@@ -1,4 +1,5 @@
 import json
+import time
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -47,3 +48,32 @@ def test_429_is_still_audited(capsys):
 
     assert 429 in statuses  # the 429 response WAS audited (audit is outermost)
     assert 200 in statuses
+
+
+def test_evicts_expired_entries():
+    # Small window + low sweep threshold makes it easy to force a sweep
+    # without needing to spray thousands of distinct keys.
+    app = FastAPI()
+
+    @app.get("/x")
+    def x():
+        return {"ok": True}
+
+    # Wrap the app directly with the middleware instance (BaseHTTPMiddleware
+    # is itself a valid ASGI app) so we can inspect/seed its internal state.
+    mw = RateLimitMiddleware(app, limit=60, window_s=1)
+    mw._SWEEP_THRESHOLD = 3
+
+    # Seed several distinct keys with an already-expired window.
+    stale_start = time.monotonic() - 10
+    for i in range(5):
+        mw._hits[f"stale{i}"] = (1, stale_start)
+    assert len(mw._hits) == 5
+
+    c = TestClient(mw)
+    # A fresh request for a new key pushes len(_hits) >= threshold and
+    # triggers the sweep, which should clear all the expired stale entries.
+    assert c.get("/x", headers={"X-API-Key": "fresh"}).status_code == 200
+
+    assert all(not k.startswith("stale") for k in mw._hits)
+    assert "fresh" in mw._hits

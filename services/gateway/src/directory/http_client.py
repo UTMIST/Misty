@@ -1,3 +1,5 @@
+from urllib.parse import quote
+
 import httpx
 
 from contracts.directory import DirectoryUnavailable
@@ -31,7 +33,7 @@ class HttpDirectoryClient:
         return resp.json()
 
     def get_person_by_github(self, github_login: str) -> dict | None:
-        return self._get(f"/people/by-identifier/github/{github_login}")
+        return self._get(f"/people/by-identifier/github/{quote(github_login, safe='')}")
 
     def list_identifiers(self, person_id: str) -> list[dict]:
         result = self._get(f"/people/{person_id}/identifiers")

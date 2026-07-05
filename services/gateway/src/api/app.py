@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -6,6 +8,8 @@ from src.api.middleware import AuditLogMiddleware
 from src.api.ratelimit import RateLimitMiddleware
 from src.api.routers import resolve
 from src.config import verify_production_secrets
+
+logger = logging.getLogger("gateway")
 
 
 def create_app() -> FastAPI:
@@ -27,6 +31,7 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(DirectoryUnavailable)
     async def _directory_unavailable(request: Request, exc: DirectoryUnavailable):
+        logger.warning("directory unavailable: %s", exc)
         return JSONResponse(status_code=503, content={"detail": "directory temporarily unavailable"})
 
     return app
