@@ -16,8 +16,8 @@ def create_app() -> FastAPI:
         description="External API gateway.",
         docs_url="/docs",
     )
-    app.add_middleware(AuditLogMiddleware, logger_name="gateway.audit")
     app.add_middleware(RateLimitMiddleware, limit=60, window_s=60)
+    app.add_middleware(AuditLogMiddleware, logger_name="gateway.audit")
 
     @app.get("/health")
     def health() -> dict[str, str]:
