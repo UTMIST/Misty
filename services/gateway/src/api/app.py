@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 
 from contracts.directory import DirectoryUnavailable
 from src.api.middleware import AuditLogMiddleware
+from src.api.ratelimit import RateLimitMiddleware
 from src.api.routers import resolve
 from src.config import verify_production_secrets
 
@@ -16,6 +17,7 @@ def create_app() -> FastAPI:
         docs_url="/docs",
     )
     app.add_middleware(AuditLogMiddleware, logger_name="gateway.audit")
+    app.add_middleware(RateLimitMiddleware, limit=60, window_s=60)
 
     @app.get("/health")
     def health() -> dict[str, str]:
