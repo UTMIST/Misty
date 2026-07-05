@@ -213,6 +213,22 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
 
+  gateway-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/gateway
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: Run tests
+        run: uv run pytest
+      - name: Ruff check
+        run: uv run ruff check .
+
   node-test:
     runs-on: ubuntu-latest
     defaults:
@@ -253,6 +269,10 @@ jobs:
         run: docker build -f services/llm/Dockerfile -t llm:ci .
       - name: Smoke-test llm image (imports resolve at boot)
         run: docker run --rm llm:ci python -c "import src.api.app"
+      - name: Build gateway image
+        run: docker build -f services/gateway/Dockerfile -t gateway:ci .
+      - name: Smoke-test gateway image (imports incl. contracts/ resolve at boot)
+        run: docker run --rm gateway:ci python -c "import src.api.app"
       - name: Build discord-bot image
         run: docker build -t discord-bot:ci ./discord-bot
       - name: Smoke-test discord-bot image (source parses)
