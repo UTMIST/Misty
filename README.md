@@ -218,3 +218,11 @@ Depending on what you're here to do:
 - [`AGENTS.md`](AGENTS.md) — the compressed set of invariants, workflow rules, and repo-specific gotchas an agent needs. `CLAUDE.md` is a pointer to it, so there is one source of truth.
 
 **New to the platform?** Start here, read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), then dive into whichever service you're most likely to touch.
+
+---
+
+## License
+
+[MIT](LICENSE) © University of Toronto Machine Intelligence Student Team (UTMIST).
+
+Copyright is held by **the organization, not by individual contributors** — which is the point of a repo whose thesis is surviving turnover. Members graduate; the club keeps its infrastructure. By contributing, you agree your contribution is licensed on the same terms.
