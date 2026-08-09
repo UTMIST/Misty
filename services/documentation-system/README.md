@@ -26,6 +26,12 @@ Two things follow from this:
 
 See `docs/ARCHITECTURE.md` for the full data flow.
 
+## Dependency on connectors
+
+The Google sources (`gdocs`, `gsheets`, `gslides`, `gdrive`) fetch their content by calling the [connectors](../connectors/) service over HTTP (`POST /fetch`) rather than holding Google credentials themselves — see `src/fetch/connectors.py` and `src/fetch/registry.py`. Configure it with `CONNECTORS_BASE_URL` (default `http://localhost:8005`) and `CONNECTORS_API_KEY`.
+
+Connectors reachability at request time is soft for ingest but hard for refetch: a connectors outage during `POST /docs` is caught and turned into a per-doc warning (the doc is still catalogued, just without a content snapshot) — see the `FetchError` handling in `src/ingest.py`. During `POST /docs/{id}/refetch`, the same `FetchError` is instead surfaced as an HTTP 502 — see `src/api/routers/docs.py` — because refetch is an explicit user-initiated action rather than a batch ingest. It is also a soft dependency at *boot* in staging/production: `verify_production_secrets()` (`src/config.py`) logs a startup warning, not a boot refusal, if `CONNECTORS_API_KEY` is still the built-in dev default — this service still starts and catalogues docs, it just can't fetch Google-source content. See `docs/DEPLOYMENT.md` for the recommended (not required) deploy order (connectors before documentation-system, so Google fetches work from the start).
+
 ## Quick start
 
 Prerequisites: Docker, Python 3.11+, [uv](https://github.com/astral-sh/uv).
@@ -93,7 +99,6 @@ documentation-system/
 │   │   ├── auth.py          Thin shim over the shared `platform_auth` package: require_api_key / require_scope / get_actor
 │   │   ├── deps.py          get_storage / get_fetchers / get_directory
 │   │   ├── hashing.py       Thin shim over `platform_auth`: Argon2 API key hashing + prefix parsing
-│   │   ├── middleware.py    Thin shim over `platform_auth`: AuditLogMiddleware
 │   │   └── routers/         docs.py, sources.py
 │   │
 │   ├── storage/              Concrete StorageAdapter implementations
@@ -163,7 +168,7 @@ Auth is **Level 2** (scoped API keys), matching team-tracking:
 - Every request needs `X-API-Key`. Keys are either the shared bootstrap env key (`API_KEY`, scope: `admin`) or a per-consumer key issued via the `doc-keys` CLI, stored as an Argon2 hash with a `docs:{read,write}` or `admin` scope set.
 - There is **no `X-Actor` header** — the actor stamped on `created_by`/`updated_by`/audit log entries is always the authenticated key's own name (`AuthedKey.name`). A caller cannot claim to be someone else; this is the "attested actor" model.
 - `require_scope("docs:read")` / `require_scope("docs:write")` gate each route; `admin` is a wildcard scope that satisfies any check.
-- `AuditLogMiddleware` (`src/api/middleware.py`) logs every request with the resolved actor.
+- `AuditLogMiddleware` (imported from `platform_auth` directly, wired in `src/api/app.py`) logs every request with the resolved actor.
 - Manage keys with the CLI:
   ```bash
   uv run doc-keys issue --name my-consumer --scopes docs:read docs:write
@@ -214,6 +219,7 @@ Lint before committing:
 
 ```bash
 uv run ruff check .
+uv run ruff format --check .
 ```
 
 ## Further documentation

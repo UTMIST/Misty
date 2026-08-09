@@ -52,14 +52,30 @@ export function createMeetingClient({ baseUrl, wsUrl, apiKey, WebSocketImpl = Ws
         console.error('meeting stream onError callback failed:', cbErr);
       }
     };
-    const onCloseEvent = () => {
+    // `ws.on('close', code, reason)` and addEventListener's CloseEvent carry
+    // the same two fields in different shapes; openStream registers whichever
+    // the impl supports, so normalize both rather than depending on one.
+    const closeInfo = (codeOrEvent, reasonArg) => {
+      const isEvent = codeOrEvent !== null && typeof codeOrEvent === 'object';
+      const code = isEvent ? codeOrEvent.code : codeOrEvent;
+      const rawReason = isEvent ? codeOrEvent.reason : reasonArg;
+      const reason = rawReason?.toString?.() ?? '';
+      return { code: code ?? 'unknown', reason: reason || '(none)' };
+    };
+
+    const onCloseEvent = (codeOrEvent, reasonArg) => {
       // A clean close is just as fatal as an error: every frame after this is
       // dropped by dispatch() below, silently. The surface needs to know so it
       // can stop the recorder rather than keep capturing into a dead socket.
       if (dead) return;
       dead = true;
+      // ALWAYS log the close code. It is the only thing that says why a live
+      // recording dropped, and discarding it here is what made two production
+      // meetings fail with no diagnosable cause on either side of the wire.
+      const { code, reason } = closeInfo(codeOrEvent, reasonArg);
+      console.error(`meeting stream closed for session ${sessionId}: code=${code} reason=${reason}`);
       try {
-        onClose?.();
+        onClose?.({ code, reason });
       } catch (cbErr) {
         console.error('meeting stream onClose callback failed:', cbErr);
       }

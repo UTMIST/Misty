@@ -1,14 +1,18 @@
 from functools import lru_cache
 
+from platform_auth import InMemoryKeyStore, key_store_from_config
+
 from src.config import get_settings
-from src.key_store import InMemoryKeyStore, key_store_from_config
 from src.providers.base import LLMProvider
 from src.providers.registry import get_provider
 
 
 @lru_cache(maxsize=1)
 def _key_store() -> InMemoryKeyStore:
-    return key_store_from_config(get_settings().consumer_keys)
+    # Unwrap at the boundary: key_store_from_config takes a plain str and does
+    # `(consumer_keys_json or "").strip()` — a SecretStr has no .strip(), so the
+    # SecretStr stops here rather than leaking into the store.
+    return key_store_from_config(get_settings().consumer_keys.get_secret_value())
 
 
 def get_key_store() -> InMemoryKeyStore:

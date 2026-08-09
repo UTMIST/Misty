@@ -78,7 +78,7 @@ Usage bills as **standard Amazon Bedrock** (AWS credits apply) — deliberately 
 Auth is scoped API keys via the shared `platform_auth` package, matching team-tracking and documentation-system — but **DB-free**. There is no `api_keys` table.
 
 - Every request needs `X-API-Key`. A key is either the shared bootstrap env key (`API_KEY`, scope: `admin`) or a per-consumer key seeded from the `CONSUMER_KEYS` env var.
-- **`CONSUMER_KEYS` is a JSON array**, each entry `{"name", "prefix", "key_hash", "scopes"}`. At boot, `key_store_from_config()` (`src/key_store.py`) parses it into an in-memory store that satisfies `platform_auth`'s `ApiKeyStore` protocol — the stateless equivalent of team-tracking's Postgres key table, swappable for a persistent store later. Keys are stored only as Argon2 hashes; a malformed `CONSUMER_KEYS` fails fast at startup.
+- **`CONSUMER_KEYS` is a JSON array**, each entry `{"name", "prefix", "key_hash", "scopes"}`. At boot, `key_store_from_config()` (`packages/auth/platform_auth/memory_store.py`) parses it into an in-memory store that satisfies `platform_auth`'s `ApiKeyStore` protocol — the stateless equivalent of team-tracking's Postgres key table, swappable for a persistent store later. Keys are stored only as Argon2 hashes; a malformed `CONSUMER_KEYS` fails fast at startup.
 - Keys use the **`llm_` envelope** (`llm_<prefix>_<secret>`). There is **no `X-Actor` header** and no `dev:spoof` scope — this is a service-to-service API, so the audit actor is always the authenticated key's own name (attested actor).
 
 ### Minting consumer keys
@@ -140,11 +140,10 @@ llm/
 │   │   ├── bedrock.py           Alt: Claude via AnthropicBedrockMantle (Messages endpoint)
 │   │   └── registry.py          Config-driven provider selection (LLM_PROVIDER → builder)
 │   │
-│   ├── key_store.py       InMemoryKeyStore seeded from CONSUMER_KEYS JSON (DB-free ApiKeyStore)
 │   ├── mint_key.py        llm-keys CLI — prints a key + its CONSUMER_KEYS entry, no store writes
 │   └── config.py          Settings (LLM_ENV, API_KEY, CONSUMER_KEYS, LLM_*, AWS_REGION) + boot check
 │
-├── tests/                 65 fast tests — no Docker, no network (fake provider)
+├── tests/                 Fast tests — no Docker, no network (fake provider)
 ├── Dockerfile             Production image (built + import-smoke-tested by CI; used by Railway).
 │                          Build context is the repo root; installs via `uv sync --frozen --no-dev --package llm`.
 ├── docker-compose.yml     Builds/runs the image locally on port 8002 (no DB service).
@@ -171,7 +170,7 @@ The suite is single-mode — no Docker, no database, no network:
 uv run pytest
 ```
 
-Runs **65 tests** against a fake provider injected via `app.dependency_overrides`. Covers the `/chat` happy path and neutral-type mapping, the auth paths (missing key → 401, key without `chat` → 403, `chat` scope → 200, `admin` wildcard → 200), request validation (empty messages, unknown model → 422), provider-error → HTTP-status mapping, the key store, the `llm-keys` CLI, config/boot checks, both Bedrock adapters (with stubbed clients), the audit log, and the OpenAPI schema.
+Runs against a fake provider injected via `app.dependency_overrides`. Covers the `/chat` happy path and neutral-type mapping, the auth paths (missing key → 401, key without `chat` → 403, `chat` scope → 200, `admin` wildcard → 200), request validation (empty messages, unknown model → 422), provider-error → HTTP-status mapping, the key store, the `llm-keys` CLI, config/boot checks, both Bedrock adapters (with stubbed clients), the audit log, and the OpenAPI schema.
 
 Lint and format with ruff:
 
@@ -192,3 +191,10 @@ v0.1: a stateless `POST /chat` proxy over Amazon Bedrock, config-seeded scoped A
 - **Persistence** — no conversation storage, no DB. Consumers keep their own history and send it on each call.
 - **RAG / retrieval** — this service does not embed or search documents; that lives in the consumers (e.g. the helper bot).
 - **Persistent key store** — keys come from `CONSUMER_KEYS` config; a DB-backed store (with a `revoke` command) can drop in later behind the same `ApiKeyStore` protocol.
+
+## Documentation
+
+- [docs/API.md](docs/API.md) — consumer-facing endpoint reference: request/response shapes, errors, curl examples
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — contributor orientation: why the service is shaped this way, boundaries, trade-offs
+- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — task walkthroughs and the pre-push checklist
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — deploy shape, variables, key provisioning, troubleshooting

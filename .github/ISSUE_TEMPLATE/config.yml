@@ -1,0 +1,15 @@
+# Blank issues stay enabled on purpose — this is a small org and a low-friction
+# "just write it down" path is worth more than template compliance. The templates
+# exist to prompt the `Blocked by:` line and the zone, not to gate reporting.
+blank_issues_enabled: true
+
+contact_links:
+  - name: How do I run this locally?
+    url: https://github.com/qiuethan/Misty/blob/staging/docs/DEVELOPMENT.md
+    about: Developer onboarding — prerequisites, running each service, first PR. Read before filing a setup question.
+  - name: How do the services fit together?
+    url: https://github.com/qiuethan/Misty/blob/staging/docs/ARCHITECTURE.md
+    about: Cross-service architecture and the conventions every service shares.
+  - name: Deploy and operations runbook
+    url: https://github.com/qiuethan/Misty/blob/staging/docs/RAILWAY-DEPLOYMENT.md
+    about: Railway + Neon setup, provisioning API keys, registering commands, verifying a deploy.

@@ -6,11 +6,22 @@ from urllib.parse import SplitResult, urlsplit
 import httpx
 
 from contracts.fetcher import FetchError, FetchResult
+from src.content import MAX_CONTENT_CHARS
 
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 _TIMEOUT = httpx.Timeout(5.0)
+
+# The snapshot stays at the historical preview length, sliced from the full text.
+SNAPSHOT_CHARS = 2000
+
+# Coarse guard against pathological pages. It sits well ABOVE MAX_CONTENT_CHARS
+# on purpose: clamp_content() at ingest/refetch is the single truncation point,
+# and capping here at the storage limit would hand it text of exactly
+# MAX_CONTENT_CHARS, which it reads as "not truncated" — silently swallowing the
+# oversized-content warning for every real web page.
+FETCH_HARD_CAP = MAX_CONTENT_CHARS * 4
 
 # SSRF egress protection.
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
@@ -39,7 +50,7 @@ def parse_title(html: str) -> str | None:
     return title or None
 
 
-def extract_text(html: str, limit: int = 2000) -> str:
+def extract_text(html: str, limit: int = FETCH_HARD_CAP) -> str:
     stripped = _TAG_RE.sub(" ", html)
     text = _WS_RE.sub(" ", stripped).strip()
     return text[:limit]
@@ -132,7 +143,7 @@ def _host_header(parts: SplitResult) -> str:
 
 
 class WebFetcher:
-    """Fetch title + a text snapshot from a public web page.
+    """Fetch title, full text, and a bounded snapshot from a public web page.
 
     Every hop's host is resolved and validated, then the request is PINNED to a
     validated IP (URL authority replaced by the IP, original hostname preserved
@@ -167,9 +178,14 @@ class WebFetcher:
                     current = str(httpx.URL(current).join(location))
                     continue
                 resp.raise_for_status()
+                text = extract_text(resp.text)
                 return FetchResult(
                     title=parse_title(resp.text),
-                    content_snapshot=extract_text(resp.text),
+                    # Empty page → both fields None, never "" (FetchResult's
+                    # invariant): ingest skips the doc_content upsert and
+                    # refetch keeps the stored snapshot instead of blanking it.
+                    content=text or None,
+                    content_snapshot=text[:SNAPSHOT_CHARS] or None,
                 )
             raise FetchError(f"web fetch failed: too many redirects (>{_MAX_REDIRECTS})")
         except (httpx.HTTPError, httpx.InvalidURL, ValueError) as e:

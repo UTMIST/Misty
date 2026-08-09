@@ -80,8 +80,9 @@ def test_third_party_loggers_are_left_alone():
         assert logging.getLogger("botocore").getEffectiveLevel() > logging.INFO
         # pytest installs handlers of its own on root, so check for OURS rather
         # than for an empty list.
-        ours = [h for h in logging.getLogger().handlers
-                if getattr(h, "_meeting_service_handler", False)]
+        ours = [
+            h for h in logging.getLogger().handlers if getattr(h, "_meeting_service_handler", False)
+        ]
         assert not ours, "the service handler was attached to root"
     finally:
         _reset()

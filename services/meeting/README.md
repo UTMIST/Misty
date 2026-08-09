@@ -54,6 +54,9 @@ All settings load from the environment (`src/config.py`, `.env` in dev):
 | `LLM_BASE_URL` | `""` | Base URL of the `llm` service (e.g. `http://llm.railway.internal:8002` in prod, `http://localhost:8002` in dev). Required outside `local`. |
 | `LLM_API_KEY` | `""` | Consumer key this service presents to `llm`'s `X-API-Key`. |
 | `REQUEST_TIMEOUT_S` | `60` | Per-request timeout when calling `llm` (seconds). |
+| `MAX_MEETING_MS` | `14400000` (4h) | Safety backstop: a session stops accepting audio past this. The normal end is `/record stop` or auto-stop-on-empty; this only bounds a forgotten meeting. 4h is also AWS Transcribe's per-stream cap. |
+| `DISCONNECT_GRACE_S` | `60` | How long a session survives an abrupt WebSocket disconnect. The transcript is already assembled server-side, so within this window `POST /stop` still turns a dropped recording into minutes instead of losing it. `0` discards immediately. |
+| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR`. Applied at boot by `configure_logging`. INFO is the default because the volume is a startup note plus per-meeting summaries, not per-request chatter — the alternative is losing them entirely. |
 
 ## Auth model
 
@@ -102,9 +105,15 @@ The wire contract the Discord-bot side mirrors.
 - `guild_id` (optional): passed to session creation; if omitted, `session_id` is used as the guild_id.
 - An invalid `session_id` (fails the regex above) closes with code 1008 before a session is created.
 
-**Once authenticated, two message types are accepted:**
+**Once authenticated, two kinds of message are accepted — control (text) and audio (binary):**
 
-1. **Control** (WebSocket text frame, UTF-8 JSON): `{"speaker_id": "<id>", "display_name": "<name>"}` — registers/updates the display name shown for a speaker_id. Send this whenever a speaker's identity becomes known (e.g. a Discord user joins voice). Unknown/malformed text frames are ignored, not fatal.
+1. **Control** (WebSocket text frame, UTF-8 JSON). Two shapes:
+
+   `{"speaker_id": "<id>", "display_name": "<name>"}` — registers/updates the display name shown for a speaker_id. Send this whenever a speaker's identity becomes known (e.g. a Discord user joins voice).
+
+   `{"end_of_audio": true}` — send **once**, after the bot stops recording and has forwarded every frame it captured. The socket delivers in order, so the server treats this as proof that all audio has arrived, and `POST /stop` waits for it before finalizing. Without it (an older bot, a crash, a dropped socket) `/stop` proceeds after `sessions.AUDIO_DRAIN_TIMEOUT_S` (5s) and logs a warning; the tail of the transcript may then be short, which is the failure this signal exists to prevent.
+
+   Unknown/malformed text frames are ignored, not fatal.
 2. **Audio** (WebSocket binary frame), one raw Opus packet per frame, framed as:
 
    ```text
@@ -159,3 +168,10 @@ v0.1: stateful per-meeting session registry, live per-speaker audio ingest over 
 
 - **Persistence** — no database, no durable session store. A process restart loses all in-flight meetings.
 - **Horizontal scaling** — one process must own a given session end-to-end; no shared session state across replicas.
+
+## Documentation
+
+- [docs/API.md](docs/API.md) — consumer-facing endpoint reference: request/response shapes, errors, curl examples
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — contributor orientation: why the service is shaped this way, boundaries, trade-offs
+- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — task walkthroughs and the pre-push checklist
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — deploy shape, variables, key provisioning, troubleshooting

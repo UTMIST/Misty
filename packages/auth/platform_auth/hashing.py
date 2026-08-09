@@ -42,7 +42,7 @@ def parse_prefix(candidate: str, envelope: str) -> str | None:
     """Extract the prefix segment, or None if the candidate is not <envelope><prefix>_<secret>."""
     if not candidate.startswith(envelope):
         return None
-    body = candidate[len(envelope):]
+    body = candidate[len(envelope) :]
     parts = body.split("_", 1)
     if len(parts) != 2 or len(parts[0]) != PREFIX_LENGTH:
         return None

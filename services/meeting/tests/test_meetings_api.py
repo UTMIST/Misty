@@ -1,6 +1,8 @@
 """Tests for the meeting HTTP + WebSocket endpoints, using a fake SessionRegistry
 (no real ffmpeg/AWS/network) injected via app.dependency_overrides."""
 
+import asyncio
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -88,6 +90,28 @@ def registry():
 @pytest.fixture
 def client(store, registry, monkeypatch):
     monkeypatch.setenv("API_KEY", "test-bootstrap-key")
+    # Grace period OFF by default so a disconnect tears down synchronously and
+    # these tests stay deterministic (no task left sleeping past the TestClient
+    # context). The HELD behavior that production runs is covered explicitly by
+    # `client_held` and the _discard_after_grace unit tests below.
+    monkeypatch.setenv("DISCONNECT_GRACE_S", "0")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+
+    app = create_app()
+    app.dependency_overrides[get_key_store] = lambda: store
+    app.dependency_overrides[get_session_registry] = lambda: registry
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def client_held(store, registry, monkeypatch):
+    """A client with the production disconnect grace period configured."""
+    monkeypatch.setenv("API_KEY", "test-bootstrap-key")
+    monkeypatch.setenv("DISCONNECT_GRACE_S", "60")
     from src.config import get_settings
 
     get_settings.cache_clear()
@@ -124,9 +148,7 @@ def test_get_transcript_unknown_session_404(client, consumer_key):
 
 
 def test_get_transcript_invalid_session_id_400(client, consumer_key):
-    resp = client.get(
-        "/meetings/bad!id/transcript", headers={"X-API-Key": consumer_key}
-    )
+    resp = client.get("/meetings/bad!id/transcript", headers={"X-API-Key": consumer_key})
     assert resp.status_code == 400
 
 
@@ -187,9 +209,35 @@ def test_ws_stream_authenticates_and_feeds_decoded_frames(client, registry, cons
         ("bob-id", "bob-id", b"opus-frame-2", 100),
     ]
     # Disconnect without POST /stop -- the WS handler must tear the session down
-    # via the lightweight discard(), NOT the full stop() pipeline.
+    # via the lightweight discard(), NOT the full stop() pipeline. (Immediate
+    # here only because this client sets DISCONNECT_GRACE_S=0.)
     assert session.discard_called is True
     assert session.stop_called is False
+
+
+def test_ws_disconnect_holds_the_session_so_stop_can_still_finalize(
+    client_held, registry, consumer_key
+):
+    """The bug that lost two production meetings: an abrupt disconnect used to
+    discard a fully-transcribed session immediately, so the bot's follow-up
+    POST /stop 404'd and the minutes were gone. With a grace period configured
+    the session must SURVIVE the disconnect."""
+    with client_held.websocket_connect(
+        f"/meetings/held-session/stream?key={consumer_key}&guild_id=g1"
+    ) as ws:
+        ws.send_bytes(_frame("alice-id", 0, b"opus-frame-1"))
+
+    session = registry.sessions["held-session"]
+    assert session.discard_called is False
+    assert registry.get("held-session") is session
+    # A closed socket cannot deliver more audio, so /stop's end-of-audio barrier
+    # must pass immediately instead of waiting out its drain timeout.
+    assert session.audio_complete is True
+
+    # ...and the salvage actually works: /stop finalizes the held session.
+    resp = client_held.post("/meetings/held-session/stop", headers={"X-API-Key": consumer_key})
+    assert resp.status_code == 200
+    assert session.stop_called is True
 
 
 def test_ws_stream_fallback_auth_binary_first_frame_closes_cleanly(client, registry):
@@ -205,9 +253,7 @@ def test_ws_stream_fallback_auth_binary_first_frame_closes_cleanly(client, regis
 
 def test_ws_stream_invalid_session_id_closes(client, registry, consumer_key):
     with pytest.raises(Exception):
-        with client.websocket_connect(
-            f"/meetings/bad!id/stream?key={consumer_key}&guild_id=g1"
-        ):
+        with client.websocket_connect(f"/meetings/bad!id/stream?key={consumer_key}&guild_id=g1"):
             pass
     assert "bad!id" not in registry.sessions
 
@@ -257,9 +303,7 @@ def test_ws_end_of_audio_control_frame_marks_the_session(client, registry, consu
     this frame arriving proves every audio frame before it has been fed -- so it
     must be routed to the session, and must not be mistaken for a speaker
     registration."""
-    with client.websocket_connect(
-        f"/meetings/ws-eoa/stream?key={consumer_key}&guild_id=g1"
-    ) as ws:
+    with client.websocket_connect(f"/meetings/ws-eoa/stream?key={consumer_key}&guild_id=g1") as ws:
         ws.send_text('{"speaker_id": "alice-id", "display_name": "Alice"}')
         ws.send_bytes(_frame("alice-id", 0, b"opus-frame-1"))
         ws.send_text('{"end_of_audio": true}')
@@ -283,3 +327,30 @@ def test_ws_counts_frames_it_throws_away(client, registry, consumer_key):
 
     session = registry.sessions["ws-drops"]
     assert session.drops.get("malformed_ws_frame", 0) >= 1
+
+
+def test_discard_after_grace_discards_a_session_nobody_claimed():
+    """Grace expiring with no POST /stop is the one path that may still throw
+    the transcript away."""
+    from src.api.routers.meetings import _discard_after_grace
+
+    registry = FakeRegistry()
+    session = registry.create("abandoned", "g1")
+
+    asyncio.run(_discard_after_grace(registry, session, "abandoned", 0))
+
+    assert session.discard_called is True
+
+
+def test_discard_after_grace_leaves_a_session_that_stop_already_claimed():
+    """POST /stop inside the window deregisters the session, so the pending
+    teardown must find nothing to do rather than discard a second time."""
+    from src.api.routers.meetings import _discard_after_grace
+
+    registry = FakeRegistry()
+    session = registry.create("claimed", "g1")
+    del registry.sessions["claimed"]  # what sessions.py stop() does
+
+    asyncio.run(_discard_after_grace(registry, session, "claimed", 0))
+
+    assert session.discard_called is False

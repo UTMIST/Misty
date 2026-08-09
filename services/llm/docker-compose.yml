@@ -1,7 +1,10 @@
 services:
   llm:
     build:
-      context: ..
+      # Repo root, not services/ — the Dockerfile COPYs the workspace manifest
+      # (pyproject.toml, uv.lock) and packages/, which only exist at the root.
+      # This mirrors Railway, which builds with the repo root as context.
+      context: ../..
       dockerfile: services/llm/Dockerfile
     ports:
       - "8002:8002"

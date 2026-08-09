@@ -52,6 +52,7 @@ def _looks_like_json_response(text: str) -> bool:
     head, brace, _ = cand.partition("{")
     return bool(brace) and len(head) <= _MAX_JSON_LEAD_IN and head.strip().endswith(":")
 
+
 MINUTES_SYSTEM_PROMPT = (
     "You write concise meeting minutes for a student organization. Given a "
     "timestamped transcript, respond with ONLY a JSON object of shape "

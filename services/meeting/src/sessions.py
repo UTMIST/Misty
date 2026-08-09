@@ -87,7 +87,9 @@ def words_to_segments(
         too_long = current_start is not None and (start - current_start) > max_segment_ms
         gapped = current_words and last_start is not None and (start - last_start) > gap_ms
         if gapped or too_long:
-            segments.append(Segment(speaker=speaker, start_ms=current_start, text=" ".join(current_words)))
+            segments.append(
+                Segment(speaker=speaker, start_ms=current_start, text=" ".join(current_words))
+            )
             current_words = []
             current_start = None
         if current_start is None:
@@ -96,7 +98,9 @@ def words_to_segments(
         last_start = start
 
     if current_words:
-        segments.append(Segment(speaker=speaker, start_ms=current_start, text=" ".join(current_words)))
+        segments.append(
+            Segment(speaker=speaker, start_ms=current_start, text=" ".join(current_words))
+        )
 
     return segments
 

@@ -23,6 +23,13 @@ WORKDIR /app/services/meeting
 RUN useradd --create-home --shell /bin/bash appuser && chown -R appuser:appuser /app
 USER appuser
 
-EXPOSE 8003
+EXPOSE 8004
 
-CMD ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8003"]
+# --ws-ping-*: uvicorn defaults to a 20s keepalive ping with a 20s pong
+# deadline, so a client that is briefly slow to answer gets its socket closed
+# mid-recording -- a leading suspect for two production meetings that dropped
+# with a clean close and no error on either side. 60s is still well inside any
+# proxy idle timeout. Keep this in step with railway.json's startCommand, which
+# overrides this CMD on Railway.
+CMD ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8004", \
+     "--ws-ping-interval", "60", "--ws-ping-timeout", "60"]

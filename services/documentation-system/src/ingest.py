@@ -7,6 +7,7 @@ from contracts.directory import DirectoryClient, DirectoryUnavailable
 from contracts.fetcher import FetchError
 from contracts.storage import DuplicateActiveUrl, StorageAdapter
 from contracts.types import DocIngest, IngestResult
+from src.content import clamp_content, content_hash
 from src.fetch.registry import FetcherRegistry
 from src.url_norm import derive_source, normalize_url
 
@@ -73,13 +74,16 @@ def ingest_doc(
     # 3. Fetch, best-effort.
     title = payload.title
     snapshot = None
+    content = None
     fetched_at = None
     if source is not None and source.content_fetch_enabled:
         try:
             result = fetchers.fetch_for(source_id, payload.url)
             title = payload.title or result.title
             snapshot = result.content_snapshot
+            content = result.content
             fetched_at = _now()
+            warnings.extend(result.warnings)
         except FetchError as e:
             warnings.append(f"content fetch failed ({e}); title fell back to url")
     elif source is not None and source.requires_auth:
@@ -122,6 +126,19 @@ def ingest_doc(
             return _merge_into_existing(storage, existing, payload, actor=actor)
         raise
     _apply_grants(storage, doc.id, payload.grants, actor=actor)
+    # Truthiness, not `is not None`: an empty extraction is None per
+    # FetchResult's contract, but a connector returning "" must not create a
+    # doc_content row holding nothing.
+    if content:
+        content, truncated = clamp_content(content)
+        if truncated:
+            warnings.append("content truncated to size cap; stored text is incomplete")
+        storage.upsert_doc_content(
+            doc.id,
+            content_text=content,
+            content_hash=content_hash(content),
+            fetched_at=fetched_at,
+        )
     doc = storage.get_doc(doc.id)  # re-hydrate with grants for the response
     return IngestResult(doc=doc, created=True, warnings=warnings)
 

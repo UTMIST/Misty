@@ -203,7 +203,9 @@ def _meta_strip(meta: dict, minutes: Minutes) -> tuple[str, str]:
     if n_actions:
         parts.append(f"{n_actions} action item" + ("" if n_actions == 1 else "s"))
     strip = "    ·    ".join(parts)
-    participants_line = "Participants: " + (", ".join(participants) if participants else "None recorded.")
+    participants_line = "Participants: " + (
+        ", ".join(participants) if participants else "None recorded."
+    )
     return strip, participants_line
 
 

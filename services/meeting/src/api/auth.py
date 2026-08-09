@@ -12,7 +12,9 @@ from src.config import get_settings
 _deps = build_auth(
     get_key_store,
     envelope="meeting_",
-    get_env_key=lambda: get_settings().api_key,
+    # build_auth wants a plain `str | None` and compares it against a presented
+    # header, so unwrap here: the SecretStr boundary stops at this edge.
+    get_env_key=lambda: get_settings().api_key.get_secret_value(),
     is_prod=lambda: get_settings().meeting_env == "production",
     enable_dev_spoof=False,
     audit_logger_name="meeting.audit",

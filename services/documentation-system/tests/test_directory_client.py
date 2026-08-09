@@ -15,6 +15,7 @@ def test_get_team_label_returns_label():
     def handler(request):
         assert request.headers["X-API-Key"] == "k"
         return httpx.Response(200, json={"id": str(uuid4()), "label": "Partnerships"})
+
     dc = HttpDirectoryClient("http://dir", "k", client=_client(handler))
     assert dc.get_team_label(uuid4()) == "Partnerships"
 
@@ -22,6 +23,7 @@ def test_get_team_label_returns_label():
 def test_get_person_label_uses_display_name():
     def handler(request):
         return httpx.Response(200, json={"display_name": "Priya"})
+
     dc = HttpDirectoryClient("http://dir", "k", client=_client(handler))
     assert dc.get_person_label(uuid4()) == "Priya"
 
@@ -29,6 +31,7 @@ def test_get_person_label_uses_display_name():
 def test_404_returns_none():
     def handler(request):
         return httpx.Response(404, json={"detail": "not found"})
+
     dc = HttpDirectoryClient("http://dir", "k", client=_client(handler))
     assert dc.get_team_label(uuid4()) is None
 
@@ -36,6 +39,7 @@ def test_404_returns_none():
 def test_connection_error_raises_unavailable():
     def handler(request):
         raise httpx.ConnectError("boom")
+
     dc = HttpDirectoryClient("http://dir", "k", client=_client(handler))
     with pytest.raises(DirectoryUnavailable):
         dc.get_team_label(uuid4())
@@ -44,6 +48,7 @@ def test_connection_error_raises_unavailable():
 def test_5xx_raises_unavailable():
     def handler(request):
         return httpx.Response(503)
+
     dc = HttpDirectoryClient("http://dir", "k", client=_client(handler))
     with pytest.raises(DirectoryUnavailable):
         dc.get_person_label(uuid4())
@@ -52,6 +57,7 @@ def test_5xx_raises_unavailable():
 def test_403_raises_unavailable():
     def handler(request):
         return httpx.Response(403, json={"detail": "forbidden"})
+
     dc = HttpDirectoryClient("http://dir", "k", client=_client(handler))
     with pytest.raises(DirectoryUnavailable):
         dc.get_team_label(uuid4())
@@ -64,17 +70,22 @@ def test_get_active_team_ids_parses_team_ids():
         assert request.url.path == "/memberships"
         assert request.url.params["person_id"] == str(pid)
         assert request.url.params["active_only"] == "true"
-        return httpx.Response(200, json=[
-            {"team_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},
-            {"team_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"},
-        ])
+        return httpx.Response(
+            200,
+            json=[
+                {"team_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"},
+                {"team_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"},
+            ],
+        )
 
     dc = HttpDirectoryClient("http://dir", "k", client=_client(handler))
     ids = dc.get_active_team_ids(pid)
-    assert ids == frozenset({
-        UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
-        UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
-    })
+    assert ids == frozenset(
+        {
+            UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+        }
+    )
 
 
 def test_get_active_team_ids_empty():

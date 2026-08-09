@@ -10,7 +10,7 @@ Two tracks:
 - **New to Python/Node/Docker, or new to this repo?** Read
   [Prerequisites](#prerequisites-new-to-this-stack) first, then work down the page.
 
-The platform is **five backend services plus the Discord bot**. You almost never
+The platform is **six backend services plus the Discord bot**. You almost never
 need all of them at once — stand up only what you're touching.
 
 | Service | Port | DB | What it is |
@@ -20,6 +20,7 @@ need all of them at once — stand up only what you're touching.
 | [`llm`](../services/llm/README.md) | 8002 | — | Stateless `POST /chat` proxy over Amazon Bedrock. No DB. |
 | [`verification`](../services/verification/README.md) | 8003 | Postgres :5434 ⚠️ | Email one-time codes (request / confirm). Backs `/link` and `/add-email`. |
 | [`meeting`](../services/meeting/README.md) | 8004 | — | **Stateful, ephemeral.** Live voice transcription → minutes PDF. No DB; state is in-process only. |
+| [`connectors`](../services/connectors/README.md) | 8005 | — | Stateless `POST /fetch` adapter — pulls Google Docs/Sheets/Slides/Drive content as text for the catalog. No DB. |
 | [`discord-bot`](../discord-bot/README.md) | 3001 (playground) | — | Discord slash commands + a browser playground that needs no Discord token. |
 
 > ⚠️ **Known port clash:** `documentation-system` and `verification` both bind
@@ -30,7 +31,8 @@ need all of them at once — stand up only what you're touching.
 > `DATABASE_URL` at 5435.
 
 Only `team-tracking`, `documentation-system`, and `verification` own a database
-(and therefore Alembic migrations). `llm` and `meeting` are DB-free.
+(and therefore Alembic migrations). `llm`, `meeting`, and `connectors` are
+DB-free.
 
 ---
 
@@ -108,6 +110,20 @@ Live transcription needs AWS Transcribe credentials plus a reachable `llm`
 service; the test suite fakes both, so you only need those to exercise a real
 recording.
 
+**Connectors API** — no Docker, no database:
+
+```bash
+cd services/connectors
+cp .env.example .env
+uv sync --extra dev
+uv run uvicorn src.api.app:app --reload --port 8005
+```
+
+`POST /fetch` requires the `fetch` scope. Google credentials are **optional** —
+with `GOOGLE_CREDENTIALS_JSON` empty the service still boots and answers
+`/health`, and `/fetch` returns 503 for Google sources. That's a supported
+running state, not a broken one.
+
 **Discord bot — playground mode** (recommended dev loop, no Discord token —
 but Docker must be running):
 
@@ -139,7 +155,7 @@ Stuck, or new to this stack? Keep reading.
 
 ## Prerequisites (new to this stack?)
 
-Install these once per machine. All five services are Python; the bot is Node.
+Install these once per machine. All six services are Python; the bot is Node.
 Docker is needed by the three DB-backed services **and by the bot's playground**.
 
 - **git** — you have it if `git --version` works.
@@ -157,7 +173,7 @@ Docker is needed by the three DB-backed services **and by the bot's playground**
   (`uv run ...`). You do not `pip install` or activate a venv by hand. Install
   `uv`, and it manages Python for you. The repo is a single **uv workspace**:
   one root `pyproject.toml` (`services/*`, `packages/*`) and one root `uv.lock`
-  cover all five services and the shared `packages/auth` (`platform_auth`)
+  cover all six services and the shared `packages/auth` (`platform_auth`)
   library — `uv sync` resolves the whole workspace even when run from a service
   subdirectory.
   No `ffmpeg` binary is needed anywhere, including for `meeting` — Opus decode
@@ -238,11 +254,12 @@ tables, and everything talks over HTTP (no in-process consumers).
 ```
   documentation-system ──validates owner ids──▶ team-tracking
    (docs catalog)         resolves labels        (directory / source of truth)
-        ▲                                              ▲
-        │ degrades gracefully if the directory is down  │
-        │                                               │
-        │  /doc                                         │  /link /whoami /team /seed
-        └───────────────── discord-bot ─────────────────┘
+        │       ▲                                      ▲
+        │ /fetch│ degrades gracefully if the directory  │
+        ▼       │            is down                    │
+   connectors   │                                       │
+   (Google docs)│  /doc                                 │  /link /whoami /team /seed
+        └───────┴────────── discord-bot ────────────────┘
                             │   │   │
               /link ────────┘   │   └──────── /record
               /add-email        │
@@ -252,8 +269,11 @@ tables, and everything talks over HTTP (no in-process consumers).
                                                 minutes, PDF)            proxy)
 ```
 
-The bot is the only thing that talks to `verification` and `meeting`;
-`meeting` is the only thing that talks to `llm` today. All five backends are
+The bot is the only thing that talks to `verification` and `meeting`, and
+`documentation-system` the only thing that talks to `connectors`. **Two things
+call `llm`:** `meeting` (for minutes at `/stop`) and the bot itself — `LLM_BASE_URL`
+and `LLM_API_KEY` are hard-required boot vars, and `helperService` calls `/chat`
+on the @-mention path (`src/context.js`, `src/adapters/discord.js`). All six backends are
 built the same way on purpose — learning one gives you ~80% of the others. The
 core conventions (the `contracts/` Protocol boundary, swappable storage
 adapters, scoped API-key auth, attested actor, Alembic migrations) are listed in
@@ -263,10 +283,10 @@ explained in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 Two services deviate deliberately, and it's worth knowing why before you read
 their code:
 
-- **`llm` and `meeting` have no database.** Their API keys are seeded from a
-  `CONSUMER_KEYS` JSON env var and parsed at boot into an in-memory store, not
-  an `api_keys` table. Rotating a key means editing the variable and
-  redeploying; there is no `revoke` command.
+- **`llm`, `meeting`, and `connectors` have no database.** Their API keys are
+  seeded from a `CONSUMER_KEYS` JSON env var and parsed at boot into an
+  in-memory store, not an `api_keys` table. Rotating a key means editing the
+  variable and redeploying; there is no `revoke` command.
 - **`verification` has a database but no key table.** It uses a
   `NullApiKeyStore`, so only the bootstrap `API_KEY` authenticates — there are no
   per-consumer keys to mint. Its database holds only verification codes.
@@ -348,12 +368,15 @@ is the workflow around them.
 2. **Copy the nearest example.** The codebase is intentionally repetitive so
    patterns are easy to imitate. When adding something, find the closest existing
    case and mirror its shape. Read the CONTRIBUTING doc for the service you're
-   touching first:
+   touching first — **every service has one**, and each ends with a pre-push
+   checklist specific to that service:
    - [team-tracking CONTRIBUTING](../services/team-tracking/docs/CONTRIBUTING.md)
    - [documentation-system CONTRIBUTING](../services/documentation-system/docs/CONTRIBUTING.md)
-
-   `llm`, `verification`, and `meeting` don't have their own CONTRIBUTING docs —
-   their READMEs cover the same ground, and they follow the two above.
+   - [verification CONTRIBUTING](../services/verification/docs/CONTRIBUTING.md) — read the warning at the top before touching the confirm path
+   - [llm CONTRIBUTING](../services/llm/docs/CONTRIBUTING.md)
+   - [meeting CONTRIBUTING](../services/meeting/docs/CONTRIBUTING.md)
+   - [connectors CONTRIBUTING](../services/connectors/docs/CONTRIBUTING.md)
+   - [discord-bot CONTRIBUTING](../discord-bot/docs/CONTRIBUTING.md)
 
 3. **Run the fast tests locally** before you push. For a DB-backed API
    (team-tracking, documentation-system, verification):
@@ -371,9 +394,9 @@ is the workflow around them.
    library, its own tests live alongside it: `cd packages/auth && uv run pytest`.
 
    Lint before pushing too: `uv run ruff check . && uv run ruff format --check .`
-   CI's coverage is uneven — `documentation-system` is gated by neither, and
-   `meeting` runs `ruff check` but not `ruff format --check` (see the note
-   below). Everywhere else, both are enforced.
+   Both are enforced on every Python service and on `packages/auth`. Use
+   `uv run ruff` rather than a system-wide `ruff` — it picks up the version
+   pinned in `uv.lock`, and formatter output drifts between ruff versions.
 
 4. **Open a PR into `staging`.** Every PR runs
    [`ci.yml`](../.github/workflows/ci.yml): full test suites against real
@@ -388,10 +411,9 @@ is the workflow around them.
 
    > **`services/meeting` went to staging with no CI coverage at all** — no test
    > job, and `docker-build` skipped its image. Both are now wired up
-   > (`meeting-test` + a meeting build/smoke step). `ruff format --check` is
-   > still deferred there: 8 files are unformatted, so enabling it would
-   > fail the job outright. Run `uv run ruff format .` in `services/meeting`
-   > before adding that step back.
+   > (`meeting-test` + a meeting build/smoke step), and its `ruff format --check`
+   > deferral has since been cleared along with `documentation-system`'s. Every
+   > Python job now gates lint and formatting alike.
 
 5. **Merging deploys.** Merging to `staging` deploys to Railway **staging**;
    merging `staging → main` deploys to **production**. PRs to `main` additionally
@@ -403,9 +425,9 @@ is the workflow around them.
 
 ## Troubleshooting
 
-- **Port already in use (5433 / 5434 / 8000–8004).** API ports are 8000
+- **Port already in use (5433 / 5434 / 8000–8005).** API ports are 8000
   team-tracking, 8001 documentation-system, 8002 llm, 8003 verification, 8004
-  meeting. Dev Postgres is 5433 for team-tracking and 5434 for *both*
+  meeting, 8005 connectors. Dev Postgres is 5433 for team-tracking and 5434 for *both*
   documentation-system and verification. If a port is taken, find the process
   (`lsof -i :5434`) or stop a stray `docker compose` from another service.
 - **documentation-system and verification can't run at once.** Both
@@ -468,11 +490,14 @@ is the workflow around them.
   bot's voice surface and the `meeting` service, and why it breaks two of the
   platform's conventions on purpose.
 - [`RAILWAY-DEPLOYMENT.md`](RAILWAY-DEPLOYMENT.md) — deploy/operate runbook.
-- [`SECURITY-REVIEW-2026-07-13.md`](SECURITY-REVIEW-2026-07-13.md) — the security
-  review that drove the `people:elevate` scope, SSRF guards, and doc visibility.
-- Per-service references:
-  [team-tracking API](../services/team-tracking/docs/API.md),
-  [documentation-system API](../services/documentation-system/docs/API.md), and
-  the [`llm`](../services/llm/README.md), [`verification`](../services/verification/README.md),
-  and [`meeting`](../services/meeting/README.md) READMEs (those three document
-  their own API surface inline).
+- Per-service references — every service now has the full four-doc set
+  (`API.md`, `ARCHITECTURE.md`, `CONTRIBUTING.md`, `DEPLOYMENT.md`) under its
+  own `docs/`:
+  [team-tracking](../services/team-tracking/docs/API.md),
+  [documentation-system](../services/documentation-system/docs/API.md),
+  [verification](../services/verification/docs/API.md),
+  [llm](../services/llm/docs/API.md),
+  [meeting](../services/meeting/docs/API.md),
+  [connectors](../services/connectors/docs/API.md).
+  `meeting`'s WebSocket route isn't representable in OpenAPI, so its
+  [API.md](../services/meeting/docs/API.md) *is* the published wire contract.

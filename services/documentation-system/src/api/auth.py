@@ -8,7 +8,10 @@ from src.config import get_settings
 _deps = build_auth(
     get_storage,
     envelope="doc_",
-    get_env_key=lambda: get_settings().api_key,
+    # SecretStr boundary: build_auth takes `Callable[[], str | None]` and
+    # compare_digest's the result against the presented X-API-Key header, so
+    # it must receive a plain str. Unwrap here, not deeper.
+    get_env_key=lambda: get_settings().api_key.get_secret_value(),
     audit_logger_name="documentation_system.audit",
 )
 

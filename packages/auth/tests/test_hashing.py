@@ -12,6 +12,6 @@ def test_roundtrip_with_envelope():
 
 def test_parse_prefix_rejects_foreign_envelope():
     plaintext, _, _ = generate_key("doc_")
-    assert parse_prefix(plaintext, "tt_") is None   # wrong envelope
+    assert parse_prefix(plaintext, "tt_") is None  # wrong envelope
     assert parse_prefix("garbage", "doc_") is None
     assert parse_prefix(plaintext, "doc_") is not None

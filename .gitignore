@@ -1,6 +1,19 @@
 /docs/superpowers
-/.claude
 /.superpowers
+
+# Agent tooling. `.claude/` is ignored by default because Claude Code writes
+# machine-local scratch there (worktrees, caches, per-user settings), but the
+# shared parts are meant to be committed and reviewed like any other config —
+# so they're re-included below. Agent *instructions* live in /AGENTS.md, which
+# is tracked normally and is not affected by any of this.
+/.claude/*
+!/.claude/skills/
+!/.claude/commands/
+!/.claude/agents/
+!/.claude/settings.json
+# Never share: local overrides and Claude Code's own working directories.
+/.claude/settings.local.json
+/.claude/worktrees/
 
 # macOS
 .DS_Store

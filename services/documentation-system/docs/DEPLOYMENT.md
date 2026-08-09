@@ -21,11 +21,16 @@ about the service in a real (staging / production) environment.
 - **A reachable team-tracking directory** — the source of truth for owners.
   See the directory-dependency section below; the service *runs* without it
   but ownership validation degrades.
+- **A reachable connectors service** — fetches content for the Google
+  sources. See "The connectors dependency" below: it is a soft dependency
+  both at request time and at *boot* — a connectors outage or a missing
+  `CONNECTORS_API_KEY` degrades Google-source fetches but never blocks
+  startup (see `verify_production_secrets()` below).
 
 ## Environment variables
 
 All configuration is env-driven (`src/config.py`, loaded from the process environment or a
-`.env` file). Four variables:
+`.env` file). Six variables:
 
 | Env var | Setting | Default | Purpose |
 |---------|---------|---------|---------|
@@ -33,12 +38,22 @@ All configuration is env-driven (`src/config.py`, loaded from the process enviro
 | `API_KEY` | `api_key` | `dev-api-key-change-me` | Bootstrap admin key. **Change or unset in prod.** |
 | `DIRECTORY_BASE_URL` | `directory_base_url` | `http://localhost:8000` | Base URL of the team-tracking directory |
 | `DIRECTORY_API_KEY` | `directory_api_key` | `dev-api-key-change-me` | API key this service uses to call the directory |
+| `CONNECTORS_BASE_URL` | `connectors_base_url` | `http://localhost:8005` | Base URL of the connectors service (fetches Google source content) |
+| `CONNECTORS_API_KEY` | `connectors_api_key` | `dev-api-key-change-me` | API key this service uses to call connectors. **Should be overridden outside `local`**, but it's a soft dependency — `verify_production_secrets()` only logs a startup warning on the dev default, it does not refuse to boot (see [`src/config.py`](../src/config.py)). |
 
 Staging + production values live in **Railway** — set per environment via the
 runbook's env-var contract. Keep the defaults ONLY for local dev; anything
 running against a real Neon branch must set a strong `API_KEY` and its own
-scoped `DIRECTORY_API_KEY` (issued by the provisioning script — see the
-runbook).
+scoped `DIRECTORY_API_KEY`, and should set its own scoped `CONNECTORS_API_KEY`
+(issued by the provisioning script / connectors' `connectors-keys` CLI — see
+the runbook) to enable Google-source content.
+
+> **A staging or production deploy that has not set `API_KEY` or
+> `DIRECTORY_API_KEY` will refuse to boot.** `verify_production_secrets()`
+> treats those two as hard requirements once `docs_env` is `staging`/`production`.
+> `CONNECTORS_API_KEY` is different: a default there only logs a startup
+> warning — the service still boots, it just can't fetch Google-source
+> content (see "The connectors dependency" below).
 
 ## Postgres
 
@@ -133,12 +148,22 @@ Which sources get fetched is determined by two things that must agree:
 2. A `Fetcher` registered for that `source_id` in `default_registry()`
    (`src/fetch/registry.py`).
 
-Today only `web` and `github` have both, so only those sources are fetched. The other six
-sources (`gdrive`, `gdocs`, `gsheets`, `gslides`, `notion`, `youtube`) are auth-gated:
+`web` and `github` fetch in-process. The four Google sources (`gdrive`, `gdocs`, `gsheets`,
+`gslides`) fetch via the [connectors](../../connectors/) service over HTTP
+(`ConnectorsFetcher`, registered in `src/fetch/registry.py`); migration `006` flipped their
+`content_fetch_enabled` to `true` to match. `notion` and `youtube` remain auth-gated:
 `content_fetch_enabled` is `false` and no fetcher is registered, so ingest records the doc
 without a snapshot. Enabling a new source is a **code change**, not just config — implement
 the `Fetcher`, register it, and flip `content_fetch_enabled` (see
-[`docs/CONTRIBUTING.md`](CONTRIBUTING.md)). There are no fetcher-specific env vars in v1.
+[`docs/CONTRIBUTING.md`](CONTRIBUTING.md)).
+
+Fetcher-specific env vars: `CONNECTORS_BASE_URL` / `CONNECTORS_API_KEY` (see above) configure
+the Google sources' fetcher. **Deploy order is recommended, not required:** documentation-system
+boots fine with no connectors configuration at all — `verify_production_secrets()` only warns
+on a default `CONNECTORS_API_KEY`, it never blocks startup. Deploying connectors first and
+setting these two vars on documentation-system before deploying it just avoids a window where
+Google-source fetches fail at request time (degraded, not fatal — see the connectors dependency
+section below) because connectors isn't up yet or isn't yet configured.
 
 ## The team-tracking directory dependency
 
@@ -157,3 +182,29 @@ Operationally this means a directory outage will **not** take the catalog down; 
 delays owner-label resolution and temporarily disables the "unknown owner id" rejection.
 Ensure `DIRECTORY_BASE_URL` and `DIRECTORY_API_KEY` are correct so validation works in
 steady state.
+
+## The connectors dependency
+
+The documentation-system fetches content for the Google sources (`gdrive`, `gdocs`,
+`gsheets`, `gslides`) by calling the [connectors](../../connectors/) service over HTTP. It is
+a runtime dependency with **two different failure modes** depending on when it's down:
+
+- **At boot, outside `local`:** soft. `verify_production_secrets()` logs a warning, not a
+  boot refusal, if `CONNECTORS_API_KEY` is still the built-in dev default — the service
+  still starts and catalogues docs, it just can't fetch Google-source content until a real
+  key is set. See "Environment variables" above.
+- **At request time:** soft for ingest, hard for refetch — deliberately different, since
+  ingest degrading a whole batch is worse than a single explicit refetch failing loudly.
+  On `POST /docs`, if connectors is unreachable or errors, `ConnectorsFetcher` raises
+  `FetchError`, which `ingest_doc` catches the same way it catches a `web`/`github` fetch
+  failure: the doc is still catalogued, just without a content snapshot, and a warning is
+  returned — a connectors outage never fails `POST /docs`. On `POST /docs/{id}/refetch`,
+  the same `FetchError` is instead surfaced to the caller as an HTTP 502 (see
+  `src/api/routers/docs.py`): refetch is an explicit user-initiated action, so it fails
+  loudly rather than silently leaving stale content in place.
+
+**Deploy order:** recommended (not required) is connectors first, then set
+`CONNECTORS_BASE_URL` / `CONNECTORS_API_KEY` on documentation-system, then deploy
+documentation-system. documentation-system deploys independently either way — see
+"Configuring / enabling fetchers" above for what degrades (not breaks) if the order
+is reversed.

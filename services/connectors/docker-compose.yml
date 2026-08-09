@@ -1,0 +1,12 @@
+services:
+  connectors:
+    build:
+      # Repo root, not services/ — the Dockerfile COPYs the workspace manifest
+      # (pyproject.toml, uv.lock) and packages/, which only exist at the root.
+      # This mirrors Railway, which builds with the repo root as context.
+      context: ../..
+      dockerfile: services/connectors/Dockerfile
+    ports:
+      - "8005:8005"
+    env_file:
+      - .env

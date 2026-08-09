@@ -2,12 +2,19 @@ import json
 
 import pytest
 
-from src.api.hashing import generate_key, parse_prefix, verify_key
-from src.key_store import InMemoryKeyStore, key_store_from_config
+from platform_auth import (
+    InMemoryKeyStore,
+    generate_key,
+    key_store_from_config,
+    parse_prefix,
+    verify_key,
+)
+
+ENVELOPE = "test_"
 
 
 def test_add_and_lookup_by_prefix():
-    plaintext, prefix, key_hash = generate_key()
+    plaintext, prefix, key_hash = generate_key(ENVELOPE)
     store = InMemoryKeyStore()
     store.add(prefix=prefix, key_hash=key_hash, name="reviewer", scopes=["chat"])
 
@@ -39,13 +46,13 @@ def test_from_config_empty_is_empty_store():
 
 
 def test_from_config_parses_entries():
-    plaintext, prefix, key_hash = generate_key()
+    plaintext, prefix, key_hash = generate_key(ENVELOPE)
     cfg = json.dumps([{"name": "docs-bot", "prefix": prefix, "key_hash": key_hash}])
     store = key_store_from_config(cfg)
     row = store.get_api_key_by_prefix(prefix)
     assert row is not None and row.name == "docs-bot"
     assert row.scopes == []  # default when omitted
-    assert parse_prefix(plaintext) == prefix
+    assert parse_prefix(plaintext, ENVELOPE) == prefix
 
 
 def test_from_config_malformed_json_raises():
@@ -59,7 +66,7 @@ def test_from_config_missing_required_field_raises():
 
 
 def test_from_config_duplicate_prefix_raises():
-    _, prefix, key_hash = generate_key()
+    _, prefix, key_hash = generate_key(ENVELOPE)
     cfg = json.dumps(
         [
             {"name": "a", "prefix": prefix, "key_hash": key_hash},
@@ -71,7 +78,7 @@ def test_from_config_duplicate_prefix_raises():
 
 
 def test_from_config_non_list_scopes_raises():
-    _, prefix, key_hash = generate_key()
+    _, prefix, key_hash = generate_key(ENVELOPE)
     cfg = json.dumps([{"name": "a", "prefix": prefix, "key_hash": key_hash, "scopes": "chat"}])
     with pytest.raises(RuntimeError, match="CONSUMER_KEYS"):
         key_store_from_config(cfg)

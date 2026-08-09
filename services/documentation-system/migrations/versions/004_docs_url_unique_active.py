@@ -15,6 +15,7 @@ Revision ID: 004
 Revises: 003
 Create Date: 2026-07-13
 """
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -51,8 +52,11 @@ def upgrade() -> None:
 
     # 2. Now the invariant holds; create the partial unique index.
     op.create_index(
-        "uq_docs_url_normalized_active", "docs", ["url_normalized"],
-        unique=True, postgresql_where=sa.text("active"),
+        "uq_docs_url_normalized_active",
+        "docs",
+        ["url_normalized"],
+        unique=True,
+        postgresql_where=sa.text("active"),
     )
 
 

@@ -6,6 +6,10 @@ see each service's own `docs/ARCHITECTURE.md`:
 
 - [`services/team-tracking/docs/ARCHITECTURE.md`](../services/team-tracking/docs/ARCHITECTURE.md)
 - [`services/documentation-system/docs/ARCHITECTURE.md`](../services/documentation-system/docs/ARCHITECTURE.md)
+- [`services/verification/docs/ARCHITECTURE.md`](../services/verification/docs/ARCHITECTURE.md)
+- [`services/llm/docs/ARCHITECTURE.md`](../services/llm/docs/ARCHITECTURE.md)
+- [`services/meeting/docs/ARCHITECTURE.md`](../services/meeting/docs/ARCHITECTURE.md)
+- [`services/connectors/docs/ARCHITECTURE.md`](../services/connectors/docs/ARCHITECTURE.md)
 - [`discord-bot/README.md`](../discord-bot/README.md) — the Discord bot doesn't have a
   standalone ARCHITECTURE.md yet; the README covers its neutral command shape (a
   single handler serves both the Discord surface and a browser-based web
@@ -14,9 +18,9 @@ see each service's own `docs/ARCHITECTURE.md`:
 
 ## The services
 
-The platform is **five backend services** — four source-of-truth services, each
-owning one domain, plus the stateful `meeting` processing service — plus the
-Discord bot as a consumer:
+The platform is **six backend services** — four source-of-truth services, each
+owning one domain, plus the stateful `meeting` processing service and the
+stateless `connectors` outbound adapter — plus the Discord bot as a consumer:
 
 | Service | Domain | Key surface |
 |---------|--------|-------------|
@@ -25,6 +29,7 @@ Discord bot as a consumer:
 | [`services/llm`](../services/llm) | Stateless LLM proxy | `POST /chat` over Amazon Bedrock; requires the `chat` scope; holds no DB/state |
 | [`services/verification`](../services/verification) | Email ownership verification | request/confirm an email code; `verification:write` scope |
 | [`services/meeting`](../services/meeting) | **Stateful** live meeting transcription + minutes | WS audio stream in → rolling transcript → minutes/PDF on stop; `meetings` scope. The one stateful service — see [MEETING-RECORDING.md](MEETING-RECORDING.md) |
+| [`services/connectors`](../services/connectors) | Outbound document fetch | `POST /fetch` returns a Google Doc/Sheet/Slides/Drive file as text; `fetch` scope; no DB/state. Not a gateway and not an authorization boundary — see its [ARCHITECTURE](../services/connectors/docs/ARCHITECTURE.md) |
 
 > **Meeting recording** spans two components (the `meeting` service + a Discord *voice surface* in the bot) and is the platform's one stateful service and its one non-neutral-command bot path. Its cross-cutting design — and *why* it breaks both conventions — is documented separately in **[MEETING-RECORDING.md](MEETING-RECORDING.md)**.
 
@@ -42,11 +47,21 @@ Protocol, and both degrade rather than fail when the directory is down — see
 for the visibility rule itself.
 
 The other services are independent and share the conventions below:
-`verification` owns its own database and migrations; `llm` is stateless with no
-database at all; `meeting` has no database either but *is* stateful in memory.
-`meeting` is also the one service that consumes another backend service —
-it calls `llm` for minutes generation, making `meeting → llm` the platform's
-only service-to-service dependency outside the catalog → directory pair.
+`verification` owns its own database and migrations; `llm` and `connectors` are
+stateless with no database at all; `meeting` has no database either but *is*
+stateful in memory.
+
+There are **two** service-to-service dependencies outside the catalog →
+directory pair, and they differ in how hard they are:
+
+- **`meeting` → `llm`** (hard). `meeting` calls `/chat` for minutes generation
+  and refuses to boot without `LLM_BASE_URL`/`LLM_API_KEY` outside `local`.
+  Deploy `llm` first.
+- **`documentation-system` → `connectors`** (soft). The catalog calls `/fetch`
+  for Google source content. With connectors unreachable or unconfigured, the
+  fetch degrades to a warning on the ingested doc and the catalog works
+  normally — the same degrade-on-dependency-down posture it takes toward the
+  directory.
 
 ## The core principle: a source of truth is API-only
 
@@ -174,16 +189,16 @@ describes how it applies them concretely.
   `alembic upgrade head`. The SQLAlchemy Core table definitions in
   `src/storage/schema.py` are the schema source of truth. This applies to the
   three services that own a database (team-tracking **007**,
-  documentation-system **004**, verification **001**); `llm` and `meeting` have
-  no schema and therefore no `preDeployCommand`.
+  documentation-system **006**, verification **001**); `llm`, `meeting`, and
+  `connectors` have no schema and therefore no `preDeployCommand`.
 - **Three auth storage models.** The convention is scoped, argon2-hashed keys
   behind `platform_auth`'s `ApiKeyStore` protocol — but where they *live* varies
   with how many consumers a service has:
   - **team-tracking, documentation-system** — an `api_keys` table, minted by a
     CLI that writes to it (`team-tracking-keys`, `doc-keys`). Revocation is a
     row update.
-  - **`llm`, `meeting`** — no table. Keys are seeded at boot from a
-    `CONSUMER_KEYS` JSON array env var, so their "mint" CLIs only *print* a key
+  - **`llm`, `meeting`, `connectors`** — no table. Keys are seeded at boot from
+    a `CONSUMER_KEYS` JSON array env var, so their "mint" CLIs only *print* a key
     and its JSON entry. Adding or revoking one is a variable edit plus a
     redeploy, and a malformed `CONSUMER_KEYS` fails the deploy at boot by design.
   - **`verification`** — a `NullApiKeyStore`: no per-consumer keys exist, and

@@ -9,8 +9,17 @@ from contracts.types import Source
 
 # Query params that never identify a distinct document — stripped for dedup.
 _TRACKING_PARAMS = {
-    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-    "gclid", "fbclid", "mc_cid", "mc_eid", "ref", "ref_src",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "gclid",
+    "fbclid",
+    "mc_cid",
+    "mc_eid",
+    "ref",
+    "ref_src",
 }
 _DEFAULT_PORTS = {"http": "80", "https": "443"}
 

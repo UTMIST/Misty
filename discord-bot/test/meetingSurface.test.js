@@ -2,6 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMeetingSurface } from '../src/meeting/meetingSurface.js';
 
+// A dropped socket now runs the full salvage (recorder.stop -> POST /stop ->
+// poster), which is several awaits deep. Draining the microtask queue plus one
+// macrotask turn lets it finish before assertions rather than hand-counting
+// `await Promise.resolve()`s that change whenever the chain does.
+const settle = async () => {
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+  await new Promise((r) => setImmediate(r));
+};
+
 function makeFakes({ stopImpl, posterImpl } = {}) {
   const openStreamCalls = [];
   const closeCalls = [];
@@ -237,10 +246,9 @@ test('a WS stream error tears down the session so a subsequent start for that gu
 
   // simulate the transport reporting a WS error
   onError(new Error('ECONNREFUSED'));
-  await Promise.resolve();
-  await Promise.resolve();
+  await settle();
 
-  // stream should have been closed as part of teardown
+  // stream should have been closed as part of the salvage
   assert.equal(fakes.closeCalls.length, 1);
 
   // and the guild's session slot must be free again
@@ -330,13 +338,38 @@ test('a WS error stops the recorder, not just the stream', async () => {
   fakes.callOrder.length = 0;
 
   fakes.openStreamOpts.at(-1).onError(new Error('socket died'));
-  await new Promise((r) => setImmediate(r));
+  await settle();
 
   // Closing the stream but leaving the voice connection up parks the bot in the
   // channel: it keeps one receive stream open per speaker while /record status
   // reports nothing recording, so only a restart can remove it.
   assert.ok(fakes.callOrder.includes('recorder.stop'), `recorder not stopped: ${fakes.callOrder}`);
-  assert.ok(fakes.notifies.length >= 1, 'the channel was never told the recording died');
+  // The service holds a disconnected session for its grace period, so the right
+  // response to a dead socket is to FINALIZE it, not to announce a lost
+  // meeting. The channel gets the minutes; nobody gets a "died" warning.
+  assert.equal(fakes.stopCalls.length, 1, 'the transcript was never salvaged via POST /stop');
+  assert.equal(fakes.posterCalls.length, 1, 'the minutes were never posted');
+  assert.equal(fakes.notifies.length, 0, `unexpected failure notice: ${JSON.stringify(fakes.notifies)}`);
+});
+
+
+test('a dropped socket that cannot be salvaged tells the channel, and still leaves the voice channel', async () => {
+  // The grace period has expired, the service redeployed, or /stop failed --
+  // whatever the reason, the minutes are genuinely gone and the meeting must
+  // not be left silently dead with the bot parked in the voice channel.
+  const fakes = makeFakes({ stopImpl: () => { throw new Error('404 session gone'); } });
+  const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
+  await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+  fakes.callOrder.length = 0;
+
+  fakes.openStreamOpts.at(-1).onClose();
+  await settle();
+
+  assert.equal(fakes.posterCalls.length, 0, 'nothing should have been posted');
+  assert.equal(fakes.notifies.length, 1, 'the channel was never told the minutes were lost');
+  assert.match(fakes.notifies[0].content, /could not be recovered/);
+  assert.ok(fakes.callOrder.includes('recorder.stop'), `recorder not stopped: ${fakes.callOrder}`);
+  assert.equal(surface.status('g1').status, 'not-recording');
 });
 
 test('a clean WS close tears down too', async () => {
@@ -348,10 +381,12 @@ test('a clean WS close tears down too', async () => {
   // An auth rejection, a duplicate session, or a redeploy closes the socket
   // with no error at all; frames after that are dropped silently.
   fakes.openStreamOpts.at(-1).onClose();
-  await new Promise((r) => setImmediate(r));
+  await settle();
 
   assert.ok(fakes.callOrder.includes('recorder.stop'), `recorder not stopped: ${fakes.callOrder}`);
   assert.equal(surface.status('g1').status, 'not-recording');
+  // Salvaged rather than discarded: the whole point of the grace period.
+  assert.equal(fakes.posterCalls.length, 1, 'the minutes were never posted');
 });
 
 test('a stream that fails synchronously never registers a session', async () => {

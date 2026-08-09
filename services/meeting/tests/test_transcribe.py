@@ -70,8 +70,10 @@ async def drain(stream, max_rounds: int = 2000):
         task = stream._task
         if task is not None and task.done():
             return
-        caught_up = stream._queue is not None and stream._queue.empty() and (
-            stream._delivered_bytes == stream._sent_bytes
+        caught_up = (
+            stream._queue is not None
+            and stream._queue.empty()
+            and (stream._delivered_bytes == stream._sent_bytes)
         )
         if caught_up:
             await asyncio.sleep(0)  # let the output consumer run
@@ -673,7 +675,9 @@ def test_repeated_aws_idle_timeouts_do_not_disable_a_speaker():
             current = client.streams[-1]
             current.output_stream.push(_final_event())
             await drain(stream)
-            current.output_stream.raise_next(RuntimeError("no new audio was received for 15 seconds"))
+            current.output_stream.raise_next(
+                RuntimeError("no new audio was received for 15 seconds")
+            )
             await drain(stream)
 
         words = await stream.aclose()

@@ -55,7 +55,8 @@ def request_code(
         VerificationCode(
             subject=payload.subject,
             email=payload.email,
-            code_hash=hash_code(code, get_settings().code_hmac_secret),
+            # Unwrap at the boundary — hash_code/verify_code take a plain str.
+            code_hash=hash_code(code, get_settings().code_hmac_secret.get_secret_value()),
             expires_at=now + CODE_TTL,
             attempts=0,
             consumed_at=None,
@@ -89,7 +90,9 @@ def confirm_code(
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="too_many_attempts"
                 )
-            if verify_code(payload.code, code.code_hash, get_settings().code_hmac_secret):
+            if verify_code(
+                payload.code, code.code_hash, get_settings().code_hmac_secret.get_secret_value()
+            ):
                 return ConfirmCodeOut(verified=True, subject=code.subject, email=code.email)
             attempts = storage.increment_attempts(payload.subject)
             if attempts >= MAX_ATTEMPTS:
@@ -106,7 +109,9 @@ def confirm_code(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="too_many_attempts"
         )
 
-    if not verify_code(payload.code, code.code_hash, get_settings().code_hmac_secret):
+    if not verify_code(
+        payload.code, code.code_hash, get_settings().code_hmac_secret.get_secret_value()
+    ):
         attempts = storage.increment_attempts(payload.subject)
         if attempts >= MAX_ATTEMPTS:
             raise HTTPException(

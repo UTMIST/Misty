@@ -171,7 +171,7 @@ The suite runs in two modes.
 uv run pytest --ignore=tests/test_postgres_adapter.py -q
 ```
 
-Runs **54 tests** against `InMemoryVerificationStore`, injected into FastAPI via `app.dependency_overrides` (see `tests/conftest.py`), plus the `FakeSender`. Covers both endpoints, the full confirm-code state machine, rate limiting, the code HMAC helpers, all three email senders, config/prod-secret guards, and auth. Completes in well under a second.
+Runs against `InMemoryVerificationStore`, injected into FastAPI via `app.dependency_overrides` (see `tests/conftest.py`), plus the `FakeSender`. Covers both endpoints, the full confirm-code state machine, rate limiting, the code HMAC helpers, all three email senders, config/prod-secret guards, and auth. Completes in well under a second.
 
 **Full (adds Postgres integration):**
 
@@ -181,7 +181,7 @@ uv run alembic upgrade head
 uv run pytest
 ```
 
-Adds the 5 tests in `tests/test_postgres_adapter.py`, which replay the adapter's behavioral assertions (including the atomic increment) against a live Postgres. They connect via `DATABASE_URL` (in `.env`) pointing at the running container on port 5434.
+Adds `tests/test_postgres_adapter.py`, which replays the adapter's behavioral assertions (including the atomic increment) against a live Postgres. They connect via `DATABASE_URL` (in `.env`) pointing at the running container on port 5434.
 
 Lint and format with ruff:
 
@@ -202,5 +202,10 @@ One table (`verification_codes`), two endpoints plus `/health`, two storage adap
 - **Identity binding** — the service proves an email is reachable; associating it with a directory person is the caller's job (team-tracking owns identity).
 - **Resend/throttle beyond the 60s window and 5-attempt cap** — no exponential backoff, per-IP limiting, or code-length/TTL configurability.
 - **Pagination / listing** — there is no endpoint to enumerate codes; rows are looked up only by subject or email internally.
-</content>
-</invoke>
+
+## Documentation
+
+- [docs/API.md](docs/API.md) — consumer-facing endpoint reference: request/response shapes, errors, curl examples
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — contributor orientation: why the service is shaped this way, boundaries, trade-offs
+- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — task walkthroughs and the pre-push checklist
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — deploy shape, variables, key provisioning, troubleshooting

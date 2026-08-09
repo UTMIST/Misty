@@ -1,11 +1,17 @@
-"""In-memory API-key store seeded from config — the DB-free equivalent of
-team-tracking's Postgres key table. Satisfies platform_auth's ApiKeyStore
-protocol structurally, so it is swappable for a persistent store later (#44)."""
+"""In-memory API-key store seeded from config — the DB-free implementation of
+this package's ApiKeyStore protocol.
+
+Services with a database back ApiKeyStore with a table; services without one
+(llm, connectors) seed this from a CONSUMER_KEYS JSON env var. Swappable for a
+persistent store later (#44).
+"""
 
 import json
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID, uuid4
+
+from platform_auth.secret_guard import reject_secret_wrapper
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,10 @@ class InMemoryKeyStore:
 
 
 def key_store_from_config(consumer_keys_json: str) -> InMemoryKeyStore:
+    # Services hold consumer_keys as SecretStr; callers must unwrap. Guarded
+    # before the .strip() below, whose AttributeError would otherwise escape
+    # uncaught (it runs outside the try) with no hint about the real mistake.
+    reject_secret_wrapper(consumer_keys_json, param="key_store_from_config(consumer_keys_json)")
     store = InMemoryKeyStore()
     raw = (consumer_keys_json or "").strip()
     if not raw:

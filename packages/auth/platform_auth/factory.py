@@ -23,6 +23,7 @@ from platform_auth.models import (
     ApiKeyStore,
     AuthedKey,
 )
+from platform_auth.secret_guard import reject_secret_wrapper
 
 _BOOTSTRAP_KEY_NAME = "env-bootstrap"
 
@@ -99,6 +100,10 @@ def build_auth(
             raise _unauthorized()
 
         env_key = get_env_key()
+        # Services hold api_key as SecretStr; the lambda passed here must unwrap
+        # it. Unguarded, a non-empty SecretStr blows up on the missing .encode()
+        # below — a 500 that reads like a library bug rather than bad wiring.
+        reject_secret_wrapper(env_key, param="get_env_key()")
         if env_key and secrets.compare_digest(x_api_key.encode(), env_key.encode()):
             authed = AuthedKey(
                 name=_BOOTSTRAP_KEY_NAME, scopes=frozenset({ADMIN_SCOPE}), is_bootstrap=True
@@ -116,6 +121,7 @@ def build_auth(
                     status_code=status.HTTP_403_FORBIDDEN, detail=f"missing scope: {scope}"
                 )
             return key
+
         return _dep
 
     def get_actor(
@@ -134,9 +140,14 @@ def build_auth(
             return None
         # Literal check, not has_scope — an admin wildcard must NOT grant this.
         if ACT_AS_USER_SCOPE not in key.scopes:
-            audit.warning(json.dumps({
-                "event": "on_behalf_of_rejected", "key_name": key.name,
-            }))
+            audit.warning(
+                json.dumps(
+                    {
+                        "event": "on_behalf_of_rejected",
+                        "key_name": key.name,
+                    }
+                )
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"missing scope: {ACT_AS_USER_SCOPE}",
@@ -148,9 +159,15 @@ def build_auth(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="X-On-Behalf-Of must be a UUID",
             ) from None
-        audit.info(json.dumps({
-            "event": "on_behalf_of_asserted", "key_name": key.name, "actor": str(actor_id),
-        }))
+        audit.info(
+            json.dumps(
+                {
+                    "event": "on_behalf_of_asserted",
+                    "key_name": key.name,
+                    "actor": str(actor_id),
+                }
+            )
+        )
         return actor_id
 
     return AuthDeps(

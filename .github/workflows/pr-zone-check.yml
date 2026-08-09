@@ -28,11 +28,22 @@ jobs:
     steps:
       - name: Detect zones touched
         run: |
+          # Keep in sync with the area list in .github/CODEOWNERS.
+          # First match wins, so the specific paths must precede the
+          # services/* and packages/* catch-alls — those exist so a newly
+          # added service lands in its own bucket instead of silently
+          # merging into an existing zone.
           zone_for() {
             case "$1" in
               discord-bot/*)                    echo discord-bot ;;
-              services/team-tracking/*)         echo services/team-tracking ;;
+              packages/auth/*)                  echo packages/auth ;;
+              packages/*)                       echo packages/other ;;
+              services/connectors/*)            echo services/connectors ;;
               services/documentation-system/*)  echo services/documentation-system ;;
+              services/llm/*)                   echo services/llm ;;
+              services/meeting/*)               echo services/meeting ;;
+              services/team-tracking/*)         echo services/team-tracking ;;
+              services/verification/*)          echo services/verification ;;
               services/*)                       echo services/other ;;
               docs/*)                           echo docs ;;
               scripts/*)                        echo scripts ;;

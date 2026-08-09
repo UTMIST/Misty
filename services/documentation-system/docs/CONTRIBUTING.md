@@ -19,7 +19,7 @@ the three Protocol boundaries.
   truth", "degrade-on-directory-down", "ingest". Match the existing docs.
 - **Keep the fast suite fast and Docker-free.** New behavior gets an in-memory test; only
   storage-adapter parity needs the Postgres suite.
-- **Lint before you push:** `uv run ruff check .` (line length 100, target py311).
+- **Lint before you push:** `uv run ruff check .` **and** `uv run ruff format --check .` (line length 100, target py311). CI gates both.
 
 ## Setup
 
@@ -164,8 +164,10 @@ that touches `postgres.py`, `schema.py`, or a migration.
 ## Lint
 
 ```bash
-uv run ruff check .        # check
-uv run ruff check --fix .  # auto-fix what it can
+uv run ruff check .          # lint
+uv run ruff check --fix .    # auto-fix what it can
+uv run ruff format .         # format
+uv run ruff format --check . # verify without writing (CI-style)
 ```
 
 Ruff config lives in `pyproject.toml` (line length 100, target py311). Keep the tree

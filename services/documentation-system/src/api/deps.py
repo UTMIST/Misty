@@ -38,4 +38,6 @@ def _directory_client(base_url: str, api_key: str) -> HttpDirectoryClient:
 
 def get_directory() -> DirectoryClient:
     s = get_settings()
-    return _directory_client(s.directory_base_url, s.directory_api_key)
+    # SecretStr boundary: HttpDirectoryClient sends the key as a plain header
+    # value, so unwrap here rather than pushing SecretStr into the client.
+    return _directory_client(s.directory_base_url, s.directory_api_key.get_secret_value())

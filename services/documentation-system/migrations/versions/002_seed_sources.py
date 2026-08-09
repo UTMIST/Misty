@@ -4,6 +4,7 @@ Revision ID: 002
 Revises: 001
 Create Date: 2026-07-01
 """
+
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import ARRAY
@@ -29,18 +30,31 @@ SOURCES = [
 def upgrade() -> None:
     tbl = sa.table(
         "sources",
-        sa.column("id", sa.Text), sa.column("label", sa.Text),
+        sa.column("id", sa.Text),
+        sa.column("label", sa.Text),
         sa.column("url_patterns", ARRAY(sa.Text)),
-        sa.column("requires_auth", sa.Boolean), sa.column("has_api", sa.Boolean),
+        sa.column("requires_auth", sa.Boolean),
+        sa.column("has_api", sa.Boolean),
         sa.column("content_fetch_enabled", sa.Boolean),
-        sa.column("created_by", sa.Text), sa.column("updated_by", sa.Text),
+        sa.column("created_by", sa.Text),
+        sa.column("updated_by", sa.Text),
     )
-    op.bulk_insert(tbl, [
-        {"id": s[0], "label": s[1], "url_patterns": s[2], "requires_auth": s[3],
-         "has_api": s[4], "content_fetch_enabled": s[5],
-         "created_by": "system", "updated_by": "system"}
-        for s in SOURCES
-    ])
+    op.bulk_insert(
+        tbl,
+        [
+            {
+                "id": s[0],
+                "label": s[1],
+                "url_patterns": s[2],
+                "requires_auth": s[3],
+                "has_api": s[4],
+                "content_fetch_enabled": s[5],
+                "created_by": "system",
+                "updated_by": "system",
+            }
+            for s in SOURCES
+        ],
+    )
 
 
 def downgrade() -> None:

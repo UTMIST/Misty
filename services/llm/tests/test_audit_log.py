@@ -3,9 +3,10 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+from platform_auth import InMemoryKeyStore
+
 from src.api.app import create_app
 from src.api.deps import get_key_store, get_llm
-from src.key_store import InMemoryKeyStore
 from src.providers.base import LLMResult, ProviderUnavailable
 
 

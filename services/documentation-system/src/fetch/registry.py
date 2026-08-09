@@ -1,6 +1,9 @@
 from contracts.fetcher import Fetcher, FetchError, FetchResult
+from src.fetch.connectors import ConnectorsFetcher
 from src.fetch.github import GithubFetcher
 from src.fetch.web import WebFetcher
+
+GOOGLE_SOURCE_IDS = ("gdocs", "gsheets", "gslides", "gdrive")
 
 
 class FetchUnsupported(FetchError):
@@ -19,6 +22,19 @@ class FetcherRegistry:
 
 
 def default_registry() -> FetcherRegistry:
-    """Fetchers wired up in v1: public web + github. Matches the sources whose
-    content_fetch_enabled is true."""
-    return FetcherRegistry({"web": WebFetcher(), "github": GithubFetcher()})
+    """Fetchers wired up today: public web + github in-process, and the Google
+    sources via the connectors service. One ConnectorsFetcher per source id
+    because Fetcher.fetch takes only a url."""
+    from src.config import get_settings
+
+    settings = get_settings()
+    mapping: dict[str, Fetcher] = {"web": WebFetcher(), "github": GithubFetcher()}
+    for source_id in GOOGLE_SOURCE_IDS:
+        mapping[source_id] = ConnectorsFetcher(
+            source_id=source_id,
+            base_url=settings.connectors_base_url,
+            # SecretStr boundary: ConnectorsFetcher sends the key as a plain
+            # header value, so unwrap here rather than pushing SecretStr down.
+            api_key=settings.connectors_api_key.get_secret_value(),
+        )
+    return FetcherRegistry(mapping)

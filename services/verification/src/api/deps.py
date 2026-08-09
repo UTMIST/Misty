@@ -31,12 +31,15 @@ def get_email_sender() -> EmailSender:
     if settings.email_backend == "resend":
         from src.email.resend import ResendSender
 
-        return ResendSender(api_key=settings.resend_api_key, sender=settings.email_from)
+        # Unwrap at the boundary — senders take plain str; SecretStr stops here.
+        return ResendSender(
+            api_key=settings.resend_api_key.get_secret_value(), sender=settings.email_from
+        )
     if settings.email_backend == "gmail":
         from src.email.gmail import GmailSender
 
         return GmailSender(
             sender=settings.gmail_sender,
-            credentials_json_b64=settings.gmail_credentials_json,
+            credentials_json_b64=settings.gmail_credentials_json.get_secret_value(),
         )
     return FakeSender()

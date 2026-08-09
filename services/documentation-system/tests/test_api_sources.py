@@ -13,15 +13,27 @@ AUTH = {"X-API-Key": "test-key"}
 
 def _sources():
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    return [Source(id="web", label="Web", url_patterns=[], requires_auth=False,
-                   has_api=False, content_fetch_enabled=True,
-                   created_at=now, updated_at=now, created_by="system", updated_by="system")]
+    return [
+        Source(
+            id="web",
+            label="Web",
+            url_patterns=[],
+            requires_auth=False,
+            has_api=False,
+            content_fetch_enabled=True,
+            created_at=now,
+            updated_at=now,
+            created_by="system",
+            updated_by="system",
+        )
+    ]
 
 
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setenv("API_KEY", "test-key")
     from src.config import get_settings
+
     get_settings.cache_clear()
     adapter = InMemoryStorageAdapter(seed_sources=_sources())
     app = create_app()

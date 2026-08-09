@@ -1,7 +1,8 @@
 import json
 
+from platform_auth import key_store_from_config
+
 from src.api.hashing import parse_prefix, verify_key
-from src.key_store import key_store_from_config
 from src.mint_key import main
 
 

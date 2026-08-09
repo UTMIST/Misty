@@ -6,7 +6,9 @@ from src.key_store import InMemoryKeyStore, key_store_from_config
 
 @lru_cache(maxsize=1)
 def _key_store() -> InMemoryKeyStore:
-    return key_store_from_config(get_settings().consumer_keys)
+    # key_store_from_config parses raw JSON, so unwrap here: the SecretStr
+    # boundary stops at this edge and the store itself keeps taking a str.
+    return key_store_from_config(get_settings().consumer_keys.get_secret_value())
 
 
 def get_key_store() -> InMemoryKeyStore:

@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
-from src.api.middleware import AuditLogMiddleware
+from platform_auth import AuditLogMiddleware
+
 from src.config import verify_production_secrets
 
 

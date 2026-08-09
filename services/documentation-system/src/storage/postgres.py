@@ -7,9 +7,9 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
 from contracts.storage import DuplicateActiveUrl
-from contracts.types import ApiKey, Doc, DocGrant, Source
+from contracts.types import ApiKey, Doc, DocContentMeta, DocGrant, Source
 from contracts.visibility import Actor, ActorContext, DENY, SEE_ALL
-from src.storage.schema import api_keys, doc_grants, doc_tags, docs, sources
+from src.storage.schema import api_keys, doc_content, doc_grants, doc_tags, docs, sources
 
 
 def _now() -> datetime:
@@ -18,20 +18,33 @@ def _now() -> datetime:
 
 def _source_row_to_model(row) -> Source:
     return Source(
-        id=row.id, label=row.label, url_patterns=list(row.url_patterns),
-        requires_auth=row.requires_auth, has_api=row.has_api,
-        content_fetch_enabled=row.content_fetch_enabled, active=row.active,
-        created_at=row.created_at, updated_at=row.updated_at,
-        created_by=row.created_by, updated_by=row.updated_by,
+        id=row.id,
+        label=row.label,
+        url_patterns=list(row.url_patterns),
+        requires_auth=row.requires_auth,
+        has_api=row.has_api,
+        content_fetch_enabled=row.content_fetch_enabled,
+        active=row.active,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        created_by=row.created_by,
+        updated_by=row.updated_by,
     )
 
 
 def _api_key_row_to_model(row) -> ApiKey:
     return ApiKey(
-        id=row.id, name=row.name, prefix=row.prefix, scopes=list(row.scopes),
-        active=row.active, revoked_at=row.revoked_at, last_used_at=row.last_used_at,
-        created_at=row.created_at, updated_at=row.updated_at,
-        created_by=row.created_by, updated_by=row.updated_by,
+        id=row.id,
+        name=row.name,
+        prefix=row.prefix,
+        scopes=list(row.scopes),
+        active=row.active,
+        revoked_at=row.revoked_at,
+        last_used_at=row.last_used_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        created_by=row.created_by,
+        updated_by=row.updated_by,
     )
 
 
@@ -76,12 +89,17 @@ class PostgresStorageAdapter:
 
     def _grants_for(self, conn, doc_id: UUID) -> list[DocGrant]:
         rows = conn.execute(
-            select(doc_grants).where(doc_grants.c.doc_id == doc_id).order_by(doc_grants.c.created_at)
+            select(doc_grants)
+            .where(doc_grants.c.doc_id == doc_id)
+            .order_by(doc_grants.c.created_at)
         ).all()
         return [
             DocGrant(
-                grantee_type=r.grantee_type, grantee_id=r.grantee_id, grantee_label=None,
-                created_at=r.created_at, created_by=r.created_by,
+                grantee_type=r.grantee_type,
+                grantee_id=r.grantee_id,
+                grantee_label=None,
+                created_at=r.created_at,
+                created_by=r.created_by,
             )
             for r in rows
         ]
@@ -96,22 +114,44 @@ class PostgresStorageAdapter:
         # tags may be supplied by a batched caller (list_docs) to avoid an N+1
         # per-doc SELECT; when None, hydrate this doc's tags on its own.
         return Doc(
-            id=row.id, url=row.url, url_normalized=row.url_normalized, title=row.title,
-            source_id=row.source_id, description=row.description,
-            owning_team_id=row.owning_team_id, owning_team_label=row.owning_team_label,
-            owning_person_id=row.owning_person_id, owning_person_label=row.owning_person_label,
-            content_snapshot=row.content_snapshot, fetched_at=row.fetched_at, active=row.active,
+            id=row.id,
+            url=row.url,
+            url_normalized=row.url_normalized,
+            title=row.title,
+            source_id=row.source_id,
+            description=row.description,
+            owning_team_id=row.owning_team_id,
+            owning_team_label=row.owning_team_label,
+            owning_person_id=row.owning_person_id,
+            owning_person_label=row.owning_person_label,
+            content_snapshot=row.content_snapshot,
+            fetched_at=row.fetched_at,
+            active=row.active,
             tags=self._tags_for(conn, row.id) if tags is None else tags,
-            created_at=row.created_at, updated_at=row.updated_at,
-            created_by=row.created_by, updated_by=row.updated_by,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            created_by=row.created_by,
+            updated_by=row.updated_by,
         )
 
     # --- Docs ---
 
     def create_doc(
-        self, *, url, url_normalized, source_id, title, description,
-        owning_team_id, owning_team_label, owning_person_id, owning_person_label,
-        content_snapshot, fetched_at, tags, actor,
+        self,
+        *,
+        url,
+        url_normalized,
+        source_id,
+        title,
+        description,
+        owning_team_id,
+        owning_team_label,
+        owning_person_id,
+        owning_person_label,
+        content_snapshot,
+        fetched_at,
+        tags,
+        actor,
     ) -> Doc:
         with self._engine.begin() as conn:
             # New docs are always active, so they fall under the partial unique
@@ -121,12 +161,21 @@ class PostgresStorageAdapter:
             # otherwise poison the transaction) and RETURNING yields no row.
             # Signal that to the caller so ingest can fall back to dedup/merge.
             row = conn.execute(
-                pg_insert(docs).values(
-                    url=url, url_normalized=url_normalized, source_id=source_id, title=title,
-                    description=description, owning_team_id=owning_team_id,
-                    owning_team_label=owning_team_label, owning_person_id=owning_person_id,
-                    owning_person_label=owning_person_label, content_snapshot=content_snapshot,
-                    fetched_at=fetched_at, created_by=actor, updated_by=actor,
+                pg_insert(docs)
+                .values(
+                    url=url,
+                    url_normalized=url_normalized,
+                    source_id=source_id,
+                    title=title,
+                    description=description,
+                    owning_team_id=owning_team_id,
+                    owning_team_label=owning_team_label,
+                    owning_person_id=owning_person_id,
+                    owning_person_label=owning_person_label,
+                    content_snapshot=content_snapshot,
+                    fetched_at=fetched_at,
+                    created_by=actor,
+                    updated_by=actor,
                 )
                 .on_conflict_do_nothing(
                     index_elements=[docs.c.url_normalized],
@@ -172,8 +221,14 @@ class PostgresStorageAdapter:
             return self._row_to_doc(conn, row) if row else None
 
     def list_docs(
-        self, *, owning_team_id=None, owning_person_id=None,
-        source_id=None, tag=None, active_only=True, visibility: ActorContext = SEE_ALL,
+        self,
+        *,
+        owning_team_id=None,
+        owning_person_id=None,
+        source_id=None,
+        tag=None,
+        active_only=True,
+        visibility: ActorContext = SEE_ALL,
     ) -> list[Doc]:
         stmt = select(docs)
         conditions = []
@@ -189,9 +244,7 @@ class PostgresStorageAdapter:
         if clause is not None:
             conditions.append(clause)
         if tag is not None:
-            stmt = stmt.where(
-                docs.c.id.in_(select(doc_tags.c.doc_id).where(doc_tags.c.tag == tag))
-            )
+            stmt = stmt.where(docs.c.id.in_(select(doc_tags.c.doc_id).where(doc_tags.c.tag == tag)))
         if conditions:
             stmt = stmt.where(and_(*conditions))
         stmt = stmt.order_by(docs.c.created_at)
@@ -229,9 +282,7 @@ class PostgresStorageAdapter:
             if exists is None:
                 return False
             already = conn.execute(
-                select(doc_tags.c.tag).where(
-                    doc_tags.c.doc_id == doc_id, doc_tags.c.tag == tag
-                )
+                select(doc_tags.c.tag).where(doc_tags.c.doc_id == doc_id, doc_tags.c.tag == tag)
             ).one_or_none()
             if already is None:
                 conn.execute(insert(doc_tags).values(doc_id=doc_id, tag=tag))
@@ -253,7 +304,8 @@ class PostgresStorageAdapter:
                 select(doc_grants.c.id).where(
                     doc_grants.c.doc_id == doc_id,
                     doc_grants.c.grantee_type == grantee_type,
-                    doc_grants.c.grantee_id.is_(None) if grantee_id is None
+                    doc_grants.c.grantee_id.is_(None)
+                    if grantee_id is None
                     else doc_grants.c.grantee_id == grantee_id,
                 )
             ).one_or_none()
@@ -267,8 +319,10 @@ class PostgresStorageAdapter:
                     with conn.begin_nested():
                         conn.execute(
                             insert(doc_grants).values(
-                                doc_id=doc_id, grantee_type=grantee_type,
-                                grantee_id=grantee_id, created_by=actor,
+                                doc_id=doc_id,
+                                grantee_type=grantee_type,
+                                grantee_id=grantee_id,
+                                created_by=actor,
                             )
                         )
                 except IntegrityError:
@@ -281,7 +335,8 @@ class PostgresStorageAdapter:
                 delete(doc_grants).where(
                     doc_grants.c.doc_id == doc_id,
                     doc_grants.c.grantee_type == grantee_type,
-                    doc_grants.c.grantee_id.is_(None) if grantee_id is None
+                    doc_grants.c.grantee_id.is_(None)
+                    if grantee_id is None
                     else doc_grants.c.grantee_id == grantee_id,
                 )
             )
@@ -290,6 +345,65 @@ class PostgresStorageAdapter:
     def list_grants(self, doc_id) -> list[DocGrant]:
         with self._engine.connect() as conn:
             return self._grants_for(conn, doc_id)
+
+    def upsert_doc_content(
+        self, doc_id: UUID, *, content_text: str, content_hash: str, fetched_at: datetime | None
+    ) -> None:
+        now = _now()
+        with self._engine.begin() as conn:
+            conn.execute(
+                pg_insert(doc_content)
+                .values(
+                    doc_id=doc_id,
+                    content_text=content_text,
+                    content_hash=content_hash,
+                    fetched_at=fetched_at,
+                    updated_at=now,
+                )
+                .on_conflict_do_update(
+                    index_elements=[doc_content.c.doc_id],
+                    set_={
+                        "content_text": content_text,
+                        "content_hash": content_hash,
+                        "fetched_at": fetched_at,
+                        "updated_at": now,
+                    },
+                )
+            )
+
+    def get_doc_content(self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL) -> str | None:
+        # Joined to `docs` because _visibility_clause builds its predicate from
+        # docs columns (owning_*) and a correlated EXISTS over doc_grants.
+        clause = self._visibility_clause(visibility)
+        stmt = (
+            select(doc_content.c.content_text)
+            .select_from(doc_content.join(docs, docs.c.id == doc_content.c.doc_id))
+            .where(doc_content.c.doc_id == doc_id)
+        )
+        if clause is not None:
+            stmt = stmt.where(clause)
+        with self._engine.connect() as conn:
+            row = conn.execute(stmt).one_or_none()
+            return row.content_text if row is not None else None
+
+    def get_doc_content_meta(
+        self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL
+    ) -> DocContentMeta | None:
+        # Joined to `docs` because _visibility_clause builds its predicate from
+        # docs columns (owning_*) and a correlated EXISTS over doc_grants.
+        clause = self._visibility_clause(visibility)
+        stmt = (
+            select(doc_content.c.content_hash, doc_content.c.fetched_at)
+            .select_from(doc_content.join(docs, docs.c.id == doc_content.c.doc_id))
+            .where(doc_content.c.doc_id == doc_id)
+        )
+        if clause is not None:
+            stmt = stmt.where(clause)
+        with self._engine.connect() as conn:
+            row = conn.execute(stmt).one_or_none()
+            if row is None:
+                return None
+            return DocContentMeta(content_hash=row.content_hash, fetched_at=row.fetched_at)
 
     # --- Sources ---
 
@@ -311,10 +425,16 @@ class PostgresStorageAdapter:
         try:
             with self._engine.begin() as conn:
                 row = conn.execute(
-                    insert(api_keys).values(
-                        name=name, prefix=prefix, key_hash=key_hash, scopes=scopes,
-                        created_by=actor, updated_by=actor,
-                    ).returning(api_keys)
+                    insert(api_keys)
+                    .values(
+                        name=name,
+                        prefix=prefix,
+                        key_hash=key_hash,
+                        scopes=scopes,
+                        created_by=actor,
+                        updated_by=actor,
+                    )
+                    .returning(api_keys)
                 ).one()
         except IntegrityError as e:
             raise ValueError(f"name or prefix already exists: {name!r} / {prefix!r}") from e
@@ -347,7 +467,8 @@ class PostgresStorageAdapter:
         now = _now()
         with self._engine.begin() as conn:
             row = conn.execute(
-                update(api_keys).where(api_keys.c.id == api_key_id)
+                update(api_keys)
+                .where(api_keys.c.id == api_key_id)
                 .values(active=False, revoked_at=now, updated_at=now, updated_by=actor)
                 .returning(api_keys)
             ).one_or_none()

@@ -1,8 +1,7 @@
 import httpx
 
 
-class LlmUnavailable(Exception):
-    ...
+class LlmUnavailable(Exception): ...
 
 
 class LlmClient:

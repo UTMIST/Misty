@@ -70,6 +70,8 @@ jobs:
         run: uv run pytest
       - name: Ruff check
         run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
 
   verification-test:
     runs-on: ubuntu-latest
@@ -132,11 +134,6 @@ jobs:
   # No Postgres service container and no AWS credentials: `meeting` has no
   # database, and its Transcribe/LLM clients are faked via
   # `app.dependency_overrides`, so the suite runs offline.
-  #
-  # `ruff format --check` is deliberately NOT run here yet: several files under
-  # services/meeting are unformatted, so adding the step would land this job red.
-  # `ruff check` (lint) passes and is enforced. To enable it, run
-  # `uv run ruff format .` in services/meeting and add the step back.
   meeting-test:
     runs-on: ubuntu-latest
     defaults:
@@ -152,6 +149,26 @@ jobs:
         run: uv run pytest
       - name: Ruff check
         run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+  connectors-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/connectors
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: Run tests
+        run: uv run pytest
+      - name: Ruff check
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
 
   documentation-system-test:
     runs-on: ubuntu-latest
@@ -191,12 +208,10 @@ jobs:
         run: uv run alembic upgrade head
       - name: Run tests
         run: uv run pytest
-      # NOTE: `ruff check`/`ruff format --check` are intentionally NOT gated here
-      # yet — documentation-system currently has pre-existing lint findings and
-      # ~26 files the formatter would rewrite. Enforcing them now would fail on
-      # unrelated code and collide with in-flight PRs. Tracked as a follow-up
-      # cleanup (fix lint + format, then add the two ruff steps to mirror the
-      # other services). See docs/SECURITY-REVIEW-2026-07-13.md.
+      - name: Ruff check
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
 
   node-test:
     runs-on: ubuntu-latest
@@ -243,3 +258,7 @@ jobs:
         run: docker build -f services/meeting/Dockerfile -t meeting:ci .
       - name: Smoke-test meeting image (imports incl. PyAV/ffmpeg resolve at boot)
         run: docker run --rm meeting:ci python -c "import src.api.app"
+      - name: Build connectors image
+        run: docker build -f services/connectors/Dockerfile -t connectors:ci .
+      - name: Smoke-test connectors image (imports resolve at boot)
+        run: docker run --rm connectors:ci python -c "import src.api.app"

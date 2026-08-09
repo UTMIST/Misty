@@ -29,8 +29,11 @@ def cmd_issue(args: argparse.Namespace, adapter=None) -> int:
     adapter = adapter or _adapter()
     plaintext, prefix, key_hash = generate_key()
     key = adapter.create_api_key(
-        name=args.name, prefix=prefix, key_hash=key_hash,
-        scopes=list(args.scopes or []), actor=args.actor,
+        name=args.name,
+        prefix=prefix,
+        key_hash=key_hash,
+        scopes=list(args.scopes or []),
+        actor=args.actor,
     )
     print("=" * 70, file=sys.stderr)
     print("API KEY ISSUED (only shown once)", file=sys.stderr)
@@ -71,14 +74,20 @@ def cmd_revoke(args: argparse.Namespace, adapter=None) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="doc-keys", description="Manage documentation-system API keys.")
+    p = argparse.ArgumentParser(
+        prog="doc-keys", description="Manage documentation-system API keys."
+    )
     p.add_argument("--actor", default="cli", help="Actor stamped on created_by/updated_by")
     subs = p.add_subparsers(dest="cmd", required=True)
 
     p_issue = subs.add_parser("issue", help="Issue a new API key")
     p_issue.add_argument("--name", required=True, help="Consumer name, e.g. 'discord-bot'")
-    p_issue.add_argument("--scopes", nargs="*", default=[],
-                         help="e.g. docs:read docs:write. Use 'admin' for wildcard.")
+    p_issue.add_argument(
+        "--scopes",
+        nargs="*",
+        default=[],
+        help="e.g. docs:read docs:write. Use 'admin' for wildcard.",
+    )
     p_issue.set_defaults(func=cmd_issue)
 
     p_list = subs.add_parser("list", help="List keys (metadata only)")

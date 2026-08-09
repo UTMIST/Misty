@@ -41,7 +41,7 @@ Every domain has a first-class HTTP API — build your own dashboard, sync job, 
 
 Every service speaks OpenAPI. Point Swagger UI or codegen at them. (`meeting`'s WebSocket route isn't representable in OpenAPI — its wire format is documented in [`services/meeting/README.md`](services/meeting/README.md).)
 
-The other three are internal-facing: **[llm](services/llm/README.md)** (`POST /chat` over Bedrock, `chat` scope), **[verification](services/verification/README.md)** (request/confirm an email code, `verification:write` scope), and **[meeting](services/meeting/README.md)** (live transcription → minutes, `meetings` scope).
+The other four are internal-facing: **[llm](services/llm/README.md)** (`POST /chat` over Bedrock, `chat` scope), **[verification](services/verification/README.md)** (request/confirm an email code, `verification:write` scope), **[meeting](services/meeting/README.md)** (live transcription → minutes, `meetings` scope), and **[connectors](services/connectors/README.md)** (`POST /fetch` document content from Google sources, `fetch` scope).
 
 ### As an operator
 
@@ -49,7 +49,7 @@ The other three are internal-facing: **[llm](services/llm/README.md)** (`POST /c
 - **Roll back is `git revert`** + push. If a migration went with it, `railway run … alembic downgrade -1` reverses the schema.
 - **Manage API keys.** Three different storage models, by design:
   - **team-tracking, documentation-system** — issued into an `api_keys` table via the `team-tracking-keys` / `doc-keys` CLIs. Scoped, revocable, per-consumer, argon2-hashed at rest.
-  - **llm, meeting** — no key table. `llm-keys` / `meeting-keys` *print* a key plus a JSON entry you paste into that service's `CONSUMER_KEYS` variable; adding or revoking one is a redeploy.
+  - **llm, meeting, connectors** — no key table. `llm-keys` / `meeting-keys` / `connectors-keys` *print* a key plus a JSON entry you paste into that service's `CONSUMER_KEYS` variable; adding or revoking one is a redeploy.
   - **verification** — no per-consumer keys at all. Only the bootstrap `API_KEY` env var authenticates, since its single consumer is the bot.
 
 ---
@@ -63,19 +63,20 @@ The other three are internal-facing: **[llm](services/llm/README.md)** (`POST /c
 | [`services/llm/`](services/llm/README.md) | Stateless (no DB) internal `POST /chat` API over AWS Bedrock; requires the `chat` scope | **Deployed** (staging + prod). No database — a thin proxy over Bedrock. |
 | [`services/verification/`](services/verification/README.md) | Email verification: request a one-time code and confirm it, linking a subject (e.g. `discord:<id>`) to a verified email; requires the `verification:write` scope | **Deployed** (staging + prod). |
 | [`services/meeting/`](services/meeting/README.md) | Meeting recording: transcribes a Discord voice session (Amazon Transcribe) and returns LLM-generated minutes as a branded PDF; no DB, nothing persisted | **Deployed** (staging). Consumed by the bot's `/record` command group; requires the `meetings` scope. |
+| [`services/connectors/`](services/connectors/README.md) | Stateless outbound adapter: fetches document content (Google Docs/Sheets/Slides/Drive) on behalf of internal consumers via a service account; no DB | **Deployed** (staging). Consumed by documentation-system's Google source fetches; requires the `fetch` scope. |
 | [`discord-bot/`](discord-bot/README.md) | Discord slash-command frontend + a browser-based "web playground" for iterating on commands without a Discord token | **Deployed** (staging + prod). All slash commands are stable and registered globally; 0 beta. |
 | Search / retrieval | Full-text + semantic search over the catalog's snapshots | Deferred (not built) |
 
-**How they relate.** team-tracking is the foundation — everything else references it. documentation-system validates every doc's owner against team-tracking, and asks it which teams a person is on to decide which docs that person may see. The discord-bot is the only consumer-facing surface and fans out to every service. `meeting` calls `llm` for minutes — the only service-to-service dependency outside the catalog → directory pair. No service shares tables with another; the three that have a database each own it outright, and `llm`/`meeting` have none.
+**How they relate.** team-tracking is the foundation — everything else references it. documentation-system validates every doc's owner against team-tracking, and asks it which teams a person is on to decide which docs that person may see. The discord-bot is the only consumer-facing surface and fans out to every service. `meeting` calls `llm` for minutes, and documentation-system calls `connectors` to fetch Google source content — the two service-to-service dependencies outside the catalog → directory pair. No service shares tables with another; the three that have a database each own it outright, and `llm`/`meeting`/`connectors` have none.
 
 ```
   documentation-system ──validates owner ids──▶ team-tracking
    (docs catalog)         resolves team ids     (directory / source of truth)
-        ▲                                              ▲
-        │ degrades gracefully if the directory is down  │
-        │                                               │
-        │  /doc                                         │  /link /whoami /team /seed
-        └───────────────── discord-bot ─────────────────┘
+        │       ▲                                      ▲
+        │ /fetch│ degrades gracefully if the directory  │
+        ▼       │           is down                     │
+   connectors    │  /doc                                │  /link /whoami /team /seed
+   (Google docs) └──────────────── discord-bot ──────────┘
                             │        │
               /link,        │        │  /record
               /add-email    │        │
@@ -92,8 +93,9 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the cross-service data fl
 ## Repo layout
 
 ```
-UTMIST-Prototypes/
+Misty/
 ├── README.md                          You are here
+├── AGENTS.md                          Instructions for AI coding agents (CLAUDE.md points here)
 ├── pyproject.toml                     Root uv workspace (members: services/*, packages/*)
 ├── uv.lock                            Single lockfile for the whole workspace
 ├── docs/
@@ -101,8 +103,7 @@ UTMIST-Prototypes/
 │   ├── ARCHITECTURE.md                Cross-service architecture — how the pieces fit
 │   ├── MEETING-RECORDING.md           How /record splits across the bot + meeting service
 │   ├── RAILWAY-DEPLOYMENT.md          Deploy runbook (Railway + Neon setup, key provisioning)
-│   ├── DEPLOYMENT-HISTORY.md          Design decisions, lessons learned, release log
-│   └── SECURITY-REVIEW-2026-07-13.md  Security review + what it changed
+│   └── DEPLOYMENT-HISTORY.md          Design decisions, lessons learned, release log
 │
 ├── services/                          HTTP services (each in its own folder)
 │   ├── team-tracking/                 Directory service — port 8000, own Postgres
@@ -117,32 +118,40 @@ UTMIST-Prototypes/
 │   ├── documentation-system/          Catalog service — 8001, own Postgres (same shape)
 │   ├── verification/                  Email one-time codes — 8003, own Postgres
 │   ├── llm/                           Bedrock /chat proxy — 8002, NO database
-│   └── meeting/                       Live meeting transcription — 8004, NO database,
-│                                       stateful (in-memory sessions)
+│   ├── meeting/                       Live meeting transcription — 8004, NO database,
+│   │                                   stateful (in-memory sessions)
+│   └── connectors/                    Google source fetch adapter — 8005, NO database
+│                                       (every service above has the same docs/ set:
+│                                        API.md, ARCHITECTURE.md, CONTRIBUTING.md, DEPLOYMENT.md)
 │
 ├── packages/
 │   └── auth/                          platform_auth — shared API-key auth lib (argon2 hashing,
 │                                       scopes, FastAPI deps, audit middleware); a pure leaf
-│                                       consumed by both services below via thin shims
+│                                       consumed by all six services via thin shims
 │
 ├── discord-bot/                       Discord frontend + web playground
 │   ├── src/                           Node.js + discord.js
 │   ├── scripts/dev-web.js             Local playground orchestrator (ephemeral scratch DB)
+│   ├── docs/CONTRIBUTING.md           Adding commands, clients, and auth policies
 │   ├── Dockerfile, railway.json       Production image + Railway config
 │   └── test/                          node --test
 │
 ├── scripts/
 │   └── provision-directory-key.sh     Mint + wire scoped API keys per environment
 │
-└── .github/workflows/
-    ├── ci.yml                         Tests + lint + Docker builds on every PR (9 jobs)
-    ├── main-source-guard.yml          Enforces "PRs to main come from staging"
-    ├── pr-zone-check.yml              Warns on PRs spanning multiple CODEOWNERS zones
-    ├── discord-pr-notify.yml          Posts to Discord when a PR needs review
-    └── blocked-ready-automation.yml   Syncs blocked/ready issue labels
+└── .github/
+    ├── CODEOWNERS                     Per-area reviewers; zones mirror pr-zone-check
+    ├── PULL_REQUEST_TEMPLATE.md       Zone, verification steps, deployment notes
+    ├── ISSUE_TEMPLATE/                Bug / feature / epic templates (prompt the `Blocked by:` line)
+    └── workflows/
+        ├── ci.yml                     Tests + lint + Docker builds on every PR (10 jobs)
+        ├── main-source-guard.yml      Enforces "PRs to main come from staging"
+        ├── pr-zone-check.yml          Warns on PRs spanning multiple CODEOWNERS zones
+        ├── discord-pr-notify.yml      Posts to Discord when a PR needs review
+        └── blocked-ready-automation.yml   Syncs blocked/ready issue labels
 ```
 
-Each service is self-contained: its own tests, its own docs, and its own database *if it needs one* — `llm` and `meeting` deliberately have none. Dependencies are managed as one uv workspace rooted at this repo's `pyproject.toml`/`uv.lock`, and all five services share one leaf, `packages/auth` (`platform_auth`), for API-key auth — a shared *library* dependency, not a dependency between services, which remain independent of each other. Add a new service by dropping it in `services/` following the same shape (and adding its CI job in the same PR).
+Each service is self-contained: its own tests, its own docs, and its own database *if it needs one* — `llm`, `meeting`, and `connectors` deliberately have none. Dependencies are managed as one uv workspace rooted at this repo's `pyproject.toml`/`uv.lock`, and all six services share one leaf, `packages/auth` (`platform_auth`), for API-key auth — a shared *library* dependency, not a dependency between services, which remain independent of each other. Add a new service by dropping it in `services/` following the same shape (and adding its CI job in the same PR).
 
 ---
 
@@ -157,6 +166,7 @@ Nothing to bootstrap at the root — stand up only what you need:
 - **LLM API** — [`services/llm/README.md`](services/llm/README.md). Port **8002**, no database, no Docker.
 - **Verification API** — [`services/verification/README.md`](services/verification/README.md). Port **8003**, Postgres **5434**. Defaults to `EMAIL_BACKEND=fake`, so no mail credentials are needed locally.
 - **Meeting API** — [`services/meeting/README.md`](services/meeting/README.md). Port **8004**, no database, no Docker.
+- **Connectors API** — [`services/connectors/README.md`](services/connectors/README.md). Port **8005**, no database, no Docker.
 - **Discord bot** — [`discord-bot/README.md`](discord-bot/README.md). Two modes:
   - `npm start` — real Discord surface (needs a bot token).
   - `npm run dev:web` — browser-based playground on `http://localhost:3001`, no Discord token needed. Orchestrates its own scratch team-tracking + ephemeral DB, so it's fully self-contained for hacking on commands. Note that `/record` has no playground equivalent — voice capture needs the real Discord surface.
@@ -169,11 +179,12 @@ For catalog-with-real-ownership-validation, run team-tracking first and point th
 
 ## Working conventions
 
-All five services are built the same way on purpose — learning one gives you 80% of the others. (`llm` and `meeting` follow every convention below *except* the storage/migration ones: they own no database.)
+All six services are built the same way on purpose — learning one gives you 80% of the others. (`llm`, `meeting`, and `connectors` follow every convention below *except* the storage/migration ones: they own no database.)
 
 - **`contracts/` Protocol boundary.** Each service has a `contracts/` package of Pydantic domain types plus `Protocol` interfaces. Application code depends on the Protocols, never on a concrete implementation.
 - **Swappable storage adapters.** `InMemoryStorageAdapter` for fast tests, `PostgresStorageAdapter` for real runs — both satisfy the same Protocol. Tests use in-memory; a small integration test suite gates the Postgres adapter too.
-- **Scoped API-key auth.** Every request carries `X-API-Key`. Keys are argon2-hashed with a set of per-resource scopes (`people:read`, `teams:write`, `chat`, `meetings`, etc.). This machinery is implemented once in the shared [`packages/auth`](packages/auth) (`platform_auth`) library and consumed by all five services through a thin shim (`src/api/auth.py`, `hashing.py`, `middleware.py`) that binds its own key prefix and config. The three DB-backed services store keys in an `api_keys` table and mint them via a CLI; `llm` and `meeting` seed them from a `CONSUMER_KEYS` JSON env var instead, so rotating one there is a redeploy.
+- **Scoped API-key auth.** Every request carries `X-API-Key`. Keys are argon2-hashed with a set of per-resource scopes (`people:read`, `teams:write`, `chat`, `meetings`, `fetch`, etc.). This machinery is implemented once in the shared [`packages/auth`](packages/auth) (`platform_auth`) library and consumed by all six services through a thin shim (`src/api/auth.py`, plus `hashing.py` for the five services that mint their own keys) that binds its own key prefix and config. Anything the library exposes ready-to-use — `AuditLogMiddleware`, for one — is imported from `platform_auth` directly; a per-service file earns its place only by binding something. The three DB-backed services store keys in an `api_keys` table and mint them via a CLI; `llm`, `meeting`, and `connectors` seed them from a `CONSUMER_KEYS` JSON env var instead, so rotating one there is a redeploy.
+- **Credentials are `SecretStr`, never `str`.** Every credential field in a service's `Settings` is `pydantic.SecretStr`, so it renders as `**********` in any repr, log line, traceback, or failing assertion diff — a plain `str` once printed a real Google private key into a transcript. Unwrap with `.get_secret_value()` at the boundary; `platform_auth` still takes plain `str`. See [`packages/auth/README.md` → Credential config convention](packages/auth/README.md#credential-config-convention) for the one way forgetting to unwrap fails *silently* rather than loudly.
 - **Attested actor.** The `created_by`/`updated_by` on every audit field is the authenticated key's own name — a caller can't claim to be someone else.
 - **Per-request audit log.** Middleware emits one JSON line per request with the resolved actor, endpoint, status, and duration.
 - **Alembic migrations.** Schema changes are versioned; migrations run as Railway's `preDeployCommand` on every deploy.
@@ -201,6 +212,9 @@ Depending on what you're here to do:
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — onboarding: clone → running locally → first PR.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the cross-service picture.
 - Then whichever service you're touching: [`services/team-tracking/`](services/team-tracking/README.md), [`services/documentation-system/`](services/documentation-system/README.md), or [`discord-bot/`](discord-bot/README.md).
-- Each service has a `docs/CONTRIBUTING.md` with task walkthroughs.
+- Every service, plus `discord-bot` and `packages/auth`, has a `docs/CONTRIBUTING.md` with task walkthroughs and a pre-push checklist.
+
+**Working with an AI coding agent**
+- [`AGENTS.md`](AGENTS.md) — the compressed set of invariants, workflow rules, and repo-specific gotchas an agent needs. `CLAUDE.md` is a pointer to it, so there is one source of truth.
 
 **New to the platform?** Start here, read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), then dive into whichever service you're most likely to touch.

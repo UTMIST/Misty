@@ -134,7 +134,7 @@ Migrations are **hand-written** and kept in sync with `src/storage/schema.py`. T
 uv run pytest --ignore=tests/test_postgres_adapter.py
 ```
 
-Runs **176 tests** using `InMemoryStorageAdapter`, injected via `app.dependency_overrides[get_storage]`. Covers every endpoint (including `/api-keys/self`), the auth/scope paths (including the `dev:spoof` guard under `TT_ENV=production`), the CLI (including its refusal to issue `dev:spoof` against production), hashing, and the audit log. Finishes in a few seconds.
+Runs using `InMemoryStorageAdapter`, injected via `app.dependency_overrides[get_storage]`. Covers every endpoint (including `/api-keys/self`), the auth/scope paths (including the `dev:spoof` guard under `TT_ENV=production`), the CLI (including its refusal to issue `dev:spoof` against production), hashing, and the audit log. Finishes in a few seconds.
 
 **Full (adds the Postgres integration tests) — run before you push:**
 
@@ -143,7 +143,7 @@ docker compose up -d postgres
 uv run pytest
 ```
 
-Runs **191 tests** — the 176 above plus the 15 in `tests/test_postgres_adapter.py`, which replay adapter behavior against a live Postgres instance (real FK enforcement, `citext`, unique constraints). These require `DATABASE_URL` (in `.env`) to point at the running container; the `clean_db` fixture truncates mutable tables between tests.
+Runs the fast suite above plus `tests/test_postgres_adapter.py`, which replays adapter behavior against a live Postgres instance (real FK enforcement, `citext`, unique constraints). These require `DATABASE_URL` (in `.env`) to point at the running container; the `clean_db` fixture truncates mutable tables between tests.
 
 > Note: there is currently no environment-variable switch to skip the Postgres tests — the split is by test file. Use `--ignore=tests/test_postgres_adapter.py` for the fast run.
 
@@ -176,4 +176,3 @@ Run both `ruff check` and `ruff format` before opening a PR, and make sure the f
 - [ ] `schema.py` and a new Alembic migration agree; `upgrade`/`downgrade` both work.
 - [ ] Tests cover happy path and error paths; the full suite (`uv run pytest`) passes with Postgres up.
 - [ ] `uv run ruff check .` and `uv run ruff format --check .` are clean.
-</content>

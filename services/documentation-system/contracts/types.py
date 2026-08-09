@@ -113,6 +113,12 @@ class IngestResult(BaseModel):
     warnings: list[str] = []
 
 
+class DocContentMeta(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    content_hash: str
+    fetched_at: datetime | None = None
+
+
 # --- API keys (Level 2 security) ---
 
 

@@ -16,29 +16,48 @@ P1 = "11111111-1111-1111-1111-111111111111"
 
 def _sources():
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    return [Source(id="web", label="Web", url_patterns=[], requires_auth=False,
-                   has_api=False, content_fetch_enabled=True,
-                   created_at=now, updated_at=now, created_by="system", updated_by="system")]
+    return [
+        Source(
+            id="web",
+            label="Web",
+            url_patterns=[],
+            requires_auth=False,
+            has_api=False,
+            content_fetch_enabled=True,
+            created_at=now,
+            updated_at=now,
+            created_by="system",
+            updated_by="system",
+        )
+    ]
 
 
 class FakeFetchers:
     def fetch_for(self, source_id, url):
         from contracts.fetcher import FetchResult
+
         return FetchResult(title="Fetched", content_snapshot="body")
 
 
 class FakeDirectory:
     def __init__(self, teams=frozenset()):
         self._teams = teams
-    def get_team_label(self, team_id): return "T"
-    def get_person_label(self, person_id): return "P"
-    def get_active_team_ids(self, person_id): return self._teams
+
+    def get_team_label(self, team_id):
+        return "T"
+
+    def get_person_label(self, person_id):
+        return "P"
+
+    def get_active_team_ids(self, person_id):
+        return self._teams
 
 
 @pytest.fixture
 def ctx(monkeypatch):
     monkeypatch.setenv("API_KEY", "test-key")
     from src.config import get_settings
+
     get_settings.cache_clear()
     adapter = InMemoryStorageAdapter(seed_sources=_sources())
     app = create_app()
@@ -49,7 +68,9 @@ def ctx(monkeypatch):
 
     def mk_key(scopes):
         plaintext, prefix, key_hash = generate_key()
-        adapter.create_api_key(name=f"k-{prefix}", prefix=prefix, key_hash=key_hash, scopes=scopes, actor="t")
+        adapter.create_api_key(
+            name=f"k-{prefix}", prefix=prefix, key_hash=key_hash, scopes=scopes, actor="t"
+        )
         return {"X-API-Key": plaintext}
 
     return client, adapter, mk_key
@@ -60,7 +81,9 @@ def test_actor_sees_only_person_granted_doc(ctx):
     # two docs via admin
     a = client.post("/docs", json={"url": "https://granted"}, headers=ADMIN).json()["doc"]["id"]
     client.post("/docs", json={"url": "https://hidden"}, headers=ADMIN)
-    client.post(f"/docs/{a}/grants", json={"grantee_type": "person", "grantee_id": P1}, headers=ADMIN)
+    client.post(
+        f"/docs/{a}/grants", json={"grantee_type": "person", "grantee_id": P1}, headers=ADMIN
+    )
 
     reader = mk_key(["docs:read", "act-as-user"])
     obo = {**reader, "X-On-Behalf-Of": P1}
@@ -92,8 +115,10 @@ def test_grant_endpoints_add_and_remove(ctx):
     # Fix: the grant must record the real authenticated caller, not a hardcoded "api".
     assert grant["created_by"] == "env-bootstrap"
     d = client.request(
-        "DELETE", f"/docs/{doc_id}/grants",
-        json={"grantee_type": "org"}, headers=ADMIN,
+        "DELETE",
+        f"/docs/{doc_id}/grants",
+        json={"grantee_type": "org"},
+        headers=ADMIN,
     )
     assert d.status_code == 200
     assert client.get(f"/docs/{doc_id}", headers=ADMIN).json()["grants"] == []
@@ -121,11 +146,15 @@ def test_team_grant_and_directory_down_degradation(ctx, monkeypatch):
     T1 = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     team_doc = client.post("/docs", json={"url": "https://team"}, headers=ADMIN).json()["doc"]["id"]
     org_doc = client.post("/docs", json={"url": "https://org"}, headers=ADMIN).json()["doc"]["id"]
-    client.post(f"/docs/{team_doc}/grants", json={"grantee_type": "team", "grantee_id": T1}, headers=ADMIN)
+    client.post(
+        f"/docs/{team_doc}/grants", json={"grantee_type": "team", "grantee_id": T1}, headers=ADMIN
+    )
     client.post(f"/docs/{org_doc}/grants", json={"grantee_type": "org"}, headers=ADMIN)
 
     # Directory that knows the actor is on T1
-    client.app.dependency_overrides[get_directory] = lambda: FakeDirectory(teams=frozenset({UUID(T1)}))
+    client.app.dependency_overrides[get_directory] = lambda: FakeDirectory(
+        teams=frozenset({UUID(T1)})
+    )
     reader = mk_key(["docs:read", "act-as-user"])
     obo = {**reader, "X-On-Behalf-Of": P1}
     urls = {d["url"] for d in client.get("/docs", headers=obo).json()}
@@ -135,7 +164,9 @@ def test_team_grant_and_directory_down_degradation(ctx, monkeypatch):
     class DownDir(FakeDirectory):
         def get_active_team_ids(self, person_id):
             from contracts.directory import DirectoryUnavailable
+
             raise DirectoryUnavailable("down")
+
     client.app.dependency_overrides[get_directory] = lambda: DownDir()
     urls_down = {d["url"] for d in client.get("/docs", headers=obo).json()}
     assert urls_down == {"https://org"}
@@ -160,6 +191,7 @@ def test_get_preserves_grants_when_label_backfill_fires(ctx):
     class DownDirectory(FakeDirectory):
         def get_team_label(self, team_id):
             from contracts.directory import DirectoryUnavailable
+
             raise DirectoryUnavailable("down")
 
     # Directory unavailable at ingest -> owning_team_label stays null.

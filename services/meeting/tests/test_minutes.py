@@ -80,7 +80,7 @@ _TRUNCATED_MID_ARRAY = (
 _TRUNCATED_MID_STRING = (
     '{"title": "Weekly Sync", '
     '"summary": "The team reviewed the roadmap and agreed on hiring priorities '
-    'for the coming quarter, then moved on to discussing the budg'
+    "for the coming quarter, then moved on to discussing the budg"
 )
 
 
@@ -138,7 +138,7 @@ def test_never_surfaces_raw_json_when_the_response_is_fenced_or_prefixed():
     the PDF the guard exists to prevent."""
     for content in (
         '```json\n{"title":"T","summar',
-        "```\n{"'"title":"T","summar',
+        '```\n{"title":"T","summar',
         'Here are the minutes:\n{"title":"T","summar',
     ):
         summary = summarize_minutes("x", FakeLlm(content)).summary
@@ -200,8 +200,7 @@ def test_prose_that_merely_mentions_json_is_kept_as_the_summary():
     quoting `{"role":"assistant"}` is ordinary content, not a malformed
     response -- replacing it with a placeholder loses a perfectly good summary."""
     prose = (
-        'We compared {"role":"assistant"} and {"role":"user"} examples, '
-        "then agreed to ship Friday."
+        'We compared {"role":"assistant"} and {"role":"user"} examples, then agreed to ship Friday.'
     )
     m = summarize_minutes("x", FakeLlm(prose))
 

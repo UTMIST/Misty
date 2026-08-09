@@ -1,10 +1,12 @@
 import os
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, text
 
 from contracts.storage import DuplicateActiveUrl
 from contracts.types import DocIngest
+from contracts.visibility import DENY, SEE_ALL, Actor
 from src.config import get_settings
 from src.ingest import ingest_doc
 from src.storage.postgres import PostgresStorageAdapter
@@ -24,10 +26,19 @@ def adapter():
 
 def _mk(adapter, url="https://x.com", tags=None):
     return adapter.create_doc(
-        url=url, url_normalized=url, source_id="web", title="X", description=None,
-        owning_team_id=None, owning_team_label=None,
-        owning_person_id=None, owning_person_label=None,
-        content_snapshot=None, fetched_at=None, tags=tags or [], actor="tester",
+        url=url,
+        url_normalized=url,
+        source_id="web",
+        title="X",
+        description=None,
+        owning_team_id=None,
+        owning_team_label=None,
+        owning_person_id=None,
+        owning_person_label=None,
+        content_snapshot=None,
+        fetched_at=None,
+        tags=tags or [],
+        actor="tester",
     )
 
 
@@ -55,7 +66,9 @@ def test_sources_seeded(adapter):
 
 
 def test_api_key_roundtrip(adapter):
-    k = adapter.create_api_key(name="bot", prefix="pfx98765", key_hash="h", scopes=["docs:read"], actor="cli")
+    k = adapter.create_api_key(
+        name="bot", prefix="pfx98765", key_hash="h", scopes=["docs:read"], actor="cli"
+    )
     assert adapter.get_api_key_hash("pfx98765") == "h"
     adapter.revoke_api_key(k.id, actor="cli")
     assert adapter.get_api_key_hash("pfx98765") is None
@@ -63,7 +76,7 @@ def test_api_key_roundtrip(adapter):
 
 def test_add_tag_idempotent(adapter):
     d = _mk(adapter, tags=["x"])
-    assert adapter.add_tag(d.id, "x") is True   # duplicate — must not raise
+    assert adapter.add_tag(d.id, "x") is True  # duplicate — must not raise
     assert adapter.get_doc(d.id).tags == ["x"]  # still exactly one
     assert adapter.add_tag(d.id, "y") is True
     assert set(adapter.get_doc(d.id).tags) == {"x", "y"}
@@ -134,12 +147,11 @@ def test_ingest_race_fallback_merges_into_existing(adapter):
     assert result.doc.id == winner.id
     assert set(result.doc.tags) == {"existing", "new"}  # merged, not duplicated
     # Still exactly one active row for the URL.
-    active = [d for d in adapter.list_docs(active_only=True) if d.url_normalized == "https://race.com"]
+    active = [
+        d for d in adapter.list_docs(active_only=True) if d.url_normalized == "https://race.com"
+    ]
     assert len(active) == 1
 
-
-from uuid import UUID
-from contracts.visibility import Actor, DENY, SEE_ALL
 
 _P1 = UUID("11111111-1111-1111-1111-111111111111")
 _T1 = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -159,7 +171,9 @@ def test_grants_and_visibility_pg(adapter):
 def test_org_grant_partial_unique_pg(adapter):
     d = _mk(adapter, url="https://o.com")
     assert adapter.add_grant(d.id, grantee_type="org", grantee_id=None, actor="t") is True
-    assert adapter.add_grant(d.id, grantee_type="org", grantee_id=None, actor="t") is True  # idempotent
+    assert (
+        adapter.add_grant(d.id, grantee_type="org", grantee_id=None, actor="t") is True
+    )  # idempotent
     assert len(adapter.list_grants(d.id)) == 1
 
 
@@ -176,3 +190,116 @@ def test_list_docs_batched_tag_hydration_matches_per_doc(adapter):
         assert listed[doc_id].tags == adapter.get_doc(doc_id).tags
     assert listed[d1.id].tags == ["alpha", "beta", "gamma"]  # tag-sorted
     assert listed[d3.id].tags == []
+
+
+def test_pg_upsert_doc_content_round_trips(adapter):
+    doc = _mk(adapter)
+    adapter.upsert_doc_content(
+        doc.id, content_text="full body", content_hash="hash1", fetched_at=None
+    )
+    assert adapter.get_doc_content(doc.id) == "full body"
+
+
+def test_pg_upsert_doc_content_updates_on_conflict(adapter):
+    doc = _mk(adapter)
+    adapter.upsert_doc_content(doc.id, content_text="first", content_hash="hash1", fetched_at=None)
+    adapter.upsert_doc_content(doc.id, content_text="second", content_hash="hash2", fetched_at=None)
+    assert adapter.get_doc_content(doc.id) == "second"
+
+
+def test_pg_get_doc_content_none_when_absent(adapter):
+    doc = _mk(adapter)
+    assert adapter.get_doc_content(doc.id) is None
+
+
+def test_pg_get_doc_content_withheld_from_stranger(adapter):
+    doc = _mk(adapter)
+    adapter.upsert_doc_content(doc.id, content_text="secret", content_hash="h", fetched_at=None)
+    stranger = Actor(person_id=uuid4(), team_ids=frozenset())
+    assert adapter.get_doc_content(doc.id, visibility=stranger) is None
+
+
+def test_pg_get_doc_content_returned_to_granted_actor(adapter):
+    doc = _mk(adapter)
+    person_id = uuid4()
+    adapter.add_grant(doc.id, grantee_type="person", grantee_id=person_id, actor="test")
+    adapter.upsert_doc_content(doc.id, content_text="secret", content_hash="h", fetched_at=None)
+    granted = Actor(person_id=person_id, team_ids=frozenset())
+    assert adapter.get_doc_content(doc.id, visibility=granted) == "secret"
+
+
+def test_pg_get_doc_content_denied_context_withholds(adapter):
+    from contracts.visibility import DENY
+
+    doc = _mk(adapter)
+    adapter.upsert_doc_content(doc.id, content_text="secret", content_hash="h", fetched_at=None)
+    assert adapter.get_doc_content(doc.id, visibility=DENY) is None
+
+
+def test_pg_get_doc_content_scoped_to_requested_doc(adapter):
+    visible = _mk(adapter, url="https://visible.com")
+    secret = _mk(adapter, url="https://secret.com")
+    person_id = uuid4()
+    adapter.add_grant(visible.id, grantee_type="person", grantee_id=person_id, actor="t")
+    adapter.upsert_doc_content(secret.id, content_text="secret", content_hash="h", fetched_at=None)
+    actor = Actor(person_id=person_id, team_ids=frozenset())
+    # The actor can see `visible` but NOT `secret`. A cross join would leak
+    # `secret`'s content because *some* doc is visible to this actor.
+    assert adapter.get_doc_content(secret.id, visibility=actor) is None
+
+
+def test_pg_get_doc_content_meta_round_trips_hash_and_fetched_at(adapter):
+    from datetime import datetime, timezone
+
+    doc = _mk(adapter)
+    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    adapter.upsert_doc_content(
+        doc.id, content_text="full body", content_hash="hash1", fetched_at=now
+    )
+    meta = adapter.get_doc_content_meta(doc.id)
+    assert meta is not None
+    assert meta.content_hash == "hash1"
+    assert meta.fetched_at == now
+
+
+def test_pg_get_doc_content_meta_none_when_absent(adapter):
+    doc = _mk(adapter)
+    assert adapter.get_doc_content_meta(doc.id) is None
+
+
+def test_pg_get_doc_content_meta_withheld_from_stranger(adapter):
+    doc = _mk(adapter)
+    adapter.upsert_doc_content(doc.id, content_text="secret", content_hash="h", fetched_at=None)
+    stranger = Actor(person_id=uuid4(), team_ids=frozenset())
+    assert adapter.get_doc_content_meta(doc.id, visibility=stranger) is None
+
+
+def test_pg_get_doc_content_meta_returned_to_granted_actor(adapter):
+    doc = _mk(adapter)
+    person_id = uuid4()
+    adapter.add_grant(doc.id, grantee_type="person", grantee_id=person_id, actor="test")
+    adapter.upsert_doc_content(doc.id, content_text="secret", content_hash="h", fetched_at=None)
+    granted = Actor(person_id=person_id, team_ids=frozenset())
+    meta = adapter.get_doc_content_meta(doc.id, visibility=granted)
+    assert meta is not None
+    assert meta.content_hash == "h"
+
+
+def test_pg_get_doc_content_meta_denied_context_withholds(adapter):
+    from contracts.visibility import DENY
+
+    doc = _mk(adapter)
+    adapter.upsert_doc_content(doc.id, content_text="secret", content_hash="h", fetched_at=None)
+    assert adapter.get_doc_content_meta(doc.id, visibility=DENY) is None
+
+
+def test_pg_get_doc_content_meta_scoped_to_requested_doc(adapter):
+    visible = _mk(adapter, url="https://visible-meta.com")
+    secret = _mk(adapter, url="https://secret-meta.com")
+    person_id = uuid4()
+    adapter.add_grant(visible.id, grantee_type="person", grantee_id=person_id, actor="t")
+    adapter.upsert_doc_content(secret.id, content_text="secret", content_hash="h", fetched_at=None)
+    actor = Actor(person_id=person_id, team_ids=frozenset())
+    # The actor can see `visible` but NOT `secret`. A cross join would leak
+    # `secret`'s content metadata because *some* doc is visible to this actor.
+    assert adapter.get_doc_content_meta(secret.id, visibility=actor) is None

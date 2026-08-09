@@ -65,5 +65,3 @@ class OpusStreamDecoder:
                 # detect silence gaps. s16 mono => 2 bytes per sample.
                 pcm += bytes(out_frame.planes[0])[: out_frame.samples * _BYTES_PER_SAMPLE]
         return bytes(pcm)
-
-

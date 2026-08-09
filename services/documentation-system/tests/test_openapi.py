@@ -11,6 +11,7 @@ from src.storage.in_memory import InMemoryStorageAdapter
 def client(monkeypatch):
     monkeypatch.setenv("API_KEY", "test-key")
     from src.config import get_settings
+
     get_settings.cache_clear()
     adapter = InMemoryStorageAdapter(seed_sources=build_seed_sources())
     app = create_app()

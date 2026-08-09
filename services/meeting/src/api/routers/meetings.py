@@ -64,13 +64,24 @@ Once authenticated, two kinds of application messages are accepted:
 Disconnect
 ----------
 If the client disconnects (or the connection errors) without the consumer
-having called ``POST /meetings/{session_id}/stop`` first, the server tears
-the session down itself by calling ``session.discard()`` -- a lightweight
-teardown that only drops the buffered audio and deregisters the session. It
-deliberately does NOT run the finalize pipeline (transcription flush,
-minutes, PDF); that only happens for an explicit ``stop()`` call,
-since it involves a blocking LLM HTTP call and isn't worth paying for on an
-abrupt/dropped connection. Teardown failures are logged (not swallowed).
+having called ``POST /meetings/{session_id}/stop`` first, the session is
+**held**, not destroyed, for ``DISCONNECT_GRACE_S`` (default 60s). A dropped
+socket does not mean the meeting is lost: the transcript is already assembled
+server-side, so within that window ``POST /stop`` still finalizes it into
+minutes exactly as a normal stop would. The disconnect also marks
+end-of-audio, since no further frames can arrive on a closed socket.
+
+Only when the grace period expires with no ``/stop`` is the session torn down
+via ``session.discard()`` -- a lightweight teardown that drops the buffered
+audio and deregisters the session. Neither path runs the finalize pipeline
+(transcription flush, minutes, PDF) on its own; that involves a blocking LLM
+HTTP call and is only worth paying for when a consumer actually asks for it.
+Teardown failures are logged (not swallowed). Set ``DISCONNECT_GRACE_S=0`` to
+discard immediately instead.
+
+The WebSocket close code is logged on every abrupt disconnect. It is the only
+signal that says *why* a live recording dropped, and both sides previously
+discarded it.
 """
 
 import asyncio
@@ -105,9 +116,61 @@ _ENVELOPE = "meeting_"
 _SPEAKER_LEN_BYTES = 2
 _TS_BYTES = 8
 
+# Strong refs to in-flight grace-period teardowns (see _schedule_disconnect_teardown).
+_pending_teardowns: set[asyncio.Task] = set()
+
 
 def _valid_session_id(session_id: str) -> bool:
     return bool(_SESSION_ID_RE.fullmatch(session_id))
+
+
+def _discard(session, session_id: str, why: str) -> None:
+    """Lightweight teardown, never allowed to raise out of a teardown path."""
+    try:
+        session.discard()
+    except Exception as e:  # noqa: BLE001 - log, don't crash teardown
+        _logger.warning("ws disconnect teardown failed for %s: %s", session_id, e)
+    else:
+        _logger.info("session %s discarded (%s)", session_id, why)
+
+
+async def _discard_after_grace(registry, session, session_id: str, grace_s: float) -> None:
+    """Hold a disconnected session for ``grace_s``, then discard it if nobody
+    claimed it.
+
+    The window exists so a dropped socket is survivable: the transcript is
+    already assembled server-side, and POST /stop can still turn it into
+    minutes. If /stop does arrive, sessions.py's stop() deregisters the
+    session and this wakes up to find nothing to do.
+    """
+    await asyncio.sleep(grace_s)
+    if registry.get(session_id) is None:
+        return  # POST /stop claimed it inside the window -- nothing to discard
+    _logger.warning(
+        "session %s: no POST /stop within the %ss disconnect grace period; "
+        "discarding the transcript",
+        session_id,
+        grace_s,
+    )
+    _discard(session, session_id, "grace period expired")
+
+
+def _schedule_disconnect_teardown(registry, session, session_id: str) -> None:
+    """Discard now, or after the grace period if one is configured."""
+    grace_s = get_settings().disconnect_grace_s
+    if grace_s <= 0:
+        _discard(session, session_id, "no grace period configured")
+        return
+    _logger.info(
+        "session %s: holding the transcript for %ss so POST /stop can still finalize it",
+        session_id,
+        grace_s,
+    )
+    # Held so the task isn't garbage-collected mid-sleep (asyncio keeps only a
+    # weak reference to running tasks), and discarded once it completes.
+    task = asyncio.create_task(_discard_after_grace(registry, session, session_id, grace_s))
+    _pending_teardowns.add(task)
+    task.add_done_callback(_pending_teardowns.discard)
 
 
 def _authenticate_ws(key: str | None, store: InMemoryKeyStore, scope: str) -> bool:
@@ -127,7 +190,8 @@ def _authenticate_ws(key: str | None, store: InMemoryKeyStore, scope: str) -> bo
             return False
         return scope in row.scopes or ADMIN_SCOPE in row.scopes
 
-    env_key = get_settings().api_key
+    # Unwrap: compare_digest below needs a real str (SecretStr has no .encode).
+    env_key = get_settings().api_key.get_secret_value()
     if env_key and secrets.compare_digest(key.encode(), env_key.encode()):
         return True  # env-bootstrap key carries admin scope
     return False
@@ -228,10 +292,16 @@ async def stream_meeting(
         return
     display_names: dict[str, str] = {}
 
+    close_code: int | None = None
+
     try:
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
+                # The close code is the ONE datum that says why a live recording
+                # dropped, and it was previously thrown away on both sides --
+                # which made a pair of production disconnects undiagnosable.
+                close_code = message.get("code")
                 break
 
             text = message.get("text")
@@ -272,18 +342,27 @@ async def stream_meeting(
                 # still propagate up and break the loop (handled below).
                 await asyncio.to_thread(session.feed, speaker_id, display_name, opus_payload, ts_ms)
             except Exception as e:  # noqa: BLE001 - see comment above
-                _logger.warning("frame feed failed for %s speaker %s: %s", session_id, speaker_id, e)
+                _logger.warning(
+                    "frame feed failed for %s speaker %s: %s", session_id, speaker_id, e
+                )
                 session.note_drop("feed_raised")
                 continue
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as e:
+        close_code = e.code
     finally:
         # If the consumer already called POST /stop, sessions.py's stop() has
         # deregistered the session -- registry.get returns None and we skip.
-        # Otherwise this is an abrupt disconnect: use the lightweight discard()
-        # (drop buffers + deregister only), NOT the full stop() pipeline.
         if registry.get(session_id) is not None:
+            _logger.info(
+                "session %s: WS closed without POST /stop (code=%s)",
+                session_id,
+                close_code if close_code is not None else "unknown",
+            )
+            # The socket is gone, so no further audio can arrive. Saying so
+            # turns stop()'s end-of-audio barrier into an immediate pass
+            # instead of a 5s wait plus a "no end-of-audio signal" warning.
             try:
-                session.discard()
+                session.mark_audio_complete()
             except Exception as e:  # noqa: BLE001 - log, don't crash teardown
-                _logger.warning("ws disconnect teardown failed for %s: %s", session_id, e)
+                _logger.warning("mark_audio_complete failed for %s: %s", session_id, e)
+            _schedule_disconnect_teardown(registry, session, session_id)

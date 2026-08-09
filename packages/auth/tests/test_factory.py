@@ -20,7 +20,7 @@ class _Row:
 
 class _Store:
     def __init__(self):
-        self.rows: dict[str, tuple[_Row, str]] = {}   # prefix -> (row, hash)
+        self.rows: dict[str, tuple[_Row, str]] = {}  # prefix -> (row, hash)
         self.touched: list[UUID] = []
 
     def add(self, name, scopes, envelope="tt_"):
@@ -135,6 +135,7 @@ def test_dev_spoof_reject_log_includes_injected_fields(caplog):
 
 def _app_with_actor(store, **kw):
     from platform_auth.factory import build_auth
+
     deps = build_auth(lambda: store, envelope="tt_", get_env_key=lambda: "", **kw)
     app = FastAPI()
 

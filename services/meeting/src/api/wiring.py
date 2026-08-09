@@ -40,8 +40,12 @@ class AudioAdapter:
 
 def _build_report_builder():
     settings = get_settings()
+    # LlmClient puts the key straight into an X-API-Key header, so unwrap here:
+    # the SecretStr boundary stops at this edge, not inside the client.
     llm_client = LlmClient(
-        settings.llm_base_url, settings.llm_api_key, settings.request_timeout_s
+        settings.llm_base_url,
+        settings.llm_api_key.get_secret_value(),
+        settings.request_timeout_s,
     )
 
     def report_builder(segments, meta):
@@ -59,9 +63,7 @@ def get_session_registry() -> SessionRegistry:
     Opus/AWS/LLM adapters. Tests override via
     ``app.dependency_overrides[get_session_registry] = lambda: fake_registry``."""
     deps = {
-        "make_transcription_stream": lambda: create_transcription_stream(
-            get_settings().aws_region
-        ),
+        "make_transcription_stream": lambda: create_transcription_stream(get_settings().aws_region),
         "audio": AudioAdapter(),
         "report_builder": _build_report_builder(),
         "now": lambda: datetime.now(timezone.utc),

@@ -69,7 +69,7 @@ The same "never hard-delete" rule applies to `people` and `teams` (soft-retire w
 
 ## Level-2 authentication
 
-The auth machinery itself lives in the shared `platform_auth` package (`packages/auth/`) — a pure leaf package with no imports of any service's `src/` or `contracts/`, shared with documentation-system. `src/api/auth.py`, `src/api/hashing.py`, and `src/api/middleware.py` are thin (~15-line) shims that call `platform_auth`'s `build_auth(...)` factory, binding team-tracking's `tt_` key envelope and config (`enable_dev_spoof=True`, `bootstrap_honors_x_actor=True`, `dev_spoof_reject_log_fields={"tt_env": "production"}`), and re-export the same names (`require_api_key`, `require_scope`, `get_actor`, `AuditLogMiddleware`). The auth behavior and contract are unchanged by this move. The model is still "Level 2": DB-issued, per-consumer, scoped keys with a cryptographically attested actor and an audit log.
+The auth machinery itself lives in the shared `platform_auth` package (`packages/auth/`) — a pure leaf package with no imports of any service's `src/` or `contracts/`, shared with documentation-system. `src/api/auth.py` and `src/api/hashing.py` are thin (~15-line) shims that call `platform_auth`'s `build_auth(...)` factory, binding team-tracking's `tt_` key envelope and config (`enable_dev_spoof=True`, `bootstrap_honors_x_actor=True`, `dev_spoof_reject_log_fields={"tt_env": "production"}`), and re-export the same names (`require_api_key`, `require_scope`, `get_actor`). `AuditLogMiddleware` binds nothing per-service, so `app.py` imports it from `platform_auth` directly. The auth behavior and contract are unchanged by this move. The model is still "Level 2": DB-issued, per-consumer, scoped keys with a cryptographically attested actor and an audit log.
 
 **Key format and storage.** A key is `tt_<prefix>_<secret>` — an 8-char public prefix plus a secret. Only an **argon2 hash** of the full key is stored (in the `api_keys` table), alongside the plaintext prefix. On a request, `require_api_key` parses the prefix, looks up the row, and argon2-verifies the candidate against the stored hash. The plaintext is shown once at issuance (by the `team-tracking-keys` CLI) and is never recoverable. All auth failures return an identical `401` — the code never leaks which check failed.
 
@@ -79,7 +79,7 @@ The auth machinery itself lives in the shared `platform_auth` package (`packages
 
 **Env bootstrap key.** The `API_KEY` setting is a deprecated grace-period key: if set and matched (constant-time compare), it grants `admin` scope so a brand-new deployment can reach the API before any DB keys exist. Every real consumer should have its own DB-issued key.
 
-**Audit middleware.** `AuditLogMiddleware` (from the shared `platform_auth` package, wired in via `src/api/middleware.py`) emits exactly one JSON line to stdout per request — method, path, status, duration, the resolved `key_name`, `is_bootstrap`, and the real client IP (read from `X-Real-IP`/`X-Forwarded-For` set by the reverse proxy). Auth stashes the resolved key on `request.state.auth_key`; the middleware reads it after the handler runs. Logging never fails the request. Ship stdout to any aggregator; grep by `key_name`/`status` for investigations (see [DEPLOYMENT.md](DEPLOYMENT.md)).
+**Audit middleware.** `AuditLogMiddleware` (from the shared `platform_auth` package, wired in directly in `src/api/app.py`) emits exactly one JSON line to stdout per request — method, path, status, duration, the resolved `key_name`, `is_bootstrap`, and the real client IP (read from `X-Real-IP`/`X-Forwarded-For` set by the reverse proxy). Auth stashes the resolved key on `request.state.auth_key`; the middleware reads it after the handler runs. Logging never fails the request. Ship stdout to any aggregator; grep by `key_name`/`status` for investigations (see [DEPLOYMENT.md](DEPLOYMENT.md)).
 
 **Self-introspection.** `GET /api-keys/self` returns the calling key's `{name, scopes}` sorted alphabetically. No additional scope required. The discord-bot uses this at startup to decide whether it holds `dev:spoof` and can therefore enable its "act as any Discord ID" web playground mode.
 
@@ -200,4 +200,3 @@ Explicitly out of scope:
 - No login/UI for officers editing directory data — handled by whatever admin surface is chosen.
 - No content storage — the directory is identity and structure only.
 - No pagination — list endpoints return all matching rows; add limit/offset if the roster grows past a few hundred.
-</content>

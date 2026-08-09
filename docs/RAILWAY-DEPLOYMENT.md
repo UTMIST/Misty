@@ -1,6 +1,6 @@
 # Railway Deployment (staging + production)
 
-Deploys the platform's five backend services plus the discord-bot to Railway,
+Deploys the platform's six backend services plus the discord-bot to Railway,
 backed by Neon Postgres (a branch per environment) for the three services that
 own a database. Repo-side config lives in each service's `Dockerfile` +
 `railway.json`; the steps below are the account-side setup you run in the
@@ -9,13 +9,14 @@ Railway + Neon dashboards / CLIs.
 | Railway service | Root dir | Database | Pre-deploy | Notes |
 |---|---|---|---|---|
 | `team-tracking` | `/` | Neon (own project) | `alembic upgrade head` | Deploy first — everything references it. |
-| `documentation-system` | `/` | Neon (own project) | `alembic upgrade head` | Consumes team-tracking. |
+| `documentation-system` | `/` | Neon (own project) | `alembic upgrade head` | Consumes team-tracking (hard dependency) and connectors (soft — recommended to deploy connectors first, not required). |
 | `verification` | `/` | Neon (own project) | `alembic upgrade head` | Email one-time codes. |
 | `llm` | `/` | **none** | — | Stateless Bedrock proxy; keys from `CONSUMER_KEYS`. |
-| `meeting` | `/` | **none** | — | **Stateful in-memory**; keys from `CONSUMER_KEYS`. See the single-replica warning in step 2. |
+| `meeting` | `/` | **none** | — | **Stateful in-memory**; keys from `CONSUMER_KEYS`. See the single-replica warning in step 2, and the WebSocket keepalive note in the Notes section — its `startCommand` is the one that isn't the plain template. |
+| `connectors` | `/` | **none** | — | Stateless outbound adapter (Google Drive/Docs); keys from `CONSUMER_KEYS`. Recommended to deploy before `documentation-system` (not required) — see its `CONNECTORS_API_KEY` note in step 3. |
 | `discord-bot` | `discord-bot` | none | — | Node; the only consumer-facing surface. |
 
-All six are **private** — no public domains. They reach each other over
+All seven are **private** — no public domains. They reach each other over
 Railway's internal network as `<service>.railway.internal:<PORT>`.
 
 ## Prerequisites
@@ -44,7 +45,9 @@ feature branch  ──PR──▶  staging  ──PR──▶  main
   ([`.github/workflows/main-source-guard.yml`](../.github/workflows/main-source-guard.yml)),
   which fails any PR to `main` whose head is not `staging`. Every merge to
   `main` auto-deploys to the `production` Railway environment.
-- Both branches are protected; all four CI checks are required.
+- Both branches are protected; **all ten** CI jobs are required status checks,
+  and `main` additionally requires `main-source-guard`. See
+  [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md) for what each job covers.
 
 ## 1. Neon: databases + branches
 Create **three Neon projects** — `team-tracking`, `documentation-system`, and
@@ -53,14 +56,14 @@ branch (= production); create a second branch named `staging` (copy-on-write
 from main). Copy the six connection strings (3 projects × 2 branches). Use the
 `postgresql+psycopg://…` form (append `?sslmode=require` if not present).
 
-`llm` and `meeting` have no database — nothing to provision for them here.
+`llm`, `meeting`, and `connectors` have no database — nothing to provision for them here.
 
 ## 2. Railway: project, environments, services
 1. Create a Railway project; it starts with a `production` environment — add a
    `staging` environment too.
-2. Add six services from this repo:
-   - The five Python services (`team-tracking`, `documentation-system`,
-     `verification`, `llm`, `meeting`). Their Dockerfiles build from the **repo
+2. Add seven services from this repo:
+   - The six Python services (`team-tracking`, `documentation-system`,
+     `verification`, `llm`, `meeting`, `connectors`). Their Dockerfiles build from the **repo
      root** as context (so `packages/` is reachable) and install their workspace
      member with `uv sync --frozen --no-dev --package <name>` into a venv at
      `/app/.venv`. So each one's Railway **root directory is `/`**, with
@@ -71,8 +74,8 @@ from main). Copy the six connection strings (3 projects × 2 branches). Use the
 
    Railway picks up each service's `railway.json` (Dockerfile build, start
    command, health check, and — for the three DB-backed services only — the
-   `alembic upgrade head` pre-deploy step). `llm` and `meeting` have no
-   `preDeployCommand` because they have no schema.
+   `alembic upgrade head` pre-deploy step). `llm`, `meeting`, and `connectors`
+   have no `preDeployCommand` because they have no schema.
 3. Keep **every** service private (no public domain). The bot needs no domain.
 4. **Pin `meeting` to a single replica.** It keeps each live meeting's session
    entirely in process memory, so a given `session_id`'s WebSocket,
@@ -94,25 +97,38 @@ Set these per environment (staging vs production) per service.
 | `PORT` | `8000` | `8000` | `8000` |
 | `DIRECTORY_BASE_URL` | — | `http://${{team-tracking.RAILWAY_PRIVATE_DOMAIN}}:${{team-tracking.PORT}}` | — |
 | `DIRECTORY_API_KEY` | — | *(set by the provisioning script — step 4)* | — |
+| `CONNECTORS_BASE_URL` | — | `http://${{connectors.RAILWAY_PRIVATE_DOMAIN}}:${{connectors.PORT}}` | — |
+| `CONNECTORS_API_KEY` | — | a `connectors` consumer key with the `fetch` scope — see step 4b | — |
 | `CODE_HMAC_SECRET` | — | — | a strong random secret |
 | `EMAIL_BACKEND` | — | — | `resend` (or `gmail`) — **not** `fake` |
 | `EMAIL_FROM` | — | — | `UTMIST <noreply@utmist.ca>` |
 | `RESEND_API_KEY` | — | — | from Resend |
 
-**The two DB-free services:**
+> **documentation-system boots fine without `CONNECTORS_API_KEY`.** Unlike
+> `API_KEY`/`DIRECTORY_API_KEY`, `verify_production_secrets()` only logs a
+> startup warning if it's still on the dev default outside `local` — it does
+> not fail the deploy. Without it, Google-source fetches (`gdocs`, `gsheets`,
+> `gslides`, `gdrive`) fail and are recorded as per-doc ingest warnings; the
+> catalog itself still works. Deploying connectors before documentation-system
+> is still recommended so Google fetches work from the start, but it is not
+> required — see the deploy order below.
 
-| Var | llm | meeting |
-|---|---|---|
-| env tier | `LLM_ENV` = `staging`/`production` | `MEETING_ENV` = `staging`/`production` |
-| `API_KEY` | a strong random secret | a strong random secret |
-| `CONSUMER_KEYS` | JSON array — see step 4b | JSON array — see step 4b |
-| `PORT` | `8000` | `8000` |
-| `AWS_REGION` | e.g. `us-east-1` (Bedrock) | e.g. `us-east-1` (Transcribe) |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | yes | yes |
-| `LLM_PROVIDER` / `LLM_MODEL` | `bedrock-converse` / `claude-sonnet-4-6` | — |
-| `LLM_BASE_URL` | — | `http://${{llm.RAILWAY_PRIVATE_DOMAIN}}:${{llm.PORT}}` |
-| `LLM_API_KEY` | — | an `llm` consumer key with the `chat` scope |
-| `MAX_MEETING_MS` | — | optional; defaults to the 4h backstop |
+**The three DB-free services:**
+
+| Var | llm | meeting | connectors |
+|---|---|---|---|
+| env tier | `LLM_ENV` = `staging`/`production` | `MEETING_ENV` = `staging`/`production` | `CONNECTORS_ENV` = `staging`/`production` |
+| `API_KEY` | a strong random secret | a strong random secret | a strong random secret |
+| `CONSUMER_KEYS` | JSON array — see step 4b | JSON array — see step 4b | JSON array — see step 4b |
+| `PORT` | `8000` | `8000` | `8000` |
+| `AWS_REGION` | e.g. `us-east-1` (Bedrock) | e.g. `us-east-1` (Transcribe) | — |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | yes | yes | — |
+| `LLM_PROVIDER` / `LLM_MODEL` | `bedrock-converse` / `claude-sonnet-4-6` | — | — |
+| `LLM_BASE_URL` | — | `http://${{llm.RAILWAY_PRIVATE_DOMAIN}}:${{llm.PORT}}` | — |
+| `LLM_API_KEY` | — | an `llm` consumer key with the `chat` scope | — |
+| `MAX_MEETING_MS` | — | optional; defaults to the 4h backstop | — |
+| `DISCONNECT_GRACE_S` | — | optional; defaults to 60s. How long a disconnected session is held so `POST /stop` can still finalize it | — |
+| `GOOGLE_CREDENTIALS_JSON` | — | — | base64 Google service-account key; empty is a valid running state (Google fetches 503, rest of the service works) |
 
 > Bedrock usage bills as **Amazon Bedrock** (credits apply) — do *not* point
 > `llm` at Claude Platform on AWS.
@@ -152,19 +168,25 @@ transcript:
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
-Ten of them — one per backend service per environment (plus
+Twelve of them — one per backend service per environment (plus
 `CODE_HMAC_SECRET` for verification). Paste into Railway's variable dashboard,
 never into a file.
 
-**Deploy order matters.** In each environment:
+**Deploy order matters for the hard dependencies below; connectors is a
+recommended-but-not-required exception.** In each environment:
 
 1. **team-tracking first** — its `preDeployCommand` runs `alembic upgrade head`
    against the environment's Neon branch, which the provisioning script (next)
    depends on.
-2. **documentation-system + verification** — they migrate the same way.
-3. **`llm` before `meeting`** — `meeting` needs `LLM_BASE_URL` pointing at a
+2. **connectors** — recommended before documentation-system so Google-source
+   fetches work immediately, but not required: documentation-system boots
+   fine without connectors reachable or `CONNECTORS_API_KEY` set (see step 4b
+   and the warning above) — it just can't fetch Google content until then.
+3. **documentation-system + verification** — they migrate the same way as
+   team-tracking.
+4. **`llm` before `meeting`** — `meeting` needs `LLM_BASE_URL` pointing at a
    running `llm`, and refuses to boot without it outside `local`.
-4. **discord-bot last** — it consumes all of the above.
+5. **discord-bot last** — it consumes all of the above.
 
 ## 4a. Provision the directory keys
 Once team-tracking is up + migrated in an environment, mint + wire the scoped
@@ -200,14 +222,14 @@ manually (`team-tracking-keys revoke <id>`).
 > `scripts/provision-directory-key.sh` already does — and **verify the minted
 > token's prefix is `tt_`, not `doc_`, before wiring it as `DIRECTORY_API_KEY`.**
 
-## 4b. Provision the `llm` + `meeting` consumer keys (manual)
+## 4b. Provision the `llm` + `meeting` + `connectors` consumer keys (manual)
 
-`llm` and `meeting` have **no `api_keys` table** — their keys live in a
+`llm`, `meeting`, and `connectors` have **no `api_keys` table** — their keys live in a
 `CONSUMER_KEYS` JSON array env var, parsed into an in-memory store at boot. So
 `provision-directory-key.sh` does not cover them; this step is manual, and you
 repeat it per environment.
 
-Two keys are needed:
+Three keys are needed:
 
 ```bash
 # 1. A key for meeting -> llm (scope: chat)
@@ -215,6 +237,9 @@ uv --project services/llm run llm-keys --name meeting --scopes chat
 
 # 2. A key for discord-bot -> meeting (scope: meetings)
 uv --project services/meeting run meeting-keys --name discord-bot --scopes meetings
+
+# 3. A key for documentation-system -> connectors (scope: fetch)
+uv --project services/connectors run connectors-keys --name documentation-system --scopes fetch
 ```
 
 Each CLI prints the **plaintext key to stdout** (shown exactly once — it is
@@ -225,6 +250,7 @@ stderr**. Wire them like this:
 |---|---|
 | append to `llm`'s `CONSUMER_KEYS` array | set as `meeting`'s `LLM_API_KEY` |
 | append to `meeting`'s `CONSUMER_KEYS` array | set as `discord-bot`'s `MEETING_API_KEY` |
+| append to `connectors`'s `CONSUMER_KEYS` array | set as `documentation-system`'s `CONNECTORS_API_KEY` |
 
 Then redeploy the service whose `CONSUMER_KEYS` you changed — the store is
 built at boot, so the new key isn't live until it restarts.
@@ -306,7 +332,7 @@ attach your Discord account to the seeded person record. New admins get added
 by an existing admin running `/seed` from Discord.
 
 ## 7. Verify
-- **APIs:** for each of the five services —
+- **APIs:** for each of the six services —
   `railway run --service <name> --environment <env> -- bash -c 'curl -s localhost:$PORT/health'`
   → `{"status":"ok"}`. `/health` is unauthenticated on every service, so no key
   is needed. For the three DB-backed ones, pre-deploy logs should also show
@@ -323,7 +349,7 @@ by an existing admin running `/seed` from Discord.
   (transcript comes back empty).
 
 ## Notes
-- All five Python Dockerfiles build with the repo root as context and
+- All six Python Dockerfiles build with the repo root as context and
   `uv sync --frozen --no-dev --package <name>` to install just that workspace
   member (plus the shared `platform_auth` leaf from `packages/auth`) — that's
   why their Railway root directory is `/` while `discord-bot`'s stays
@@ -342,3 +368,12 @@ by an existing admin running `/seed` from Discord.
   so staging commands never touch the real UTMIST server.
 - The `sh -c` wrapper on the API `startCommand` is deliberate — see the second
   bug in [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md).
+- **`meeting` carries extra WebSocket keepalive flags** on its `startCommand`:
+  `--ws-ping-interval 60 --ws-ping-timeout 60`. uvicorn defaults to a 20 s ping
+  with a 20 s pong deadline, which closes the socket on a client that is briefly
+  slow to answer — mid-recording, and cleanly enough that neither side logs an
+  error. 60 s is still well inside any proxy idle timeout. It's the one service
+  whose `startCommand` isn't the plain `uvicorn … --port ${PORT}` template, so
+  don't "normalize" it, and keep `railway.json` and the Dockerfile `CMD` in step
+  with each other. Railway reads `railway.json`, so that file is what actually
+  governs the deploy.

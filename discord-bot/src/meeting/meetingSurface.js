@@ -75,13 +75,52 @@ export function createMeetingSurface({
       }).catch((err) => console.error(`meetingSurface: teardown notify failed:`, err));
     };
 
+    // An unexpected socket death does NOT mean the transcript is gone. The
+    // service HOLDS a disconnected session for its disconnect grace period
+    // precisely so it can still be finalized over HTTP, so try stop() -- which
+    // POSTs /stop and posts the PDF -- before telling anyone the meeting was
+    // lost. Tearing down immediately is what threw away two fully-transcribed
+    // production meetings in one morning.
+    const salvage = async (reason) => {
+      if (tornDown) return;
+      // Not registered yet (openStream failed synchronously, auth rejected, a
+      // duplicate session id): there is no server-side session to finalize, and
+      // teardown is also what flags start() to abort.
+      if (!registered) return teardown(reason);
+      // A normal stop() closes the socket itself and has already deregistered
+      // the session by the time this fires. Nothing to salvage, and re-running
+      // would double-post the minutes.
+      if (sessions.get(guildId)?.sessionId !== sessionId) return;
+
+      const result = await stop(guildId).catch((err) => {
+        console.error(`meetingSurface: salvage finalize failed for guild ${guildId}:`, err);
+        return { status: 'error' };
+      });
+      if (result?.status === 'stopped') return;
+
+      // stop() has already deregistered the session and closed the stream, so
+      // teardown()'s owner guard would no-op here -- do the two things it would
+      // have done. recorder.stop() is idempotent, and stop() skips it if the
+      // finalize threw first, so this is what keeps us out of the voice channel.
+      tornDown = true;
+      try {
+        if (recorder) await recorder.stop();
+      } catch (err) {
+        console.error(`meetingSurface: error stopping recorder after failed salvage for guild ${guildId}:`, err);
+      }
+      await notify({
+        channel: textChannel,
+        content: `⚠️ The recording stopped unexpectedly (${reason}) and the minutes could not be recovered.`,
+      }).catch((err) => console.error('meetingSurface: salvage notify failed:', err));
+    };
+
     stream = meetingClient.openStream(sessionId, {
       guildId,
-      onError: () => teardown('connection error'),
+      onError: () => salvage('connection error'),
       // A clean close counts too: an auth rejection, a duplicate session, or a
       // service redeploy all close the socket without an error, and every frame
       // after that is silently discarded by the client.
-      onClose: () => teardown('connection closed'),
+      onClose: () => salvage('connection closed'),
     });
     // openStream failed synchronously and teardown already ran -- but with no
     // `stream` to close yet, so close it here rather than registering it.

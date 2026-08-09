@@ -7,9 +7,16 @@ from src.url_norm import derive_source, normalize_url
 def _src(sid, patterns):
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return Source(
-        id=sid, label=sid, url_patterns=patterns, requires_auth=False,
-        has_api=False, content_fetch_enabled=False,
-        created_at=now, updated_at=now, created_by="system", updated_by="system",
+        id=sid,
+        label=sid,
+        url_patterns=patterns,
+        requires_auth=False,
+        has_api=False,
+        content_fetch_enabled=False,
+        created_at=now,
+        updated_at=now,
+        created_by="system",
+        updated_by="system",
     )
 
 

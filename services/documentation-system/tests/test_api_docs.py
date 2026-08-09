@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,19 +15,31 @@ AUTH = {"X-API-Key": "test-key"}
 
 def _sources():
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    return [Source(id="web", label="Web", url_patterns=[], requires_auth=False,
-                   has_api=False, content_fetch_enabled=True,
-                   created_at=now, updated_at=now, created_by="system", updated_by="system")]
+    return [
+        Source(
+            id="web",
+            label="Web",
+            url_patterns=[],
+            requires_auth=False,
+            has_api=False,
+            content_fetch_enabled=True,
+            created_at=now,
+            updated_at=now,
+            created_by="system",
+            updated_by="system",
+        )
+    ]
 
 
 class FakeFetchers:
     def fetch_for(self, source_id, url):
-        return FetchResult(title="Fetched", content_snapshot="body")
+        return FetchResult(title="Fetched", content="full fetched body", content_snapshot="body")
 
 
 class FakeDirectory:
     def get_team_label(self, team_id):
         return "Partnerships"
+
     def get_person_label(self, person_id):
         return "Priya"
 
@@ -35,6 +48,7 @@ class FakeDirectory:
 def client(monkeypatch):
     monkeypatch.setenv("API_KEY", "test-key")
     from src.config import get_settings
+
     get_settings.cache_clear()
     adapter = InMemoryStorageAdapter(seed_sources=_sources())
     app = create_app()
@@ -43,6 +57,23 @@ def client(monkeypatch):
     app.dependency_overrides[get_directory] = lambda: FakeDirectory()
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture
+def client_and_store(monkeypatch):
+    """Like `client`, but also yields the backing adapter so tests can assert on
+    storage the API deliberately does not expose (e.g. full doc content)."""
+    monkeypatch.setenv("API_KEY", "test-key")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+    adapter = InMemoryStorageAdapter(seed_sources=_sources())
+    app = create_app()
+    app.dependency_overrides[get_storage] = lambda: adapter
+    app.dependency_overrides[get_fetchers] = lambda: FakeFetchers()
+    app.dependency_overrides[get_directory] = lambda: FakeDirectory()
+    with TestClient(app) as c:
+        yield c, adapter
 
 
 def test_ingest_returns_201_with_warnings_envelope(client):
@@ -70,8 +101,10 @@ def test_ingest_bad_team_id_returns_400(client):
     class NotFoundDir:
         def get_team_label(self, team_id):
             return None
+
         def get_person_label(self, person_id):
             return None
+
     client.app.dependency_overrides[get_directory] = lambda: NotFoundDir()
     resp = client.post(
         "/docs",
@@ -124,8 +157,10 @@ def test_patch_bad_team_id_returns_400(client):
     class NotFoundDir:
         def get_team_label(self, team_id):
             return None
+
         def get_person_label(self, person_id):
             return None
+
     client.app.dependency_overrides[get_directory] = lambda: NotFoundDir()
     resp = client.patch(
         f"/docs/{doc_id}",
@@ -141,3 +176,93 @@ def test_add_and_remove_tag(client):
     assert "new" in client.get(f"/docs/{doc_id}", headers=AUTH).json()["tags"]
     assert client.request("DELETE", f"/docs/{doc_id}/tags/new", headers=AUTH).status_code == 200
     assert "new" not in client.get(f"/docs/{doc_id}", headers=AUTH).json()["tags"]
+
+
+def test_refetch_persists_full_content(client_and_store):
+    client, store = client_and_store
+    created = client.post("/docs", json={"url": "https://x.com/refetch"}, headers=AUTH).json()
+    doc_id = created["doc"]["id"]
+
+    resp = client.post(f"/docs/{doc_id}/refetch", headers=AUTH)
+    assert resp.status_code == 200
+    assert store.get_doc_content(UUID(doc_id)) == "full fetched body"
+
+
+def test_refetch_no_content_leaves_prior_content_untouched(client_and_store):
+    client, store = client_and_store
+    created = client.post("/docs", json={"url": "https://x.com/goes-empty"}, headers=AUTH).json()
+    doc_id = created["doc"]["id"]
+
+    before = client.post(f"/docs/{doc_id}/refetch", headers=AUTH).json()
+    before_text = store.get_doc_content(UUID(doc_id))
+    before_meta = store.get_doc_content_meta(UUID(doc_id))
+
+    class _NoContentFetchers:
+        def fetch_for(self, source_id, url):
+            return FetchResult(title="Fetched", content=None, content_snapshot=None)
+
+    client.app.dependency_overrides[get_fetchers] = lambda: _NoContentFetchers()
+    resp = client.post(f"/docs/{doc_id}/refetch", headers=AUTH)
+    assert resp.status_code == 200
+
+    after_text = store.get_doc_content(UUID(doc_id))
+    after_meta = store.get_doc_content_meta(UUID(doc_id))
+    assert after_text == before_text
+    assert after_meta.content_hash == before_meta.content_hash
+    # The snapshot is half of the same preserved pair — blanking it while the
+    # full text survives leaves the doc self-inconsistent.
+    assert resp.json()["content_snapshot"] == before["content_snapshot"]
+
+
+def test_refetch_empty_string_content_does_not_wipe_stored_content(client_and_store):
+    # A connector that violates FetchResult's None-not-"" invariant must still
+    # not be able to blank stored text or the snapshot through refetch.
+    client, store = client_and_store
+    created = client.post("/docs", json={"url": "https://x.com/blanks"}, headers=AUTH).json()
+    doc_id = created["doc"]["id"]
+
+    before = client.post(f"/docs/{doc_id}/refetch", headers=AUTH).json()
+    before_text = store.get_doc_content(UUID(doc_id))
+
+    class _BlankFetchers:
+        def fetch_for(self, source_id, url):
+            return FetchResult(title="Fetched", content="", content_snapshot="")
+
+    client.app.dependency_overrides[get_fetchers] = lambda: _BlankFetchers()
+    resp = client.post(f"/docs/{doc_id}/refetch", headers=AUTH)
+    assert resp.status_code == 200
+
+    assert store.get_doc_content(UUID(doc_id)) == before_text
+    assert resp.json()["content_snapshot"] == before["content_snapshot"]
+
+
+def test_refetch_unchanged_content_leaves_hash_stable(client_and_store):
+    client, store = client_and_store
+    created = client.post("/docs", json={"url": "https://x.com/stable"}, headers=AUTH).json()
+    doc_id = created["doc"]["id"]
+
+    client.post(f"/docs/{doc_id}/refetch", headers=AUTH)
+    first_hash = store.get_doc_content_meta(UUID(doc_id)).content_hash
+    client.post(f"/docs/{doc_id}/refetch", headers=AUTH)
+    assert store.get_doc_content_meta(UUID(doc_id)).content_hash == first_hash
+
+
+def test_refetch_changed_content_updates_text_and_hash(client_and_store):
+    client, store = client_and_store
+    created = client.post("/docs", json={"url": "https://x.com/changed"}, headers=AUTH).json()
+    doc_id = created["doc"]["id"]
+
+    client.post(f"/docs/{doc_id}/refetch", headers=AUTH)
+    before_meta = store.get_doc_content_meta(UUID(doc_id))
+
+    class _ChangedFetchers:
+        def fetch_for(self, source_id, url):
+            return FetchResult(title="Fetched", content="edited body", content_snapshot="edited")
+
+    client.app.dependency_overrides[get_fetchers] = lambda: _ChangedFetchers()
+    client.post(f"/docs/{doc_id}/refetch", headers=AUTH)
+
+    after_text = store.get_doc_content(UUID(doc_id))
+    after_meta = store.get_doc_content_meta(UUID(doc_id))
+    assert after_text == "edited body"
+    assert after_meta.content_hash != before_meta.content_hash

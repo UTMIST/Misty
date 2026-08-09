@@ -13,10 +13,15 @@
 # Fallback: anything not covered by an area below.
 * @qiuethan
 
-# Areas
+# Areas — keep in sync with zone_for() in .github/workflows/pr-zone-check.yml.
 /discord-bot/                    @qiuethan
-/services/team-tracking/         @qiuethan
+/packages/auth/                  @qiuethan
+/services/connectors/            @qiuethan
 /services/documentation-system/  @qiuethan
+/services/llm/                   @qiuethan
+/services/meeting/               @qiuethan
+/services/team-tracking/         @qiuethan
+/services/verification/          @qiuethan
 /docs/                           @qiuethan
 /scripts/                        @qiuethan
 /.github/                        @qiuethan

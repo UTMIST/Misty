@@ -44,9 +44,7 @@ def read_context(
         return SEE_ALL
     if key.has_scope(DOCS_READ):
         return DENY
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN, detail=f"missing scope: {DOCS_READ}"
-    )
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"missing scope: {DOCS_READ}")
 
 
 def write_context(
@@ -58,9 +56,7 @@ def write_context(
     return _actor(actor_id, directory)
 
 
-def get_visible_doc_or_404(
-    doc_id: UUID, ctx: ActorContext, storage: StorageAdapter
-) -> Doc:
+def get_visible_doc_or_404(doc_id: UUID, ctx: ActorContext, storage: StorageAdapter) -> Doc:
     doc = storage.get_doc(doc_id, visibility=ctx)
     if doc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="doc not found")
