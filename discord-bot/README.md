@@ -251,7 +251,7 @@ parallel to team-tracking's scoped-key auth.
 
 ## Setup
 
-1. **Node 20+** required.
+1. **Node 22.12+** required (`@discordjs/voice` sets the floor). `nvm use` reads `.nvmrc`.
 2. `cp .env.example .env` and fill in:
    - Discord app credentials (`DISCORD_TOKEN`, `DISCORD_CLIENT_ID`).
    - `DISCORD_GUILD_ID` — dedicated testing guild ID. **Beta** commands register

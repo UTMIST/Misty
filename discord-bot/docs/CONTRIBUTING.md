@@ -2,7 +2,7 @@
 
 Task walkthroughs for working on `discord-bot`. Assumes you've read the [README](../README.md), which covers the architecture, env vars, and the complete cold-start sequence. This doc is the *how do I change it* companion.
 
-The bot is the platform's only consumer-facing surface. It's Node 20+ with `discord.js`, no build step, and no framework beyond that.
+The bot is the platform's only consumer-facing surface. It's Node 22.12+ with `discord.js`, no build step, and no framework beyond that.
 
 ## Conventions you need to know first
 

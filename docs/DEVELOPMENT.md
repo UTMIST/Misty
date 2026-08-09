@@ -38,7 +38,7 @@ DB-free.
 
 ## Quickstart
 
-Prerequisites: Docker, Python 3.11+, [`uv`](https://github.com/astral-sh/uv), Node 20+, git.
+Prerequisites: Docker, Python 3.11+, [`uv`](https://github.com/astral-sh/uv), Node 22.12+, git.
 
 **Directory API (team-tracking):**
 
@@ -178,8 +178,16 @@ Docker is needed by the three DB-backed services **and by the bot's playground**
   subdirectory.
   No `ffmpeg` binary is needed anywhere, including for `meeting` — Opus decode
   runs in-process via PyAV, which bundles its own ffmpeg libraries.
-- **Node 20+** — for the discord-bot. Check with `node --version`. The bot reads
-  its `.env` via Node's built-in `--env-file`, so no `dotenv` package needed.
+- **Node 22.12+** — for the discord-bot. Check with `node --version`. The floor
+  is set by `@discordjs/voice` (which `/record` uses), not by the bot's own
+  code; `discord-bot/.nvmrc` pins it, so `nvm use` in that directory picks the
+  right one. The bot reads its `.env` via Node's built-in `--env-file`, so no
+  `dotenv` package needed.
+
+  `discord-bot/.npmrc` sets `engine-strict=true`, so `npm ci` **fails** on an
+  older Node rather than warning. That's deliberate: the downstream symptoms are
+  unrecognizable (`node:test` "does not provide an export named 'mock'`",
+  `diagnostics.tracingChannel is not a function`) and mention nothing about Node.
 
 Sanity check: `git --version`, `docker --version`, `uv --version`, `node --version`
 should all print a version.
@@ -214,9 +222,10 @@ with `Missing required env vars: …` if any of these ten are unset:
 `DOC_BASE_URL`, `DOC_API_KEY`, `LLM_BASE_URL`, `LLM_API_KEY`,
 `VERIFICATION_BASE_URL`, `VERIFICATION_API_KEY`. The example fills every one
 except `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, and `DIRECTORY_API_KEY` — those
-three are yours to provide. `MEETING_*` is genuinely optional: leave
-`MEETING_BASE_URL` blank and the bot boots fine with `/record` reporting
-"not configured".
+three are yours to provide. `MEETING_*` is genuinely optional and **ships
+blank**: the bot boots fine and `/record` reports "not configured". Fill
+`MEETING_BASE_URL` in only when you're working on `/record` and have the meeting
+service up on 8004.
 
 **Minting `DIRECTORY_API_KEY`** (against a running team-tracking on 8000):
 
@@ -477,6 +486,16 @@ is the workflow around them.
 - **`CONSUMER_KEYS` rejected at boot.** `llm` and `meeting` both require it to be
   a **JSON array** (`[{...}]`), not a bare object or a comma-separated string.
   Anything else fails fast at startup by design.
+- **`npm ci` fails with `EBADENGINE` / `Unsupported engine`.** Your Node is older
+  than 22.12. Run `nvm use` inside `discord-bot` (it reads `.nvmrc`), or install
+  Node 22. This is `engine-strict=true` doing its job — before it existed, an old
+  Node produced these instead, neither of which names the real cause:
+
+  ```
+  SyntaxError: The requested module 'node:test' does not provide an export named 'mock'
+  TypeError: diagnostics.tracingChannel is not a function
+  ```
+
 - **`uv: command not found` / `docker: command not found`.** Revisit
   [Prerequisites](#prerequisites-new-to-this-stack).
 
