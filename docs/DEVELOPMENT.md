@@ -199,6 +199,10 @@ Their examples are pre-filled with working local defaults (`TT_ENV=local`,
 safe: outside `local`, each service calls `verify_production_secrets()` at boot
 and refuses to start while any secret is still a built-in default.
 
+Where those values come from — and who to ask when they're org-owned — is
+[`ACCESS.md`](ACCESS.md). The short answer is that you need **no UTMIST
+credentials at all** for normal development.
+
 What you must supply yourself, and only when you need that capability:
 
 | Variable(s) | Needed for | Where it comes from |
@@ -489,6 +493,8 @@ is the workflow around them.
 - [`MEETING-RECORDING.md`](MEETING-RECORDING.md) — how `/record` splits across the
   bot's voice surface and the `meeting` service, and why it breaks two of the
   platform's conventions on purpose.
+- [`ACCESS.md`](ACCESS.md) — which credentials you need (mostly none), who to
+  ask for the rest, and what to revoke when someone leaves.
 - [`RAILWAY-DEPLOYMENT.md`](RAILWAY-DEPLOYMENT.md) — deploy/operate runbook.
 - Per-service references — every service now has the full four-doc set
   (`API.md`, `ARCHITECTURE.md`, `CONTRIBUTING.md`, `DEPLOYMENT.md`) under its

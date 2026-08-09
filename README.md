@@ -100,6 +100,7 @@ Misty/
 ├── uv.lock                            Single lockfile for the whole workspace
 ├── docs/
 │   ├── DEVELOPMENT.md                 Developer onboarding — clone to first PR
+│   ├── ACCESS.md                      Which credentials you need (mostly none) and who to ask
 │   ├── ARCHITECTURE.md                Cross-service architecture — how the pieces fit
 │   ├── MEETING-RECORDING.md           How /record splits across the bot + meeting service
 │   ├── RAILWAY-DEPLOYMENT.md          Deploy runbook (Railway + Neon setup, key provisioning)

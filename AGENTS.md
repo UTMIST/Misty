@@ -113,6 +113,7 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 |---|---|
 | How do the services relate? | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | How do I run this locally? | [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) |
+| What credentials do I need, and from whom? | [`docs/ACCESS.md`](docs/ACCESS.md) |
 | How do I change service X? | `services/X/docs/CONTRIBUTING.md` |
 | What does endpoint Y do? | `services/X/docs/API.md` |
 | Why is X built this way? | `services/X/docs/ARCHITECTURE.md` |
