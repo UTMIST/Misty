@@ -61,7 +61,9 @@ test('requestCode throws VerificationUnavailable on 500', async () => {
 });
 
 test('requestCode network error becomes VerificationUnavailable', async () => {
-  const fetchImpl = async () => { throw new Error('econnrefused'); };
+  const fetchImpl = async () => {
+    throw new Error('econnrefused');
+  };
   const client = createVerificationClient({ baseUrl: BASE, apiKey: KEY, fetchImpl });
   await assert.rejects(
     () => client.requestCode({ subject: 'discord:123', email: 'a@x' }),
@@ -70,7 +72,9 @@ test('requestCode network error becomes VerificationUnavailable', async () => {
 });
 
 test('confirmCode returns body on 200', async () => {
-  const fetchImpl = fakeFetch([{ status: 200, body: { verified: true, subject: 'discord:123', email: 'a@x' } }]);
+  const fetchImpl = fakeFetch([
+    { status: 200, body: { verified: true, subject: 'discord:123', email: 'a@x' } },
+  ]);
   const client = createVerificationClient({ baseUrl: BASE, apiKey: KEY, fetchImpl });
   const result = await client.confirmCode({ subject: 'discord:123', code: '123456' });
   assert.deepEqual(result, { verified: true, subject: 'discord:123', email: 'a@x' });
@@ -128,7 +132,9 @@ test('confirmCode throws VerificationUnavailable on 500', async () => {
 });
 
 test('confirmCode network error becomes VerificationUnavailable', async () => {
-  const fetchImpl = async () => { throw new Error('econnrefused'); };
+  const fetchImpl = async () => {
+    throw new Error('econnrefused');
+  };
   const client = createVerificationClient({ baseUrl: BASE, apiKey: KEY, fetchImpl });
   await assert.rejects(
     () => client.confirmCode({ subject: 'discord:123', code: '000000' }),

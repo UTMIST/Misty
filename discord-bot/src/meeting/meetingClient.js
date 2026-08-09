@@ -12,7 +12,13 @@ export class MeetingUnavailable extends Error {
 // discord.js here; the binary frame layout below MUST byte-match the
 // service's parser (2-byte BE speaker_id length, speaker_id utf8, 8-byte BE
 // ts_ms, remaining bytes = opus payload).
-export function createMeetingClient({ baseUrl, wsUrl, apiKey, WebSocketImpl = WsWebSocket, fetchImpl = fetch }) {
+export function createMeetingClient({
+  baseUrl,
+  wsUrl,
+  apiKey,
+  WebSocketImpl = WsWebSocket,
+  fetchImpl = fetch,
+}) {
   function encodeFrame(speakerId, tsMs, opusBuffer) {
     const id = Buffer.from(speakerId, 'utf8');
     const head = Buffer.allocUnsafe(2);
@@ -73,7 +79,9 @@ export function createMeetingClient({ baseUrl, wsUrl, apiKey, WebSocketImpl = Ws
       // recording dropped, and discarding it here is what made two production
       // meetings fail with no diagnosable cause on either side of the wire.
       const { code, reason } = closeInfo(codeOrEvent, reasonArg);
-      console.error(`meeting stream closed for session ${sessionId}: code=${code} reason=${reason}`);
+      console.error(
+        `meeting stream closed for session ${sessionId}: code=${code} reason=${reason}`,
+      );
       try {
         onClose?.({ code, reason });
       } catch (cbErr) {

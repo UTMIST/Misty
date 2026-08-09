@@ -67,7 +67,9 @@ function buildSystemPrompt(askerName) {
 // `knownPeople` seeds authors whose Person is already resolved (the asker, whom
 // handleMention looked up to authorize the mention), saving a round-trip.
 async function resolveIdentities(directory, turns, knownPeople = new Map()) {
-  const authorIds = [...new Set(turns.filter((t) => t.role === 'user' && t.authorId).map((t) => t.authorId))];
+  const authorIds = [
+    ...new Set(turns.filter((t) => t.role === 'user' && t.authorId).map((t) => t.authorId)),
+  ];
   if (!authorIds.length) return new Map();
 
   // activeOnly:false so an active membership on an inactive team still resolves
@@ -83,12 +85,20 @@ async function resolveIdentities(directory, turns, knownPeople = new Map()) {
   const entries = await Promise.all(
     authorIds.map(async (authorId) => {
       try {
-        const person = knownPeople.get(authorId) ?? (await directory.getPersonByDiscordId(authorId));
+        const person =
+          knownPeople.get(authorId) ?? (await directory.getPersonByDiscordId(authorId));
         if (!person) return [authorId, { linked: false }];
-        const memberships = await directory.listMemberships({ personId: person.id, activeOnly: true });
+        const memberships = await directory.listMemberships({
+          personId: person.id,
+          activeOnly: true,
+        });
         const byId = await teamsById;
         const teams = byId
-          ? memberships.map((m) => byId.get(m.team_id)).filter(Boolean).map((t) => t.label).filter(Boolean)
+          ? memberships
+              .map((m) => byId.get(m.team_id))
+              .filter(Boolean)
+              .map((t) => t.label)
+              .filter(Boolean)
           : [];
         return [authorId, { linked: true, name: person.display_name, teams }];
       } catch (e) {
@@ -146,7 +156,8 @@ export function createHelperService({ llmClient, directory }) {
       const identities = await resolveIdentities(directory, turns, knownPeople);
       const rendered = turns.map((t) => ({
         role: t.role,
-        content: t.role === 'user' ? renderUserTurn(t, identities.get(t.authorId)) : escapeText(t.text),
+        content:
+          t.role === 'user' ? renderUserTurn(t, identities.get(t.authorId)) : escapeText(t.text),
       }));
       const messages = normalize(trimToBudget(rendered));
       // Nothing answerable survived (e.g. a fetch race left an assistant turn

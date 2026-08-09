@@ -35,7 +35,9 @@ export function loadConfig(env = process.env) {
     meetingWsUrl:
       env.MEETING_WS_URL ||
       (env.MEETING_BASE_URL
-        ? env.MEETING_BASE_URL.replace(/\/+$/, '').replace(/^http(s?):\/\//, (_m, s) => (s ? 'wss://' : 'ws://'))
+        ? env.MEETING_BASE_URL.replace(/\/+$/, '').replace(/^http(s?):\/\//, (_m, s) =>
+            s ? 'wss://' : 'ws://',
+          )
         : undefined),
   };
 }

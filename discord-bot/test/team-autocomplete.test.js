@@ -16,16 +16,22 @@ function teamOptOf(subName) {
 test('admin subcommands that target a team have an autocomplete resolver', () => {
   for (const name of ['rename', 'add', 'remove', 'roster']) {
     const opt = teamOptOf(name);
-    assert.equal(typeof opt.autocomplete, 'function', `${name} team/slug option should autocomplete`);
+    assert.equal(
+      typeof opt.autocomplete,
+      'function',
+      `${name} team/slug option should autocomplete`,
+    );
   }
 });
 
-test('allTeamsAutocomplete suggests ALL active teams, not just the caller\'s', async () => {
+test("allTeamsAutocomplete suggests ALL active teams, not just the caller's", async () => {
   const ctx = {
     directory: {
       // If this resolver ever calls listMemberships it is wrongly scoping to the
       // caller — admin commands act on any team, so fail loudly.
-      listMemberships: async () => { throw new Error('should not scope to memberships'); },
+      listMemberships: async () => {
+        throw new Error('should not scope to memberships');
+      },
       listTeams: async ({ activeOnly }) => {
         assert.equal(activeOnly, true);
         return [
@@ -51,9 +57,17 @@ test('allTeamsAutocomplete filters by typed against label and slug', async () =>
       ],
     },
   };
-  const byLabel = await allTeamsAutocomplete({ typed: 'oper', principal: { person: { id: 'p1' } }, ctx });
+  const byLabel = await allTeamsAutocomplete({
+    typed: 'oper',
+    principal: { person: { id: 'p1' } },
+    ctx,
+  });
   assert.deepEqual(byLabel, [{ name: 'Operations', value: 'ops' }]);
-  const bySlug = await allTeamsAutocomplete({ typed: 'ml', principal: { person: { id: 'p1' } }, ctx });
+  const bySlug = await allTeamsAutocomplete({
+    typed: 'ml',
+    principal: { person: { id: 'p1' } },
+    ctx,
+  });
   assert.deepEqual(bySlug, [{ name: 'Machine Learning', value: 'ml' }]);
 });
 

@@ -1,0 +1,24 @@
+# Revisions git blame should skip: bulk reformats with no behaviour change.
+#
+# Without this, `git blame` on the reformatted files answers "who ran the
+# formatter" instead of "who wrote this line" — which is the question that
+# actually matters when the person who wrote it graduated two years ago.
+#
+# GitHub honours this file automatically in its blame view. For local git, opt
+# in once per clone:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Only add commits that are provably formatting-only. One SHA per line, with a
+# comment naming it.
+#
+# ---------------------------------------------------------------------------
+# HEADS UP: PRs in this repo are SQUASH-merged, so a branch commit's SHA does
+# not survive the merge — a pre-merge SHA listed here would silently match
+# nothing. Each entry has to be the squashed commit as it lands on `staging`,
+# which means adding it in a small follow-up commit after the merge.
+# ---------------------------------------------------------------------------
+#
+# TODO(after merge): append the squash SHA of PR #192, "chore(discord-bot): gate
+# JS on ESLint + Prettier" — the one-time Prettier pass across 60 files in
+# discord-bot/. Get it from `git log --oneline staging` once merged.

@@ -31,7 +31,9 @@ async function ensurePostgresUp() {
       cwd: teamTrackingDir,
       stdio: 'inherit',
     });
-    child.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`docker compose up failed: ${code}`)));
+    child.on('exit', (code) =>
+      code === 0 ? resolve() : reject(new Error(`docker compose up failed: ${code}`)),
+    );
   });
 }
 
@@ -42,9 +44,20 @@ async function terminateScratchConnections() {
   return new Promise((resolve) => {
     const child = spawn(
       'docker',
-      ['compose', 'exec', '-T', 'postgres', 'psql', '-U', DB_USER, '-d', 'postgres', '-c',
+      [
+        'compose',
+        'exec',
+        '-T',
+        'postgres',
+        'psql',
+        '-U',
+        DB_USER,
+        '-d',
+        'postgres',
+        '-c',
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity ` +
-        `WHERE datname = '${SCRATCH_DB}' AND pid <> pg_backend_pid();`],
+          `WHERE datname = '${SCRATCH_DB}' AND pid <> pg_backend_pid();`,
+      ],
       { cwd: teamTrackingDir, stdio: 'inherit' },
     );
     child.on('exit', () => resolve()); // best-effort — fine if the DB doesn't exist yet
@@ -55,12 +68,27 @@ async function countPeople() {
   return new Promise((resolve) => {
     const child = spawn(
       'docker',
-      ['compose', 'exec', '-T', 'postgres', 'psql', '-U', DB_USER, '-d', SCRATCH_DB,
-        '-t', '-A', '-c', 'SELECT count(*) FROM people;'],
+      [
+        'compose',
+        'exec',
+        '-T',
+        'postgres',
+        'psql',
+        '-U',
+        DB_USER,
+        '-d',
+        SCRATCH_DB,
+        '-t',
+        '-A',
+        '-c',
+        'SELECT count(*) FROM people;',
+      ],
       { cwd: teamTrackingDir, stdio: ['ignore', 'pipe', 'pipe'] },
     );
     let out = '';
-    child.stdout.on('data', (d) => { out += d.toString(); });
+    child.stdout.on('data', (d) => {
+      out += d.toString();
+    });
     child.on('exit', () => resolve(parseInt(out.trim(), 10) || 0));
   });
 }
@@ -69,8 +97,19 @@ async function dropScratchDb() {
   return new Promise((resolve) => {
     const child = spawn(
       'docker',
-      ['compose', 'exec', '-T', 'postgres', 'psql', '-U', DB_USER, '-d', 'postgres', '-c',
-        `DROP DATABASE IF EXISTS ${SCRATCH_DB};`],
+      [
+        'compose',
+        'exec',
+        '-T',
+        'postgres',
+        'psql',
+        '-U',
+        DB_USER,
+        '-d',
+        'postgres',
+        '-c',
+        `DROP DATABASE IF EXISTS ${SCRATCH_DB};`,
+      ],
       { cwd: teamTrackingDir, stdio: 'inherit' },
     );
     child.on('exit', () => resolve()); // best-effort
@@ -94,12 +133,24 @@ async function shutdown(sig) {
   }, 5000);
   watchdog.unref();
   if (webServer) {
-    try { await webServer.close(); } catch (e) { console.error(e); }
+    try {
+      await webServer.close();
+    } catch (e) {
+      console.error(e);
+    }
   }
   if (scratch) {
-    try { await scratch.close(); } catch (e) { console.error(e); }
+    try {
+      await scratch.close();
+    } catch (e) {
+      console.error(e);
+    }
   }
-  try { await dropScratchDb(); } catch (e) { console.error(e); }
+  try {
+    await dropScratchDb();
+  } catch (e) {
+    console.error(e);
+  }
   clearTimeout(watchdog);
   process.exit(0);
 }

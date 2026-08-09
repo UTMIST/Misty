@@ -42,10 +42,16 @@ test('authMessages.internalError returns ReplyPayload', () => {
 });
 
 test('renderLinkResult covers every outcome', () => {
-  assert.match(renderLinkResult({ outcome: 'CODE_SENT', email: 'alex@utmist.ca' }).content, /alex@utmist\.ca/);
+  assert.match(
+    renderLinkResult({ outcome: 'CODE_SENT', email: 'alex@utmist.ca' }).content,
+    /alex@utmist\.ca/,
+  );
   assert.match(renderLinkResult({ outcome: 'NOT_A_MEMBER' }).content, /exec/i);
   assert.match(renderLinkResult({ outcome: 'DIRECTORY_DOWN' }).content, /unavailable|try again/i);
-  assert.match(renderLinkResult({ outcome: 'VERIFICATION_DOWN' }).content, /unavailable|try again/i);
+  assert.match(
+    renderLinkResult({ outcome: 'VERIFICATION_DOWN' }).content,
+    /unavailable|try again/i,
+  );
   assert.match(renderLinkResult({ outcome: 'RATE_LIMITED' }).content, /too many|wait/i);
   assert.match(renderLinkResult({ outcome: 'SOMETHING_ELSE' }).content, /wrong|try again/i);
 });
@@ -57,15 +63,27 @@ test('renderLinkResult returns ReplyPayload with content', () => {
 });
 
 test('renderVerifyCodeResult covers every outcome', () => {
-  assert.match(renderVerifyCodeResult({ outcome: 'LINKED', person: { display_name: 'Alex' } }).content, /Alex/);
+  assert.match(
+    renderVerifyCodeResult({ outcome: 'LINKED', person: { display_name: 'Alex' } }).content,
+    /Alex/,
+  );
   assert.match(renderVerifyCodeResult({ outcome: 'NOT_A_MEMBER' }).content, /exec/i);
-  assert.match(renderVerifyCodeResult({ outcome: 'ALREADY_LINKED', detail: 'x' }).content, /already|couldn't|could not/i);
+  assert.match(
+    renderVerifyCodeResult({ outcome: 'ALREADY_LINKED', detail: 'x' }).content,
+    /already|couldn't|could not/i,
+  );
   assert.match(renderVerifyCodeResult({ outcome: 'CODE_EXPIRED' }).content, /expired/i);
   assert.match(renderVerifyCodeResult({ outcome: 'TOO_MANY_ATTEMPTS' }).content, /too many/i);
   assert.match(renderVerifyCodeResult({ outcome: 'INVALID_CODE' }).content, /right|invalid|wrong/i);
   assert.match(renderVerifyCodeResult({ outcome: 'NO_PENDING_CODE' }).content, /pending|link/i);
-  assert.match(renderVerifyCodeResult({ outcome: 'VERIFICATION_DOWN' }).content, /unavailable|try again/i);
-  assert.match(renderVerifyCodeResult({ outcome: 'DIRECTORY_DOWN' }).content, /unavailable|try again/i);
+  assert.match(
+    renderVerifyCodeResult({ outcome: 'VERIFICATION_DOWN' }).content,
+    /unavailable|try again/i,
+  );
+  assert.match(
+    renderVerifyCodeResult({ outcome: 'DIRECTORY_DOWN' }).content,
+    /unavailable|try again/i,
+  );
   assert.match(renderVerifyCodeResult({ outcome: 'SOMETHING_ELSE' }).content, /wrong|try again/i);
 });
 
@@ -118,10 +136,7 @@ test('buildWhoamiEmbed sorts identifiers alphabetically and formats handle vs no
     ],
   ).embeds[0];
   const byName = Object.fromEntries(embed.fields.map((f) => [f.name, f.value]));
-  assert.equal(
-    byName['Identities'],
-    'discord: <@123>\ngithub: eeetan (9876)\nnotion: notion-uuid',
-  );
+  assert.equal(byName['Identities'], 'discord: <@123>\ngithub: eeetan (9876)\nnotion: notion-uuid');
 });
 
 test('buildWhoamiEmbed renders discord identity as a mention (drops stored handle)', () => {
@@ -144,7 +159,10 @@ test('buildWhoamiEmbed shows _(unavailable)_ when identifiers is null', () => {
 
 test('renderSeedResult covers outcomes', () => {
   assert.match(
-    renderSeedResult({ outcome: 'SEEDED', person: { display_name: 'A', primary_email: 'a@x', access_level: 'member' } }).content,
+    renderSeedResult({
+      outcome: 'SEEDED',
+      person: { display_name: 'A', primary_email: 'a@x', access_level: 'member' },
+    }).content,
     /A/,
   );
   assert.match(renderSeedResult({ outcome: 'EXISTS', detail: 'x' }).content, /already/i);
@@ -157,19 +175,28 @@ test('renderCreateTeamResult covers outcomes', () => {
     /ML|ml/,
   );
   assert.match(renderCreateTeamResult({ outcome: 'SLUG_EXISTS', detail: 'x' }).content, /already/i);
-  assert.match(renderCreateTeamResult({ outcome: 'DIRECTORY_DOWN' }).content, /unavailable|try again/i);
+  assert.match(
+    renderCreateTeamResult({ outcome: 'DIRECTORY_DOWN' }).content,
+    /unavailable|try again/i,
+  );
 });
 
 test('renderListTeamsResult covers outcomes', () => {
   assert.match(
-    renderListTeamsResult({ outcome: 'LISTED', teams: [{ slug: 'ml', label: 'ML' }, { slug: 'ops', label: 'Ops' }] }).content,
+    renderListTeamsResult({
+      outcome: 'LISTED',
+      teams: [
+        { slug: 'ml', label: 'ML' },
+        { slug: 'ops', label: 'Ops' },
+      ],
+    }).content,
     /ML.*Ops|ml.*ops/is,
   );
+  assert.match(renderListTeamsResult({ outcome: 'LISTED', teams: [] }).content, /no teams/i);
   assert.match(
-    renderListTeamsResult({ outcome: 'LISTED', teams: [] }).content,
-    /no teams/i,
+    renderListTeamsResult({ outcome: 'DIRECTORY_DOWN' }).content,
+    /unavailable|try again/i,
   );
-  assert.match(renderListTeamsResult({ outcome: 'DIRECTORY_DOWN' }).content, /unavailable|try again/i);
 });
 
 test('renderRenameTeamResult covers outcomes', () => {
@@ -178,7 +205,10 @@ test('renderRenameTeamResult covers outcomes', () => {
     /New/,
   );
   assert.match(renderRenameTeamResult({ outcome: 'TEAM_NOT_FOUND' }).content, /no team|not found/i);
-  assert.match(renderRenameTeamResult({ outcome: 'DIRECTORY_DOWN' }).content, /unavailable|try again/i);
+  assert.match(
+    renderRenameTeamResult({ outcome: 'DIRECTORY_DOWN' }).content,
+    /unavailable|try again/i,
+  );
 });
 
 test('renderAddMemberResult covers outcomes', () => {
@@ -193,13 +223,23 @@ test('renderAddMemberResult covers outcomes', () => {
   assert.match(renderAddMemberResult({ outcome: 'USER_NOT_LINKED' }).content, /link/i);
   assert.match(renderAddMemberResult({ outcome: 'TEAM_NOT_FOUND' }).content, /no team|not found/i);
   assert.match(
-    renderAddMemberResult({ outcome: 'ALREADY_ON_TEAM', person: { display_name: 'Alex' }, team: { label: 'ML' } }).content,
+    renderAddMemberResult({
+      outcome: 'ALREADY_ON_TEAM',
+      person: { display_name: 'Alex' },
+      team: { label: 'ML' },
+    }).content,
     /already/i,
   );
-  const invalid = renderAddMemberResult({ outcome: 'MEMBERSHIP_INVALID', detail: 'role_kind_id not found: lead' }).content;
+  const invalid = renderAddMemberResult({
+    outcome: 'MEMBERSHIP_INVALID',
+    detail: 'role_kind_id not found: lead',
+  }).content;
   assert.match(invalid, /rejected/i);
   assert.match(invalid, /role_kind_id not found: lead/);
-  assert.match(renderAddMemberResult({ outcome: 'DIRECTORY_DOWN' }).content, /unavailable|try again/i);
+  assert.match(
+    renderAddMemberResult({ outcome: 'DIRECTORY_DOWN' }).content,
+    /unavailable|try again/i,
+  );
 });
 
 test('renderRemoveMemberResult covers outcomes', () => {
@@ -215,12 +255,22 @@ test('renderRemoveMemberResult covers outcomes', () => {
     renderRemoveMemberResult({ outcome: 'USER_NOT_LINKED' }).content,
     /aren't on any team|not on any team/i,
   );
-  assert.match(renderRemoveMemberResult({ outcome: 'TEAM_NOT_FOUND' }).content, /no team|not found/i);
   assert.match(
-    renderRemoveMemberResult({ outcome: 'NOT_ON_TEAM', person: { display_name: 'Alex' }, team: { label: 'ML' } }).content,
+    renderRemoveMemberResult({ outcome: 'TEAM_NOT_FOUND' }).content,
+    /no team|not found/i,
+  );
+  assert.match(
+    renderRemoveMemberResult({
+      outcome: 'NOT_ON_TEAM',
+      person: { display_name: 'Alex' },
+      team: { label: 'ML' },
+    }).content,
     /not on/i,
   );
-  assert.match(renderRemoveMemberResult({ outcome: 'DIRECTORY_DOWN' }).content, /unavailable|try again/i);
+  assert.match(
+    renderRemoveMemberResult({ outcome: 'DIRECTORY_DOWN' }).content,
+    /unavailable|try again/i,
+  );
 });
 
 test('renderRosterResult covers outcomes', () => {
@@ -237,7 +287,8 @@ test('renderRosterResult covers outcomes', () => {
   assert.match(roster, /lead/);
   assert.match(roster, /ML|ml/);
   assert.match(
-    renderRosterResult({ outcome: 'ROSTER', team: { slug: 'ml', label: 'ML' }, members: [] }).content,
+    renderRosterResult({ outcome: 'ROSTER', team: { slug: 'ml', label: 'ML' }, members: [] })
+      .content,
     /no members|empty/i,
   );
   assert.match(renderRosterResult({ outcome: 'TEAM_NOT_FOUND' }).content, /no team|not found/i);
@@ -258,7 +309,10 @@ test('renderMyTeamsResult covers outcomes', () => {
     renderMyTeamsResult({ outcome: 'MY_TEAMS', memberships: [] }).content,
     /not on any/i,
   );
-  assert.match(renderMyTeamsResult({ outcome: 'DIRECTORY_DOWN' }).content, /unavailable|try again/i);
+  assert.match(
+    renderMyTeamsResult({ outcome: 'DIRECTORY_DOWN' }).content,
+    /unavailable|try again/i,
+  );
 });
 
 test('personal/admin render functions return ReplyPayload with ephemeral: true', () => {
@@ -291,19 +345,31 @@ test('shared-reference render functions (list, roster) are public (ephemeral: fa
 });
 
 test('renderDocAddResult ADDED shows title and url, ephemeral', () => {
-  const r = renderDocAddResult({ outcome: 'ADDED', doc: { title: 'Onboarding', url: 'https://x.com', id: 'd1' }, warnings: [] });
+  const r = renderDocAddResult({
+    outcome: 'ADDED',
+    doc: { title: 'Onboarding', url: 'https://x.com', id: 'd1' },
+    warnings: [],
+  });
   assert.match(r.content, /Onboarding/);
   assert.match(r.content, /https:\/\/x\.com/);
   assert.equal(r.ephemeral, true);
 });
 
 test('renderDocAddResult MERGED says already catalogued', () => {
-  const r = renderDocAddResult({ outcome: 'MERGED', doc: { url: 'https://x.com', id: 'd1' }, warnings: [] });
+  const r = renderDocAddResult({
+    outcome: 'MERGED',
+    doc: { url: 'https://x.com', id: 'd1' },
+    warnings: [],
+  });
   assert.match(r.content, /already catalogued/i);
 });
 
 test('renderDocAddResult surfaces warnings', () => {
-  const r = renderDocAddResult({ outcome: 'ADDED', doc: { url: 'https://x.com', id: 'd1' }, warnings: ['owner label deferred'] });
+  const r = renderDocAddResult({
+    outcome: 'ADDED',
+    doc: { url: 'https://x.com', id: 'd1' },
+    warnings: ['owner label deferred'],
+  });
   assert.match(r.content, /owner label deferred/);
 });
 
@@ -312,7 +378,10 @@ test('renderDocAddResult TEAM_NOT_FOUND', () => {
 });
 
 test('renderDocListResult LISTED is public and lists titles+ids', () => {
-  const r = renderDocListResult({ outcome: 'LISTED', docs: [{ title: 'Onboarding', id: 'd1', source_id: 'gdocs' }] });
+  const r = renderDocListResult({
+    outcome: 'LISTED',
+    docs: [{ title: 'Onboarding', id: 'd1', source_id: 'gdocs' }],
+  });
   assert.equal(r.ephemeral, false);
   assert.match(r.content, /Onboarding/);
   assert.match(r.content, /d1/);
@@ -323,7 +392,17 @@ test('renderDocListResult LISTED empty', () => {
 });
 
 test('renderDocShowResult SHOWN includes url and id', () => {
-  const r = renderDocShowResult({ outcome: 'SHOWN', doc: { title: 'Onboarding', url: 'https://x.com', id: 'd1', source_id: 'gdocs', tags: ['onboarding'], owning_team_label: 'ML' } });
+  const r = renderDocShowResult({
+    outcome: 'SHOWN',
+    doc: {
+      title: 'Onboarding',
+      url: 'https://x.com',
+      id: 'd1',
+      source_id: 'gdocs',
+      tags: ['onboarding'],
+      owning_team_label: 'ML',
+    },
+  });
   assert.match(r.content, /https:\/\/x\.com/);
   assert.match(r.content, /ML/);
 });
@@ -339,7 +418,12 @@ test('renderDocRemoveResult REMOVED is ephemeral', () => {
 });
 
 test('doc renderers map DOC_DOWN', () => {
-  for (const fn of [renderDocAddResult, renderDocListResult, renderDocShowResult, renderDocRemoveResult]) {
+  for (const fn of [
+    renderDocAddResult,
+    renderDocListResult,
+    renderDocShowResult,
+    renderDocRemoveResult,
+  ]) {
     assert.match(fn({ outcome: 'DOC_DOWN' }).content, /unavailable/i);
   }
 });

@@ -6,10 +6,12 @@ function fakeChannel({ sendImpl } = {}) {
   const calls = [];
   return {
     calls,
-    send: sendImpl ?? (async (payload) => {
-      calls.push(payload);
-      return payload;
-    }),
+    send:
+      sendImpl ??
+      (async (payload) => {
+        calls.push(payload);
+        return payload;
+      }),
   };
 }
 
@@ -70,7 +72,11 @@ test('a failed send surfaces instead of being swallowed', async () => {
   // means the minutes are gone permanently. Swallowing it told the user
   // "minutes will post here shortly" for a meeting that no longer exists.
   const poster = makeAttachmentPoster();
-  const channel = { send: async () => { throw new Error('missing permissions'); } };
+  const channel = {
+    send: async () => {
+      throw new Error('missing permissions');
+    },
+  };
   const originalError = console.error;
   console.error = () => {};
   try {

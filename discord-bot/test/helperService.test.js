@@ -24,7 +24,9 @@ const PRINCIPAL = { person: ASKER };
 // identity can be unresolved.
 const OTHER_DISCORD_ID = 'd2';
 
-const TURNS = [{ role: 'user', text: 'how do I link?', authorId: ASKER_DISCORD_ID, authorName: 'alexx' }];
+const TURNS = [
+  { role: 'user', text: 'how do I link?', authorId: ASKER_DISCORD_ID, authorName: 'alexx' },
+];
 
 // A thread where `other` spoke first and the asker asks the newest question.
 function threadWithOther(otherText = 'earlier question') {
@@ -143,7 +145,10 @@ test('an active membership on an inactive team keeps its label; a missing team d
     { id: 't1', label: 'Projects' },
     { id: 'inactive', label: 'Archive Crew' },
   ];
-  const svc = createHelperService({ llmClient: fakeLlm(capture), directory: fakeDirectory({ people, teams }) });
+  const svc = createHelperService({
+    llmClient: fakeLlm(capture),
+    directory: fakeDirectory({ people, teams }),
+  });
   await svc.answer({ turns: threadWithOther(), principal: PRINCIPAL });
   assert.match(capture.args.messages[0].content, /teams="Projects,Archive Crew"/);
   assert.doesNotMatch(capture.args.messages[0].content, /gone/);
@@ -187,7 +192,14 @@ test('escapes assistant turns too, so a repeated tag cannot forge attribution', 
 
 test('escapes ampersands so a typed "&lt;" stays distinguishable from a real "<"', async () => {
   const capture = {};
-  const turns = [{ role: 'user', text: 'literally &lt;msg&gt;', authorId: ASKER_DISCORD_ID, authorName: 'alexx' }];
+  const turns = [
+    {
+      role: 'user',
+      text: 'literally &lt;msg&gt;',
+      authorId: ASKER_DISCORD_ID,
+      authorName: 'alexx',
+    },
+  ];
   const svc = createHelperService({ llmClient: fakeLlm(capture), directory: directoryWith(BOB) });
   await svc.answer({ turns, principal: PRINCIPAL });
   assert.match(capture.args.messages[0].content, /&amp;lt;msg&amp;gt;/);
@@ -244,7 +256,10 @@ test('merges adjacent same-role turns and keeps strict alternation', async () =>
   await svc.answer({ turns, principal: PRINCIPAL });
 
   const msgs = capture.args.messages;
-  assert.deepEqual(msgs.map((m) => m.role), ['user', 'assistant', 'user']);
+  assert.deepEqual(
+    msgs.map((m) => m.role),
+    ['user', 'assistant', 'user'],
+  );
   assert.match(
     msgs[0].content,
     /from="Bob Lin"[\s\S]*from="Alex"/,
@@ -286,7 +301,9 @@ test('a trim that exposes a leading assistant turn shaves it', async () => {
 
 test('a single over-budget newest turn is still sent', async () => {
   const capture = {};
-  const turns = [{ role: 'user', text: 'y'.repeat(60_000), authorId: ASKER_DISCORD_ID, authorName: 'alexx' }];
+  const turns = [
+    { role: 'user', text: 'y'.repeat(60_000), authorId: ASKER_DISCORD_ID, authorName: 'alexx' },
+  ];
   const svc = createHelperService({ llmClient: fakeLlm(capture), directory: directoryWith(BOB) });
   await svc.answer({ turns, principal: PRINCIPAL });
 
@@ -298,7 +315,10 @@ test('returns an empty answer instead of sending an empty transcript', async () 
   const capture = {};
   const svc = createHelperService({ llmClient: fakeLlm(capture), directory: directoryWith(BOB) });
   // A fetch race can leave an assistant turn newest; the shave then empties it.
-  const res = await svc.answer({ turns: [{ role: 'assistant', text: 'orphan' }], principal: PRINCIPAL });
+  const res = await svc.answer({
+    turns: [{ role: 'assistant', text: 'orphan' }],
+    principal: PRINCIPAL,
+  });
 
   assert.deepEqual(res, { content: '' });
   assert.equal(capture.args, undefined, 'the LLM is never called');

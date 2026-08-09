@@ -29,7 +29,10 @@ export function createEmailService({ directory, verification }) {
 
   async function confirmAndAddEmail({ personId, discordUserId, code }) {
     try {
-      const confirmation = await verification.confirmCode({ subject: subjectFor(discordUserId), code });
+      const confirmation = await verification.confirmCode({
+        subject: subjectFor(discordUserId),
+        code,
+      });
       await directory.addEmailIdentifier(personId, confirmation.email);
       return { outcome: 'ADDED', email: confirmation.email };
     } catch (e) {

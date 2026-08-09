@@ -60,7 +60,12 @@ async function drain(resp) {
   }
 }
 
-export function createVerificationClient({ baseUrl, apiKey, fetchImpl = fetch, timeoutMs = 15000 }) {
+export function createVerificationClient({
+  baseUrl,
+  apiKey,
+  fetchImpl = fetch,
+  timeoutMs = 15000,
+}) {
   const headers = { 'X-API-Key': apiKey, 'Content-Type': 'application/json' };
   // Bound each request so /link and /verify-code can't block indefinitely on a
   // hung verification service (mirrors llmClient.js) — the shared helper arms an

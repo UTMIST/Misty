@@ -79,7 +79,7 @@ export async function buildServer({ commands, appContext, onReset }) {
     }
 
     const activeOptions = subcommand
-      ? command.subcommands.find((s) => s.name === subcommand)?.options ?? []
+      ? (command.subcommands.find((s) => s.name === subcommand)?.options ?? [])
       : command.options;
     const coerced = { ...options };
     for (const o of activeOptions) {

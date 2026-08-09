@@ -12,14 +12,32 @@ test('buildSnapshotCommands emits the drop, create, and pg_dump-piped-into-psql 
   assert.equal(cmds.length, 3);
   // Drop
   assert.deepEqual(cmds[0], [
-    'docker', 'compose', 'exec', '-T', 'postgres',
-    'psql', '-U', 'team_tracking', '-d', 'postgres', '-c',
+    'docker',
+    'compose',
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-U',
+    'team_tracking',
+    '-d',
+    'postgres',
+    '-c',
     'DROP DATABASE IF EXISTS team_tracking_playground;',
   ]);
   // Create
   assert.deepEqual(cmds[1], [
-    'docker', 'compose', 'exec', '-T', 'postgres',
-    'psql', '-U', 'team_tracking', '-d', 'postgres', '-c',
+    'docker',
+    'compose',
+    'exec',
+    '-T',
+    'postgres',
+    'psql',
+    '-U',
+    'team_tracking',
+    '-d',
+    'postgres',
+    '-c',
     'CREATE DATABASE team_tracking_playground;',
   ]);
   // Dump-and-restore pipeline described as a single sh -c line
