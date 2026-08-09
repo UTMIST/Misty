@@ -16,12 +16,13 @@ export default [
 
   js.configs.recommended,
 
+  // Rules apply everywhere. Kept separate from the globals blocks below so the
+  // two runtime environments can be mutually exclusive without duplicating them.
   {
     files: ['**/*.js'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'module',
-      globals: { ...globals.node },
     },
     rules: {
       // `_`-prefixed args are the repo's existing convention for deliberately
@@ -40,6 +41,17 @@ export default [
         },
       ],
     },
+  },
+
+  // Globals are split into two NON-overlapping blocks on purpose. Flat config
+  // *merges* languageOptions.globals across every block whose `files` match, so
+  // a browser block layered on top of a `**/*.js` node block would hand browser
+  // files both sets — and `process.env.X` in playground code would lint clean
+  // and then break in the page. `ignores` here is what keeps them disjoint.
+  {
+    files: ['**/*.js'],
+    ignores: ['src/web/public/**'],
+    languageOptions: { globals: { ...globals.node } },
   },
 
   {

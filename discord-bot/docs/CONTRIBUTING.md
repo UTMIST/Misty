@@ -155,3 +155,14 @@ CI runs `node-test` (`npm ci` + `npm test`) plus a Docker build with a boot smok
 > [`eslint.config.js`](../eslint.config.js) and [`.prettierrc.json`](../.prettierrc.json);
 > `printWidth` is **100**, matching the `line-length = 100` the Python services set for ruff.
 > Both are scoped to `*.js` — the Markdown here is hand-wrapped and Prettier must not touch it.
+>
+> Two things worth knowing about that config:
+>
+> - The one-time reformat that introduced Prettier touched 60 files, so `git blame` needs
+>   help to see past it. Opt in once per clone —
+>   `git config blame.ignoreRevsFile .git-blame-ignore-revs` — and GitHub's blame view
+>   applies it automatically.
+> - Node and browser globals are kept **disjoint**, via `ignores` rather than layering.
+>   `src/web/public/` is served to the page, so `process` and `Buffer` genuinely don't
+>   exist there and ESLint is configured to say so. Layer a browser block on top of a
+>   `**/*.js` node block and flat config merges them, handing browser files both sets.
