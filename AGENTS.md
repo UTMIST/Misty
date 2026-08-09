@@ -89,7 +89,7 @@ uv run ruff check . && uv run ruff format --check .
 
 `llm`, `meeting`, and `connectors` have no Postgres adapter — just `uv run pytest`. The bot: `cd discord-bot && npm test`. The shared library: `cd packages/auth && uv run pytest`.
 
-Run what CI runs for that service (see the table below) rather than the generic pair, and don't quote test counts in docs or commit messages — they go stale immediately.
+Run what CI runs for that service — `.github/workflows/ci.yml` is authoritative, and [`docs/DEPLOYMENT-HISTORY.md`](docs/DEPLOYMENT-HISTORY.md#ci-on-every-pr-to-staging-or-main) lists what each of the ten jobs covers — rather than the generic pair, and don't quote test counts in docs or commit messages — they go stale immediately.
 
 > **Every Python service is gated on both `ruff check` and `ruff format --check`.** There are no deferrals left. (The one job that runs neither is `python-test`, which only runs team-tracking's pytest — team-tracking's linting lives in the separate `python-lint` job.) If a job ever needs an exemption, `ci.yml` carries a comment saying so, and that file is the authority, not this one.
 >

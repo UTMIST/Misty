@@ -16,6 +16,9 @@ Service-specific deploy notes. The full platform runbook is [`docs/RAILWAY-DEPLO
 | **State** | **In process memory.** One session per active meeting. |
 | **Dependencies** | `llm` (hard), AWS Transcribe |
 | **Binaries** | None. No `ffmpeg` — PyAV bundles its own libraries. |
+| **Start command** | Not the plain platform template — carries `--ws-ping-interval 60 --ws-ping-timeout 60`. See below. |
+
+**The WebSocket keepalive is widened on purpose.** uvicorn's defaults (20 s ping, 20 s pong deadline) close a socket whose client is briefly slow to answer — mid-recording, with a clean close code and no error on either side, which is a leading suspect for two production meetings that dropped. `railway.json`'s `startCommand` and the Dockerfile `CMD` both pass `--ws-ping-interval 60 --ws-ping-timeout 60`; 60 s is still well inside any proxy idle timeout. Keep the two in step, and don't normalize this back to the template the other five services use. Railway reads `railway.json`, so that file governs the deploy.
 
 ## Variables
 

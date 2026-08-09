@@ -12,7 +12,7 @@ Railway + Neon dashboards / CLIs.
 | `documentation-system` | `/` | Neon (own project) | `alembic upgrade head` | Consumes team-tracking (hard dependency) and connectors (soft — recommended to deploy connectors first, not required). |
 | `verification` | `/` | Neon (own project) | `alembic upgrade head` | Email one-time codes. |
 | `llm` | `/` | **none** | — | Stateless Bedrock proxy; keys from `CONSUMER_KEYS`. |
-| `meeting` | `/` | **none** | — | **Stateful in-memory**; keys from `CONSUMER_KEYS`. See the single-replica warning in step 2. |
+| `meeting` | `/` | **none** | — | **Stateful in-memory**; keys from `CONSUMER_KEYS`. See the single-replica warning in step 2, and the WebSocket keepalive note in the Notes section — its `startCommand` is the one that isn't the plain template. |
 | `connectors` | `/` | **none** | — | Stateless outbound adapter (Google Drive/Docs); keys from `CONSUMER_KEYS`. Recommended to deploy before `documentation-system` (not required) — see its `CONNECTORS_API_KEY` note in step 3. |
 | `discord-bot` | `discord-bot` | none | — | Node; the only consumer-facing surface. |
 
@@ -45,7 +45,9 @@ feature branch  ──PR──▶  staging  ──PR──▶  main
   ([`.github/workflows/main-source-guard.yml`](../.github/workflows/main-source-guard.yml)),
   which fails any PR to `main` whose head is not `staging`. Every merge to
   `main` auto-deploys to the `production` Railway environment.
-- Both branches are protected; all four CI checks are required.
+- Both branches are protected; **all ten** CI jobs are required status checks,
+  and `main` additionally requires `main-source-guard`. See
+  [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md) for what each job covers.
 
 ## 1. Neon: databases + branches
 Create **three Neon projects** — `team-tracking`, `documentation-system`, and
@@ -366,3 +368,12 @@ by an existing admin running `/seed` from Discord.
   so staging commands never touch the real UTMIST server.
 - The `sh -c` wrapper on the API `startCommand` is deliberate — see the second
   bug in [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md).
+- **`meeting` carries extra WebSocket keepalive flags** on its `startCommand`:
+  `--ws-ping-interval 60 --ws-ping-timeout 60`. uvicorn defaults to a 20 s ping
+  with a 20 s pong deadline, which closes the socket on a client that is briefly
+  slow to answer — mid-recording, and cleanly enough that neither side logs an
+  error. 60 s is still well inside any proxy idle timeout. It's the one service
+  whose `startCommand` isn't the plain `uvicorn … --port ${PORT}` template, so
+  don't "normalize" it, and keep `railway.json` and the Dockerfile `CMD` in step
+  with each other. Railway reads `railway.json`, so that file is what actually
+  governs the deploy.
