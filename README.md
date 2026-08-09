@@ -165,6 +165,8 @@ Nothing to bootstrap at the root to *run* a service — stand up only what you n
 ```bash
 make install   # uv workspace + bot dependencies
 make check     # lint + format check + fast tests, across everything
+make test-full # adds the Postgres-adapter suites (needs Docker) — run this
+               # if you touched storage, an adapter, or a migration
 make help      # the rest
 ```
 

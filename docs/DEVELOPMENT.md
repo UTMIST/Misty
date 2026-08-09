@@ -384,13 +384,20 @@ is the workflow around them.
    time:
 
    ```bash
+   make install  # first time only
    make check    # lint + format check + fast tests, everywhere
    ```
 
-   `make help` lists the rest (`make install`, `make test`, `make format`,
-   `make test-full`). It's a convenience wrapper over the per-directory commands
-   below, not a replacement for them — [`ci.yml`](../.github/workflows/ci.yml)
-   stays authoritative, and if the Makefile ever disagrees with CI, CI is right.
+   > **`make check` is not CI-equivalent.** It runs the *fast* suites, skipping
+   > the 65 Postgres-adapter tests CI runs across the three DB-backed services
+   > (plus 3 behind `RUN_PG_TESTS`). It's the right pre-push check for most
+   > work, but **if you touched storage, an adapter, or a migration, run
+   > `make test-full`** with Postgres up — otherwise CI can still go red.
+
+   `make help` lists the rest (`make test`, `make format`, `make test-full`).
+   It's a convenience wrapper over the per-directory commands below, not a
+   replacement for them — [`ci.yml`](../.github/workflows/ci.yml) stays
+   authoritative, and if the Makefile ever disagrees with CI, CI is right.
 
    To run one service on its own — for a DB-backed API (team-tracking,
    documentation-system, verification):

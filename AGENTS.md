@@ -78,7 +78,7 @@ Violating any of these is a bug even if tests pass.
 
 ### Run before you push
 
-`make check` from the repo root runs lint, format checks, and the fast suites across all seven Python directories plus the bot. `make help` lists the rest. It's a wrapper over the commands below — `ci.yml` is still authoritative, and a disagreement between the two means the Makefile is wrong.
+`make check` from the repo root runs lint, format checks, and the fast suites across all seven Python directories plus the bot. **It is not CI-equivalent** — it skips the Postgres-adapter suites, so after touching storage, an adapter, or a migration use `make test-full` with Postgres up. `make help` lists the rest. It's a wrapper over the commands below — `ci.yml` is still authoritative, and a disagreement between the two means the Makefile is wrong.
 
 For a single DB-backed service (team-tracking, documentation-system, verification):
 
