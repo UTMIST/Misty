@@ -8,9 +8,9 @@ export async function ensureDevSpoofScope(ctx) {
   if (!scopes.includes('dev:spoof')) {
     throw new Error(
       `Startup guard failed: this bot's team-tracking API key lacks the ` +
-      `\`dev:spoof\` scope, which is required to enable the web playground. ` +
-      `Issue a new key against a non-production team-tracking with ` +
-      `\`--scopes ... dev:spoof\`.`,
+        `\`dev:spoof\` scope, which is required to enable the web playground. ` +
+        `Issue a new key against a non-production team-tracking with ` +
+        `\`--scopes ... dev:spoof\`.`,
     );
   }
 }

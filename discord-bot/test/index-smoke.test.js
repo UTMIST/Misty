@@ -16,7 +16,13 @@ test('every factory index.js calls is imported or declared', () => {
 
   const available = new Set();
   for (const m of src.matchAll(/import\s*\{([^}]+)\}/g)) {
-    for (const name of m[1].split(',')) available.add(name.trim().split(/\s+as\s+/).pop());
+    for (const name of m[1].split(','))
+      available.add(
+        name
+          .trim()
+          .split(/\s+as\s+/)
+          .pop(),
+      );
   }
   for (const m of src.matchAll(/\b(?:function|const|let|var|class)\s+(\w+)/g)) available.add(m[1]);
 

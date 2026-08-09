@@ -44,10 +44,7 @@ export function createTeamService({ directory, now = isoDateToday } = {}) {
     }
   }
 
-  async function addMember(
-    { discordSnowflake, teamSlug, roleKindId, isTeamAdmin },
-    _opts,
-  ) {
+  async function addMember({ discordSnowflake, teamSlug, roleKindId, isTeamAdmin }, _opts) {
     try {
       const person = await directory.getPersonByDiscordId(discordSnowflake);
       if (!person) return { outcome: 'USER_NOT_LINKED' };
@@ -114,9 +111,7 @@ export function createTeamService({ directory, now = isoDateToday } = {}) {
         activeOnly: true,
         asOf: asOf ?? now(),
       });
-      const persons = await Promise.all(
-        memberships.map((m) => directory.getPerson(m.person_id)),
-      );
+      const persons = await Promise.all(memberships.map((m) => directory.getPerson(m.person_id)));
       const members = memberships
         .map((m, i) => ({
           person: persons[i],
@@ -137,9 +132,7 @@ export function createTeamService({ directory, now = isoDateToday } = {}) {
         personId,
         activeOnly: true,
       });
-      const teams = await Promise.all(
-        memberships.map((m) => directory.getTeam(m.team_id)),
-      );
+      const teams = await Promise.all(memberships.map((m) => directory.getTeam(m.team_id)));
       const withTeams = memberships
         .map((m, i) => ({
           team: teams[i],

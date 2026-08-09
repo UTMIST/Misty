@@ -398,6 +398,13 @@ is the workflow around them.
    `uv run ruff` rather than a system-wide `ruff` — it picks up the version
    pinned in `uv.lock`, and formatter output drifts between ruff versions.
 
+   **The bot has the same pair**, spelled ESLint and Prettier:
+   `cd discord-bot && npm run lint && npm run format:check`. `npm run lint:fix`
+   and `npm run format` fix most findings. Both gate CI in the `node-test` job,
+   and both are scoped to `*.js` — the Markdown in this repo is hand-wrapped, so
+   Prettier is deliberately not pointed at it. Prettier's `printWidth` is 100,
+   matching ruff's `line-length = 100` on the Python side.
+
 4. **Open a PR into `staging`.** Every PR runs
    [`ci.yml`](../.github/workflows/ci.yml): full test suites against real
    Postgres, `ruff` lint, and Docker builds with boot smoke tests. Green CI is

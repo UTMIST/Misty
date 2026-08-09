@@ -229,6 +229,13 @@ jobs:
         run: npm ci
       - name: Run tests
         run: npm test
+      # Mirrors the ruff check + ruff format --check pair that gates every
+      # Python service. ESLint covers correctness; Prettier covers formatting.
+      # Scoped to *.js on purpose — the hand-wrapped Markdown is not Prettier's.
+      - name: ESLint
+        run: npm run lint
+      - name: Prettier format check
+        run: npm run format:check
 
   docker-build:
     runs-on: ubuntu-latest

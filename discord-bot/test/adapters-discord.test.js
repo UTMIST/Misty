@@ -91,7 +91,11 @@ test('interactionToIntent extracts subcommand', () => {
     description: 't',
     subcommands: [
       { name: 'list', options: [], handler: async () => ({ content: 'l' }) },
-      { name: 'create', options: [{ name: 'slug', type: 'string', required: true, description: 's' }], handler: async () => ({ content: 'c' }) },
+      {
+        name: 'create',
+        options: [{ name: 'slug', type: 'string', required: true, description: 's' }],
+        handler: async () => ({ content: 'c' }),
+      },
     ],
     handler: async () => ({ content: '?' }),
   });
@@ -148,9 +152,7 @@ test('resolveEphemeral prefers the active subcommand hint', () => {
     name: 'team',
     description: 'x',
     ephemeral: false,
-    subcommands: [
-      { name: 'roster', ephemeral: true, handler: async () => ({ content: 'ok' }) },
-    ],
+    subcommands: [{ name: 'roster', ephemeral: true, handler: async () => ({ content: 'ok' }) }],
     handler: async () => ({ content: 'top' }),
   });
   assert.equal(resolveEphemeral(cmd, 'roster'), true);
@@ -274,7 +276,12 @@ function fakeAutocompleteInteraction({ commandName, subcommand, focused, calls }
 
 test('interactionToAutocompleteIntent extracts focused option and typed value', () => {
   const intent = interactionToAutocompleteIntent(
-    fakeAutocompleteInteraction({ commandName: 'doc', subcommand: 'list', focused: { name: 'team', value: 'm' }, calls: [] }),
+    fakeAutocompleteInteraction({
+      commandName: 'doc',
+      subcommand: 'list',
+      focused: { name: 'team', value: 'm' },
+      calls: [],
+    }),
   );
   assert.equal(intent.commandName, 'doc');
   assert.equal(intent.subcommand, 'list');
@@ -286,15 +293,37 @@ test('interactionToAutocompleteIntent extracts focused option and typed value', 
 test('wireDiscordClient responds to autocomplete with suggestions', async () => {
   const calls = [];
   const doc = defineCommand({
-    name: 'doc', description: 'd', handler: async () => ({ content: 'x' }),
-    subcommands: [{ name: 'list', description: 'l', handler: async () => ({ content: 'y' }),
-      options: [{ name: 'team', type: 'string', description: 't', autocomplete: async () => [{ name: 'ML', value: 'ml' }] }] }],
+    name: 'doc',
+    description: 'd',
+    handler: async () => ({ content: 'x' }),
+    subcommands: [
+      {
+        name: 'list',
+        description: 'l',
+        handler: async () => ({ content: 'y' }),
+        options: [
+          {
+            name: 'team',
+            type: 'string',
+            description: 't',
+            autocomplete: async () => [{ name: 'ML', value: 'ml' }],
+          },
+        ],
+      },
+    ],
   });
   const commands = new Map([['doc', doc]]);
   const appContext = { directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) } };
   const client = fakeClient();
   wireDiscordClient(client, { commands, appContext });
-  await client.emit(fakeAutocompleteInteraction({ commandName: 'doc', subcommand: 'list', focused: { name: 'team', value: 'm' }, calls }));
+  await client.emit(
+    fakeAutocompleteInteraction({
+      commandName: 'doc',
+      subcommand: 'list',
+      focused: { name: 'team', value: 'm' },
+      calls,
+    }),
+  );
   const respond = calls.find((c) => c.method === 'respond');
   assert.deepEqual(respond.choices, [{ name: 'ML', value: 'ml' }]);
 });
@@ -311,8 +340,12 @@ function fakeRecordInteraction({ subcommand, voiceChannel = null, calls }) {
     isChatInputCommand: () => true,
     isAutocomplete: () => false,
     options: { getSubcommand: () => subcommand },
-    async deferReply(opts) { calls.push({ method: 'deferReply', opts }); },
-    async editReply(payload) { calls.push({ method: 'editReply', payload }); },
+    async deferReply(opts) {
+      calls.push({ method: 'deferReply', opts });
+    },
+    async editReply(payload) {
+      calls.push({ method: 'editReply', payload });
+    },
   };
 }
 
@@ -325,12 +358,19 @@ test('/record start is denied for an UNLINKED caller and never starts recording'
   let startCalled = false;
   const appContext = {
     directory: { getPersonByDiscordId: async () => null },
-    meetingSurface: { start: () => { startCalled = true; return { status: 'recording' }; } },
+    meetingSurface: {
+      start: () => {
+        startCalled = true;
+        return { status: 'recording' };
+      },
+    },
   };
   const client = fakeClient();
   wireDiscordClient(client, { commands: recordCommands, appContext });
 
-  await client.emit(fakeRecordInteraction({ subcommand: 'start', voiceChannel: { id: 'vc1' }, calls }));
+  await client.emit(
+    fakeRecordInteraction({ subcommand: 'start', voiceChannel: { id: 'vc1' }, calls }),
+  );
 
   const edit = calls.find((c) => c.method === 'editReply');
   assert.match(edit.payload.content, /link your account/i);
@@ -343,7 +383,12 @@ test('/record start proceeds for a LINKED caller in a voice channel', async () =
   const voiceChannel = { id: 'vc1' };
   const appContext = {
     directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) },
-    meetingSurface: { start: (args) => { startArgs = args; return { status: 'recording' }; } },
+    meetingSurface: {
+      start: (args) => {
+        startArgs = args;
+        return { status: 'recording' };
+      },
+    },
   };
   const client = fakeClient();
   wireDiscordClient(client, { commands: recordCommands, appContext });
@@ -360,13 +405,24 @@ test('/record start fails closed (no start) when the directory is unavailable', 
   const calls = [];
   let startCalled = false;
   const appContext = {
-    directory: { getPersonByDiscordId: async () => { throw new DirectoryUnavailable('down'); } },
-    meetingSurface: { start: () => { startCalled = true; return { status: 'recording' }; } },
+    directory: {
+      getPersonByDiscordId: async () => {
+        throw new DirectoryUnavailable('down');
+      },
+    },
+    meetingSurface: {
+      start: () => {
+        startCalled = true;
+        return { status: 'recording' };
+      },
+    },
   };
   const client = fakeClient();
   wireDiscordClient(client, { commands: recordCommands, appContext });
 
-  await client.emit(fakeRecordInteraction({ subcommand: 'start', voiceChannel: { id: 'vc1' }, calls }));
+  await client.emit(
+    fakeRecordInteraction({ subcommand: 'start', voiceChannel: { id: 'vc1' }, calls }),
+  );
 
   const edit = calls.find((c) => c.method === 'editReply');
   assert.match(edit.payload.content, /unavailable/i);
@@ -379,8 +435,17 @@ test('/record stop is PUBLIC: an unlinked caller can still stop a runaway record
   const appContext = {
     // A directory OUTAGE must not strand a live recording -- stop must not even
     // depend on the lookup. (Throw to prove stop never calls resolvePrincipal.)
-    directory: { getPersonByDiscordId: async () => { throw new DirectoryUnavailable('down'); } },
-    meetingSurface: { stop: async () => { stopped = true; return { status: 'stopped' }; } },
+    directory: {
+      getPersonByDiscordId: async () => {
+        throw new DirectoryUnavailable('down');
+      },
+    },
+    meetingSurface: {
+      stop: async () => {
+        stopped = true;
+        return { status: 'stopped' };
+      },
+    },
   };
   const client = fakeClient();
   wireDiscordClient(client, { commands: recordCommands, appContext });
@@ -393,7 +458,11 @@ test('/record stop is PUBLIC: an unlinked caller can still stop a runaway record
 test('/record status is PUBLIC: works for an unlinked caller without a directory call', async () => {
   const calls = [];
   const appContext = {
-    directory: { getPersonByDiscordId: async () => { throw new DirectoryUnavailable('down'); } },
+    directory: {
+      getPersonByDiscordId: async () => {
+        throw new DirectoryUnavailable('down');
+      },
+    },
     meetingSurface: { status: () => ({ status: 'not-recording' }) },
   };
   const client = fakeClient();
@@ -428,23 +497,44 @@ function fakeVoiceChannel(id, occupants) {
 const botOcc = { userId: BOT_ID, bot: true };
 const botOccUnresolved = { userId: BOT_ID, resolved: false }; // member not cached
 const humanOcc = (userId = 'h1') => ({ userId, bot: false });
-const activeSessionOf = (sessionId, channelId, occupants) =>
-  ({ sessionId, voiceChannel: fakeVoiceChannel(channelId, occupants) });
+const activeSessionOf = (sessionId, channelId, occupants) => ({
+  sessionId,
+  voiceChannel: fakeVoiceChannel(channelId, occupants),
+});
 
 // A controllable timer: setTimer captures the callback, fire() runs it.
 function fakeTimer() {
   const state = { cb: null, cleared: 0 };
   return {
-    setTimer: (fn) => { state.cb = fn; return 1; },
-    clearTimer: () => { state.cleared += 1; state.cb = null; },
-    fire: () => { const fn = state.cb; state.cb = null; if (fn) return fn(); },
-    get scheduled() { return state.cb !== null; },
-    get cleared() { return state.cleared; },
+    setTimer: (fn) => {
+      state.cb = fn;
+      return 1;
+    },
+    clearTimer: () => {
+      state.cleared += 1;
+      state.cb = null;
+    },
+    fire: () => {
+      const fn = state.cb;
+      state.cb = null;
+      if (fn) return fn();
+    },
+    get scheduled() {
+      return state.cb !== null;
+    },
+    get cleared() {
+      return state.cleared;
+    },
   };
 }
 
 const makeAutoStop = (timer, meetingSurface) =>
-  createAutoStop({ meetingSurface, getBotId: () => BOT_ID, setTimer: timer.setTimer, clearTimer: timer.clearTimer });
+  createAutoStop({
+    meetingSurface,
+    getBotId: () => BOT_ID,
+    setTimer: timer.setTimer,
+    clearTimer: timer.clearTimer,
+  });
 
 const leaveEvent = { channelId: 'vc1', guild: { id: 'g1' } };
 const nowInVc2 = { channelId: 'vc2', guild: { id: 'g1' } };
@@ -460,7 +550,11 @@ test('auto-stop: the recorder bot alone does NOT count as an occupant (even if i
     stop: async () => {},
   };
   makeAutoStop(timer, meetingSurface)(leaveEvent, left);
-  assert.equal(timer.scheduled, true, 'a channel with only the bot must read as empty and schedule a stop');
+  assert.equal(
+    timer.scheduled,
+    true,
+    'a channel with only the bot must read as empty and schedule a stop',
+  );
 });
 
 test('auto-stop: DEBOUNCES -- schedules on empty, stops only after the grace timer fires', async () => {
@@ -468,7 +562,10 @@ test('auto-stop: DEBOUNCES -- schedules on empty, stops only after the grace tim
   let stopped = null;
   const meetingSurface = {
     activeSession: () => activeSessionOf('s1', 'vc1', [botOcc]), // only the bot
-    stop: async (g) => { stopped = g; return { status: 'stopped' }; },
+    stop: async (g) => {
+      stopped = g;
+      return { status: 'stopped' };
+    },
   };
   makeAutoStop(timer, meetingSurface)(leaveEvent, left);
   assert.equal(timer.scheduled, true, 'stop must be SCHEDULED, not fired immediately');
@@ -484,7 +581,9 @@ test('auto-stop: cancels the pending stop if a human returns before the timer fi
   let occupants = [botOcc]; // empty of humans
   const meetingSurface = {
     activeSession: () => activeSessionOf('s1', 'vc1', occupants),
-    stop: async () => { stopCalled = true; },
+    stop: async () => {
+      stopCalled = true;
+    },
   };
   const onVSU = makeAutoStop(timer, meetingSurface);
 
@@ -506,7 +605,9 @@ test('auto-stop: re-checks at fire time and does NOT stop if a human is back', a
   let occupants = [botOcc];
   const meetingSurface = {
     activeSession: () => activeSessionOf('s1', 'vc1', occupants),
-    stop: async () => { stopCalled = true; },
+    stop: async () => {
+      stopCalled = true;
+    },
   };
   const onVSU = makeAutoStop(timer, meetingSurface);
 
@@ -520,7 +621,12 @@ test('auto-stop: a stale timer from an ENDED session never stops a LATER recordi
   const timer = fakeTimer();
   let session = activeSessionOf('A', 'vc1', [botOcc]); // A, empty of humans
   const stops = [];
-  const meetingSurface = { activeSession: () => session, stop: async (g) => { stops.push(g); } };
+  const meetingSurface = {
+    activeSession: () => session,
+    stop: async (g) => {
+      stops.push(g);
+    },
+  };
   const onVSU = makeAutoStop(timer, meetingSurface);
 
   onVSU(leaveEvent, left);
@@ -564,4 +670,3 @@ test('auto-stop: no-op (and clears any pending) when nothing is being recorded',
   makeAutoStop(timer, meetingSurface)(leaveEvent, left);
   assert.equal(timer.scheduled, false);
 });
-

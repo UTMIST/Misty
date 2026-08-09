@@ -47,13 +47,16 @@ function formatOption(option) {
 export function buildHelpEmbed(commands) {
   const sorted = [...commands].sort((a, b) => a.name.localeCompare(b.name));
   return {
-    embeds: [{
-      title: 'Available commands',
-      description: sorted.length === 0
-        ? 'No commands are available.'
-        : sorted.map((command) => `**/${command.name}** — ${command.description}`).join('\n'),
-      footer: { text: 'Use /help command:<name> for details.' },
-    }],
+    embeds: [
+      {
+        title: 'Available commands',
+        description:
+          sorted.length === 0
+            ? 'No commands are available.'
+            : sorted.map((command) => `**/${command.name}** — ${command.description}`).join('\n'),
+        footer: { text: 'Use /help command:<name> for details.' },
+      },
+    ],
     ephemeral: true,
   };
 }
@@ -78,11 +81,13 @@ export function buildCommandDetailEmbed(command) {
     });
   }
   return {
-    embeds: [{
-      title: `/${command.name}`,
-      description: command.description,
-      ...(fields.length > 0 ? { fields } : {}),
-    }],
+    embeds: [
+      {
+        title: `/${command.name}`,
+        description: command.description,
+        ...(fields.length > 0 ? { fields } : {}),
+      },
+    ],
     ephemeral: true,
   };
 }
@@ -192,7 +197,8 @@ export function renderSeedResult(result) {
 
 const FALLBACK = 'Something went wrong. Please try again.';
 const DIRECTORY_DOWN_MSG = 'The directory is temporarily unavailable. Please try again shortly.';
-const DOC_DOWN_MSG = 'The documentation service is temporarily unavailable. Please try again shortly.';
+const DOC_DOWN_MSG =
+  'The documentation service is temporarily unavailable. Please try again shortly.';
 const USER_NOT_LINKED_MSG =
   "That user hasn't linked their directory account yet. Ask them to run `/link` first, then try again.";
 
@@ -217,9 +223,7 @@ export function renderListTeamsResult(result) {
     switch (result.outcome) {
       case 'LISTED':
         if (result.teams.length === 0) return 'There are no teams yet.';
-        return result.teams
-          .map((t) => `• **${t.label}** (\`${t.slug}\`)`)
-          .join('\n');
+        return result.teams.map((t) => `• **${t.label}** (\`${t.slug}\`)`).join('\n');
       case 'DIRECTORY_DOWN':
         return DIRECTORY_DOWN_MSG;
       default:
@@ -345,7 +349,8 @@ export function renderDocAddResult(result) {
     switch (result.outcome) {
       case 'ADDED':
       case 'MERGED': {
-        const verb = result.outcome === 'ADDED' ? '✅ Catalogued' : '✅ Already catalogued (tags merged)';
+        const verb =
+          result.outcome === 'ADDED' ? '✅ Catalogued' : '✅ Already catalogued (tags merged)';
         const title = result.doc.title || result.doc.url;
         const lines = [`${verb}: **${title}**`, result.doc.url, `id: \`${result.doc.id}\``];
         if (result.warnings && result.warnings.length > 0) {

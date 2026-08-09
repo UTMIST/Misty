@@ -30,7 +30,12 @@ export default defineCommand({
       options: [
         { name: 'slug', type: 'string', required: true, description: 'Short handle, e.g. "ml"' },
         { name: 'label', type: 'string', required: true, description: 'Display name' },
-        { name: 'description', type: 'string', required: false, description: 'Optional description' },
+        {
+          name: 'description',
+          type: 'string',
+          required: false,
+          description: 'Optional description',
+        },
       ],
       async handler({ options, principal, ctx }) {
         const caller = principal?.person;
@@ -48,12 +53,18 @@ export default defineCommand({
       auth: 'linked',
       ephemeral: false, // shared reference — post publicly so the channel can see it
       options: [
-        { name: 'active_only', type: 'boolean', required: false, description: 'Only active teams (default true)' },
+        {
+          name: 'active_only',
+          type: 'boolean',
+          required: false,
+          description: 'Only active teams (default true)',
+        },
       ],
       async handler({ options, principal, ctx }) {
         const caller = principal?.person;
         const activeOnlyOpt = options.active_only;
-        const activeOnly = activeOnlyOpt === null || activeOnlyOpt === undefined ? true : activeOnlyOpt;
+        const activeOnly =
+          activeOnlyOpt === null || activeOnlyOpt === undefined ? true : activeOnlyOpt;
         const result = await ctx.teamService.listTeams({ activeOnly }, { caller });
         return renderListTeamsResult(result);
       },
@@ -63,7 +74,13 @@ export default defineCommand({
       description: 'Rename a team (admin)',
       auth: 'admin',
       options: [
-        { name: 'slug', type: 'string', required: true, description: 'Team slug', autocomplete: allTeamsAutocomplete },
+        {
+          name: 'slug',
+          type: 'string',
+          required: true,
+          description: 'Team slug',
+          autocomplete: allTeamsAutocomplete,
+        },
         { name: 'new_label', type: 'string', required: true, description: 'New display name' },
       ],
       async handler({ options, principal, ctx }) {
@@ -81,9 +98,26 @@ export default defineCommand({
       auth: 'admin',
       options: [
         { name: 'user', type: 'user', required: true, description: 'Discord user' },
-        { name: 'team', type: 'string', required: true, description: 'Team slug', autocomplete: allTeamsAutocomplete },
-        { name: 'role', type: 'string', required: false, description: 'Role (default member)', choices: ROLE_CHOICES },
-        { name: 'team_admin', type: 'boolean', required: false, description: 'Grant team-admin flag' },
+        {
+          name: 'team',
+          type: 'string',
+          required: true,
+          description: 'Team slug',
+          autocomplete: allTeamsAutocomplete,
+        },
+        {
+          name: 'role',
+          type: 'string',
+          required: false,
+          description: 'Role (default member)',
+          choices: ROLE_CHOICES,
+        },
+        {
+          name: 'team_admin',
+          type: 'boolean',
+          required: false,
+          description: 'Grant team-admin flag',
+        },
       ],
       async handler({ options, principal, ctx }) {
         const caller = principal?.person;
@@ -105,7 +139,13 @@ export default defineCommand({
       auth: 'admin',
       options: [
         { name: 'user', type: 'user', required: true, description: 'Discord user' },
-        { name: 'team', type: 'string', required: true, description: 'Team slug', autocomplete: allTeamsAutocomplete },
+        {
+          name: 'team',
+          type: 'string',
+          required: true,
+          description: 'Team slug',
+          autocomplete: allTeamsAutocomplete,
+        },
       ],
       async handler({ options, principal, ctx }) {
         const caller = principal?.person;
@@ -122,7 +162,13 @@ export default defineCommand({
       auth: 'linked',
       ephemeral: false, // shared reference — post publicly so the channel can see it
       options: [
-        { name: 'team', type: 'string', required: true, description: 'Team slug', autocomplete: allTeamsAutocomplete },
+        {
+          name: 'team',
+          type: 'string',
+          required: true,
+          description: 'Team slug',
+          autocomplete: allTeamsAutocomplete,
+        },
         { name: 'as_of', type: 'string', required: false, description: 'ISO date (default today)' },
       ],
       async handler({ options, principal, ctx }) {

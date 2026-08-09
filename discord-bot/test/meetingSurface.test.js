@@ -23,9 +23,13 @@ function makeFakes({ stopImpl, posterImpl } = {}) {
   const openStreamOpts = [];
 
   const notifies = [];
-  const notify = async (n) => { notifies.push(n); };
+  const notify = async (n) => {
+    notifies.push(n);
+  };
   const stream = {
-    endAudio: () => { callOrder.push('stream.endAudio'); },
+    endAudio: () => {
+      callOrder.push('stream.endAudio');
+    },
     close: (...args) => {
       callOrder.push('stream.close');
       closeCalls.push(args);
@@ -153,7 +157,12 @@ test('stop calls recorder.stop, stream.close, meetingClient.stop, then poster wi
   // before stream.close() -- closing the WS first races the session into
   // being discarded server-side (WS-disconnect-without-prior-/stop => discard,
   // no finalize), which would lose the minutes/PDF/audio.
-  assert.deepEqual(fakes.callOrder, ['recorder.stop', 'stream.endAudio', 'client.stop', 'stream.close']);
+  assert.deepEqual(fakes.callOrder, [
+    'recorder.stop',
+    'stream.endAudio',
+    'client.stop',
+    'stream.close',
+  ]);
 });
 
 test('stop with no active session returns not-recording', async () => {
@@ -258,7 +267,9 @@ test('a WS stream error tears down the session so a subsequent start for that gu
 
 test('a failed join reports error, not recording', async () => {
   const fakes = makeFakes();
-  fakes.recorder.start = async () => { throw new Error('join failed'); };
+  fakes.recorder.start = async () => {
+    throw new Error('join failed');
+  };
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
 
   const originalError = console.error;
@@ -267,12 +278,20 @@ test('a failed join reports error, not recording', async () => {
     // Telling the user "🔴 Recording…" when the bot never joined means a
     // missing Connect permission or a full channel looks like success, and they
     // only discover the meeting was never captured at /record stop.
-    const result = await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+    const result = await surface.start({
+      guildId: 'g1',
+      voiceChannel: { id: 'vc1' },
+      textChannel: { id: 'tc1' },
+    });
     assert.equal(result.status, 'error');
 
     // ...and the guild is left clean, so they can just try again.
     fakes.recorder.start = async () => {};
-    const second = await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+    const second = await surface.start({
+      guildId: 'g1',
+      voiceChannel: { id: 'vc1' },
+      textChannel: { id: 'tc1' },
+    });
     assert.equal(second.status, 'recording');
   } finally {
     console.error = originalError;
@@ -281,7 +300,9 @@ test('a failed join reports error, not recording', async () => {
 
 test('a failed join is logged and never throws', async () => {
   const fakes = makeFakes();
-  fakes.recorder.start = async () => { throw new Error('join failed'); };
+  fakes.recorder.start = async () => {
+    throw new Error('join failed');
+  };
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
 
   const originalError = console.error;
@@ -349,15 +370,22 @@ test('a WS error stops the recorder, not just the stream', async () => {
   // meeting. The channel gets the minutes; nobody gets a "died" warning.
   assert.equal(fakes.stopCalls.length, 1, 'the transcript was never salvaged via POST /stop');
   assert.equal(fakes.posterCalls.length, 1, 'the minutes were never posted');
-  assert.equal(fakes.notifies.length, 0, `unexpected failure notice: ${JSON.stringify(fakes.notifies)}`);
+  assert.equal(
+    fakes.notifies.length,
+    0,
+    `unexpected failure notice: ${JSON.stringify(fakes.notifies)}`,
+  );
 });
-
 
 test('a dropped socket that cannot be salvaged tells the channel, and still leaves the voice channel', async () => {
   // The grace period has expired, the service redeployed, or /stop failed --
   // whatever the reason, the minutes are genuinely gone and the meeting must
   // not be left silently dead with the bot parked in the voice channel.
-  const fakes = makeFakes({ stopImpl: () => { throw new Error('404 session gone'); } });
+  const fakes = makeFakes({
+    stopImpl: () => {
+      throw new Error('404 session gone');
+    },
+  });
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
   await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
   fakes.callOrder.length = 0;
@@ -407,7 +435,11 @@ test('a stream that fails synchronously never registers a session', async () => 
   const originalError = console.error;
   console.error = () => {};
   try {
-    const result = await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+    const result = await surface.start({
+      guildId: 'g1',
+      voiceChannel: { id: 'vc1' },
+      textChannel: { id: 'tc1' },
+    });
     assert.equal(result.status, 'error');
   } finally {
     console.error = originalError;
@@ -436,7 +468,11 @@ test('a normal stop does not announce that the recording died', async () => {
   fakes.openStreamOpts.at(-1).onClose();
   await new Promise((r) => setImmediate(r));
 
-  assert.equal(fakes.notifies.length, 0, `told the user a completed meeting died: ${JSON.stringify(fakes.notifies)}`);
+  assert.equal(
+    fakes.notifies.length,
+    0,
+    `told the user a completed meeting died: ${JSON.stringify(fakes.notifies)}`,
+  );
   assert.equal(fakes.recorderStopCalls.length, 1, 'the recorder was stopped twice');
 });
 

@@ -23,9 +23,7 @@ function applyOption(target, o) {
 }
 
 export function buildDiscordData(command) {
-  const b = new SlashCommandBuilder()
-    .setName(command.name)
-    .setDescription(command.description);
+  const b = new SlashCommandBuilder().setName(command.name).setDescription(command.description);
   if (command.subcommands.length) {
     for (const sub of command.subcommands) {
       b.addSubcommand((s) => {
@@ -58,10 +56,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   if (config.discordGuildId) {
     // Registering betaBody (which may be empty) also CLEARS any previously
     // registered guild commands, so promoted/removed beta commands don't linger.
-    await rest.put(
-      Routes.applicationGuildCommands(config.discordClientId, config.discordGuildId),
-      { body: betaBody },
-    );
+    await rest.put(Routes.applicationGuildCommands(config.discordClientId, config.discordGuildId), {
+      body: betaBody,
+    });
     console.log(
       `Registered ${betaBody.length} beta commands to testing guild ${config.discordGuildId} (exclusive).`,
     );

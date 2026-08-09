@@ -59,12 +59,18 @@ export function createMeetingSurface({
       try {
         if (recorder) await recorder.stop();
       } catch (err) {
-        console.error(`meetingSurface: error stopping recorder during teardown for guild ${guildId}:`, err);
+        console.error(
+          `meetingSurface: error stopping recorder during teardown for guild ${guildId}:`,
+          err,
+        );
       }
       try {
         if (stream) await stream.close();
       } catch (err) {
-        console.error(`meetingSurface: error closing stream during teardown for guild ${guildId}:`, err);
+        console.error(
+          `meetingSurface: error closing stream during teardown for guild ${guildId}:`,
+          err,
+        );
       }
       // Nothing to announce if the recording never started: start() returns
       // 'error' and the command reply already says so.
@@ -106,7 +112,10 @@ export function createMeetingSurface({
       try {
         if (recorder) await recorder.stop();
       } catch (err) {
-        console.error(`meetingSurface: error stopping recorder after failed salvage for guild ${guildId}:`, err);
+        console.error(
+          `meetingSurface: error stopping recorder after failed salvage for guild ${guildId}:`,
+          err,
+        );
       }
       await notify({
         channel: textChannel,
@@ -139,10 +148,14 @@ export function createMeetingSurface({
         if (sessions.get(guildId)?.sessionId !== sessionId) return;
         notify({
           channel: textChannel,
-          content: '⚠️ I lost the voice connection. Wrapping up the recording — the minutes will cover everything up to that point.',
+          content:
+            '⚠️ I lost the voice connection. Wrapping up the recording — the minutes will cover everything up to that point.',
         }).catch((err) => console.error('meetingSurface: voice-lost notify failed:', err));
         stop(guildId).catch((err) => {
-          console.error(`meetingSurface: finalize after voice loss failed for guild ${guildId}:`, err);
+          console.error(
+            `meetingSurface: finalize after voice loss failed for guild ${guildId}:`,
+            err,
+          );
         });
       },
     });
@@ -234,7 +247,10 @@ export function createMeetingSurface({
       // Close regardless of outcome so a failed recorder.stop()/finalize
       // never leaves the WS connected to the meeting service.
       await Promise.resolve(stream.close()).catch((closeErr) => {
-        console.error(`meetingSurface: error closing stream during stop for guild ${guildId}:`, closeErr);
+        console.error(
+          `meetingSurface: error closing stream during stop for guild ${guildId}:`,
+          closeErr,
+        );
       });
     }
   }

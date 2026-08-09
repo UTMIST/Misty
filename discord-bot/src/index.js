@@ -2,7 +2,11 @@ import { Client, GatewayIntentBits } from 'discord.js';
 import { loadConfig } from './config.js';
 import { createAppContext } from './context.js';
 import { commands } from './commands/index.js';
-import { wireDiscordClient, makeAttachmentPoster, makeChannelNotifier } from './adapters/discord.js';
+import {
+  wireDiscordClient,
+  makeAttachmentPoster,
+  makeChannelNotifier,
+} from './adapters/discord.js';
 
 async function main() {
   const config = loadConfig();

@@ -16,9 +16,7 @@ function commandsAvailableToIntent(commands, intent, appContext) {
   const includeBeta = Boolean(
     appContext.discordGuildId && intent.discordGuildId === appContext.discordGuildId,
   );
-  return new Map(
-    [...commands].filter(([, candidate]) => !candidate.beta || includeBeta),
-  );
+  return new Map([...commands].filter(([, candidate]) => !candidate.beta || includeBeta));
 }
 
 // The single Policy Enforcement Point: authenticate -> authorize -> dispatch.
@@ -122,7 +120,7 @@ export async function dispatchAutocomplete(intent, { commands, appContext }) {
   const command = commands.get(intent.commandName);
   if (!command) return [];
   const activeOptions = intent.subcommand
-    ? command.subcommands.find((s) => s.name === intent.subcommand)?.options ?? []
+    ? (command.subcommands.find((s) => s.name === intent.subcommand)?.options ?? [])
     : command.options;
   const option = activeOptions.find((o) => o.name === intent.focusedOption);
   if (!option || typeof option.autocomplete !== 'function') return [];

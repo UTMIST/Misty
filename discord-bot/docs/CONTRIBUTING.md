@@ -146,3 +146,12 @@ CI runs `node-test` (`npm ci` + `npm test`) plus a Docker build with a boot smok
 - [ ] Tests cover the handler and the auth policy.
 - [ ] Command lists updated in this service's README and the root README.
 - [ ] `npm test` is clean.
+- [ ] `npm run lint` and `npm run format:check` are clean. Both gate CI, the same
+      way `ruff check` / `ruff format --check` gate every Python service.
+      `npm run lint:fix` and `npm run format` fix most of what they find.
+
+> Formatting is Prettier's job and correctness is ESLint's — `eslint-config-prettier`
+> switches off every stylistic ESLint rule so the two can't disagree. Config lives in
+> [`eslint.config.js`](../eslint.config.js) and [`.prettierrc.json`](../.prettierrc.json);
+> `printWidth` is **100**, matching the `line-length = 100` the Python services set for ruff.
+> Both are scoped to `*.js` — the Markdown here is hand-wrapped and Prettier must not touch it.

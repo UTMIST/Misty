@@ -17,7 +17,10 @@ test('record is registered in the command registry', () => {
 test('record is on the stable channel (registered globally, not testing-guild only)', () => {
   const { stable, beta } = partitionCommands([...commands.values()]);
   assert.ok(stable.some((c) => c.name === 'record'));
-  assert.deepEqual(beta.map((c) => c.name), []);
+  assert.deepEqual(
+    beta.map((c) => c.name),
+    [],
+  );
 });
 
 test('record handler is a guard that is never reached via the neutral path (adapter intercepts)', async () => {

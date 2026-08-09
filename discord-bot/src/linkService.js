@@ -16,7 +16,7 @@ function subjectFor(discordUserId) {
 }
 
 export function createLinkService({ directory, verification }) {
-  async function linkByEmail({ email, discordUserId, discordHandle }) {
+  async function linkByEmail({ email, discordUserId }) {
     try {
       const person = await directory.getPersonByEmail(email);
       if (!person) return { outcome: 'NOT_A_MEMBER' };
