@@ -78,7 +78,9 @@ Violating any of these is a bug even if tests pass.
 
 ### Run before you push
 
-For a DB-backed service (team-tracking, documentation-system, verification):
+`make check` from the repo root runs lint, format checks, and the fast suites across all seven Python directories plus the bot. `make help` lists the rest. It's a wrapper over the commands below — `ci.yml` is still authoritative, and a disagreement between the two means the Makefile is wrong.
+
+For a single DB-backed service (team-tracking, documentation-system, verification):
 
 ```bash
 cd services/<service>

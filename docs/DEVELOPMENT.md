@@ -378,8 +378,22 @@ is the workflow around them.
    - [connectors CONTRIBUTING](../services/connectors/docs/CONTRIBUTING.md)
    - [discord-bot CONTRIBUTING](../discord-bot/docs/CONTRIBUTING.md)
 
-3. **Run the fast tests locally** before you push. For a DB-backed API
-   (team-tracking, documentation-system, verification):
+3. **Run the fast tests locally** before you push.
+
+   The whole repo at once, from the root — this is what you want most of the
+   time:
+
+   ```bash
+   make check    # lint + format check + fast tests, everywhere
+   ```
+
+   `make help` lists the rest (`make install`, `make test`, `make format`,
+   `make test-full`). It's a convenience wrapper over the per-directory commands
+   below, not a replacement for them — [`ci.yml`](../.github/workflows/ci.yml)
+   stays authoritative, and if the Makefile ever disagrees with CI, CI is right.
+
+   To run one service on its own — for a DB-backed API (team-tracking,
+   documentation-system, verification):
 
    ```bash
    cd services/<service>
