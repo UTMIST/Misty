@@ -1,12 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTeamService, llmSafe } from '../src/teamService.js';
-import {
-  TeamExists,
-  TeamNotFound,
-  MembershipInvalid,
-  DirectoryUnavailable,
-} from '../src/directoryClient.js';
+import { TeamExists, MembershipInvalid, DirectoryUnavailable } from '../src/directoryClient.js';
 
 const admin = { id: 'a', display_name: 'A', access_level: 'admin' };
 
@@ -36,7 +31,9 @@ test('createTeam returns CREATED on success', async () => {
 test('createTeam returns SLUG_EXISTS on TeamExists', async () => {
   const svc = createTeamService({
     directory: {
-      createTeam: async () => { throw new TeamExists('slug already exists'); },
+      createTeam: async () => {
+        throw new TeamExists('slug already exists');
+      },
     },
   });
   const res = await svc.createTeam({ slug: 'ml', label: 'ML' }, { caller: admin });
@@ -47,7 +44,9 @@ test('createTeam returns SLUG_EXISTS on TeamExists', async () => {
 test('createTeam returns DIRECTORY_DOWN on DirectoryUnavailable', async () => {
   const svc = createTeamService({
     directory: {
-      createTeam: async () => { throw new DirectoryUnavailable('down'); },
+      createTeam: async () => {
+        throw new DirectoryUnavailable('down');
+      },
     },
   });
   const res = await svc.createTeam({ slug: 'ml', label: 'ML' }, { caller: admin });
@@ -71,7 +70,9 @@ test('listTeams returns LISTED with teams array', async () => {
 test('listTeams returns DIRECTORY_DOWN when directory is unavailable', async () => {
   const svc = createTeamService({
     directory: {
-      listTeams: async () => { throw new DirectoryUnavailable('down'); },
+      listTeams: async () => {
+        throw new DirectoryUnavailable('down');
+      },
     },
   });
   const res = await svc.listTeams({ activeOnly: true }, { caller: admin });
@@ -104,7 +105,9 @@ test('renameTeam returns TEAM_NOT_FOUND when slug does not resolve', async () =>
   const svc = createTeamService({
     directory: {
       getTeamBySlug: async () => null,
-      updateTeam: async () => { throw new Error('should not be called'); },
+      updateTeam: async () => {
+        throw new Error('should not be called');
+      },
     },
   });
   const res = await svc.renameTeam({ slug: 'missing', newLabel: 'X' }, { caller: admin });
@@ -114,7 +117,9 @@ test('renameTeam returns TEAM_NOT_FOUND when slug does not resolve', async () =>
 test('renameTeam returns DIRECTORY_DOWN on outage during lookup', async () => {
   const svc = createTeamService({
     directory: {
-      getTeamBySlug: async () => { throw new DirectoryUnavailable('down'); },
+      getTeamBySlug: async () => {
+        throw new DirectoryUnavailable('down');
+      },
       updateTeam: async () => ({}),
     },
   });
@@ -135,10 +140,7 @@ function mkDir(overrides = {}) {
 
 test('addMember returns USER_NOT_LINKED when snowflake does not resolve', async () => {
   const svc = createTeamService({ directory: mkDir() });
-  const res = await svc.addMember(
-    { discordSnowflake: '999', teamSlug: 'ml' },
-    { caller: admin },
-  );
+  const res = await svc.addMember({ discordSnowflake: '999', teamSlug: 'ml' }, { caller: admin });
   assert.equal(res.outcome, 'USER_NOT_LINKED');
 });
 
@@ -170,13 +172,13 @@ test('addMember returns ALREADY_ON_TEAM when active membership exists', async ()
         assert.equal(args.activeOnly, true);
         return [{ id: 'm-existing' }];
       },
-      createMembership: async () => { created = true; return {}; },
+      createMembership: async () => {
+        created = true;
+        return {};
+      },
     }),
   });
-  const res = await svc.addMember(
-    { discordSnowflake: '123', teamSlug: 'ml' },
-    { caller: admin },
-  );
+  const res = await svc.addMember({ discordSnowflake: '123', teamSlug: 'ml' }, { caller: admin });
   assert.equal(res.outcome, 'ALREADY_ON_TEAM');
   assert.equal(res.person, person);
   assert.equal(res.team, team);
@@ -213,13 +215,12 @@ test('addMember returns ADDED with role and admin flag forwarded', async () => {
 test('addMember returns DIRECTORY_DOWN on outage during person lookup', async () => {
   const svc = createTeamService({
     directory: mkDir({
-      getPersonByDiscordId: async () => { throw new DirectoryUnavailable('down'); },
+      getPersonByDiscordId: async () => {
+        throw new DirectoryUnavailable('down');
+      },
     }),
   });
-  const res = await svc.addMember(
-    { discordSnowflake: '123', teamSlug: 'ml' },
-    { caller: admin },
-  );
+  const res = await svc.addMember({ discordSnowflake: '123', teamSlug: 'ml' }, { caller: admin });
   assert.equal(res.outcome, 'DIRECTORY_DOWN');
 });
 
@@ -231,13 +232,12 @@ test('addMember maps MembershipInvalid with "already" detail to ALREADY_ON_TEAM 
       getPersonByDiscordId: async () => person,
       getTeamBySlug: async () => team,
       listMemberships: async () => [],
-      createMembership: async () => { throw new MembershipInvalid('active membership already exists'); },
+      createMembership: async () => {
+        throw new MembershipInvalid('active membership already exists');
+      },
     }),
   });
-  const res = await svc.addMember(
-    { discordSnowflake: '123', teamSlug: 'ml' },
-    { caller: admin },
-  );
+  const res = await svc.addMember({ discordSnowflake: '123', teamSlug: 'ml' }, { caller: admin });
   assert.equal(res.outcome, 'ALREADY_ON_TEAM');
 });
 
@@ -249,7 +249,9 @@ test('addMember surfaces other MembershipInvalid detail as MEMBERSHIP_INVALID', 
       getPersonByDiscordId: async () => person,
       getTeamBySlug: async () => team,
       listMemberships: async () => [],
-      createMembership: async () => { throw new MembershipInvalid('role_kind_id not found: lead'); },
+      createMembership: async () => {
+        throw new MembershipInvalid('role_kind_id not found: lead');
+      },
     }),
   });
   const res = await svc.addMember(
@@ -330,7 +332,9 @@ test('removeMember returns DIRECTORY_DOWN on outage during team lookup', async (
   const svc = createTeamService({
     directory: mkDir({
       getPersonByDiscordId: async () => ({ id: 'p1', display_name: 'A' }),
-      getTeamBySlug: async () => { throw new DirectoryUnavailable('down'); },
+      getTeamBySlug: async () => {
+        throw new DirectoryUnavailable('down');
+      },
     }),
   });
   const res = await svc.removeMember(
@@ -363,7 +367,10 @@ test('getRoster returns ROSTER with resolved persons using injected now() as as_
     directory: {
       ...mkDir(),
       getTeamBySlug: async () => team,
-      listMemberships: async (args) => { listedWith = args; return memberships; },
+      listMemberships: async (args) => {
+        listedWith = args;
+        return memberships;
+      },
       getPerson: async (id) => people[id] ?? null,
     },
     now: () => '2026-07-01',
@@ -376,7 +383,9 @@ test('getRoster returns ROSTER with resolved persons using injected now() as as_
   assert.equal(res.members[0].role_kind_id, 'lead');
   assert.equal(res.members[0].is_team_admin, true);
   assert.deepEqual(listedWith, {
-    teamId: 't1', activeOnly: true, asOf: '2026-07-01',
+    teamId: 't1',
+    activeOnly: true,
+    asOf: '2026-07-01',
   });
 });
 
@@ -386,7 +395,10 @@ test('getRoster uses explicit asOf when provided', async () => {
     directory: {
       ...mkDir(),
       getTeamBySlug: async () => ({ id: 't1' }),
-      listMemberships: async (args) => { listedWith = args; return []; },
+      listMemberships: async (args) => {
+        listedWith = args;
+        return [];
+      },
     },
     now: () => 'IGNORED',
   });
@@ -416,7 +428,9 @@ test('getRoster returns DIRECTORY_DOWN on outage', async () => {
   const svc = createTeamService({
     directory: {
       ...mkDir(),
-      getTeamBySlug: async () => { throw new DirectoryUnavailable('down'); },
+      getTeamBySlug: async () => {
+        throw new DirectoryUnavailable('down');
+      },
     },
   });
   const res = await svc.getRoster({ teamSlug: 'ml' }, { caller: admin });
@@ -471,7 +485,9 @@ test('getMyTeams returns DIRECTORY_DOWN on outage', async () => {
   const svc = createTeamService({
     directory: {
       ...mkDir(),
-      listMemberships: async () => { throw new DirectoryUnavailable('down'); },
+      listMemberships: async () => {
+        throw new DirectoryUnavailable('down');
+      },
     },
   });
   const res = await svc.getMyTeams({ personId: 'p1' }, { caller: admin });

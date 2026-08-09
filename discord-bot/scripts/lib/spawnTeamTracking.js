@@ -5,7 +5,9 @@ async function pollReady(url, { attempts = 30, delayMs = 250 } = {}) {
     try {
       const res = await fetch(url);
       if (res.ok) return;
-    } catch { /* not up yet */ }
+    } catch {
+      /* not up yet */
+    }
     await new Promise((r) => setTimeout(r, delayMs));
   }
   throw new Error(`team-tracking at ${url} did not become ready within ${attempts * delayMs}ms`);
@@ -33,10 +35,11 @@ export async function spawnTeamTracking({ port, databaseUrl, teamTrackingDir }) 
   return {
     child,
     url,
-    close: () => new Promise((resolve) => {
-      if (child.exitCode !== null) return resolve();
-      child.once('exit', () => resolve());
-      child.kill('SIGTERM');
-    }),
+    close: () =>
+      new Promise((resolve) => {
+        if (child.exitCode !== null) return resolve();
+        child.once('exit', () => resolve());
+        child.kill('SIGTERM');
+      }),
   };
 }

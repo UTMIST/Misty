@@ -89,7 +89,7 @@ uv run pytest                                           # full, needs Postgres u
 uv run ruff check . && uv run ruff format --check .
 ```
 
-`llm`, `meeting`, and `connectors` have no Postgres adapter — just `uv run pytest`. The bot: `cd discord-bot && npm test`. The shared library: `cd packages/auth && uv run pytest`.
+`llm`, `meeting`, and `connectors` have no Postgres adapter — just `uv run pytest`. The bot: `cd discord-bot && npm test && npm run lint && npm run format:check`. The shared library: `cd packages/auth && uv run pytest`.
 
 Run what CI runs for that service — `.github/workflows/ci.yml` is authoritative, and [`docs/DEPLOYMENT-HISTORY.md`](docs/DEPLOYMENT-HISTORY.md#ci-on-every-pr-to-staging-or-main) lists what each of the ten jobs covers — rather than the generic pair, and don't quote test counts in docs or commit messages — they go stale immediately.
 
@@ -98,6 +98,8 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 > Run both before pushing. A formatting-only diff is fine on its own, but **never bundle a reformat with a behavior change** — the diff becomes unreviewable.
 >
 > Use the ruff version pinned in `uv.lock` (`uv run ruff …` does this for you). Formatter output drifts between ruff versions, so a system-wide `ruff` can produce a diff CI disagrees with.
+>
+> **The bot is gated the same way**, by ESLint and Prettier instead of ruff: `node-test` runs `npm run lint` and `npm run format:check` after `npm test`. Same rule about not bundling a reformat with a behavior change. Both are scoped to `*.js` — Markdown in this repo is hand-wrapped and Prettier must not reflow it. Use the pinned versions via `npm ci`, not a global `eslint`/`prettier`.
 
 ## Gotchas that will cost you an hour
 

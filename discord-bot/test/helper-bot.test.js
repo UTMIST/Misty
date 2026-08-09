@@ -33,7 +33,11 @@ test('threadHistoryToTurns maps roles, keeps speakers separate, drops leading as
     { author: { id: '2', username: 'bobl' }, content: 'and also this' }, // different human → own turn
     { author: { id: BOT, username: 'misty' }, content: 'answer part 1' },
     { author: { id: BOT, username: 'misty' }, content: 'answer part 2' },
-    { author: { id: '1', username: 'alexx' }, member: { displayName: 'Alex Q' }, content: `<@${BOT}> follow up` },
+    {
+      author: { id: '1', username: 'alexx' },
+      member: { displayName: 'Alex Q' },
+      content: `<@${BOT}> follow up`,
+    },
   ];
   assert.deepEqual(threadHistoryToTurns(fetched, BOT), [
     { role: 'user', text: 'question one', authorId: '1', authorName: 'alexx' },
@@ -86,13 +90,22 @@ function fakeChannel({ isThread = false, history = [], starter, starterThrows = 
     fetched, // args of each messages.fetch call
     typing: 0,
     isThread: () => isThread,
-    async send(content) { sent.push(content); },
-    async sendTyping() { this.typing += 1; },
+    async send(content) {
+      sent.push(content);
+    },
+    async sendTyping() {
+      this.typing += 1;
+    },
     async fetchStarterMessage() {
       if (starterThrows) throw new Error('unknown message');
       return starter ?? null;
     },
-    messages: { fetch: async (opts) => { fetched.push(opts); return { values: () => history }; } },
+    messages: {
+      fetch: async (opts) => {
+        fetched.push(opts);
+        return { values: () => history };
+      },
+    },
   };
 }
 
@@ -101,15 +114,26 @@ function fakeMessage({ content, authorId = '1', authorName = 'alexx', channel, t
     content,
     author: { id: authorId, bot: false, username: authorName },
     channel,
-    reply: async (c) => { (channel.replies ??= []).push(c); },
+    reply: async (c) => {
+      (channel.replies ??= []).push(c);
+    },
     startThread: async () => thread,
   };
 }
 
-function ctx({ principal = { person: { id: 'p1', display_name: 'Alex' } }, answer, dirThrows = false } = {}) {
+function ctx({
+  principal = { person: { id: 'p1', display_name: 'Alex' } },
+  answer,
+  dirThrows = false,
+} = {}) {
   return {
     directory: {
-      getPersonByDiscordId: async () => (dirThrows ? (() => { throw new DirectoryUnavailable('down'); })() : principal?.person ?? null),
+      getPersonByDiscordId: async () =>
+        dirThrows
+          ? (() => {
+              throw new DirectoryUnavailable('down');
+            })()
+          : (principal?.person ?? null),
     },
     helperService: { answer: answer ?? (async () => ({ content: 'the answer' })) },
   };
@@ -126,7 +150,10 @@ test('handleMention in a channel: opens a thread and posts the answer', async ()
 
 test('handleMention in a thread: replays history and posts in the thread', async () => {
   let seen;
-  const answer = async ({ turns }) => { seen = turns; return { content: 'reply' }; };
+  const answer = async ({ turns }) => {
+    seen = turns;
+    return { content: 'reply' };
+  };
   const history = [
     { author: { id: BOT_ID, username: 'misty' }, content: 'earlier answer' },
     { author: { id: '1', username: 'alexx' }, content: `<@${BOT_ID}> follow up` },
@@ -140,7 +167,10 @@ test('handleMention in a thread: replays history and posts in the thread', async
 
 test('handleMention in a thread: every speaker reaches the service separately attributed', async () => {
   let seen;
-  const answer = async ({ turns }) => { seen = turns; return { content: 'reply' }; };
+  const answer = async ({ turns }) => {
+    seen = turns;
+    return { content: 'reply' };
+  };
   const history = [
     { author: { id: '1', username: 'alexx' }, content: `<@${BOT_ID}> how do I get repo access?` },
     { author: { id: BOT_ID, username: 'misty' }, content: 'Ask Infra.' },
@@ -148,23 +178,38 @@ test('handleMention in a thread: every speaker reaches the service separately at
     { author: { id: '3', username: 'cara' }, content: `<@${BOT_ID}> what about mine?` },
   ];
   const thread = fakeChannel({ isThread: true, history });
-  const message = fakeMessage({ content: `<@${BOT_ID}> what about mine?`, authorId: '3', authorName: 'cara', channel: thread });
+  const message = fakeMessage({
+    content: `<@${BOT_ID}> what about mine?`,
+    authorId: '3',
+    authorName: 'cara',
+    channel: thread,
+  });
   await handleMention(message, { appContext: ctx({ answer }), botId: BOT_ID });
-  assert.deepEqual(thread.fetched, [{ limit: 100 }], 'fetches Discord\'s single-call maximum');
-  assert.deepEqual(seen.map((t) => [t.role, t.authorId]), [
-    ['user', '1'],
-    ['assistant', undefined],
-    ['user', '2'],
-    ['user', '3'],
-  ]);
+  assert.deepEqual(thread.fetched, [{ limit: 100 }], "fetches Discord's single-call maximum");
+  assert.deepEqual(
+    seen.map((t) => [t.role, t.authorId]),
+    [
+      ['user', '1'],
+      ['assistant', undefined],
+      ['user', '2'],
+      ['user', '3'],
+    ],
+  );
 });
 
 test('handleMention in a thread: replays the starter message that lives in the parent channel', async () => {
   let seen;
-  const answer = async ({ turns }) => { seen = turns; return { content: 'reply' }; };
+  const answer = async ({ turns }) => {
+    seen = turns;
+    return { content: 'reply' };
+  };
   // The founding question isn't in the thread's own fetch — only the bot's
   // answer and what came after.
-  const starter = { id: 's1', author: { id: '1', username: 'alexx' }, content: `<@${BOT_ID}> how do I get repo access?` };
+  const starter = {
+    id: 's1',
+    author: { id: '1', username: 'alexx' },
+    content: `<@${BOT_ID}> how do I get repo access?`,
+  };
   const history = [
     { id: 'm1', author: { id: BOT_ID, username: 'misty' }, content: 'Ask Infra.' },
     { id: 'm2', author: { id: '1', username: 'alexx' }, content: `<@${BOT_ID}> and for staging?` },
@@ -173,19 +218,29 @@ test('handleMention in a thread: replays the starter message that lives in the p
   const message = fakeMessage({ content: `<@${BOT_ID}> and for staging?`, channel: thread });
   await handleMention(message, { appContext: ctx({ answer }), botId: BOT_ID });
 
-  assert.deepEqual(seen.map((t) => t.text), [
-    'how do I get repo access?', // would have been lost entirely
-    'Ask Infra.', // and this with it, as a leading assistant turn
-    'and for staging?',
-  ]);
+  assert.deepEqual(
+    seen.map((t) => t.text),
+    [
+      'how do I get repo access?', // would have been lost entirely
+      'Ask Infra.', // and this with it, as a leading assistant turn
+      'and for staging?',
+    ],
+  );
   assert.equal(seen[0].authorId, '1', 'starter keeps its author attribution');
 });
 
 test('handleMention in a thread: a starter already in the fetch is not duplicated', async () => {
   let seen;
-  const answer = async ({ turns }) => { seen = turns; return { content: 'reply' }; };
+  const answer = async ({ turns }) => {
+    seen = turns;
+    return { content: 'reply' };
+  };
   // Forum threads return a starter that IS the thread's first message.
-  const starter = { id: 'm1', author: { id: '1', username: 'alexx' }, content: `<@${BOT_ID}> first post` };
+  const starter = {
+    id: 'm1',
+    author: { id: '1', username: 'alexx' },
+    content: `<@${BOT_ID}> first post`,
+  };
   const history = [
     starter,
     { id: 'm2', author: { id: BOT_ID, username: 'misty' }, content: 'an answer' },
@@ -195,41 +250,71 @@ test('handleMention in a thread: a starter already in the fetch is not duplicate
   const message = fakeMessage({ content: `<@${BOT_ID}> follow up`, channel: thread });
   await handleMention(message, { appContext: ctx({ answer }), botId: BOT_ID });
 
-  assert.deepEqual(seen.map((t) => t.text), ['first post', 'an answer', 'follow up']);
+  assert.deepEqual(
+    seen.map((t) => t.text),
+    ['first post', 'an answer', 'follow up'],
+  );
 });
 
 test('handleMention in a thread: a deleted starter costs context, not the answer', async () => {
   let seen;
-  const answer = async ({ turns }) => { seen = turns; return { content: 'reply' }; };
-  const history = [{ id: 'm1', author: { id: '1', username: 'alexx' }, content: `<@${BOT_ID}> follow up` }];
+  const answer = async ({ turns }) => {
+    seen = turns;
+    return { content: 'reply' };
+  };
+  const history = [
+    { id: 'm1', author: { id: '1', username: 'alexx' }, content: `<@${BOT_ID}> follow up` },
+  ];
   const thread = fakeChannel({ isThread: true, history, starterThrows: true });
   const message = fakeMessage({ content: `<@${BOT_ID}> follow up`, channel: thread });
   await handleMention(message, { appContext: ctx({ answer }), botId: BOT_ID });
 
   assert.deepEqual(thread.sent, ['reply'], 'still answers');
-  assert.deepEqual(seen.map((t) => t.text), ['follow up']);
+  assert.deepEqual(
+    seen.map((t) => t.text),
+    ['follow up'],
+  );
 });
 
 test('handleMention in a thread: survives a channel with no fetchStarterMessage', async () => {
   let seen;
-  const answer = async ({ turns }) => { seen = turns; return { content: 'reply' }; };
-  const history = [{ id: 'm1', author: { id: '1', username: 'alexx' }, content: `<@${BOT_ID}> follow up` }];
+  const answer = async ({ turns }) => {
+    seen = turns;
+    return { content: 'reply' };
+  };
+  const history = [
+    { id: 'm1', author: { id: '1', username: 'alexx' }, content: `<@${BOT_ID}> follow up` },
+  ];
   const thread = fakeChannel({ isThread: true, history });
   delete thread.fetchStarterMessage;
   const message = fakeMessage({ content: `<@${BOT_ID}> follow up`, channel: thread });
   await handleMention(message, { appContext: ctx({ answer }), botId: BOT_ID });
 
-  assert.deepEqual(seen.map((t) => t.text), ['follow up']);
+  assert.deepEqual(
+    seen.map((t) => t.text),
+    ['follow up'],
+  );
 });
 
 test('handleMention in a channel: the opening turn carries the asker identity', async () => {
   let seen;
-  const answer = async ({ turns }) => { seen = turns; return { content: 'the answer' }; };
+  const answer = async ({ turns }) => {
+    seen = turns;
+    return { content: 'the answer' };
+  };
   const thread = fakeChannel({ isThread: true });
   const channel = fakeChannel({ isThread: false });
-  const message = fakeMessage({ content: `<@${BOT_ID}> how do I link?`, authorId: '7', authorName: 'dee', channel, thread });
+  const message = fakeMessage({
+    content: `<@${BOT_ID}> how do I link?`,
+    authorId: '7',
+    authorName: 'dee',
+    channel,
+    thread,
+  });
   await handleMention(message, { appContext: ctx({ answer }), botId: BOT_ID });
-  assert.deepEqual(seen, [{ role: 'user', text: 'how do I link?', authorId: '7', authorName: 'dee' }]);
+  assert.deepEqual(seen, [
+    { role: 'user', text: 'how do I link?', authorId: '7', authorName: 'dee' },
+  ]);
 });
 
 test('handleMention: unlinked author gets the link prompt, no thread', async () => {
@@ -244,7 +329,9 @@ test('handleMention: LlmUnavailable posts a friendly error, no throw', async () 
   const thread = fakeChannel({ isThread: true });
   const channel = fakeChannel({ isThread: false });
   const message = fakeMessage({ content: `<@${BOT_ID}> hi`, channel, thread });
-  const answer = async () => { throw new Error('llm down'); };
+  const answer = async () => {
+    throw new Error('llm down');
+  };
   await handleMention(message, { appContext: ctx({ answer }), botId: BOT_ID });
   assert.equal(thread.sent.length, 1);
   assert.match(thread.sent[0], /trouble/i);
@@ -263,7 +350,9 @@ test('handleMention: empty LLM answer posts a friendly fallback, no silent dead-
 test('handleMention: startThread failure gets a friendly reply, no throw', async () => {
   const channel = fakeChannel({ isThread: false });
   const message = fakeMessage({ content: `<@${BOT_ID}> hi`, channel });
-  message.startThread = async () => { throw new Error('missing permission'); };
+  message.startThread = async () => {
+    throw new Error('missing permission');
+  };
   await assert.doesNotReject(() => handleMention(message, { appContext: ctx(), botId: BOT_ID }));
   assert.equal(channel.replies.length, 1);
   assert.match(channel.replies[0], /couldn't open a thread/i);
@@ -290,7 +379,9 @@ test('handleMention: directory-down fails closed, no thread created', async () =
 function ctxThrowingPlainError() {
   return {
     directory: {
-      getPersonByDiscordId: async () => { throw new Error('boom'); },
+      getPersonByDiscordId: async () => {
+        throw new Error('boom');
+      },
     },
     helperService: { answer: async () => ({ content: 'the answer' }) },
   };
@@ -298,7 +389,12 @@ function ctxThrowingPlainError() {
 
 test('messageCreate listener: ignores bot-authored messages (no self-trigger)', async () => {
   const handlers = {};
-  const client = { user: { id: BOT_ID }, on: (evt, fn) => { handlers[evt] = fn; } };
+  const client = {
+    user: { id: BOT_ID },
+    on: (evt, fn) => {
+      handlers[evt] = fn;
+    },
+  };
   wireDiscordClient(client, { commands: new Map(), appContext: ctx() });
 
   const thread = fakeChannel({ isThread: true });
@@ -316,7 +412,12 @@ test('messageCreate listener: ignores bot-authored messages (no self-trigger)', 
 
 test('messageCreate listener: dispatches a real leading-mention message to handleMention', async () => {
   const handlers = {};
-  const client = { user: { id: BOT_ID }, on: (evt, fn) => { handlers[evt] = fn; } };
+  const client = {
+    user: { id: BOT_ID },
+    on: (evt, fn) => {
+      handlers[evt] = fn;
+    },
+  };
   wireDiscordClient(client, { commands: new Map(), appContext: ctx() });
 
   const thread = fakeChannel({ isThread: true });
@@ -330,7 +431,12 @@ test('messageCreate listener: dispatches a real leading-mention message to handl
 
 test('messageCreate listener: swallows a throw from handleMention', async () => {
   const handlers = {};
-  const client = { user: { id: BOT_ID }, on: (evt, fn) => { handlers[evt] = fn; } };
+  const client = {
+    user: { id: BOT_ID },
+    on: (evt, fn) => {
+      handlers[evt] = fn;
+    },
+  };
   wireDiscordClient(client, { commands: new Map(), appContext: ctxThrowingPlainError() });
 
   const channel = fakeChannel({ isThread: false });

@@ -31,7 +31,12 @@ test('SEEDED when directory createPerson succeeds', async () => {
 test('ESCALATION_DENIED when requested level exceeds caller and no create is attempted', async () => {
   let called = false;
   const svc = createSeedService({
-    directory: { createPerson: async () => { called = true; return {}; } },
+    directory: {
+      createPerson: async () => {
+        called = true;
+        return {};
+      },
+    },
   });
   const res = await svc.seedPerson(
     { email: 'x@utmist.ca', displayName: 'X', level: 'superuser' },
@@ -46,7 +51,11 @@ test('ESCALATION_DENIED when requested level exceeds caller and no create is att
 test('admin can grant admin (equal rank allowed)', async () => {
   const svc = createSeedService({
     directory: {
-      createPerson: async () => ({ display_name: 'A', primary_email: 'a@utmist.ca', access_level: 'admin' }),
+      createPerson: async () => ({
+        display_name: 'A',
+        primary_email: 'a@utmist.ca',
+        access_level: 'admin',
+      }),
     },
   });
   const res = await svc.seedPerson(
@@ -70,7 +79,9 @@ test('member caller cannot grant admin', async () => {
 test('EXISTS surfaces directory detail', async () => {
   const svc = createSeedService({
     directory: {
-      createPerson: async () => { throw new PersonExists('primary_email already exists'); },
+      createPerson: async () => {
+        throw new PersonExists('primary_email already exists');
+      },
     },
   });
   const res = await svc.seedPerson(
@@ -83,7 +94,11 @@ test('EXISTS surfaces directory detail', async () => {
 
 test('DIRECTORY_DOWN when directory is unavailable', async () => {
   const svc = createSeedService({
-    directory: { createPerson: async () => { throw new DirectoryUnavailable('down'); } },
+    directory: {
+      createPerson: async () => {
+        throw new DirectoryUnavailable('down');
+      },
+    },
   });
   const res = await svc.seedPerson(
     { email: 'd@utmist.ca', displayName: 'D', level: 'member' },

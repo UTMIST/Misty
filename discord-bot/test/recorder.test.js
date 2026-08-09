@@ -9,12 +9,17 @@ function makeClock(onWait) {
   let t = 0;
   return {
     now: () => t,
-    advance: (ms) => { t += ms; },
+    advance: (ms) => {
+      t += ms;
+    },
     // `onWait` runs on every poll of the drain loop. It is what lets a test
     // simulate audio still arriving DURING the drain -- a setInterval never
     // gets a turn here, because these awaits resolve as microtasks and the
     // loop finishes before the event loop reaches any macrotask.
-    wait: async (ms) => { t += ms; if (onWait) onWait(); },
+    wait: async (ms) => {
+      t += ms;
+      if (onWait) onWait();
+    },
   };
 }
 
@@ -33,12 +38,18 @@ function makeConnection() {
         const existing = streams.get(userId);
         if (existing) return existing;
         const s = new EventEmitter();
-        s.destroy = () => { s.destroyed = true; streams.delete(userId); s.emit('close'); };
+        s.destroy = () => {
+          s.destroyed = true;
+          streams.delete(userId);
+          s.emit('close');
+        };
         streams.set(userId, s);
         return s;
       },
     },
-    destroy() { this.destroyed = true; },
+    destroy() {
+      this.destroyed = true;
+    },
   };
   conn.streams = streams;
   return conn;
@@ -57,7 +68,10 @@ async function startedRecorder(clock, conn, sink) {
     join: () => conn,
     ready: async () => {},
   });
-  await recorder.start({ id: 'vc1', guild: { id: 'g1', voiceAdapterCreator: null, members: { cache: new Map() } } });
+  await recorder.start({
+    id: 'vc1',
+    guild: { id: 'g1', voiceAdapterCreator: null, members: { cache: new Map() } },
+  });
   return recorder;
 }
 
@@ -130,7 +144,7 @@ test('stop is safe to call twice', async () => {
 test('a speaker subscription is never allowed to self-end', async () => {
   const clock = makeClock();
   const conn = makeConnection();
-  const recorder = await startedRecorder(clock, conn, makeSink());
+  await startedRecorder(clock, conn, makeSink());
 
   conn.receiver.speaking.emit('start', 'u1');
 
@@ -150,7 +164,7 @@ test('a speaker who pauses and resumes is still captured', async () => {
   const clock = makeClock();
   const conn = makeConnection();
   const sink = makeSink();
-  const recorder = await startedRecorder(clock, conn, sink);
+  await startedRecorder(clock, conn, sink);
 
   conn.receiver.speaking.emit('start', 'u1');
   const stream = conn.streams.get('u1');
@@ -186,14 +200,25 @@ test('a clock that jumps backwards never produces a negative timestamp', async (
   // nothing catches -- and the bot registers no uncaughtException handler, so
   // that is a crash mid-meeting.
   let t = 10_000;
-  const clock = { now: () => t, wait: async (ms) => { t += ms; } };
+  const clock = {
+    now: () => t,
+    wait: async (ms) => {
+      t += ms;
+    },
+  };
   const conn = makeConnection();
   const sink = makeSink();
   const recorder = createRecorder({
-    sink, monotonic: clock.now, wait: clock.wait,
-    join: () => conn, ready: async () => {},
+    sink,
+    monotonic: clock.now,
+    wait: clock.wait,
+    join: () => conn,
+    ready: async () => {},
   });
-  await recorder.start({ id: 'vc1', guild: { id: 'g1', voiceAdapterCreator: null, members: { cache: new Map() } } });
+  await recorder.start({
+    id: 'vc1',
+    guild: { id: 'g1', voiceAdapterCreator: null, members: { cache: new Map() } },
+  });
 
   conn.receiver.speaking.emit('start', 'u1');
   const stream = conn.streams.get('u1');
@@ -222,13 +247,23 @@ test('an unidentified speaker gets a real name once the API answers', async () =
 
   let resolveFetch;
   const guild = {
-    id: 'g1', voiceAdapterCreator: null,
-    members: { cache: new Map(), fetch: () => new Promise((r) => { resolveFetch = r; }) },
+    id: 'g1',
+    voiceAdapterCreator: null,
+    members: {
+      cache: new Map(),
+      fetch: () =>
+        new Promise((r) => {
+          resolveFetch = r;
+        }),
+    },
     voiceStates: { cache: new Map([['u1', { member: null }]]) },
   };
   const recorder = createRecorder({
-    sink, monotonic: clock.now, wait: clock.wait,
-    join: () => conn, ready: async () => {},
+    sink,
+    monotonic: clock.now,
+    wait: clock.wait,
+    join: () => conn,
+    ready: async () => {},
   });
   await recorder.start({ id: 'vc1', guild, client: { user: { id: 'bot' } } });
 
@@ -238,18 +273,29 @@ test('an unidentified speaker gets a real name once the API answers', async () =
   resolveFetch({ user: { bot: false }, displayName: 'Priya' });
   await new Promise((r) => setImmediate(r));
 
-  assert.deepEqual(controls.at(-1), { speakerId: 'u1', displayName: 'Priya' },
-    'the raw snowflake was never corrected');
+  assert.deepEqual(
+    controls.at(-1),
+    { speakerId: 'u1', displayName: 'Priya' },
+    'the raw snowflake was never corrected',
+  );
 });
 
 test('the recorder never transcribes itself', async () => {
   const clock = makeClock();
   const conn = makeConnection();
   const sink = makeSink();
-  const guild = { id: 'g1', voiceAdapterCreator: null, members: { cache: new Map() }, voiceStates: { cache: new Map() } };
+  const guild = {
+    id: 'g1',
+    voiceAdapterCreator: null,
+    members: { cache: new Map() },
+    voiceStates: { cache: new Map() },
+  };
   const recorder = createRecorder({
-    sink, monotonic: clock.now, wait: clock.wait,
-    join: () => conn, ready: async () => {},
+    sink,
+    monotonic: clock.now,
+    wait: clock.wait,
+    join: () => conn,
+    ready: async () => {},
   });
   await recorder.start({ id: 'vc1', guild, client: { user: { id: 'bot-self' } } });
 
@@ -264,13 +310,23 @@ test('an unresolved user is captured, then dropped if they turn out to be a bot'
   const sink = makeSink();
   let resolveFetch;
   const guild = {
-    id: 'g1', voiceAdapterCreator: null,
-    members: { cache: new Map(), fetch: () => new Promise((r) => { resolveFetch = r; }) },
+    id: 'g1',
+    voiceAdapterCreator: null,
+    members: {
+      cache: new Map(),
+      fetch: () =>
+        new Promise((r) => {
+          resolveFetch = r;
+        }),
+    },
     voiceStates: { cache: new Map() },
   };
   const recorder = createRecorder({
-    sink, monotonic: clock.now, wait: clock.wait,
-    join: () => conn, ready: async () => {},
+    sink,
+    monotonic: clock.now,
+    wait: clock.wait,
+    join: () => conn,
+    ready: async () => {},
   });
   await recorder.start({ id: 'vc1', guild, client: { user: { id: 'bot' } } });
 
@@ -290,13 +346,23 @@ test('a bot dropped after the fetch stays dropped', async () => {
   const conn = makeConnection();
   let resolveFetch;
   const guild = {
-    id: 'g1', voiceAdapterCreator: null,
-    members: { cache: new Map(), fetch: () => new Promise((r) => { resolveFetch = r; }) },
+    id: 'g1',
+    voiceAdapterCreator: null,
+    members: {
+      cache: new Map(),
+      fetch: () =>
+        new Promise((r) => {
+          resolveFetch = r;
+        }),
+    },
     voiceStates: { cache: new Map() },
   };
   const recorder = createRecorder({
-    sink: makeSink(), monotonic: clock.now, wait: clock.wait,
-    join: () => conn, ready: async () => {},
+    sink: makeSink(),
+    monotonic: clock.now,
+    wait: clock.wait,
+    join: () => conn,
+    ready: async () => {},
   });
   await recorder.start({ id: 'vc1', guild, client: { user: { id: 'bot' } } });
 

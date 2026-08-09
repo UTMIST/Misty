@@ -26,12 +26,20 @@ test('add handler calls docService.addDoc with parsed tags and returns rendered 
   let received;
   const ctx = {
     docService: {
-      addDoc: async (args) => { received = args; return { outcome: 'ADDED', doc: { title: 'X', url: 'https://x.com', id: 'd1' }, warnings: [] }; },
+      addDoc: async (args) => {
+        received = args;
+        return {
+          outcome: 'ADDED',
+          doc: { title: 'X', url: 'https://x.com', id: 'd1' },
+          warnings: [],
+        };
+      },
     },
   };
   const payload = await findSub('add').handler({
     options: { url: 'https://x.com', title: null, team: 'ml', tags: 'a, b' },
-    principal: { person: { id: 'p1' } }, ctx,
+    principal: { person: { id: 'p1' } },
+    ctx,
   });
   assert.equal(received.url, 'https://x.com');
   assert.equal(received.teamSlug, 'ml');
@@ -45,7 +53,8 @@ test('team autocomplete resolver returns caller teams filtered by typed', async 
   const ctx = {
     directory: {
       listMemberships: async ({ personId, activeOnly }) => {
-        assert.equal(personId, 'p1'); assert.equal(activeOnly, true);
+        assert.equal(personId, 'p1');
+        assert.equal(activeOnly, true);
         return [{ team_id: 't1' }, { team_id: 't2' }];
       },
       listTeams: async () => [
@@ -95,7 +104,7 @@ test('teamAutocomplete returns [] when directory lookups exceed the budget', asy
   assert.deepEqual(out, []);
 });
 
-test('stacked autocomplete timeouts stay under Discord\'s 3s window', () => {
+test("stacked autocomplete timeouts stay under Discord's 3s window", () => {
   assert.ok(
     PRINCIPAL_AUTOCOMPLETE_TIMEOUT_MS + AUTOCOMPLETE_TIMEOUT_MS <= 2800,
     `principal (${PRINCIPAL_AUTOCOMPLETE_TIMEOUT_MS}) + lookup (${AUTOCOMPLETE_TIMEOUT_MS}) must stay well under 3000ms`,
@@ -105,11 +114,17 @@ test('stacked autocomplete timeouts stay under Discord\'s 3s window', () => {
 test('list handler passes the caller person id as onBehalfOf', async () => {
   let received;
   const ctx = {
-    docService: { listDocs: async (args) => { received = args; return { outcome: 'LISTED', docs: [] }; } },
+    docService: {
+      listDocs: async (args) => {
+        received = args;
+        return { outcome: 'LISTED', docs: [] };
+      },
+    },
   };
   await findSub('list').handler({
     options: { team: null, tag: null, source: null },
-    principal: { person: { id: 'p1' } }, ctx,
+    principal: { person: { id: 'p1' } },
+    ctx,
   });
   assert.equal(received.onBehalfOf, 'p1');
 });
@@ -117,11 +132,17 @@ test('list handler passes the caller person id as onBehalfOf', async () => {
 test('show handler passes the caller person id as onBehalfOf', async () => {
   let received;
   const ctx = {
-    docService: { showDoc: async (args) => { received = args; return { outcome: 'NOT_FOUND' }; } },
+    docService: {
+      showDoc: async (args) => {
+        received = args;
+        return { outcome: 'NOT_FOUND' };
+      },
+    },
   };
   await findSub('show').handler({
     options: { id: 'd1' },
-    principal: { person: { id: 'p1' } }, ctx,
+    principal: { person: { id: 'p1' } },
+    ctx,
   });
   assert.equal(received.id, 'd1');
   assert.equal(received.onBehalfOf, 'p1');
@@ -130,11 +151,17 @@ test('show handler passes the caller person id as onBehalfOf', async () => {
 test('list handler omits onBehalfOf when the caller is not linked (fail-closed)', async () => {
   let received;
   const ctx = {
-    docService: { listDocs: async (args) => { received = args; return { outcome: 'LISTED', docs: [] }; } },
+    docService: {
+      listDocs: async (args) => {
+        received = args;
+        return { outcome: 'LISTED', docs: [] };
+      },
+    },
   };
   await findSub('list').handler({
     options: { team: null, tag: null, source: null },
-    principal: null, ctx,
+    principal: null,
+    ctx,
   });
   assert.equal(received.onBehalfOf, undefined);
 });
@@ -142,11 +169,17 @@ test('list handler omits onBehalfOf when the caller is not linked (fail-closed)'
 test('show handler omits onBehalfOf when the caller is not linked (fail-closed)', async () => {
   let received;
   const ctx = {
-    docService: { showDoc: async (args) => { received = args; return { outcome: 'NOT_FOUND' }; } },
+    docService: {
+      showDoc: async (args) => {
+        received = args;
+        return { outcome: 'NOT_FOUND' };
+      },
+    },
   };
   await findSub('show').handler({
     options: { id: 'd1' },
-    principal: null, ctx,
+    principal: null,
+    ctx,
   });
   assert.equal(received.id, 'd1');
   assert.equal(received.onBehalfOf, undefined);
@@ -155,11 +188,21 @@ test('show handler omits onBehalfOf when the caller is not linked (fail-closed)'
 test('add handler owns the doc as the caller (owningPersonId)', async () => {
   let received;
   const ctx = {
-    docService: { addDoc: async (args) => { received = args; return { outcome: 'ADDED', doc: { title: 'X', url: 'https://x.com', id: 'd1' }, warnings: [] }; } },
+    docService: {
+      addDoc: async (args) => {
+        received = args;
+        return {
+          outcome: 'ADDED',
+          doc: { title: 'X', url: 'https://x.com', id: 'd1' },
+          warnings: [],
+        };
+      },
+    },
   };
   await findSub('add').handler({
     options: { url: 'https://x.com', title: null, team: null, tags: null },
-    principal: { person: { id: 'p1' } }, ctx,
+    principal: { person: { id: 'p1' } },
+    ctx,
   });
   assert.equal(received.owningPersonId, 'p1');
 });

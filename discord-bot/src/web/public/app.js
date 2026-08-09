@@ -2,11 +2,11 @@ import { hydrateMentions } from '/mentions.js';
 
 // --- State ---
 const state = {
-  commands: [],       // list from /api/commands (with subcommands flattened for the sidebar)
-  people: [],         // list from /api/people
+  commands: [], // list from /api/commands (with subcommands flattened for the sidebar)
+  people: [], // list from /api/people
   peopleMap: new Map(), // discord_id -> display_name for mention hydration
   actingAs: localStorage.getItem('actingAs') || '',
-  selectedKey: null,  // "link" or "team:list" for subcommands
+  selectedKey: null, // "link" or "team:list" for subcommands
 };
 
 // --- DOM refs ---
@@ -83,7 +83,9 @@ function initTopStrip() {
   actingAsInput.value = state.actingAs;
   actingAsInput.addEventListener('input', () => {
     // If the value matches a display_name in datalist, resolve to the ID.
-    const person = state.people.find((p) => p.discord_id === actingAsInput.value || p.display_name === actingAsInput.value);
+    const person = state.people.find(
+      (p) => p.discord_id === actingAsInput.value || p.display_name === actingAsInput.value,
+    );
     state.actingAs = person && person.discord_id ? person.discord_id : actingAsInput.value;
     localStorage.setItem('actingAs', state.actingAs);
     // Refresh any visible Run button.
@@ -215,7 +217,9 @@ async function submitForm(cmd, form) {
     });
     const payload = await res.json();
     if (!res.ok) {
-      appendErrorMessage(`HTTP ${res.status}: ${payload.error || payload.content || res.statusText}`);
+      appendErrorMessage(
+        `HTTP ${res.status}: ${payload.error || payload.content || res.statusText}`,
+      );
     } else {
       appendBotMessage(payload);
     }
@@ -226,7 +230,9 @@ async function submitForm(cmd, form) {
 
 // --- Transcript rendering ---
 function appendYouMessage(cmd, options) {
-  const optsStr = Object.entries(options).map(([k, v]) => `${k}:${v}`).join(' ');
+  const optsStr = Object.entries(options)
+    .map(([k, v]) => `${k}:${v}`)
+    .join(' ');
   const el = messageElement({ author: 'You', avatar: 'Y', klass: 'you' });
   el.querySelector('.body').textContent = `/${cmd.displayName} ${optsStr}`.trim();
   transcript.appendChild(el);
@@ -282,9 +288,17 @@ function scrollToBottom() {
 }
 
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
+  return String(s).replace(
+    /[&<>"']/g,
+    (c) =>
+      ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+      })[c],
+  );
 }
 
 main();

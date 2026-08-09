@@ -27,7 +27,10 @@ const echoCmd = defineCommand({
   }),
 });
 
-const commands = new Map([[linkCmd.name, linkCmd], [echoCmd.name, echoCmd]]);
+const commands = new Map([
+  [linkCmd.name, linkCmd],
+  [echoCmd.name, echoCmd],
+]);
 const appContext = { directory: {} };
 
 describe('web server', () => {
@@ -122,8 +125,14 @@ describe('web server', () => {
 test('GET /api/people returns array with discord_id resolved', async () => {
   const directory = {
     listPeople: async () => [
-      { id: 'p1', display_name: 'Alex', primary_email: 'a@x', access_level: 'member', active: true },
-      { id: 'p2', display_name: 'Bea',  primary_email: 'b@x', access_level: 'admin',  active: true },
+      {
+        id: 'p1',
+        display_name: 'Alex',
+        primary_email: 'a@x',
+        access_level: 'member',
+        active: true,
+      },
+      { id: 'p2', display_name: 'Bea', primary_email: 'b@x', access_level: 'admin', active: true },
     ],
     listIdentifiers: async (personId) => {
       if (personId === 'p1') return [{ provider: 'discord', external_id: '111', handle: 'alex' }];
@@ -150,8 +159,14 @@ test('GET /api/people returns array with discord_id resolved', async () => {
 test('GET /api/people tolerates a per-person listIdentifiers failure', async () => {
   const directory = {
     listPeople: async () => [
-      { id: 'p1', display_name: 'Alex', primary_email: 'a@x', access_level: 'member', active: true },
-      { id: 'p2', display_name: 'Bea',  primary_email: 'b@x', access_level: 'admin',  active: true },
+      {
+        id: 'p1',
+        display_name: 'Alex',
+        primary_email: 'a@x',
+        access_level: 'member',
+        active: true,
+      },
+      { id: 'p2', display_name: 'Bea', primary_email: 'b@x', access_level: 'admin', active: true },
     ],
     listIdentifiers: async (personId) => {
       if (personId === 'p1') throw new Error('boom');
@@ -180,7 +195,9 @@ test('POST /api/reset with onReset callback returns { ok: true }', async () => {
   const server = await buildServer({
     commands: new Map(),
     appContext: {},
-    onReset: async () => { called++; },
+    onReset: async () => {
+      called++;
+    },
   });
   await server.ready();
   try {
@@ -209,7 +226,9 @@ test('POST /api/reset propagates errors from onReset as 500', async () => {
   const server = await buildServer({
     commands: new Map(),
     appContext: {},
-    onReset: async () => { throw new Error('pg_dump failed'); },
+    onReset: async () => {
+      throw new Error('pg_dump failed');
+    },
   });
   await server.ready();
   try {

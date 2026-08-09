@@ -70,7 +70,7 @@ test('encodeFrame produces exact byte layout: len, speakerId utf8, 8-byte BE ts,
   const frame = encodeFrame('u1', 500, Buffer.from([1, 2, 3]));
   assert.deepEqual(
     [...frame],
-    [0x00, 0x02, 0x75, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xf4, 0x01, 0x02, 0x03]
+    [0x00, 0x02, 0x75, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xf4, 0x01, 0x02, 0x03],
   );
 });
 
@@ -87,7 +87,9 @@ test('encodeFrame uses byte length (not char length) for multi-byte utf8 speaker
 });
 
 test('getTranscript GETs the transcript endpoint with X-API-Key and parses JSON', async () => {
-  const fetchImpl = fakeFetch([{ status: 200, body: { segments: [{ speaker: 'a', text: 'hi' }] } }]);
+  const fetchImpl = fakeFetch([
+    { status: 200, body: { segments: [{ speaker: 'a', text: 'hi' }] } },
+  ]);
   const client = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, fetchImpl });
   const res = await client.getTranscript('sess-1');
   assert.deepEqual(res, { segments: [{ speaker: 'a', text: 'hi' }] });
@@ -126,12 +128,22 @@ test('stop throws MeetingUnavailable on non-ok response and on transport error',
   await assert.rejects(() => client.stop('sess-1'), MeetingUnavailable);
 
   const fetchImpl2 = fakeFetch([{ throw: true }]);
-  const client2 = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, fetchImpl: fetchImpl2 });
+  const client2 = createMeetingClient({
+    baseUrl: BASE,
+    wsUrl: WS_BASE,
+    apiKey: KEY,
+    fetchImpl: fetchImpl2,
+  });
   await assert.rejects(() => client2.stop('sess-1'), MeetingUnavailable);
 });
 
 test('openStream connects to a URL with no key query param, only guild_id (URL-encoded)', () => {
-  const client = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, WebSocketImpl: FakeWebSocket });
+  const client = createMeetingClient({
+    baseUrl: BASE,
+    wsUrl: WS_BASE,
+    apiKey: KEY,
+    WebSocketImpl: FakeWebSocket,
+  });
   client.openStream('sess-1', { guildId: 'g 1&x' });
   const ws = FakeWebSocket.instances.at(-1);
   assert.equal(ws.url, `${WS_BASE}/meetings/sess-1/stream?guild_id=${encodeURIComponent('g 1&x')}`);
@@ -139,7 +151,12 @@ test('openStream connects to a URL with no key query param, only guild_id (URL-e
 });
 
 test('on open, the first frame sent is the {"key": ...} auth text frame', () => {
-  const client = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, WebSocketImpl: FakeWebSocket });
+  const client = createMeetingClient({
+    baseUrl: BASE,
+    wsUrl: WS_BASE,
+    apiKey: KEY,
+    WebSocketImpl: FakeWebSocket,
+  });
   client.openStream('sess-1', { guildId: 'g1' });
   const ws = FakeWebSocket.instances.at(-1);
   ws._open();
@@ -148,7 +165,12 @@ test('on open, the first frame sent is the {"key": ...} auth text frame', () => 
 });
 
 test('sendControl sends a JSON text frame with speaker_id and display_name, after the auth frame', () => {
-  const client = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, WebSocketImpl: FakeWebSocket });
+  const client = createMeetingClient({
+    baseUrl: BASE,
+    wsUrl: WS_BASE,
+    apiKey: KEY,
+    WebSocketImpl: FakeWebSocket,
+  });
   const stream = client.openStream('sess-1', { guildId: 'g1' });
   const ws = FakeWebSocket.instances.at(-1);
   ws._open();
@@ -159,7 +181,12 @@ test('sendControl sends a JSON text frame with speaker_id and display_name, afte
 });
 
 test('sendFrame sends encodeFrame bytes as a binary frame, after the auth frame', () => {
-  const client = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, WebSocketImpl: FakeWebSocket });
+  const client = createMeetingClient({
+    baseUrl: BASE,
+    wsUrl: WS_BASE,
+    apiKey: KEY,
+    WebSocketImpl: FakeWebSocket,
+  });
   const stream = client.openStream('sess-1', { guildId: 'g1' });
   const ws = FakeWebSocket.instances.at(-1);
   ws._open();
@@ -172,7 +199,12 @@ test('sendFrame sends encodeFrame bytes as a binary frame, after the auth frame'
 });
 
 test('sendFrame/sendControl before the socket is open are queued and flushed on open, after the auth frame', () => {
-  const client = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, WebSocketImpl: FakeWebSocket });
+  const client = createMeetingClient({
+    baseUrl: BASE,
+    wsUrl: WS_BASE,
+    apiKey: KEY,
+    WebSocketImpl: FakeWebSocket,
+  });
   const stream = client.openStream('sess-1', { guildId: 'g1' });
   const ws = FakeWebSocket.instances.at(-1);
   const opus = Buffer.from([1, 2]);
@@ -187,7 +219,12 @@ test('sendFrame/sendControl before the socket is open are queued and flushed on 
 });
 
 test('close() closes the underlying socket', () => {
-  const client = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, WebSocketImpl: FakeWebSocket });
+  const client = createMeetingClient({
+    baseUrl: BASE,
+    wsUrl: WS_BASE,
+    apiKey: KEY,
+    WebSocketImpl: FakeWebSocket,
+  });
   const stream = client.openStream('sess-1', { guildId: 'g1' });
   const ws = FakeWebSocket.instances.at(-1);
   stream.close();
@@ -195,9 +232,17 @@ test('close() closes the underlying socket', () => {
 });
 
 test('a WS "error" event does not throw out of openStream/sendFrame and invokes onError', () => {
-  const client = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, WebSocketImpl: FakeWebSocket });
+  const client = createMeetingClient({
+    baseUrl: BASE,
+    wsUrl: WS_BASE,
+    apiKey: KEY,
+    WebSocketImpl: FakeWebSocket,
+  });
   const onErrorCalls = [];
-  const stream = client.openStream('sess-1', { guildId: 'g1', onError: (e) => onErrorCalls.push(e) });
+  const stream = client.openStream('sess-1', {
+    guildId: 'g1',
+    onError: (e) => onErrorCalls.push(e),
+  });
   const ws = FakeWebSocket.instances.at(-1);
 
   const originalError = console.error;
@@ -221,7 +266,12 @@ test('a WS "error" event does not throw out of openStream/sendFrame and invokes 
 });
 
 test('a WS "close" event marks the stream dead so subsequent sends are dropped, not queued', () => {
-  const client = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, WebSocketImpl: FakeWebSocket });
+  const client = createMeetingClient({
+    baseUrl: BASE,
+    wsUrl: WS_BASE,
+    apiKey: KEY,
+    WebSocketImpl: FakeWebSocket,
+  });
   const stream = client.openStream('sess-1', { guildId: 'g1' });
   const ws = FakeWebSocket.instances.at(-1);
 
@@ -231,8 +281,13 @@ test('a WS "close" event marks the stream dead so subsequent sends are dropped, 
 });
 
 test('openStream works without an onError callback (optional param)', () => {
-  const client = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, WebSocketImpl: FakeWebSocket });
-  const stream = client.openStream('sess-1', { guildId: 'g1' });
+  const client = createMeetingClient({
+    baseUrl: BASE,
+    wsUrl: WS_BASE,
+    apiKey: KEY,
+    WebSocketImpl: FakeWebSocket,
+  });
+  client.openStream('sess-1', { guildId: 'g1' });
   const ws = FakeWebSocket.instances.at(-1);
 
   const originalError = console.error;
@@ -245,7 +300,12 @@ test('openStream works without an onError callback (optional param)', () => {
 });
 
 test('endAudio sends the end-of-audio control frame after the audio', () => {
-  const client = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, WebSocketImpl: FakeWebSocket });
+  const client = createMeetingClient({
+    baseUrl: BASE,
+    wsUrl: WS_BASE,
+    apiKey: KEY,
+    WebSocketImpl: FakeWebSocket,
+  });
   const stream = client.openStream('sess-1', { guildId: 'g1' });
   const ws = FakeWebSocket.instances.at(-1);
   ws._open();
@@ -258,7 +318,12 @@ test('endAudio sends the end-of-audio control frame after the audio', () => {
 });
 
 test('endAudio is queued like any other frame if the socket is not open yet', () => {
-  const client = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, WebSocketImpl: FakeWebSocket });
+  const client = createMeetingClient({
+    baseUrl: BASE,
+    wsUrl: WS_BASE,
+    apiKey: KEY,
+    WebSocketImpl: FakeWebSocket,
+  });
   const stream = client.openStream('sess-1', { guildId: 'g1' });
   const ws = FakeWebSocket.instances.at(-1);
   stream.endAudio();

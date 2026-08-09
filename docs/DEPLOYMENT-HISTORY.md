@@ -118,7 +118,7 @@ Minting them is a manual per-environment step — see the runbook's
 - **`meeting-test`** — services/meeting pytest suite + ruff check/format. No Postgres container and no AWS credentials: the service has no database, and its Transcribe/LLM clients are faked via `app.dependency_overrides`, so the suite runs fully offline
 - **`connectors-test`** — services/connectors pytest suite + ruff check/format. No container and no Google credentials: the Google API clients are faked, so the suite runs fully offline
 - **`documentation-system-test`** — Postgres 16 service container, runs `alembic upgrade head`, then `pytest` with `RUN_PG_TESTS=1` + ruff check/format
-- **`node-test`** — the bot's `node --test` suite
+- **`node-test`** — the bot's `node --test` suite + ESLint and Prettier `--check` (the JS counterpart to the ruff pair)
 - **`docker-build`** — builds *and boot-smoke-tests* every service image (`python -c "import src.api.app"` for the six APIs, `node --check src/index.js` for the bot)
 
 **All ten are required status checks** in branch protection on both `staging`

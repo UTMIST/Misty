@@ -7,7 +7,12 @@ export default defineCommand({
   auth: 'linked',
   beta: false,
   options: [
-    { name: 'code', type: 'string', required: true, description: 'The 6-digit code from your email' },
+    {
+      name: 'code',
+      type: 'string',
+      required: true,
+      description: 'The 6-digit code from your email',
+    },
   ],
   async handler({ options, ctx, principal, discordUserId }) {
     const result = await ctx.emailService.confirmAndAddEmail({

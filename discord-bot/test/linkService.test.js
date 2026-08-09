@@ -20,7 +20,9 @@ test('linkByEmail: CODE_SENT when email resolves and code request succeeds', asy
   const svc = createLinkService({
     directory: { getPersonByEmail: async () => person },
     verification: {
-      requestCode: async (args) => { requested.push(args); },
+      requestCode: async (args) => {
+        requested.push(args);
+      },
     },
   });
   const res = await svc.linkByEmail(ARGS);
@@ -33,7 +35,11 @@ test('linkByEmail: NOT_A_MEMBER when email does not resolve, and no code request
   let requestCalled = false;
   const svc = createLinkService({
     directory: { getPersonByEmail: async () => null },
-    verification: { requestCode: async () => { requestCalled = true; } },
+    verification: {
+      requestCode: async () => {
+        requestCalled = true;
+      },
+    },
   });
   const res = await svc.linkByEmail(ARGS);
   assert.equal(res.outcome, 'NOT_A_MEMBER');
@@ -42,7 +48,11 @@ test('linkByEmail: NOT_A_MEMBER when email does not resolve, and no code request
 
 test('linkByEmail: DIRECTORY_DOWN when directory is unavailable', async () => {
   const svc = createLinkService({
-    directory: { getPersonByEmail: async () => { throw new DirectoryUnavailable('nope'); } },
+    directory: {
+      getPersonByEmail: async () => {
+        throw new DirectoryUnavailable('nope');
+      },
+    },
     verification: { requestCode: async () => {} },
   });
   const res = await svc.linkByEmail(ARGS);
@@ -52,7 +62,11 @@ test('linkByEmail: DIRECTORY_DOWN when directory is unavailable', async () => {
 test('linkByEmail: VERIFICATION_DOWN when verification service is unavailable', async () => {
   const svc = createLinkService({
     directory: { getPersonByEmail: async () => ({ id: 'p1', display_name: 'Alex' }) },
-    verification: { requestCode: async () => { throw new VerificationUnavailable('down'); } },
+    verification: {
+      requestCode: async () => {
+        throw new VerificationUnavailable('down');
+      },
+    },
   });
   const res = await svc.linkByEmail(ARGS);
   assert.equal(res.outcome, 'VERIFICATION_DOWN');
@@ -61,7 +75,11 @@ test('linkByEmail: VERIFICATION_DOWN when verification service is unavailable', 
 test('linkByEmail: RATE_LIMITED when verification service rate limits', async () => {
   const svc = createLinkService({
     directory: { getPersonByEmail: async () => ({ id: 'p1', display_name: 'Alex' }) },
-    verification: { requestCode: async () => { throw new RateLimited('rate_limited'); } },
+    verification: {
+      requestCode: async () => {
+        throw new RateLimited('rate_limited');
+      },
+    },
   });
   const res = await svc.linkByEmail(ARGS);
   assert.equal(res.outcome, 'RATE_LIMITED');
@@ -72,8 +90,14 @@ test('confirmAndLink: LINKED when code confirms and link succeeds', async () => 
   const linked = [];
   const svc = createLinkService({
     directory: {
-      getPersonByEmail: async (email) => { assert.equal(email, 'alex@utmist.ca'); return person; },
-      linkDiscord: async (pid, payload) => { linked.push({ pid, payload }); return {}; },
+      getPersonByEmail: async (email) => {
+        assert.equal(email, 'alex@utmist.ca');
+        return person;
+      },
+      linkDiscord: async (pid, payload) => {
+        linked.push({ pid, payload });
+        return {};
+      },
     },
     verification: {
       confirmCode: async (args) => {
@@ -93,10 +117,17 @@ test('confirmAndLink: NOT_A_MEMBER when verified email no longer resolves', asyn
   const svc = createLinkService({
     directory: {
       getPersonByEmail: async () => null,
-      linkDiscord: async () => { linkCalled = true; return {}; },
+      linkDiscord: async () => {
+        linkCalled = true;
+        return {};
+      },
     },
     verification: {
-      confirmCode: async () => ({ verified: true, subject: 'discord:123', email: 'alex@utmist.ca' }),
+      confirmCode: async () => ({
+        verified: true,
+        subject: 'discord:123',
+        email: 'alex@utmist.ca',
+      }),
     },
   });
   const res = await svc.confirmAndLink(CONFIRM_ARGS);
@@ -108,10 +139,16 @@ test('confirmAndLink: ALREADY_LINKED surfaces directory detail', async () => {
   const svc = createLinkService({
     directory: {
       getPersonByEmail: async () => ({ id: 'p1', display_name: 'Alex' }),
-      linkDiscord: async () => { throw new AlreadyLinked('this discord already belongs to another person'); },
+      linkDiscord: async () => {
+        throw new AlreadyLinked('this discord already belongs to another person');
+      },
     },
     verification: {
-      confirmCode: async () => ({ verified: true, subject: 'discord:123', email: 'alex@utmist.ca' }),
+      confirmCode: async () => ({
+        verified: true,
+        subject: 'discord:123',
+        email: 'alex@utmist.ca',
+      }),
     },
   });
   const res = await svc.confirmAndLink(CONFIRM_ARGS);
@@ -122,7 +159,11 @@ test('confirmAndLink: ALREADY_LINKED surfaces directory detail', async () => {
 test('confirmAndLink: CODE_EXPIRED', async () => {
   const svc = createLinkService({
     directory: {},
-    verification: { confirmCode: async () => { throw new CodeExpired('expired'); } },
+    verification: {
+      confirmCode: async () => {
+        throw new CodeExpired('expired');
+      },
+    },
   });
   const res = await svc.confirmAndLink(CONFIRM_ARGS);
   assert.equal(res.outcome, 'CODE_EXPIRED');
@@ -131,7 +172,11 @@ test('confirmAndLink: CODE_EXPIRED', async () => {
 test('confirmAndLink: TOO_MANY_ATTEMPTS', async () => {
   const svc = createLinkService({
     directory: {},
-    verification: { confirmCode: async () => { throw new TooManyAttempts('too_many_attempts'); } },
+    verification: {
+      confirmCode: async () => {
+        throw new TooManyAttempts('too_many_attempts');
+      },
+    },
   });
   const res = await svc.confirmAndLink(CONFIRM_ARGS);
   assert.equal(res.outcome, 'TOO_MANY_ATTEMPTS');
@@ -140,7 +185,11 @@ test('confirmAndLink: TOO_MANY_ATTEMPTS', async () => {
 test('confirmAndLink: INVALID_CODE', async () => {
   const svc = createLinkService({
     directory: {},
-    verification: { confirmCode: async () => { throw new InvalidCode('invalid_code'); } },
+    verification: {
+      confirmCode: async () => {
+        throw new InvalidCode('invalid_code');
+      },
+    },
   });
   const res = await svc.confirmAndLink(CONFIRM_ARGS);
   assert.equal(res.outcome, 'INVALID_CODE');
@@ -149,7 +198,11 @@ test('confirmAndLink: INVALID_CODE', async () => {
 test('confirmAndLink: NO_PENDING_CODE', async () => {
   const svc = createLinkService({
     directory: {},
-    verification: { confirmCode: async () => { throw new NoPendingCode('no_pending_code'); } },
+    verification: {
+      confirmCode: async () => {
+        throw new NoPendingCode('no_pending_code');
+      },
+    },
   });
   const res = await svc.confirmAndLink(CONFIRM_ARGS);
   assert.equal(res.outcome, 'NO_PENDING_CODE');
@@ -158,7 +211,11 @@ test('confirmAndLink: NO_PENDING_CODE', async () => {
 test('confirmAndLink: VERIFICATION_DOWN', async () => {
   const svc = createLinkService({
     directory: {},
-    verification: { confirmCode: async () => { throw new VerificationUnavailable('down'); } },
+    verification: {
+      confirmCode: async () => {
+        throw new VerificationUnavailable('down');
+      },
+    },
   });
   const res = await svc.confirmAndLink(CONFIRM_ARGS);
   assert.equal(res.outcome, 'VERIFICATION_DOWN');
@@ -167,10 +224,16 @@ test('confirmAndLink: VERIFICATION_DOWN', async () => {
 test('confirmAndLink: DIRECTORY_DOWN when directory unavailable after confirm', async () => {
   const svc = createLinkService({
     directory: {
-      getPersonByEmail: async () => { throw new DirectoryUnavailable('nope'); },
+      getPersonByEmail: async () => {
+        throw new DirectoryUnavailable('nope');
+      },
     },
     verification: {
-      confirmCode: async () => ({ verified: true, subject: 'discord:123', email: 'alex@utmist.ca' }),
+      confirmCode: async () => ({
+        verified: true,
+        subject: 'discord:123',
+        email: 'alex@utmist.ca',
+      }),
     },
   });
   const res = await svc.confirmAndLink(CONFIRM_ARGS);

@@ -17,7 +17,15 @@ test('resolvePrincipal returns null when unlinked', async () => {
 
 test('resolvePrincipal propagates DirectoryUnavailable', async () => {
   await assert.rejects(
-    () => resolvePrincipal({ getPersonByDiscordId: async () => { throw new DirectoryUnavailable('down'); } }, '123'),
+    () =>
+      resolvePrincipal(
+        {
+          getPersonByDiscordId: async () => {
+            throw new DirectoryUnavailable('down');
+          },
+        },
+        '123',
+      ),
     DirectoryUnavailable,
   );
 });
@@ -33,7 +41,10 @@ test('authorize linked requires a principal', () => {
 });
 
 test('authorize denies unknown policy (fail closed)', () => {
-  assert.deepEqual(authorize('superadmin', { person: {} }), { ok: false, reason: 'unknown_policy' });
+  assert.deepEqual(authorize('superadmin', { person: {} }), {
+    ok: false,
+    reason: 'unknown_policy',
+  });
 });
 
 const principal = (level) => ({ person: { access_level: level } });

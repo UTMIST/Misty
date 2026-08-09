@@ -7,7 +7,12 @@ export default defineCommand({
   auth: 'public', // you are not linked yet when you run /verify-code
   beta: false, // stable → registered globally (all prod servers)
   options: [
-    { name: 'code', type: 'string', required: true, description: 'The 6-digit code from your email' },
+    {
+      name: 'code',
+      type: 'string',
+      required: true,
+      description: 'The 6-digit code from your email',
+    },
   ],
   async handler({ options, ctx, discordUserId, discordHandle }) {
     const result = await ctx.linkService.confirmAndLink({

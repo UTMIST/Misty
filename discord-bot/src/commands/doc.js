@@ -32,8 +32,19 @@ export default defineCommand({
       auth: 'linked',
       options: [
         { name: 'url', type: 'string', required: true, description: 'The link to catalog' },
-        { name: 'title', type: 'string', required: false, description: 'Optional title (auto-fetched if omitted)' },
-        { name: 'team', type: 'string', required: false, description: 'Owning team (slug)', autocomplete: teamAutocomplete },
+        {
+          name: 'title',
+          type: 'string',
+          required: false,
+          description: 'Optional title (auto-fetched if omitted)',
+        },
+        {
+          name: 'team',
+          type: 'string',
+          required: false,
+          description: 'Owning team (slug)',
+          autocomplete: teamAutocomplete,
+        },
         { name: 'tags', type: 'string', required: false, description: 'Comma-separated tags' },
       ],
       async handler({ options, ctx, principal }) {
@@ -54,9 +65,20 @@ export default defineCommand({
       auth: 'linked',
       ephemeral: false,
       options: [
-        { name: 'team', type: 'string', required: false, description: 'Filter by owning team (slug)', autocomplete: teamAutocomplete },
+        {
+          name: 'team',
+          type: 'string',
+          required: false,
+          description: 'Filter by owning team (slug)',
+          autocomplete: teamAutocomplete,
+        },
         { name: 'tag', type: 'string', required: false, description: 'Filter by tag' },
-        { name: 'source', type: 'string', required: false, description: 'Filter by source kind (e.g. gdocs, github)' },
+        {
+          name: 'source',
+          type: 'string',
+          required: false,
+          description: 'Filter by source kind (e.g. gdocs, github)',
+        },
       ],
       async handler({ options, ctx, principal }) {
         const args = {};
@@ -78,7 +100,10 @@ export default defineCommand({
         { name: 'id', type: 'string', required: true, description: 'Doc id (from /doc list)' },
       ],
       async handler({ options, ctx, principal }) {
-        const result = await ctx.docService.showDoc({ id: options.id, onBehalfOf: principal?.person?.id });
+        const result = await ctx.docService.showDoc({
+          id: options.id,
+          onBehalfOf: principal?.person?.id,
+        });
         return renderDocShowResult(result);
       },
     },

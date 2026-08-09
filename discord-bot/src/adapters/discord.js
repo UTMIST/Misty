@@ -28,11 +28,9 @@ function extractOptions(interaction, activeOptions) {
  * @returns {object} Intent consumed by the application router.
  */
 export function interactionToIntent(interaction, command) {
-  const subcommand = command.subcommands.length
-    ? interaction.options.getSubcommand(false)
-    : null;
+  const subcommand = command.subcommands.length ? interaction.options.getSubcommand(false) : null;
   const activeOptions = subcommand
-    ? command.subcommands.find((s) => s.name === subcommand)?.options ?? []
+    ? (command.subcommands.find((s) => s.name === subcommand)?.options ?? [])
     : command.options;
   return {
     surface: 'discord',
@@ -70,9 +68,7 @@ export function payloadToDiscordReply(payload) {
 // an active subcommand's hint wins, otherwise the command-level hint, otherwise
 // fail-safe to ephemeral (private).
 export function resolveEphemeral(command, subcommandName) {
-  const sub = subcommandName
-    ? command.subcommands.find((s) => s.name === subcommandName)
-    : null;
+  const sub = subcommandName ? command.subcommands.find((s) => s.name === subcommandName) : null;
   return sub?.ephemeral ?? command.ephemeral ?? true;
 }
 
@@ -82,9 +78,7 @@ async function safeReply(interaction, payload) {
     // Nothing to say. If we deferred, clear the "thinking…" state so the user
     // isn't left staring at a spinner.
     if (interaction.deferred && !interaction.replied) {
-      await interaction
-        .deleteReply()
-        .catch((e) => console.error('deleteReply failed:', e.message));
+      await interaction.deleteReply().catch((e) => console.error('deleteReply failed:', e.message));
     }
     return;
   }
@@ -94,16 +88,12 @@ async function safeReply(interaction, payload) {
   // ephemeral flag — strip it to avoid passing an unsupported option.
   if (interaction.deferred && !interaction.replied) {
     const { flags, ...editable } = dpayload;
-    await interaction
-      .editReply(editable)
-      .catch((e) => console.error('reply failed:', e.message));
+    await interaction.editReply(editable).catch((e) => console.error('reply failed:', e.message));
     return;
   }
 
   const method = interaction.replied ? 'followUp' : 'reply';
-  await interaction[method](dpayload).catch((e) =>
-    console.error('reply failed:', e.message),
-  );
+  await interaction[method](dpayload).catch((e) => console.error('reply failed:', e.message));
 }
 
 const DISCORD_MAX_MESSAGE = 2000;
@@ -124,7 +114,9 @@ export function stripLeadingMention(content, botId) {
 // Nickname when the member is resolved, else the global/user name — the label a
 // human would recognize, and the fallback when the directory can't identify them.
 function authorLabel(message) {
-  return message.member?.displayName ?? message.author?.globalName ?? message.author?.username ?? '';
+  return (
+    message.member?.displayName ?? message.author?.globalName ?? message.author?.username ?? ''
+  );
 }
 
 // Chronological array of fetched messages -> neutral turns carrying author
@@ -166,11 +158,15 @@ export function chunkForDiscord(text) {
 }
 
 const HISTORY_LIMIT = 100; // Discord's messages.fetch maximum; no pagination
-const LINK_PROMPT = 'You need to link your account first. Run `/link` to identify yourself, then try again.';
-const VERIFY_UNAVAILABLE = "I can't verify you right now — the directory is unavailable. Please try again shortly.";
-const LLM_UNAVAILABLE = "I'm having trouble reaching the assistant right now — please try again shortly.";
+const LINK_PROMPT =
+  'You need to link your account first. Run `/link` to identify yourself, then try again.';
+const VERIFY_UNAVAILABLE =
+  "I can't verify you right now — the directory is unavailable. Please try again shortly.";
+const LLM_UNAVAILABLE =
+  "I'm having trouble reaching the assistant right now — please try again shortly.";
 const EMPTY_ANSWER = "I couldn't come up with an answer that time — please try rephrasing.";
-const THREAD_UNAVAILABLE = "I couldn't open a thread for that — please try again. (I may be missing the 'Create Public Threads' or 'Read Message History' permission.)";
+const THREAD_UNAVAILABLE =
+  "I couldn't open a thread for that — please try again. (I may be missing the 'Create Public Threads' or 'Read Message History' permission.)";
 
 // The message a thread was started from lives in the PARENT channel, not the
 // thread — ThreadChannel#fetchStarterMessage reads it from `parent` unless the
@@ -232,12 +228,14 @@ export async function handleMention(message, { appContext, botId }) {
       turns = threadHistoryToTurns(ordered, botId);
     } else {
       target = await message.startThread({ name: question.slice(0, 100) });
-      turns = [{
-        role: 'user',
-        text: question,
-        authorId: message.author?.id,
-        authorName: authorLabel(message),
-      }];
+      turns = [
+        {
+          role: 'user',
+          text: question,
+          authorId: message.author?.id,
+          authorName: authorLabel(message),
+        },
+      ];
     }
   } catch (e) {
     console.error('thread create/fetch failed:', e.message);
@@ -288,7 +286,9 @@ export function makeChannelNotifier() {
 export function makeAttachmentPoster() {
   return async ({ channel, report, requesterId }) => {
     try {
-      const pdfFile = new AttachmentBuilder(Buffer.from(report.pdf_b64, 'base64'), { name: 'meeting-minutes.pdf' });
+      const pdfFile = new AttachmentBuilder(Buffer.from(report.pdf_b64, 'base64'), {
+        name: 'meeting-minutes.pdf',
+      });
       // No requesterId (e.g. a recording started before this field existed, or
       // any path that couldn't resolve one) => post unaddressed rather than
       // dropping the minutes.
@@ -315,7 +315,10 @@ async function handleRecordInteraction(interaction, appContext, recordCommand) {
   const subcommand = interaction.options.getSubcommand(false);
   await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
 
-  const reply = (content) => interaction.editReply({ content }).catch((e) => console.error('record reply failed:', e.message));
+  const reply = (content) =>
+    interaction
+      .editReply({ content })
+      .catch((e) => console.error('record reply failed:', e.message));
 
   // `/record` bypasses the neutral dispatch, which is where the Policy
   // Enforcement Point normally lives -- so re-run authenticate -> authorize
@@ -375,8 +378,7 @@ async function handleRecordInteraction(interaction, appContext, recordCommand) {
       // Without this branch the failure fell through to "🔴 Recording…" --
       // the exact false positive this change exists to remove.
       await reply("Couldn't start recording — I couldn't join that voice channel.");
-    }
-    else if (result.status === 'unconfigured') await reply("Meeting recording isn't configured.");
+    } else if (result.status === 'unconfigured') await reply("Meeting recording isn't configured.");
     else await reply('🔴 Recording…');
     return;
   }
@@ -492,11 +494,16 @@ export function createAutoStop({
       // Re-check at fire time: only stop if it's STILL the same recording and
       // STILL empty (the meeting may have ended, or a human returned).
       const current = meetingSurface?.activeSession?.(guildId);
-      if (!current || current.sessionId !== sessionId || humansIn(current.voiceChannel, getBotId()) > 0) {
+      if (
+        !current ||
+        current.sessionId !== sessionId ||
+        humansIn(current.voiceChannel, getBotId()) > 0
+      ) {
         return;
       }
       Promise.resolve(meetingSurface.stop(guildId)).catch((err) =>
-        console.error(`auto-stop failed for guild ${guildId}:`, err?.message ?? err));
+        console.error(`auto-stop failed for guild ${guildId}:`, err?.message ?? err),
+      );
     }, graceMs);
     handle?.unref?.(); // don't keep the process alive on the grace timer alone
     pending.set(guildId, { handle, sessionId });

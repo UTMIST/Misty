@@ -22,7 +22,17 @@ function validateOptions(cmdName, options) {
  * @param {object} definition Declarative command metadata and handler.
  * @returns {object} Normalized command consumed by every adapter.
  */
-export function defineCommand({ name, description, auth, beta, ephemeral, identifyCaller, options, handler, subcommands }) {
+export function defineCommand({
+  name,
+  description,
+  auth,
+  beta,
+  ephemeral,
+  identifyCaller,
+  options,
+  handler,
+  subcommands,
+}) {
   if (!name || typeof name !== 'string') {
     throw new Error('defineCommand: `name` (string) is required');
   }
