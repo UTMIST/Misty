@@ -96,6 +96,7 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the cross-service data fl
 Misty/
 ├── README.md                          You are here
 ├── AGENTS.md                          Instructions for AI coding agents (CLAUDE.md points here)
+├── Makefile                           make check / test / lint / format across every package
 ├── pyproject.toml                     Root uv workspace (members: services/*, packages/*)
 ├── uv.lock                            Single lockfile for the whole workspace
 ├── docs/
@@ -159,7 +160,17 @@ Each service is self-contained: its own tests, its own docs, and its own databas
 
 New here? Start with the **[developer onboarding guide](docs/DEVELOPMENT.md)** — it walks a fresh clone through prerequisites, running the platform in order, and your first contribution.
 
-Nothing to bootstrap at the root — stand up only what you need:
+Nothing to bootstrap at the root to *run* a service — stand up only what you need. To *verify* a change, there is one root command:
+
+```bash
+make install   # uv workspace + bot dependencies
+make check     # lint + format check + fast tests, across everything
+make test-full # adds the Postgres-adapter suites (needs Docker) — run this
+               # if you touched storage, an adapter, or a migration
+make help      # the rest
+```
+
+Stand up individual services as needed:
 
 - **Directory API** — [`services/team-tracking/README.md` → Quick start](services/team-tracking/README.md#quick-start). Port **8000**, Postgres **5433**.
 - **Catalog API** — [`services/documentation-system/README.md` → Quick start](services/documentation-system/README.md#quick-start). Port **8001**, Postgres **5434**.
