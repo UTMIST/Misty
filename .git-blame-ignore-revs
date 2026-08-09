@@ -18,7 +18,9 @@
 # nothing. Each entry has to be the squashed commit as it lands on `staging`,
 # which means adding it in a small follow-up commit after the merge.
 # ---------------------------------------------------------------------------
-#
-# TODO(after merge): append the squash SHA of PR #192, "chore(discord-bot): gate
-# JS on ESLint + Prettier" — the one-time Prettier pass across 60 files in
-# discord-bot/. Get it from `git log --oneline staging` once merged.
+
+# chore(discord-bot): gate JS on ESLint + Prettier, matching the ruff pair (#192)
+# One-time Prettier pass over 60 files in discord-bot/. Formatting-only apart
+# from five unused-variable removals ESLint flagged; verified by formatting the
+# pre-merge tree and diffing.
+c970bc9097258328ef8964296eb30d6ddac5a833
