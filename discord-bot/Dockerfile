@@ -6,7 +6,11 @@ WORKDIR /app
 # ffmpeg decode/mix and the Opus/ffmpeg peer stack live in the meeting service
 # now (see services/meeting), not the bot, so no apt packages or peer-dep
 # overrides are needed here.
-COPY package.json package-lock.json ./
+# .npmrc carries engine-strict=true, so it has to land BEFORE npm ci — copied
+# later (with the source) the engines check is skipped for the image build.
+# With it here, a base tag that ever drifts below the >=22.12 floor fails the
+# build instead of quietly shipping a runtime @discordjs/voice doesn't support.
+COPY package.json package-lock.json .npmrc ./
 RUN npm ci --omit=dev
 
 # Copy the application source (node_modules/.env excluded via .dockerignore).

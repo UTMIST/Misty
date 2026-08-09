@@ -349,6 +349,20 @@ by an existing admin running `/seed` from Discord.
   (transcript comes back empty).
 
 ## Notes
+- **The Railway dashboard reports `Builder: RAILPACK`, but the Dockerfiles are
+  what actually build.** Each service's `railway.json` sets
+  `"builder": "DOCKERFILE"`, and that config-as-code wins at build time — the
+  dashboard field is the underlying service default, not a record of what ran.
+  Verify from a build log, not the dashboard; a Dockerfile build opens with:
+
+  ```
+  [internal] load build definition from discord-bot/Dockerfile
+  [internal] load metadata for docker.io/library/node:22-slim
+  ```
+
+  This matters because editing a base image **does** change the deployed
+  runtime, even though nothing in the dashboard suggests the Dockerfile is
+  involved at all. Don't conclude from `RAILPACK` that the Dockerfile is dead.
 - All six Python Dockerfiles build with the repo root as context and
   `uv sync --frozen --no-dev --package <name>` to install just that workspace
   member (plus the shared `platform_auth` leaf from `packages/auth`) — that's
