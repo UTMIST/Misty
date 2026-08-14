@@ -50,9 +50,9 @@ jobs:
           PROJECTS_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
         with:
           script: |
-            // --- Project board config (stable IDs for the "Misty" project #2) ---
-            const PROJECT_ID   = 'PVT_kwHOBKcJlc4BcaH-';
-            const STATUS_FIELD = 'PVTSSF_lAHOBKcJlc4BcaH-zhXDMKo';
+            // --- Project board config (stable IDs for org project #13, "Misty") ---
+            const PROJECT_ID   = 'PVT_kwDOAovuf84BgUkT';
+            const STATUS_FIELD = 'PVTSSF_lADOAovuf84BgUkTzhahLEM';
             const OPT_READY    = '08afe404';
             const OPT_BLOCKED  = 'dc1ac841';
 
