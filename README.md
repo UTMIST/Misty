@@ -153,6 +153,7 @@ Misty/
         ├── main-source-guard.yml      Enforces "PRs to main come from staging"
         ├── pr-zone-check.yml          Warns on PRs spanning multiple CODEOWNERS zones
         ├── label-consistency.yml      Fails when the zone or area list drifts (runs check-labels.mjs)
+        ├── codeowners-valid.yml       Fails when a CODEOWNERS owner can't actually review
         ├── zone-label.yml             Labels a PR with the zone it touches
         ├── area-label-issues.yml      Labels an issue from its form's Area dropdown
         ├── pr-size-label.yml          Labels a PR size/xs .. size/xl

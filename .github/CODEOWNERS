@@ -1,20 +1,47 @@
 # Code owners — GitHub auto-requests these reviewers on matching PRs.
 #
 # Per-zone ownership. Everything is @qiuethan for now; as people are hired,
-# replace @qiuethan on the relevant line (and/or add owners, space-separated:
-# `/services/team-tracking/ @qiuethan @new-hire`).
+# add them to the relevant line. Owners are space-separated, and you must keep
+# the existing owner if they are to stay one:
+#
+#     /services/team-tracking/ @qiuethan @somebody
 #
 # NOTE: last matching pattern wins and is NOT cumulative — for a given file
-# only the last line it matches applies, so keep @qiuethan on each zone line
-# if you want to stay an owner of that zone.
+# only the last line it matches applies, so writing `/services/llm/ @somebody`
+# on its own silently REMOVES @qiuethan as owner of that zone rather than
+# adding to it. There is no error when this happens; you just stop being asked
+# to review.
+#
+# Requesting is not gating: `require_code_owner_reviews` is off on staging, so
+# GitHub asks the owner for a review but any approval satisfies the branch
+# protection. Code owners are not requested on draft PRs, and an owner without
+# write access to the repo is silently ignored — codeowners-valid.yml fails the
+# build on that second case.
 #
 # "Zone" is the repo's word for these buckets; docs/CODE-OWNERSHIP.md defines
 # them. Older comments say "area" for the same thing.
 #
 # See issue #34 (Code Reviewer Assigner + Discord webhook).
 
-# Fallback: anything not covered by a zone below.
+# Fallback: anything not covered by a zone below. This is what owns the `root`
+# zone — the top-level files (README.md, AGENTS.md, Makefile, pyproject.toml,
+# uv.lock, the dotfiles). `root` cannot have a line of its own: it is not a
+# directory.
 * @qiuethan
+
+# Catch-alls for workspace members that have no zone of their own yet — the
+# `services/other` and `packages/other` zones.
+#
+# ORDER MATTERS, and it is the OPPOSITE of pr-zone-check.yml. CODEOWNERS is
+# last-match-wins, so these two lines must sit ABOVE the specific ones below:
+# a file in services/llm/ matches both, and the later, more specific line is
+# the one that applies. Move them below and they would swallow every service.
+#
+# Without these, an unregistered service resolved to the `*` fallback instead
+# of anyone who knows it. check-labels.mjs enforces both their presence and
+# their position.
+/services/                       @qiuethan
+/packages/                       @qiuethan
 
 # Zones — keep in sync with zone_for() in .github/workflows/pr-zone-check.yml.
 /discord-bot/                    @qiuethan
