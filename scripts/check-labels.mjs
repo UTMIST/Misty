@@ -69,9 +69,18 @@ const ISSUE_FORMS = [
 // fix is to give it a real zone rather than pick the catch-all.
 const TRANSITIONAL = new Set(["packages/other", "services/other"]);
 
-// Zones with no CODEOWNERS line of their own: they resolve through the `*`
-// fallback. Latent while every owner is the same person; see the doc.
-const FALLBACK_OWNED = new Set(["packages/other", "services/other", "root"]);
+// `root` is the only zone with no CODEOWNERS line of its own, and cannot have
+// one: it is not a directory, it is "every top-level file", which is exactly
+// what the `*` fallback already means.
+const FALLBACK_OWNED = new Set(["root"]);
+
+// The two catch-all zones are spelled as bare workspace directories in
+// CODEOWNERS (`/services/` owns any service without a line of its own), so the
+// pattern does not equal the zone name the way every other line does.
+const CATCHALL_CODEOWNER = new Map([
+  ["services", "services/other"],
+  ["packages", "packages/other"],
+]);
 
 // Workspace parents whose children must each carry their own zone.
 const WORKSPACE_DIRS = ["services", "packages"];
@@ -236,15 +245,53 @@ const selectable = canonical.filter((z) => !TRANSITIONAL.has(z));
 {
   const src = readOrDie(FILES.codeowners);
   const owned = new Set();
+  const order = []; // pattern order, for the last-match-wins check below
   for (const line of src.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     const [pattern] = trimmed.split(/\s+/);
     if (pattern === "*") continue; // the fallback
     // `/services/llm/` -> `services/llm`
-    owned.add(pattern.replace(/^\/+/, "").replace(/\/+$/, ""));
+    const stripped = pattern.replace(/^\/+/, "").replace(/\/+$/, "");
+    owned.add(stripped);
+    order.push(stripped);
   }
+
+  // CODEOWNERS is LAST-match-wins — the exact inverse of zone_for()'s first-
+  // match-wins. So the `/services/` and `/packages/` catch-alls must sit ABOVE
+  // the specific lines, or they swallow every service instead of only the
+  // unregistered ones. Getting this backwards produces no error from GitHub:
+  // reviews just silently route to the wrong person.
+  for (const [dir] of CATCHALL_CODEOWNER) {
+    const catchAllIdx = order.indexOf(dir);
+    if (catchAllIdx === -1) continue;
+    for (const [i, pattern] of order.entries()) {
+      if (i >= catchAllIdx && pattern.startsWith(`${dir}/`)) continue;
+      if (i < catchAllIdx && pattern.startsWith(`${dir}/`)) {
+        fail(
+          `${FILES.codeowners}: '/${pattern}/' is listed ABOVE the '/${dir}/' ` +
+            `catch-all, so the catch-all overrides it (last match wins) and ` +
+            `${pattern} would be reviewed by the ${dir} catch-all owner. Move ` +
+            `'/${dir}/' above every '/${dir}/*' line.`,
+        );
+      }
+    }
+  }
+
   for (const zone of canonical) {
+    // The catch-all zones are owned via a bare `/services/` or `/packages/`.
+    const viaCatchAll = [...CATCHALL_CODEOWNER].find(([, z]) => z === zone);
+    if (viaCatchAll) {
+      if (!owned.has(viaCatchAll[0])) {
+        fail(
+          `zone '${zone}' has no owner: add a '/${viaCatchAll[0]}/' line to ` +
+            `${FILES.codeowners}, above the specific '/${viaCatchAll[0]}/*' ` +
+            `lines, so an unregistered ${viaCatchAll[0]} member is reviewed by ` +
+            `someone rather than falling through to the '*' fallback`,
+        );
+      }
+      continue;
+    }
     if (FALLBACK_OWNED.has(zone)) {
       if (owned.has(zone)) {
         fail(
@@ -260,6 +307,7 @@ const selectable = canonical.filter((z) => !TRANSITIONAL.has(z));
     }
   }
   for (const pattern of owned) {
+    if (CATCHALL_CODEOWNER.has(pattern)) continue; // `/services/`, `/packages/`
     if (!canonicalSet.has(pattern)) {
       fail(
         `${FILES.codeowners} owns '/${pattern}/' but zone_for() in ` +

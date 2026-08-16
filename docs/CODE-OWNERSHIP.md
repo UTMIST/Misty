@@ -21,18 +21,18 @@ Fourteen buckets. Every tracked file lands in exactly one.
 |---|---|---|---|
 | `discord-bot` | `discord-bot/*` | `/discord-bot/` | @qiuethan |
 | `packages/auth` | `packages/auth/*` | `/packages/auth/` | @qiuethan |
-| `packages/other` | `packages/*` | *(none — falls to `*`)* | @qiuethan |
+| `packages/other` | `packages/*` | `/packages/` | @qiuethan |
 | `services/connectors` | `services/connectors/*` | `/services/connectors/` | @qiuethan |
 | `services/documentation-system` | `services/documentation-system/*` | `/services/documentation-system/` | @qiuethan |
 | `services/llm` | `services/llm/*` | `/services/llm/` | @qiuethan |
 | `services/meeting` | `services/meeting/*` | `/services/meeting/` | @qiuethan |
 | `services/team-tracking` | `services/team-tracking/*` | `/services/team-tracking/` | @qiuethan |
 | `services/verification` | `services/verification/*` | `/services/verification/` | @qiuethan |
-| `services/other` | `services/*` | *(none — falls to `*`)* | @qiuethan |
+| `services/other` | `services/*` | `/services/` | @qiuethan |
 | `docs` | `docs/*` | `/docs/` | @qiuethan |
 | `scripts` | `scripts/*` | `/scripts/` | @qiuethan |
 | `.github` | `.github/*` | `/.github/` | @qiuethan |
-| `root` | everything else | *(none — falls to `*`)* | @qiuethan |
+| `root` | everything else | *(the `*` fallback)* | @qiuethan |
 
 Every owner is a `@qiuethan` placeholder for now. Per-zone assignment happens as
 people are hired — see [`CODEOWNERS`](../.github/CODEOWNERS) for how to add one
@@ -50,6 +50,7 @@ until it gets its own line in both files.
 | Mechanism | Effect | Blocking? |
 |---|---|---|
 | [`.github/CODEOWNERS`](../.github/CODEOWNERS) | GitHub auto-requests the zone's owner on a matching PR | No — `require_code_owner_reviews` is off, so it requests but does not gate |
+| [`codeowners-valid.yml`](../.github/workflows/codeowners-valid.yml) | Fails when CODEOWNERS names an owner GitHub cannot resolve or who lacks write access — a failure that is otherwise completely silent | **Yes** — the job exits non-zero |
 | [`pr-zone-check.yml`](../.github/workflows/pr-zone-check.yml) | Warns when one PR touches more than one zone; writes the list to the job summary | No — ends in `exit 0` by design |
 | [`zone-label.yml`](../.github/workflows/zone-label.yml) + [`labeler.yml`](../.github/labeler.yml) | Applies `zone: <name>` labels from the paths a PR touches, so zones are visible on the PR list | No |
 | [`label-consistency.yml`](../.github/workflows/label-consistency.yml) + [`scripts/check-labels.mjs`](../scripts/check-labels.mjs) | Fails when the copies of the list disagree, when `labeler.yml`'s globs resolve a path to a different zone than `zone_for()` does, or when a `services/*` / `packages/*` directory has no zone | **Yes, when made a required check** — the job itself exits non-zero |
@@ -114,12 +115,18 @@ deliberate and convenient: [`AGENTS.md`](../AGENTS.md) requires you to update a
 service's docs in the same PR as the code change, and because both sit in the
 same zone, doing the right thing does not trip the multi-zone warning.
 
-**The two mechanisms resolve in opposite directions.** `zone_for()` is a bash
-`case` — **first** match wins, which is why the specific service paths must sit
-above the `services/*` and `packages/*` catch-alls. CODEOWNERS is the reverse:
-**last** matching pattern wins, and it is not cumulative. Only the last line a
-file matches applies, so an owner added to a specific zone line replaces the
-`*` fallback rather than adding to it.
+**The two mechanisms resolve in opposite directions, and both files now contain
+a catch-all whose position depends on that.** `zone_for()` is a bash `case` —
+**first** match wins, so the specific service arms sit **above** `services/*`.
+CODEOWNERS is the reverse: **last** matching pattern wins, so the `/services/`
+catch-all sits **below** nothing and **above** every `/services/<name>/` line.
+Same intent, mirrored layout; get either backwards and the catch-all swallows
+every service instead of only the unregistered ones. `check-labels.mjs` checks
+the ordering in both files.
+
+CODEOWNERS is also not cumulative — only the last line a file matches applies,
+so an owner added to a specific zone line *replaces* the `*` fallback rather
+than adding to it.
 
 **Zones are a review boundary, not an architectural one.** They happen to line
 up with the service directories because the services are independent, but the
@@ -199,7 +206,21 @@ checks that the copies agree, not that the mapping matches how the code is
 actually organised. A zone pointed at a directory that no longer exists passes
 cleanly.
 
-**Latent, not yet biting:** `root`, `services/other`, and `packages/other` have
-no `CODEOWNERS` line and resolve through the `*` fallback. Invisible while every
-owner is `@qiuethan`. Once owners diverge, an unregistered service starts
-auto-requesting the fallback owner instead of anyone who knows it.
+**The latent one is now closed for two of the three.** `services/other` and
+`packages/other` used to have no `CODEOWNERS` line and resolved through the `*`
+fallback — invisible while every owner was `@qiuethan`, but the moment owners
+diverge an unregistered service starts auto-requesting the fallback owner
+instead of anyone who knows it. They now have bare `/services/` and `/packages/`
+lines, placed **above** the specific ones so last-match-wins still gives
+`services/llm` to its own owner.
+
+`root` keeps resolving through `*`, and always will: it is not a directory, so
+there is no pattern to write. "Every top-level file" is exactly what `*` means.
+
+**A CODEOWNERS entry can be wrong in a way that is completely silent.** Name
+someone who is not a collaborator, or who has read-only access, and GitHub never
+requests them and never says why — the zone looks owned and reviews go nowhere.
+[`codeowners-valid.yml`](../.github/workflows/codeowners-valid.yml) asks
+GitHub's own parser on every change to the file and fails on exactly that.
+`check-labels.mjs` cannot catch it: it sees a line per zone, not whether the
+handle on that line can review.
