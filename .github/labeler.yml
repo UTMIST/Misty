@@ -1,0 +1,111 @@
+# Zone labels for PRs — consumed by .github/workflows/zone-label.yml.
+#
+# One key per zone in zone_for() (.github/workflows/pr-zone-check.yml), which is
+# canonical; scripts/check-labels.mjs fails CI if the two drift. Zones are
+# defined in docs/CODE-OWNERSHIP.md.
+#
+# NOTE: `zone: *` is a different axis from the `area/*` issue labels. A zone is
+# a directory bucket (who reviews it); an area is a kind of work. One
+# `area/service` issue can span six zones.
+#
+# The two mechanisms resolve differently, and it matters here. zone_for() is a
+# bash `case` — first match wins, so `services/*` sitting last quietly means
+# "any service without its own arm". actions/labeler has no such ordering: every
+# rule that matches applies. So the catch-all buckets have to say what they are
+# NOT, via all-globs-to-any-file (a file must match the glob AND none of the
+# negations). Negations inside any-glob-to-any-file would instead match every
+# other file in the repo.
+
+"zone: discord-bot":
+  - changed-files:
+      - any-glob-to-any-file:
+          - discord-bot/**
+
+"zone: packages/auth":
+  - changed-files:
+      - any-glob-to-any-file:
+          - packages/auth/**
+
+# Catch-all: a package with no zone of its own. Reaching this bucket means
+# something was added that nobody registered — give it a real zone.
+"zone: packages/other":
+  - changed-files:
+      - all-globs-to-any-file:
+          - packages/**
+          - "!packages/auth/**"
+
+"zone: services/connectors":
+  - changed-files:
+      - any-glob-to-any-file:
+          - services/connectors/**
+
+"zone: services/documentation-system":
+  - changed-files:
+      - any-glob-to-any-file:
+          - services/documentation-system/**
+
+"zone: services/llm":
+  - changed-files:
+      - any-glob-to-any-file:
+          - services/llm/**
+
+"zone: services/meeting":
+  - changed-files:
+      - any-glob-to-any-file:
+          - services/meeting/**
+
+"zone: services/team-tracking":
+  - changed-files:
+      - any-glob-to-any-file:
+          - services/team-tracking/**
+
+"zone: services/verification":
+  - changed-files:
+      - any-glob-to-any-file:
+          - services/verification/**
+
+# Catch-all: a service with no zone of its own. This is the bucket that hid the
+# August 2026 drift — five services shared it, so a PR spanning two of them
+# looked single-zone. check-labels.mjs now fails CI when a services/ directory
+# lands here.
+"zone: services/other":
+  - changed-files:
+      - all-globs-to-any-file:
+          - services/**
+          - "!services/connectors/**"
+          - "!services/documentation-system/**"
+          - "!services/llm/**"
+          - "!services/meeting/**"
+          - "!services/team-tracking/**"
+          - "!services/verification/**"
+
+# Top-level docs/ only. A service's own docs (services/llm/docs/API.md) belong
+# to that service's zone — the earlier services/** rules already claimed them.
+"zone: docs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - docs/**
+
+"zone: scripts":
+  - changed-files:
+      - any-glob-to-any-file:
+          - scripts/**
+
+"zone: .github":
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/**
+
+# Everything not claimed above: README.md, AGENTS.md, CLAUDE.md, Makefile,
+# pyproject.toml, uv.lock, .claude/, and the root dotfiles. A permanent
+# destination, and the one the most ordinary PRs here belong to.
+"zone: root":
+  - changed-files:
+      - all-globs-to-any-file:
+          - "**"
+          - "!discord-bot/**"
+          - "!packages/**"
+          - "!services/**"
+          - "!docs/**"
+          - "!scripts/**"
+          - "!.github/**"

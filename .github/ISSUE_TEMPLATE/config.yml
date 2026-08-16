@@ -1,6 +1,9 @@
 # Blank issues stay enabled on purpose — this is a small org and a low-friction
-# "just write it down" path is worth more than template compliance. The templates
-# exist to prompt the `Blocked by:` line and the zone, not to gate reporting.
+# "just write it down" path is worth more than template compliance. The forms
+# exist to prompt the Blocked by and Area fields, not to gate reporting.
+#
+# A blank issue simply gets no area labels: area-label-issues.yml leaves labels
+# alone when it finds no Area section, rather than stripping hand-applied ones.
 blank_issues_enabled: true
 
 contact_links:

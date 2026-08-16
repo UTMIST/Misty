@@ -140,16 +140,22 @@ Misty/
 │   └── test/                          node --test
 │
 ├── scripts/
-│   └── provision-directory-key.sh     Mint + wire scoped API keys per environment
+│   ├── check-labels.mjs              Fails CI when the zone or area list drifts between its copies
+│   └── provision-directory-key.sh    Mint + wire scoped API keys per environment
 │
 └── .github/
     ├── CODEOWNERS                     Per-zone reviewers; zones mirror pr-zone-check
+    ├── labeler.yml                    Path globs -> `zone: *` PR labels
     ├── PULL_REQUEST_TEMPLATE.md       Zone, verification steps, deployment notes
-    ├── ISSUE_TEMPLATE/                Bug / feature / epic templates (prompt the `Blocked by:` line)
+    ├── ISSUE_TEMPLATE/                Bug / feature / epic issue forms (Blocked by + Zone fields)
     └── workflows/
         ├── ci.yml                     Tests + lint + Docker builds on every PR (10 jobs)
         ├── main-source-guard.yml      Enforces "PRs to main come from staging"
         ├── pr-zone-check.yml          Warns on PRs spanning multiple CODEOWNERS zones
+        ├── label-consistency.yml      Fails when the zone or area list drifts (runs check-labels.mjs)
+        ├── zone-label.yml             Labels a PR with the zone it touches
+        ├── area-label-issues.yml      Labels an issue from its form's Area dropdown
+        ├── pr-size-label.yml          Labels a PR size/xs .. size/xl
         ├── discord-pr-notify.yml      Posts to Discord when a PR needs review
         └── blocked-ready-automation.yml   Syncs blocked/ready issue labels
 ```

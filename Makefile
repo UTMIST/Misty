@@ -33,7 +33,7 @@ BOT_DIR := discord-bot
 PG_SUITE := tests/test_postgres_adapter.py
 
 .DEFAULT_GOAL := help
-.PHONY: help install test test-full lint format check check-node clean-pyc
+.PHONY: help install test test-full lint format check check-node labels clean-pyc
 
 help: ## Show this help
 	@echo 'UTMIST ops platform'
@@ -113,7 +113,10 @@ format: ## Apply formatters and autofixes in place
 	@$(MAKE) --no-print-directory check-node
 	@cd $(BOT_DIR) && npm run --if-present lint:fix && npm run --if-present format
 
-check: lint test ## Lint + fast tests. Pre-push for most changes; see test-full
+labels: ## Check the zone list (PRs) and area list (issues) agree across their copies
+	@node scripts/check-labels.mjs
+
+check: lint labels test ## Lint + labels + fast tests. Pre-push for most changes; see test-full
 
 clean-pyc: ## Remove __pycache__ and stray .pyc files
 	find . -path ./.venv -prune -o -name '__pycache__' -type d -print0 2>/dev/null \

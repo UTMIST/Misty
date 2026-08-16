@@ -22,8 +22,10 @@ Branching rules (enforced by CI):
 Which zone does this touch? Delete the rest. `root` is the one to pick for the
 top-level files — README.md, AGENTS.md, Makefile, pyproject.toml, .claude/.
 
-Adding a new service or package? Give it its own zone in .github/CODEOWNERS and
-pr-zone-check.yml in this PR, rather than leaving it in a catch-all bucket.
+Adding a new service or package? Give it its own zone in this PR rather than
+leaving it in a catch-all bucket. The zone list lives in five files and
+label-consistency.yml fails the build if you miss one — docs/CODE-OWNERSHIP.md
+-> "Adding or renaming a zone" lists them, and `make labels` checks locally.
 
 Full list, and what each zone covers: docs/CODE-OWNERSHIP.md
 -->

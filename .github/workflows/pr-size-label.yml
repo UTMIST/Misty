@@ -1,0 +1,76 @@
+name: Label PR size
+
+# Applies exactly one size/* label per PR, from lines changed. Ported from
+# UTMIST/UTMIST unchanged — it reads nothing repo-specific.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+# Labels on a pull request are written through the issues endpoint, but the
+# permission GitHub checks is `pull-requests` — `issues: write` alone yields
+# "Resource not accessible by integration" (403) on the addLabels call.
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  label-size:
+    runs-on: ubuntu-latest
+    # Two pushes seconds apart would otherwise race: the second run's payload is
+    # a snapshot taken before the first run relabelled, so it tries to remove a
+    # label that is already gone.
+    concurrency:
+      group: pr-size-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Label PR size
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const changed = pr.additions + pr.deletions;
+
+            const labels = [
+              { name: "size/xs", max: 10 },
+              { name: "size/s", max: 50 },
+              { name: "size/m", max: 200 },
+              { name: "size/l", max: 500 },
+              { name: "size/xl", max: Infinity },
+            ];
+
+            const sizeLabels = labels.map(label => label.name);
+            const newLabel = labels.find(label => changed <= label.max).name;
+
+            const { owner, repo } = context.repo;
+            const issue_number = pr.number;
+
+            const currentLabels = pr.labels.map(label => label.name);
+
+            for (const label of sizeLabels) {
+              if (currentLabels.includes(label) && label !== newLabel) {
+                // `currentLabels` is a payload snapshot, not a live read, so the
+                // label may already be gone. A 404 here is the expected race,
+                // not a failure worth reporting on the PR.
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner,
+                    repo,
+                    issue_number,
+                    name: label,
+                  });
+                } catch (e) {
+                  if (e.status !== 404) throw e;
+                }
+              }
+            }
+
+            if (!currentLabels.includes(newLabel)) {
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number,
+                labels: [newLabel],
+              });
+            }

@@ -1,0 +1,112 @@
+name: Epic
+description: A body of work too big for one issue — a container tracked through sub-issues
+title: "Epic: "
+labels: ["epic"]
+body:
+  - type: input
+    id: blocked-by
+    attributes:
+      label: Blocked by
+      description: >-
+        Issue numbers this depends on, like `#40, #42`. An epic's blockers are
+        the work it *builds on*, not its own children — the decomposition below
+        is not a blocker list. Leave it empty if nothing blocks this.
+      placeholder: "#40, #42"
+    validations:
+      required: false
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: >-
+        Why this exists, in a paragraph. The most useful version names the gap:
+        what is already on the board, what isn't covered by any of it, and what
+        that missing piece is currently making look stuck.
+    validations:
+      required: true
+
+  - type: textarea
+    id: model
+    attributes:
+      label: Model
+      description: >-
+        The shape of the work — its stages or pieces, and how they relate. Name
+        the constraint that governs it if there is one (an authorization
+        boundary, an ordering requirement, a service that has to ship first).
+        This section is what makes the decomposition below a consequence rather
+        than a wish list.
+    validations:
+      required: true
+
+  - type: textarea
+    id: decomposition
+    attributes:
+      label: Decomposition (build order)
+      description: >-
+        Ordered. Each line should be something one person can pick up and finish
+        without holding the whole epic in their head. Promote each to its own
+        sub-issue as it's picked up — the sub-issues are what the board tracks,
+        and each should stay inside a single zone even though the epic doesn't.
+      value: |
+        - [ ] **** —
+        - [ ] **** —
+        - [ ] **** —
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: >-
+        Which parts of the system this epic reaches. Epics routinely span
+        several — that's much of what makes them epics. Zones are not asked for
+        here: they belong to PRs, and each PR under this epic is still expected
+        to stay inside one (see docs/CODE-OWNERSHIP.md).
+      multiple: true
+      options:
+        - bot
+        - deployment
+        - docs-system
+        - integration
+        - observability
+        - service
+        - tooling
+        - not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: build-on
+    attributes:
+      label: What we can build on
+      description: >-
+        The closed issues, existing patterns, and shipped services this reuses.
+        Two jobs: it stops an epic from reading as more new work than it is, and
+        it points whoever picks up the first sub-issue at the right prior art
+        instead of a blank file.
+    validations:
+      required: false
+
+  - type: textarea
+    id: not-in-epic
+    attributes:
+      label: Not in this epic
+      description: >-
+        The neighbouring work this gets confused with, and which issue owns it
+        instead. This is the section that most reliably prevents the same work
+        being built twice or counted twice.
+    validations:
+      required: false
+
+  - type: textarea
+    id: open-questions
+    attributes:
+      label: Open questions
+      description: >-
+        Decisions genuinely not made yet. Filing with these open is fine and
+        normal; starting the first sub-issue with the ones that affect it still
+        open is not.
+    validations:
+      required: false
