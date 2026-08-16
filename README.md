@@ -105,6 +105,7 @@ Misty/
 │   ├── ARCHITECTURE.md                Cross-service architecture — how the pieces fit
 │   ├── MEETING-RECORDING.md           How /record splits across the bot + meeting service
 │   ├── RAILWAY-DEPLOYMENT.md          Deploy runbook (Railway + Neon setup, key provisioning)
+│   ├── CODE-OWNERSHIP.md              Zones — what they are, who owns each, PR scope
 │   └── DEPLOYMENT-HISTORY.md          Design decisions, lessons learned, release log
 │
 ├── services/                          HTTP services (each in its own folder)
@@ -142,7 +143,7 @@ Misty/
 │   └── provision-directory-key.sh     Mint + wire scoped API keys per environment
 │
 └── .github/
-    ├── CODEOWNERS                     Per-area reviewers; zones mirror pr-zone-check
+    ├── CODEOWNERS                     Per-zone reviewers; zones mirror pr-zone-check
     ├── PULL_REQUEST_TEMPLATE.md       Zone, verification steps, deployment notes
     ├── ISSUE_TEMPLATE/                Bug / feature / epic templates (prompt the `Blocked by:` line)
     └── workflows/

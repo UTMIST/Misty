@@ -1,19 +1,22 @@
 # Code owners — GitHub auto-requests these reviewers on matching PRs.
 #
-# Per-area ownership. Everything is @qiuethan for now; as people are hired,
+# Per-zone ownership. Everything is @qiuethan for now; as people are hired,
 # replace @qiuethan on the relevant line (and/or add owners, space-separated:
 # `/services/team-tracking/ @qiuethan @new-hire`).
 #
 # NOTE: last matching pattern wins and is NOT cumulative — for a given file
-# only the last line it matches applies, so keep @qiuethan on each area line
-# if you want to stay an owner of that area.
+# only the last line it matches applies, so keep @qiuethan on each zone line
+# if you want to stay an owner of that zone.
+#
+# "Zone" is the repo's word for these buckets; docs/CODE-OWNERSHIP.md defines
+# them. Older comments say "area" for the same thing.
 #
 # See issue #34 (Code Reviewer Assigner + Discord webhook).
 
-# Fallback: anything not covered by an area below.
+# Fallback: anything not covered by a zone below.
 * @qiuethan
 
-# Areas — keep in sync with zone_for() in .github/workflows/pr-zone-check.yml.
+# Zones — keep in sync with zone_for() in .github/workflows/pr-zone-check.yml.
 /discord-bot/                    @qiuethan
 /packages/auth/                  @qiuethan
 /services/connectors/            @qiuethan

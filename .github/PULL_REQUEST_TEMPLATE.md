@@ -18,9 +18,17 @@ Branching rules (enforced by CI):
 
 ## Zone
 
-<!-- Which area does this touch? Delete the rest. -->
+<!--
+Which zone does this touch? Delete the rest. `root` is the one to pick for the
+top-level files — README.md, AGENTS.md, Makefile, pyproject.toml, .claude/.
 
-`discord-bot` · `packages/auth` · `services/connectors` · `services/documentation-system` · `services/llm` · `services/meeting` · `services/team-tracking` · `services/verification` · `docs` · `scripts` · `.github`
+Adding a new service or package? Give it its own zone in .github/CODEOWNERS and
+pr-zone-check.yml in this PR, rather than leaving it in a catch-all bucket.
+
+Full list, and what each zone covers: docs/CODE-OWNERSHIP.md
+-->
+
+`discord-bot` · `packages/auth` · `services/connectors` · `services/documentation-system` · `services/llm` · `services/meeting` · `services/team-tracking` · `services/verification` · `docs` · `scripts` · `.github` · `root`
 
 <!-- If this spans more than one zone, explain why it can't be split: -->
 
