@@ -51,12 +51,36 @@ until it gets its own line in both files.
 |---|---|---|
 | [`.github/CODEOWNERS`](../.github/CODEOWNERS) | GitHub auto-requests the zone's owner on a matching PR | No — `require_code_owner_reviews` is off, so it requests but does not gate |
 | [`pr-zone-check.yml`](../.github/workflows/pr-zone-check.yml) | Warns when one PR touches more than one zone; writes the list to the job summary | No — ends in `exit 0` by design |
+| [`zone-label.yml`](../.github/workflows/zone-label.yml) + [`labeler.yml`](../.github/labeler.yml) | Applies `zone: <name>` labels from the paths a PR touches, so zones are visible on the PR list | No |
+| [`label-consistency.yml`](../.github/workflows/label-consistency.yml) + [`scripts/check-labels.mjs`](../scripts/check-labels.mjs) | Fails when the copies of the list disagree, when `labeler.yml`'s globs resolve a path to a different zone than `zone_for()` does, or when a `services/*` / `packages/*` directory has no zone | **Yes, when made a required check** — the job itself exits non-zero |
 | [`PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md) | Prompts the author to name the zone | No |
-| [`ISSUE_TEMPLATE/`](../.github/ISSUE_TEMPLATE) | `feature_request` prompts for one zone; `epic` prompts for the several it spans | No |
 
-Nothing here can block a merge today. `pr-zone-check` becomes enforcing by
-changing its trailing `exit 0` to `exit 1` and adding the job as a required
-status check in branch protection.
+`label-consistency` is the only one that fails a run, and only about the list's
+*internal* consistency — nothing here gates a merge on which zones a PR touches.
+`pr-zone-check` becomes enforcing by changing its trailing `exit 0` to `exit 1`
+and adding the job as a required status check in branch protection.
+
+## Zones are for PRs. Areas are for issues.
+
+These are two different label namespaces on two different axes, and the split is
+deliberate:
+
+| | `zone: *` | `area/*` |
+|---|---|---|
+| Applies to | Pull requests | Issues |
+| Answers | Which directory bucket, and so who reviews it | Which parts of the system are involved, and so what you need to know to pick it up |
+| Cardinality | **One.** A file has exactly one zone, and a PR is expected to stay inside one | **Several.** Most issues here carry two or three |
+| Set by | [`zone-label.yml`](../.github/workflows/zone-label.yml), from the changed paths | [`area-label-issues.yml`](../.github/workflows/area-label-issues.yml), from the form's Area dropdown |
+| The list | The fourteen above | `bot`, `deployment`, `docs-system`, `integration`, `observability`, `service`, `tooling` |
+
+The cardinality is the reason they cannot be one namespace. A zone is
+single-valued by construction — that is the whole basis of `pr-zone-check`
+nagging about multi-zone PRs. An area is multi-valued by nature: one
+`area/service` issue routinely spans six zones. Collapsing them would either
+make zones meaningless or make areas unusable.
+
+So an issue is never given a zone, and a PR is never given an area. If you want
+to know which zones an epic will touch, that falls out of its PRs.
 
 ---
 
@@ -113,22 +137,37 @@ attributed rather than silently ownerless.
 
 ## Adding or renaming a zone
 
-Five files carry the list. Change them in the same PR or the next reader gets a
-contradiction:
+Five files carry the list. Change them in the same PR — `label-consistency`
+fails the build otherwise, and names the file you missed:
 
-1. [`.github/CODEOWNERS`](../.github/CODEOWNERS) — the zone line and its owner.
-2. [`.github/workflows/pr-zone-check.yml`](../.github/workflows/pr-zone-check.yml)
+1. [`.github/workflows/pr-zone-check.yml`](../.github/workflows/pr-zone-check.yml)
    — a `zone_for()` case **above** the `services/*` / `packages/*` catch-alls.
-3. [`.github/PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md) —
+   This one is canonical; the checker reads the others against it.
+2. [`.github/CODEOWNERS`](../.github/CODEOWNERS) — the zone line and its owner.
+3. [`.github/labeler.yml`](../.github/labeler.yml) — a `zone: <name>` key **and**
+   a matching `!` negation in every catch-all bucket the new zone carves paths
+   out of, because `labeler` applies *every* rule that matches rather than
+   stopping at the first. Forget the negation and the zone gets two labels; the
+   checker probes a path per zone and fails on exactly that.
+4. [`.github/PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md) —
    the Zone list.
-4. [`.github/ISSUE_TEMPLATE/feature_request.md`](../.github/ISSUE_TEMPLATE/feature_request.md)
-   and [`epic.md`](../.github/ISSUE_TEMPLATE/epic.md) — the same list, twice.
 5. This file's table.
+
+Then create the label: `gh label create "zone: <name>" --color BFD4F2`. Nothing
+checks that the labels exist — a missing one is created on first use, in a
+random colour.
+
+Run `make labels` before pushing to get the same answer CI will give you.
+
+**Adding an area** is a separate, smaller job: the `areas` array in
+[`area-label-issues.yml`](../.github/workflows/area-label-issues.yml) (canonical)
+and the Area dropdown in each of the three issue forms. Same check, same
+failure mode.
 
 If the new zone is a service, its CI job in
 [`ci.yml`](../.github/workflows/ci.yml) belongs in that PR too — a service has
-shipped to staging with no CI coverage before, and the zone list is not what
-catches that.
+shipped to staging with no CI coverage before, and `label-consistency` does not
+catch that. It checks that the service *has a zone*, not that it has tests.
 
 ---
 
@@ -142,11 +181,23 @@ right response is to give it a real zone
 `root` is different: a permanent destination that never resolves into anything
 else, and the one the most ordinary PRs in this repo belong to.
 
-**The one real gap: five files hold the list and nothing checks they agree.**
-`CODEOWNERS`, `pr-zone-check.yml`, the three templates, and this page. Both
-drift incidents so far trace to that, and correcting the copies resets the clock
-without changing the odds. A CI step that extracts the zones from `zone_for()`
-and from `CODEOWNERS` and diffs the two would catch it mechanically.
+**The gap that used to be here is closed.** Five files hold the zone list, and
+[`label-consistency`](../.github/workflows/label-consistency.yml) now diffs them
+against `zone_for()` on every PR. Both drift incidents so far traced to nobody
+checking; correcting the copies by hand reset the clock without changing the
+odds, which is why this is a CI step rather than a convention.
+
+It also catches the incident directly: any directory under `services/` or
+`packages/` without its own zone fails the build, rather than silently joining
+the catch-all bucket where multi-zone PRs stop warning. And it probes one path
+per zone through `labeler.yml`'s globs, so a bucket that double-labels — or a
+mistyped glob that labels nothing — fails too, rather than being a set of keys
+that merely *looks* right.
+
+What it still cannot see: whether a zone's paths are the *right* paths. It
+checks that the copies agree, not that the mapping matches how the code is
+actually organised. A zone pointed at a directory that no longer exists passes
+cleanly.
 
 **Latent, not yet biting:** `root`, `services/other`, and `packages/other` have
 no `CODEOWNERS` line and resolve through the `*` fallback. Invisible while every
