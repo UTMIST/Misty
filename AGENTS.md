@@ -71,7 +71,7 @@ Violating any of these is a bug even if tests pass.
   git switch -c your-feature
   ```
 
-- **Keep a PR inside one CODEOWNERS zone.** `pr-zone-check.yml` warns (non-blocking) when a PR spans multiple zones. Zones are the service/package directories plus `docs/`, `scripts/`, `.github/`, and `root` (anything else, including this file). If a change genuinely spans zones — a protocol change touching both `meeting` and `discord-bot` — that's fine, but it should be deliberate, not incidental.
+- **Keep a PR inside one CODEOWNERS zone.** `pr-zone-check.yml` warns (non-blocking) when a PR spans multiple zones. [`docs/CODE-OWNERSHIP.md`](docs/CODE-OWNERSHIP.md) is the zone list and what each one covers — note that editing *this* file puts a PR in `root`. If a change genuinely spans zones — a protocol change touching both `meeting` and `discord-bot` — that's fine, but it should be deliberate, not incidental.
 - **Open PRs into `staging`.** Green CI is required.
 - **Don't commit or push unless asked.** Especially don't push to `staging` or `main` directly.
 - **Issue bodies use `Blocked by: #40, #42`** to drive the `blocked`/`ready` labels (`blocked-ready-automation.yml`). Case-insensitive, colon optional.
@@ -123,6 +123,7 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 | Why is X built this way? | `services/X/docs/ARCHITECTURE.md` |
 | How do I deploy / what env vars? | `services/X/docs/DEPLOYMENT.md`, [`docs/RAILWAY-DEPLOYMENT.md`](docs/RAILWAY-DEPLOYMENT.md) |
 | Why was this decided? | [`docs/DEPLOYMENT-HISTORY.md`](docs/DEPLOYMENT-HISTORY.md) |
+| What zone/area is this in, and who owns it? | [`docs/CODE-OWNERSHIP.md`](docs/CODE-OWNERSHIP.md) |
 | How does `/record` work? | [`docs/MEETING-RECORDING.md`](docs/MEETING-RECORDING.md) |
 
 ## Documentation is part of the change

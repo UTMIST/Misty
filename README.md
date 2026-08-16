@@ -105,6 +105,7 @@ Misty/
 │   ├── ARCHITECTURE.md                Cross-service architecture — how the pieces fit
 │   ├── MEETING-RECORDING.md           How /record splits across the bot + meeting service
 │   ├── RAILWAY-DEPLOYMENT.md          Deploy runbook (Railway + Neon setup, key provisioning)
+│   ├── CODE-OWNERSHIP.md              Areas/zones — what they are, who owns each, PR scope
 │   └── DEPLOYMENT-HISTORY.md          Design decisions, lessons learned, release log
 │
 ├── services/                          HTTP services (each in its own folder)

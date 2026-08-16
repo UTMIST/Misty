@@ -25,9 +25,11 @@ Blocked by:
 ## Where
 
 <!-- Delete the ones that don't apply. Work spanning several zones is usually
-     better split into one issue per zone — PRs are expected to stay single-zone. -->
+     better split into one issue per zone — PRs are expected to stay single-zone.
+     `root` is the top-level files (README.md, AGENTS.md, Makefile,
+     pyproject.toml). What each zone covers: docs/CODE-OWNERSHIP.md -->
 
-`discord-bot` · `packages/auth` · `services/connectors` · `services/documentation-system` · `services/llm` · `services/meeting` · `services/team-tracking` · `services/verification` · `docs` · `scripts` · `.github`
+`discord-bot` · `packages/auth` · `services/connectors` · `services/documentation-system` · `services/llm` · `services/meeting` · `services/team-tracking` · `services/verification` · `docs` · `scripts` · `.github` · `root`
 
 ## Done looks like
 

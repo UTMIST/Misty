@@ -57,9 +57,10 @@ Blocked by:
 
 <!-- Epics routinely span several — that's much of what makes them epics. List
      them here so the scope is visible, then keep each sub-issue and each PR
-     inside one, because pr-zone-check.yml is scoped to PRs, not to this. -->
+     inside one, because pr-zone-check.yml is scoped to PRs, not to this.
+     `root` is the top-level files. What each zone covers: docs/CODE-OWNERSHIP.md -->
 
-`discord-bot` · `packages/auth` · `services/connectors` · `services/documentation-system` · `services/llm` · `services/meeting` · `services/team-tracking` · `services/verification` · `docs` · `scripts` · `.github`
+`discord-bot` · `packages/auth` · `services/connectors` · `services/documentation-system` · `services/llm` · `services/meeting` · `services/team-tracking` · `services/verification` · `docs` · `scripts` · `.github` · `root`
 
 ## Open questions
 
