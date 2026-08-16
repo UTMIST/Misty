@@ -123,7 +123,7 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 | Why is X built this way? | `services/X/docs/ARCHITECTURE.md` |
 | How do I deploy / what env vars? | `services/X/docs/DEPLOYMENT.md`, [`docs/RAILWAY-DEPLOYMENT.md`](docs/RAILWAY-DEPLOYMENT.md) |
 | Why was this decided? | [`docs/DEPLOYMENT-HISTORY.md`](docs/DEPLOYMENT-HISTORY.md) |
-| What zone/area is this in, and who owns it? | [`docs/CODE-OWNERSHIP.md`](docs/CODE-OWNERSHIP.md) |
+| What zone is this in, and who owns it? | [`docs/CODE-OWNERSHIP.md`](docs/CODE-OWNERSHIP.md) |
 | How does `/record` work? | [`docs/MEETING-RECORDING.md`](docs/MEETING-RECORDING.md) |
 
 ## Documentation is part of the change
