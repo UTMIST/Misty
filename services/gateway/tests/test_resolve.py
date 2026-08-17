@@ -47,9 +47,52 @@ def test_no_discord_identifier_404():
     assert c.get("/v1/resolve/discord/octocat", headers=h).status_code == 404
 
 
+def test_the_two_misses_are_indistinguishable():
+    """"Not in the directory" and "in it, but no Discord link" must look identical.
+
+    Otherwise the endpoint is a membership oracle: anyone holding a
+    resolve:discord key could walk a list of GitHub logins and learn which of
+    them belong to UTMIST members, which is more than this endpoint is meant to
+    disclose about anyone.
+    """
+    absent, absent_h = _client(FakeDir(person=None))
+    present, present_h = _client(
+        FakeDir(person={"id": "p1"}, idents=[{"provider": "github", "external_id": "x"}])
+    )
+    a = absent.get("/v1/resolve/discord/octocat", headers=absent_h)
+    b = present.get("/v1/resolve/discord/octocat", headers=present_h)
+    assert a.status_code == b.status_code == 404
+    assert a.json() == b.json()
+
+
 def test_directory_down_503():
     c, h = _client(FakeDir(down=True))
     assert c.get("/v1/resolve/discord/octocat", headers=h).status_code == 503
+
+
+def test_person_without_an_id_fails_closed_to_503():
+    # An unrecognised upstream shape is an upstream fault, not a missing record.
+    # Indexing it blindly would raise KeyError and surface as a 500.
+    c, h = _client(FakeDir(person={"name": "no id here"}))
+    assert c.get("/v1/resolve/discord/octocat", headers=h).status_code == 503
+
+
+def test_response_carries_only_the_discord_id():
+    c, h = _client(
+        FakeDir(
+            person={"id": "p1", "primary_email": "someone@example.com", "full_name": "Someone"},
+            idents=[
+                {"provider": "discord", "external_id": "42"},
+                {"provider": "uoft_email", "external_id": "someone@utoronto.ca"},
+            ],
+        )
+    )
+    r = c.get("/v1/resolve/discord/octocat", headers=h)
+    assert r.status_code == 200
+    assert r.json() == {"discord_id": "42"}
+    body = r.text
+    for leaked in ("someone@example.com", "Someone", "utoronto.ca", "p1"):
+        assert leaked not in body
 
 
 def test_requires_scope_and_key():
