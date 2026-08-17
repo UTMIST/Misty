@@ -5,9 +5,9 @@ from fastapi.responses import JSONResponse
 
 from contracts.directory import DirectoryUnavailable
 from src.api.middleware import AuditLogMiddleware
-from src.api.ratelimit import RateLimitMiddleware
+from src.api.ratelimit import ClientRateLimitMiddleware
 from src.api.routers import resolve
-from src.config import verify_production_secrets
+from src.config import get_settings, verify_production_secrets
 
 logger = logging.getLogger("gateway")
 
@@ -20,7 +20,15 @@ def create_app() -> FastAPI:
         description="External API gateway.",
         docs_url="/docs",
     )
-    app.add_middleware(RateLimitMiddleware, limit=60, window_s=60)
+    # Order matters, and add_middleware prepends: the last one added is the
+    # outermost. Audit must be outermost so it still records the requests the
+    # flood guard short-circuits — a 429 storm is exactly what you want in the
+    # log. The per-key quota is not here; it runs as a router dependency, after
+    # auth has resolved the key (see src/api/ratelimit.py).
+    app.add_middleware(
+        ClientRateLimitMiddleware,
+        trust_proxy=get_settings().trust_proxy_headers,
+    )
     app.add_middleware(AuditLogMiddleware, logger_name="gateway.audit")
 
     @app.get("/health")
