@@ -13,3 +13,17 @@ def test_issue_mints_verifiable_key(monkeypatch, capsys):
     assert store.get_api_key_hash(prefix) is not None
     assert verify_key(plaintext, store.get_api_key_hash(prefix)) is True
     assert store.get_api_key_by_prefix(prefix).scopes == ["resolve:discord"]
+
+
+def test_issue_reports_a_duplicate_name_without_a_traceback(monkeypatch, capsys):
+    store = InMemoryStorageAdapter()
+    monkeypatch.setattr(cli, "_adapter", lambda: store)
+    assert cli.main(["issue", "--name", "gh-action"]) == 0
+    capsys.readouterr()
+
+    assert cli.main(["issue", "--name", "gh-action"]) == 1
+    captured = capsys.readouterr()
+    assert "error:" in captured.err
+    # Nothing on stdout: a caller piping stdout to a secrets store must not be
+    # handed a key that was never persisted.
+    assert captured.out.strip() == ""

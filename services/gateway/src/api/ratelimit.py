@@ -157,9 +157,7 @@ def build_key_rate_limit(counter: FixedWindowCounter):
 
     def _dep(key: AuthedKey = Depends(require_api_key)) -> AuthedKey:
         if not counter.hit(key.name):
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=_TOO_MANY
-            )
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=_TOO_MANY)
         return key
 
     return _dep

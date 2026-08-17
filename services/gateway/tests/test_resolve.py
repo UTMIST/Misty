@@ -10,10 +10,12 @@ from src.storage.in_memory import InMemoryStorageAdapter
 class FakeDir:
     def __init__(self, person=None, idents=None, down=False):
         self._p, self._i, self._down = person, idents or [], down
+
     def get_person_by_github(self, login):
         if self._down:
             raise DirectoryUnavailable("x")
         return self._p
+
     def list_identifiers(self, pid):
         return self._i
 
@@ -21,8 +23,9 @@ class FakeDir:
 def _client(fake):
     store = InMemoryStorageAdapter()
     plaintext, prefix, key_hash = generate_key()
-    store.create_api_key(name="c", prefix=prefix, key_hash=key_hash,
-                         scopes=["resolve:discord"], actor="t")
+    store.create_api_key(
+        name="c", prefix=prefix, key_hash=key_hash, scopes=["resolve:discord"], actor="t"
+    )
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_directory] = lambda: fake
@@ -30,9 +33,15 @@ def _client(fake):
 
 
 def test_resolves_discord_id():
-    c, h = _client(FakeDir(person={"id": "p1"},
-                           idents=[{"provider": "github", "external_id": "octocat"},
-                                   {"provider": "discord", "external_id": "42"}]))
+    c, h = _client(
+        FakeDir(
+            person={"id": "p1"},
+            idents=[
+                {"provider": "github", "external_id": "octocat"},
+                {"provider": "discord", "external_id": "42"},
+            ],
+        )
+    )
     r = c.get("/v1/resolve/discord/octocat", headers=h)
     assert r.status_code == 200 and r.json() == {"discord_id": "42"}
 
@@ -43,12 +52,14 @@ def test_login_not_found_404():
 
 
 def test_no_discord_identifier_404():
-    c, h = _client(FakeDir(person={"id": "p1"}, idents=[{"provider": "github", "external_id": "x"}]))
+    c, h = _client(
+        FakeDir(person={"id": "p1"}, idents=[{"provider": "github", "external_id": "x"}])
+    )
     assert c.get("/v1/resolve/discord/octocat", headers=h).status_code == 404
 
 
 def test_the_two_misses_are_indistinguishable():
-    """"Not in the directory" and "in it, but no Discord link" must look identical.
+    """ "Not in the directory" and "in it, but no Discord link" must look identical.
 
     Otherwise the endpoint is a membership oracle: anyone holding a
     resolve:discord key could walk a list of GitHub logins and learn which of
@@ -96,5 +107,7 @@ def test_response_carries_only_the_discord_id():
 
 
 def test_requires_scope_and_key():
-    c, h = _client(FakeDir(person={"id": "p1"}, idents=[{"provider": "discord", "external_id": "42"}]))
+    c, h = _client(
+        FakeDir(person={"id": "p1"}, idents=[{"provider": "discord", "external_id": "42"}])
+    )
     assert c.get("/v1/resolve/discord/octocat").status_code == 401

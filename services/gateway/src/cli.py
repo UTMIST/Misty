@@ -24,10 +24,19 @@ def _adapter() -> PostgresStorageAdapter:
 
 def cmd_issue(args: argparse.Namespace) -> int:
     plaintext, prefix, key_hash = generate_key()
-    key = _adapter().create_api_key(
-        name=args.name, prefix=prefix, key_hash=key_hash, scopes=list(args.scopes or []),
-        actor=args.actor,
-    )
+    try:
+        key = _adapter().create_api_key(
+            name=args.name,
+            prefix=prefix,
+            key_hash=key_hash,
+            scopes=list(args.scopes or []),
+            actor=args.actor,
+        )
+    except ValueError as e:
+        # Almost always a duplicate --name. Matching cmd_revoke, an operator
+        # error gets a sentence and an exit code, not a traceback.
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     print("=" * 70, file=sys.stderr)
     print("EXTERNAL API KEY ISSUED (shown once)", file=sys.stderr)
     print(f"  Name:   {key.name}", file=sys.stderr)
@@ -63,7 +72,9 @@ def cmd_revoke(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="gateway-keys", description="Manage gateway external API keys.")
+    p = argparse.ArgumentParser(
+        prog="gateway-keys", description="Manage gateway external API keys."
+    )
     p.add_argument("--actor", default="cli")
     subs = p.add_subparsers(dest="cmd", required=True)
     pi = subs.add_parser("issue")

@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -7,6 +8,8 @@ from sqlalchemy.exc import IntegrityError
 
 from contracts.types import ApiKey
 from src.storage.schema import api_keys
+
+logger = logging.getLogger("gateway.storage")
 
 
 def _now() -> datetime:
@@ -108,4 +111,10 @@ class PostgresStorageAdapter:
                     update(api_keys).where(api_keys.c.id == api_key_id).values(last_used_at=_now())
                 )
         except Exception:
-            pass  # best-effort; DB blips must not fail the auth path
+            # Best-effort: a DB blip must not fail the auth path over a
+            # bookkeeping write. Logged rather than swallowed outright, because
+            # silence here means last_used_at can go stale indefinitely and the
+            # only symptom is a key that looks unused while it is in daily use.
+            logger.warning(
+                "could not update last_used_at for api key %s", api_key_id, exc_info=True
+            )

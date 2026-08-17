@@ -159,7 +159,11 @@ def _keyed_app(limit: int):
     )
     other_plain, other_prefix, other_hash = generate_key()
     store.create_api_key(
-        name="other", prefix=other_prefix, key_hash=other_hash, scopes=["resolve:discord"], actor="t"
+        name="other",
+        prefix=other_prefix,
+        key_hash=other_hash,
+        scopes=["resolve:discord"],
+        actor="t",
     )
 
     counter = FixedWindowCounter(limit=limit, window_s=60)

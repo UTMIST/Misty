@@ -3,8 +3,13 @@ from src.storage.in_memory import InMemoryStorageAdapter
 
 def test_create_get_verify_revoke_roundtrip():
     a = InMemoryStorageAdapter()
-    key = a.create_api_key(name="gh-action", prefix="abcd1234", key_hash="HASH",
-                           scopes=["resolve:discord"], actor="cli")
+    key = a.create_api_key(
+        name="gh-action",
+        prefix="abcd1234",
+        key_hash="HASH",
+        scopes=["resolve:discord"],
+        actor="cli",
+    )
     assert key.name == "gh-action" and key.active is True
     assert a.get_api_key_hash("abcd1234") == "HASH"
     row = a.get_api_key_by_prefix("abcd1234")

@@ -40,7 +40,9 @@ def create_app() -> FastAPI:
     @app.exception_handler(DirectoryUnavailable)
     async def _directory_unavailable(request: Request, exc: DirectoryUnavailable):
         logger.warning("directory unavailable: %s", exc)
-        return JSONResponse(status_code=503, content={"detail": "directory temporarily unavailable"})
+        return JSONResponse(
+            status_code=503, content={"detail": "directory temporarily unavailable"}
+        )
 
     return app
 
