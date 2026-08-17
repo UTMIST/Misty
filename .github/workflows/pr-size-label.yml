@@ -17,12 +17,16 @@ permissions:
 jobs:
   label-size:
     runs-on: ubuntu-latest
-    # Two pushes seconds apart would otherwise race: the second run's payload is
-    # a snapshot taken before the first run relabelled, so it tries to remove a
-    # label that is already gone.
+    # Shared with zone-label.yml — the group name is deliberately identical, and
+    # concurrency groups are repo-wide, so the two serialise instead of
+    # interleaving. See that file for why interleaving loses labels.
+    #
+    # `cancel-in-progress: false` is required here: with `true`, the two
+    # workflows would cancel each other instead of queueing, which is the
+    # opposite of what we need.
     concurrency:
-      group: pr-size-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
+      group: pr-labels-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
 
     steps:
       - name: Label PR size

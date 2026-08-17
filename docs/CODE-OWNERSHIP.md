@@ -140,6 +140,18 @@ counted as a single zone and never warned.
 `root` and the `*` fallback exist precisely so that a new top-level file is
 attributed rather than silently ownerless.
 
+**Anything else that labels a PR must join the `pr-labels-*` concurrency
+group.** `actions/labeler` writes with `setLabels` — `PUT /issues/{n}/labels`,
+which *replaces* the whole label set rather than adding to it. It reads,
+computes, and writes back, so a label another workflow adds between that read
+and that write is silently discarded. On PR #203 this ate a `size/l` label one
+second after it was applied. [`zone-label.yml`](../.github/workflows/zone-label.yml)
+and [`pr-size-label.yml`](../.github/workflows/pr-size-label.yml) therefore share
+`concurrency: group: pr-labels-${{ github.event.pull_request.number }}` with
+`cancel-in-progress: false`, which serialises them. A third labeller that does
+not join the group will lose this race roughly half the time, and the symptom is
+a label that appears and then vanishes — not an error.
+
 ---
 
 ## Adding or renaming a zone

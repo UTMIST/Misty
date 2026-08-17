@@ -19,6 +19,25 @@ permissions:
 jobs:
   label-zone:
     runs-on: ubuntu-latest
+    # Shared with pr-size-label.yml. Both fire on the same event, and
+    # actions/labeler writes labels with `setLabels` — PUT /issues/{n}/labels,
+    # which REPLACES the whole set rather than adding to it. So it reads the
+    # PR's labels, computes, and writes back; anything another workflow adds in
+    # between that read and that write is silently discarded.
+    #
+    # That is not hypothetical: on PR #203, pr-size-label added `size/l` at
+    # 23:50:36 and this workflow's write removed it at 23:50:37.
+    #
+    # Serialising fixes it in either order — run after, and the read already
+    # includes `size/l`; run before, and the size labeler's `addLabels` is
+    # additive. `cancel-in-progress: false` so the two queue rather than
+    # cancelling each other.
+    #
+    # Upgrading does not help: v6 and v7 still call setLabels. Only the
+    # unreleased main branch switched to addLabels/removeLabels.
+    concurrency:
+      group: pr-labels-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     steps:
       - uses: actions/labeler@v5
         with:
