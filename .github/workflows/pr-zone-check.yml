@@ -41,6 +41,7 @@ jobs:
               packages/*)                       echo packages/other ;;
               services/connectors/*)            echo services/connectors ;;
               services/documentation-system/*)  echo services/documentation-system ;;
+              services/gateway/*)               echo services/gateway ;;
               services/llm/*)                   echo services/llm ;;
               services/meeting/*)               echo services/meeting ;;
               services/team-tracking/*)         echo services/team-tracking ;;

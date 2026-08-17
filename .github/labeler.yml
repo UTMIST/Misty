@@ -44,6 +44,11 @@
       - any-glob-to-any-file:
           - services/documentation-system/**
 
+"zone: services/gateway":
+  - changed-files:
+      - any-glob-to-any-file:
+          - services/gateway/**
+
 "zone: services/llm":
   - changed-files:
       - any-glob-to-any-file:
@@ -74,6 +79,7 @@
           - services/**
           - "!services/connectors/**"
           - "!services/documentation-system/**"
+          - "!services/gateway/**"
           - "!services/llm/**"
           - "!services/meeting/**"
           - "!services/team-tracking/**"

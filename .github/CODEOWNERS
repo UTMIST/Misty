@@ -48,6 +48,7 @@
 /packages/auth/                  @qiuethan
 /services/connectors/            @qiuethan
 /services/documentation-system/  @qiuethan
+/services/gateway/               @qiuethan
 /services/llm/                   @qiuethan
 /services/meeting/               @qiuethan
 /services/team-tracking/         @qiuethan
