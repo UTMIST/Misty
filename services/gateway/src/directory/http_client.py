@@ -10,22 +10,26 @@ _TIMEOUT = httpx.Timeout(5.0)
 class HttpDirectoryClient:
     """Looks up people and identifiers over team-tracking's HTTP API. A 404
     means 'no such record' (returns None); connection failure or 5xx means
-    'directory unavailable' (raises DirectoryUnavailable)."""
+    'directory unavailable' (raises DirectoryUnavailable).
+
+    Holds one pooled httpx.Client for its whole lifetime. The resolver makes two
+    directory calls per request, so a client built (and closed) per call would
+    mean two fresh TCP + TLS handshakes on the hot path. Construct this once —
+    src/api/deps.py caches the instance — rather than per request.
+    """
 
     def __init__(self, base_url: str, api_key: str, client: httpx.Client | None = None) -> None:
         self._base_url = base_url.rstrip("/")
-        self._api_key = api_key
-        self._client = client
+        # Set once as a default header so the key never has to be rebuilt (or
+        # accidentally logged) per call. It is never read back out.
+        self._client = client or httpx.Client(timeout=_TIMEOUT)
+        self._client.headers["X-API-Key"] = api_key
 
     def _get(self, path: str):
-        client = self._client or httpx.Client(timeout=_TIMEOUT)
         try:
-            resp = client.get(f"{self._base_url}{path}", headers={"X-API-Key": self._api_key})
+            resp = self._client.get(f"{self._base_url}{path}")
         except httpx.HTTPError as e:
             raise DirectoryUnavailable(f"directory unreachable: {e}") from e
-        finally:
-            if self._client is None:
-                client.close()
         if resp.status_code == 404:
             return None
         if not (200 <= resp.status_code < 300):
