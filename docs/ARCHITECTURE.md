@@ -234,7 +234,18 @@ callers go through a gateway at all.
   (`identifiers:read`) for its own outbound calls. It composes and curates — it never
   passes an internal response straight through — and adds the protections an
   externally-facing surface needs that internal services don't: a public Railway
-  domain, per-key rate limiting, and audit logging of every external request.
+  domain, per-key rate limiting behind a per-IP flood guard, and audit logging of
+  every external request.
+
+  The asymmetry runs one level deeper than the key registries. Every internal
+  service also accepts an env-bootstrap key (`API_KEY`), which `platform_auth`
+  resolves to the wildcard `admin` scope — the grace path you use to reach the
+  admin API that issues the first real key, and safe because only the private
+  network can reach it. **The gateway does not.** It has no admin API to
+  bootstrap (`gateway-keys` writes to its database directly) and it is the one
+  service on the public internet, so it passes `get_env_key=lambda: None` and
+  every caller must present an issued, scoped key. When adding an
+  externally-reachable service, copy that, not the internal shim.
 
 The gateway's first (and so far only) endpoint is the resolver,
 `GET /v1/resolve/discord/{github_login}` — it turns a GitHub login into the Discord id
