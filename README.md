@@ -100,6 +100,7 @@ Misty/
 ├── pyproject.toml                     Root uv workspace (members: services/*, packages/*)
 ├── uv.lock                            Single lockfile for the whole workspace
 ├── docs/
+│   ├── ONBOARDING.md                  Joining the team — zones, getting work, PR norms, expectations
 │   ├── DEVELOPMENT.md                 Developer onboarding — clone to first PR
 │   ├── ACCESS.md                      Which credentials you need (mostly none) and who to ask
 │   ├── ARCHITECTURE.md                Cross-service architecture — how the pieces fit
@@ -167,7 +168,7 @@ Each service is self-contained: its own tests, its own docs, and its own databas
 
 ## Running the platform locally
 
-New here? Start with the **[developer onboarding guide](docs/DEVELOPMENT.md)** — it walks a fresh clone through prerequisites, running the platform in order, and your first contribution.
+New here? Start with the **[developer onboarding guide](docs/DEVELOPMENT.md)** — it walks a fresh clone through prerequisites, running the platform in order, and your first contribution. Joining as a contributor? [`docs/ONBOARDING.md`](docs/ONBOARDING.md) covers the process side — zones, getting work, and PR norms.
 
 Nothing to bootstrap at the root to *run* a service — stand up only what you need. To *verify* a change, there is one root command:
 
@@ -229,6 +230,7 @@ Depending on what you're here to do:
 - [`services/documentation-system/docs/API.md`](services/documentation-system/docs/API.md) — ingest, retrieve, and update the catalog.
 
 **Contributing code**
+- [`docs/ONBOARDING.md`](docs/ONBOARDING.md) — joining the team: zones, getting work, PR norms, and what's expected of you.
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — onboarding: clone → running locally → first PR.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the cross-service picture.
 - Then whichever service you're touching: [`services/team-tracking/`](services/team-tracking/README.md), [`services/documentation-system/`](services/documentation-system/README.md), or [`discord-bot/`](discord-bot/README.md).
