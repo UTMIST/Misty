@@ -10,6 +10,10 @@ Two tracks:
 - **New to Python/Node/Docker, or new to this repo?** Read
   [Prerequisites](#prerequisites-new-to-this-stack) first, then work down the page.
 
+This page is the *technical* path. The *process* side — zone ownership, how
+work gets assigned, PR review norms, what's expected of you — is
+[`ONBOARDING.md`](ONBOARDING.md).
+
 The platform is **six backend services plus the Discord bot**. You almost never
 need all of them at once — stand up only what you're touching.
 
