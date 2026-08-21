@@ -38,6 +38,7 @@ Every domain has a first-class HTTP API — build your own dashboard, sync job, 
 
 - **[team-tracking](services/team-tracking/README.md)** — 26 endpoints across `people`, `teams`, `role_kinds`, `team_memberships`, `providers`, `person_identifiers`, `api_keys`. Full point-in-time roster queries. Scoped API keys, per-request audit log. **Actively consumed** by the Discord bot in production.
 - **[documentation-system](services/documentation-system/README.md)** — endpoints over `docs` and `sources`; ingest a URL and it's normalized, dedup'd, fetched (title + snapshot for supported sources), and owner-validated against team-tracking. Ownership degrades gracefully if the directory is unreachable. **Consumed** by the Discord bot's `/doc` command group (`add`, `list`, `show`, `remove`).
+- **[gateway](services/gateway/README.md)** — the one **public** service. A narrow, scoped, rate-limited door onto the directory for external consumers (e.g. a GitHub Action) that shouldn't hold an internal team-tracking key. First endpoint: `GET /v1/resolve/discord/{github_login}`, returning only a Discord id.
 
 Every service speaks OpenAPI. Point Swagger UI or codegen at them. (`meeting`'s WebSocket route isn't representable in OpenAPI — its wire format is documented in [`services/meeting/README.md`](services/meeting/README.md).)
 
@@ -64,6 +65,7 @@ The other four are internal-facing: **[llm](services/llm/README.md)** (`POST /ch
 | [`services/verification/`](services/verification/README.md) | Email verification: request a one-time code and confirm it, linking a subject (e.g. `discord:<id>`) to a verified email; requires the `verification:write` scope | **Deployed** (staging + prod). |
 | [`services/meeting/`](services/meeting/README.md) | Meeting recording: transcribes a Discord voice session (Amazon Transcribe) and returns LLM-generated minutes as a branded PDF; no DB, nothing persisted | **Deployed** (staging). Consumed by the bot's `/record` command group; requires the `meetings` scope. |
 | [`services/connectors/`](services/connectors/README.md) | Stateless outbound adapter: fetches document content (Google Docs/Sheets/Slides/Drive) on behalf of internal consumers via a service account; no DB | **Deployed** (staging). Consumed by documentation-system's Google source fetches; requires the `fetch` scope. |
+| [`services/gateway/`](services/gateway/README.md) | The one **public** service — a scoped, rate-limited external gateway onto the directory, with its own external key registry and one internal team-tracking key | Built. First endpoint: `GET /v1/resolve/discord/{github_login}` (used by #34's reviewer-ping GitHub Action). |
 | [`discord-bot/`](discord-bot/README.md) | Discord slash-command frontend + a browser-based "web playground" for iterating on commands without a Discord token | **Deployed** (staging + prod). All slash commands are stable and registered globally; 0 beta. |
 | Search / retrieval | Full-text + semantic search over the catalog's snapshots | Deferred (not built) |
 
@@ -124,14 +126,17 @@ Misty/
 │   ├── llm/                           Bedrock /chat proxy — 8002, NO database
 │   ├── meeting/                       Live meeting transcription — 8004, NO database,
 │   │                                   stateful (in-memory sessions)
-│   └── connectors/                    Google source fetch adapter — 8005, NO database
+│   ├── connectors/                    Google source fetch adapter — 8005, NO database
+│   └── gateway/                       External API gateway — 8006, own Postgres (external
+│                                       key registry). The one PUBLIC service: scoped,
+│                                       rate-limited, curated read surface
 │                                       (every service above has the same docs/ set:
 │                                        API.md, ARCHITECTURE.md, CONTRIBUTING.md, DEPLOYMENT.md)
 │
 ├── packages/
 │   └── auth/                          platform_auth — shared API-key auth lib (argon2 hashing,
 │                                       scopes, FastAPI deps, audit middleware); a pure leaf
-│                                       consumed by all six services via thin shims
+│                                       consumed by all seven services via thin shims
 │
 ├── discord-bot/                       Discord frontend + web playground
 │   ├── src/                           Node.js + discord.js
@@ -150,7 +155,7 @@ Misty/
     ├── PULL_REQUEST_TEMPLATE.md       Zone, verification steps, deployment notes
     ├── ISSUE_TEMPLATE/                Bug / feature / epic issue forms (Blocked by + Zone fields)
     └── workflows/
-        ├── ci.yml                     Tests + lint + Docker builds on every PR (10 jobs)
+        ├── ci.yml                     Tests + lint + Docker builds on every PR (11 jobs)
         ├── main-source-guard.yml      Enforces "PRs to main come from staging"
         ├── pr-zone-check.yml          Warns on PRs spanning multiple CODEOWNERS zones
         ├── label-consistency.yml      Fails when the zone or area list drifts (runs check-labels.mjs)
@@ -162,7 +167,7 @@ Misty/
         └── blocked-ready-automation.yml   Syncs blocked/ready issue labels
 ```
 
-Each service is self-contained: its own tests, its own docs, and its own database *if it needs one* — `llm`, `meeting`, and `connectors` deliberately have none. Dependencies are managed as one uv workspace rooted at this repo's `pyproject.toml`/`uv.lock`, and all six services share one leaf, `packages/auth` (`platform_auth`), for API-key auth — a shared *library* dependency, not a dependency between services, which remain independent of each other. Add a new service by dropping it in `services/` following the same shape (and adding its CI job in the same PR).
+Each service is self-contained: its own tests, its own docs, and its own database *if it needs one* — `llm`, `meeting`, and `connectors` deliberately have none. Dependencies are managed as one uv workspace rooted at this repo's `pyproject.toml`/`uv.lock`, and all seven services share one leaf, `packages/auth` (`platform_auth`), for API-key auth — a shared *library* dependency, not a dependency between services, which remain independent of each other. Add a new service by dropping it in `services/` following the same shape (and adding its CI job in the same PR).
 
 ---
 

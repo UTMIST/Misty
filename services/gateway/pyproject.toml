@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.uv]
+package = true
+
+[project]
+name = "gateway"
+version = "0.1.0"
+description = "UTMIST external API gateway"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    "sqlalchemy>=2.0.35",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.13",
+    "uvicorn[standard]>=0.32",
+    "argon2-cffi>=23.1",
+    "httpx>=0.27",
+    "platform-auth",
+]
+
+[tool.uv.sources]
+platform-auth = { workspace = true }
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "httpx>=0.27", "ruff>=0.6"]
+
+[project.scripts]
+gateway-keys = "src.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

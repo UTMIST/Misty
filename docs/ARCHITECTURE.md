@@ -212,6 +212,47 @@ describes how it applies them concretely.
   driven by an actor supplied via `X-On-Behalf-Of` rather than by the key alone.
   No other service needs this today.
 
+## Access architecture: two doors, not one gateway
+
+The platform has exactly two ways in, and they're deliberately asymmetric — there is
+**no internal gateway**. Internal services trust each other directly; only external
+callers go through a gateway at all.
+
+- **Internal door.** team-tracking, documentation-system, and the gateway's own
+  outbound call to team-tracking all authenticate the same way: a per-consumer key,
+  argon2-hashed, scoped, issued by the target service's own CLI (`team-tracking-keys`,
+  `doc-keys`). The machinery is the shared [`packages/auth`](../packages/auth)
+  (`platform_auth`) library described above — each internal service is its own
+  authority over its own keys. There is no shared internal proxy standing in front of
+  them; adding a service that trusts another means issuing it a key on that service,
+  nothing more.
+- **External door — [`services/gateway/`](../services/gateway/README.md), implemented.**
+  Callers outside the org's trust boundary (a GitHub Action, a future third-party
+  integration) never get a team-tracking key. Instead they hold a key issued by the
+  gateway's own external registry (`gateway-keys`, scoped e.g. `resolve:discord`), and
+  the gateway holds exactly **one** internal team-tracking key
+  (`identifiers:read`) for its own outbound calls. It composes and curates — it never
+  passes an internal response straight through — and adds the protections an
+  externally-facing surface needs that internal services don't: a public Railway
+  domain, per-key rate limiting behind a per-IP flood guard, and audit logging of
+  every external request.
+
+  The asymmetry runs one level deeper than the key registries. Every internal
+  service also accepts an env-bootstrap key (`API_KEY`), which `platform_auth`
+  resolves to the wildcard `admin` scope — the grace path you use to reach the
+  admin API that issues the first real key, and safe because only the private
+  network can reach it. **The gateway does not.** It has no admin API to
+  bootstrap (`gateway-keys` writes to its database directly) and it is the one
+  service on the public internet, so it passes `get_env_key=lambda: None` and
+  every caller must present an issued, scoped key. When adding an
+  externally-reachable service, copy that, not the internal shim.
+
+The gateway's first (and so far only) endpoint is the resolver,
+`GET /v1/resolve/discord/{github_login}` — it turns a GitHub login into the Discord id
+linked to the same person in the directory, and nothing else, for #34's reviewer-ping
+GitHub Action. New external use cases get new narrow endpoints on the gateway, not
+broader access to team-tracking itself.
+
 ## Why the directory is built first
 
 The build order — **directory → docs catalog → search** — isn't arbitrary. It follows

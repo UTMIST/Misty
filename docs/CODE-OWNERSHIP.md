@@ -24,6 +24,7 @@ Fourteen buckets. Every tracked file lands in exactly one.
 | `packages/other` | `packages/*` | `/packages/` | @qiuethan |
 | `services/connectors` | `services/connectors/*` | `/services/connectors/` | @qiuethan |
 | `services/documentation-system` | `services/documentation-system/*` | `/services/documentation-system/` | @qiuethan |
+| `services/gateway` | `services/gateway/*` | `/services/gateway/` | @qiuethan |
 | `services/llm` | `services/llm/*` | `/services/llm/` | @qiuethan |
 | `services/meeting` | `services/meeting/*` | `/services/meeting/` | @qiuethan |
 | `services/team-tracking` | `services/team-tracking/*` | `/services/team-tracking/` | @qiuethan |
