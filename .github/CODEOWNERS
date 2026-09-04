@@ -1,8 +1,9 @@
 # Code owners — GitHub auto-requests these reviewers on matching PRs.
 #
-# Per-zone ownership. Everything is @qiuethan for now; as people are hired,
-# add them to the relevant line. Owners are space-separated, and you must keep
-# the existing owner if they are to stay one:
+# Per-zone ownership, assigned from the onboarding zone-interest form. The
+# zones still on @qiuethan had no taker on that form, except packages/auth,
+# which is held deliberately — see docs/CODE-OWNERSHIP.md. Owners are
+# space-separated, and you must keep the existing owner if they are to stay one:
 #
 #     /services/team-tracking/ @qiuethan @somebody
 #
@@ -44,13 +45,13 @@
 /packages/                       @qiuethan
 
 # Zones — keep in sync with zone_for() in .github/workflows/pr-zone-check.yml.
-/discord-bot/                    @qiuethan
+/discord-bot/                    @pusheen5000000
 /packages/auth/                  @qiuethan
-/services/connectors/            @qiuethan
-/services/documentation-system/  @qiuethan
-/services/llm/                   @qiuethan
-/services/meeting/               @qiuethan
-/services/team-tracking/         @qiuethan
+/services/connectors/            @michelle-yl
+/services/documentation-system/  @angelayzheng
+/services/llm/                   @Williamzhibo
+/services/meeting/               @andrei-akopian
+/services/team-tracking/         @michelle-yl
 /services/verification/          @qiuethan
 /docs/                           @qiuethan
 /scripts/                        @qiuethan

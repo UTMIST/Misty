@@ -19,14 +19,14 @@ Fourteen buckets. Every tracked file lands in exactly one.
 
 | Zone | What it covers | Owner | `pr-zone-check` pattern | CODEOWNERS line |
 |---|---|---|---|---|
-| `discord-bot` | Discord frontend for the platform — slash commands over the team-tracking API. Holds no database and no business logic. [README](../discord-bot/README.md) | @qiuethan | `discord-bot/*` | `/discord-bot/` |
+| `discord-bot` | Discord frontend for the platform — slash commands over the team-tracking API. Holds no database and no business logic. [README](../discord-bot/README.md) | @pusheen5000000 | `discord-bot/*` | `/discord-bot/` |
 | `packages/auth` | `platform-auth`, the shared API-key auth library — keys, scopes, audit middleware — that every service wires in via `build_auth(...)`. [README](../packages/auth/README.md) | @qiuethan | `packages/auth/*` | `/packages/auth/` |
 | `packages/other` | Any package with no zone of its own yet. Transitional — see below. | @qiuethan | `packages/*` | `/packages/` |
-| `services/connectors` | Stateless `POST /fetch` — returns document text from external sources (Google Drive/Docs) so consumers never hold source credentials. [README](../services/connectors/README.md) | @qiuethan | `services/connectors/*` | `/services/connectors/` |
-| `services/documentation-system` | Catalog API for the org's links — docs, sheets, repos, videos — with owners, tags, and content snapshots. [README](../services/documentation-system/README.md) | @qiuethan | `services/documentation-system/*` | `/services/documentation-system/` |
-| `services/llm` | Stateless `POST /chat` fronting Claude on Bedrock. The single choke point for credentials, model catalog, and provider quirks. [README](../services/llm/README.md) | @qiuethan | `services/llm/*` | `/services/llm/` |
-| `services/meeting` | Stateful HTTP + WebSocket service: live Discord voice audio to Amazon Transcribe, then a rolling transcript, minutes, and a PDF. [README](../services/meeting/README.md) | @qiuethan | `services/meeting/*` | `/services/meeting/` |
-| `services/team-tracking` | Source of truth for the directory — people, teams, roles, memberships, external identity mapping. [README](../services/team-tracking/README.md) | @qiuethan | `services/team-tracking/*` | `/services/team-tracking/` |
+| `services/connectors` | Stateless `POST /fetch` — returns document text from external sources (Google Drive/Docs) so consumers never hold source credentials. [README](../services/connectors/README.md) | @michelle-yl | `services/connectors/*` | `/services/connectors/` |
+| `services/documentation-system` | Catalog API for the org's links — docs, sheets, repos, videos — with owners, tags, and content snapshots. [README](../services/documentation-system/README.md) | @angelayzheng | `services/documentation-system/*` | `/services/documentation-system/` |
+| `services/llm` | Stateless `POST /chat` fronting Claude on Bedrock. The single choke point for credentials, model catalog, and provider quirks. [README](../services/llm/README.md) | @Williamzhibo | `services/llm/*` | `/services/llm/` |
+| `services/meeting` | Stateful HTTP + WebSocket service: live Discord voice audio to Amazon Transcribe, then a rolling transcript, minutes, and a PDF. [README](../services/meeting/README.md) | @andrei-akopian | `services/meeting/*` | `/services/meeting/` |
+| `services/team-tracking` | Source of truth for the directory — people, teams, roles, memberships, external identity mapping. [README](../services/team-tracking/README.md) | @michelle-yl | `services/team-tracking/*` | `/services/team-tracking/` |
 | `services/verification` | Proves someone controls an email address for a given subject, via short-lived one-time codes. [README](../services/verification/README.md) | @qiuethan | `services/verification/*` | `/services/verification/` |
 | `services/other` | Any service with no zone of its own yet. Transitional — see below. | @qiuethan | `services/*` | `/services/` |
 | `docs` | The top-level `docs/` only: cross-cutting docs that belong to no one service. A service's own `docs/` is part of that service's zone. | @qiuethan | `docs/*` | `/docs/` |
@@ -34,9 +34,23 @@ Fourteen buckets. Every tracked file lands in exactly one.
 | `.github` | CI and repo automation: the [workflows](../.github/workflows), [`CODEOWNERS`](../.github/CODEOWNERS), [`labeler.yml`](../.github/labeler.yml), and the issue and PR templates. | @qiuethan | `.github/*` | `/.github/` |
 | `root` | Every top-level file: `README.md`, [`AGENTS.md`](../AGENTS.md), `Makefile`, `pyproject.toml`, `uv.lock`, `.claude/`, the dotfiles. | @qiuethan | everything else | *(the `*` fallback)* |
 
-Every owner is a `@qiuethan` placeholder for now. Per-zone assignment happens as
-people are hired — see [`CODEOWNERS`](../.github/CODEOWNERS) for how to add one
-without accidentally removing yourself.
+Six zones were assigned from the onboarding zone-interest form. The rest stay
+`@qiuethan`, for two different reasons:
+
+- **`packages/auth` is held deliberately.** Every service wires it in via
+  `build_auth(...)`, so a change here has blast radius far past its 530 source
+  lines. It had an interested owner; it is on `@qiuethan` by choice.
+- **The others had no taker** — `services/verification`, `docs`, `scripts`,
+  `.github`, `root`, and the two `*/other` catch-alls. Note that no respondent
+  named *any* non-service zone, so treat that silence as untested rather than
+  settled: `.github` alone saw 34 file-touches in the last 80 commits.
+
+To change an owner, see [`CODEOWNERS`](../.github/CODEOWNERS) for how to add one
+without accidentally removing yourself. Nothing in CI validates the handles in
+the Owner column above: `check-labels.mjs` only checks that every zone has a
+row and a CODEOWNERS line, so this table goes stale silently. `codeowners-valid`
+does catch a handle that cannot actually review, but only in
+`.github/CODEOWNERS`, never here.
 
 The two `*/other` buckets and `root` are **real destinations, not leftovers.**
 A PR that edits `AGENTS.md`, `README.md`, `Makefile`, `pyproject.toml`, or
