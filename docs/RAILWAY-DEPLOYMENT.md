@@ -129,6 +129,7 @@ Set these per environment (staging vs production) per service.
 | `MAX_MEETING_MS` | — | optional; defaults to the 4h backstop | — |
 | `DISCONNECT_GRACE_S` | — | optional; defaults to 60s. How long a disconnected session is held so `POST /stop` can still finalize it | — |
 | `GOOGLE_CREDENTIALS_JSON` | — | — | base64 Google service-account key; empty is a valid running state (Google fetches 503, rest of the service works) |
+| `MAX_FILE_BYTES` | — | — | optional; defaults to 25 MiB. Pre-download limit for uploaded PDF, `.docx`, and `text/*` files |
 
 > Bedrock usage bills as **Amazon Bedrock** (credits apply) — do *not* point
 > `llm` at Claude Platform on AWS.

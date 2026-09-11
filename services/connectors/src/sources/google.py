@@ -15,6 +15,7 @@ from src.sources.base import (
     SourceNotFound,
     SourceResult,
     SourceUnsupported,
+    SourceUnavailable,
 )
 from src.sources.google_extractors.base import Extractor, execute
 from src.sources.google_extractors.docs import DocsExtractor
@@ -112,11 +113,13 @@ class GoogleSource:
         *,
         credentials_json_b64: str,
         max_content_chars: int,
+        max_file_bytes: int,
         services: dict | None = None,
         request_timeout_s: float = 30.0,
     ) -> None:
         self._credentials_json_b64 = credentials_json_b64
         self._max_content_chars = max_content_chars
+        self._max_file_bytes = max_file_bytes
         self._request_timeout_s = request_timeout_s
         # API name -> client. A dict rather than one client because extractors
         # need different APIs (drive, docs, ...). Tests inject fakes here; in
@@ -205,7 +208,7 @@ class GoogleSource:
             credentials = self._get_credentials()
             services = self._build_services(credentials)
 
-        meta = execute(services["drive"].files().get(fileId=file_id, fields="name,mimeType"))
+        meta = execute(services["drive"].files().get(fileId=file_id, fields="name,mimeType,size"))
         name = (meta or {}).get("name")
         mime = (meta or {}).get("mimeType") or ""
 
@@ -214,6 +217,19 @@ class GoogleSource:
             if not mime.startswith("text/"):
                 raise SourceUnsupported(f"no text form for mime type: {mime}")
             extractor = _MEDIA_EXTRACTOR
+
+        if mime in (PDF_MIME, DOCX_MIME) or mime.startswith("text/"):
+            raw_size = (meta or {}).get("size")
+            if raw_size is not None:
+                try:
+                    file_size = int(raw_size)
+                except (TypeError, ValueError) as e:
+                    raise SourceUnavailable("google returned invalid file size metadata") from e
+                if file_size > self._max_file_bytes:
+                    raise SourceUnsupported(
+                        f"file size {file_size} bytes exceeds MAX_FILE_BYTES limit "
+                        f"of {self._max_file_bytes} bytes"
+                    )
 
         extracted = extractor.extract(services, file_id, mime)
         return SourceResult(
