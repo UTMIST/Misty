@@ -435,6 +435,50 @@ function humansIn(voiceChannel, botId) {
   return count;
 }
 
+function findMeetingAnnouncementChannel(guild) {
+  if (guild?.systemChannel?.send) return guild.systemChannel;
+  return guild?.channels?.cache?.find(
+    (channel) => channel?.send && channel.isTextBased?.() && !channel.isThread?.(),
+  );
+}
+
+const NEW_MEETING_PROMPT =
+  'A new meeting is starting. Run `/record start` to begin recording the voice channel.';
+
+// Prompt the first human to enter an otherwise empty voice channel. Starting
+// remains an explicit slash command because it is linked-only and consumes a
+// voice connection plus a live meeting session.
+export function createMeetingPrompt({ meetingSurface, getBotId = () => undefined } = {}) {
+  return function onVoiceStateUpdate(oldState, newState) {
+    const guild = newState?.guild;
+    const guildId = guild?.id;
+    const channelId = newState?.channelId;
+    if (!guildId || !channelId || oldState?.channelId === channelId) return;
+
+    const botId = getBotId();
+    const userId = newState.id ?? newState.member?.id;
+    if (!userId || userId === botId || newState.member?.user?.bot) return;
+    // The no-meeting-service fallback has no activeSession method. Do not
+    // advertise a recording flow that cannot start in that configuration.
+    if (typeof meetingSurface?.activeSession !== 'function') return;
+    if (meetingSurface.activeSession(guildId)) return;
+
+    const voiceChannel = newState.channel ?? guild.channels?.cache?.get?.(channelId);
+    if (humansIn(voiceChannel, botId) !== 1) return;
+
+    const announcementChannel = findMeetingAnnouncementChannel(guild);
+    if (!announcementChannel) return;
+
+    try {
+      Promise.resolve(
+        announcementChannel.send({ content: `<@${userId}> ${NEW_MEETING_PROMPT}` }),
+      ).catch((err) => console.error(`meeting prompt failed for guild ${guildId}:`, err));
+    } catch (err) {
+      console.error(`meeting prompt failed for guild ${guildId}:`, err);
+    }
+  };
+}
+
 // Auto-stop: end a recording when everyone leaves its voice channel. Rather than
 // finalizing on the raw "last member left" event (which a transient client blip
 // or a voice-region failover would trigger, irreversibly terminating a live
@@ -581,9 +625,14 @@ export function wireDiscordClient(client, { commands, appContext }) {
     meetingSurface: appContext.meetingSurface,
     getBotId: () => client.user?.id,
   });
+  const onMeetingPrompt = createMeetingPrompt({
+    meetingSurface: appContext.meetingSurface,
+    getBotId: () => client.user?.id,
+  });
   client.on('voiceStateUpdate', (oldState, newState) => {
     try {
       onVoiceStateUpdate(oldState, newState);
+      onMeetingPrompt(oldState, newState);
     } catch (err) {
       console.error('voiceStateUpdate handler error:', err?.message ?? err);
     }
