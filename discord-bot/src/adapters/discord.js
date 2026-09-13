@@ -435,20 +435,28 @@ function humansIn(voiceChannel, botId) {
   return count;
 }
 
-function findMeetingAnnouncementChannel(guild) {
-  if (guild?.systemChannel?.send) return guild.systemChannel;
-  return guild?.channels?.cache?.find(
-    (channel) => channel?.send && channel.isTextBased?.() && !channel.isThread?.(),
-  );
-}
-
 const NEW_MEETING_PROMPT =
   'A new meeting is starting. Run `/record start` to begin recording the voice channel.';
 
 // Prompt the first human to enter an otherwise empty voice channel. Starting
 // remains an explicit slash command because it is linked-only and consumes a
 // voice connection plus a live meeting session.
-export function createMeetingPrompt({ meetingSurface, getBotId = () => undefined } = {}) {
+export function createMeetingPrompt({
+  meetingSurface,
+  getBotId = () => undefined,
+  getUser = () => undefined,
+} = {}) {
+  const sendPrompt = (user, guildId) => {
+    if (!user?.send) return;
+    try {
+      Promise.resolve(user.send({ content: NEW_MEETING_PROMPT })).catch((err) =>
+        console.error(`meeting prompt failed for guild ${guildId}:`, err),
+      );
+    } catch (err) {
+      console.error(`meeting prompt failed for guild ${guildId}:`, err);
+    }
+  };
+
   return function onVoiceStateUpdate(oldState, newState) {
     const guild = newState?.guild;
     const guildId = guild?.id;
@@ -466,13 +474,18 @@ export function createMeetingPrompt({ meetingSurface, getBotId = () => undefined
     const voiceChannel = newState.channel ?? guild.channels?.cache?.get?.(channelId);
     if (humansIn(voiceChannel, botId) !== 1) return;
 
-    const announcementChannel = findMeetingAnnouncementChannel(guild);
-    if (!announcementChannel) return;
+    const cachedUser = newState.member?.user;
+    if (cachedUser?.send) {
+      sendPrompt(cachedUser, guildId);
+      return;
+    }
 
     try {
-      Promise.resolve(
-        announcementChannel.send({ content: `<@${userId}> ${NEW_MEETING_PROMPT}` }),
-      ).catch((err) => console.error(`meeting prompt failed for guild ${guildId}:`, err));
+      Promise.resolve(getUser(userId))
+        .then((user) => sendPrompt(user, guildId))
+        .catch((err) => {
+          console.error(`meeting prompt failed for guild ${guildId}:`, err);
+        });
     } catch (err) {
       console.error(`meeting prompt failed for guild ${guildId}:`, err);
     }
@@ -628,6 +641,7 @@ export function wireDiscordClient(client, { commands, appContext }) {
   const onMeetingPrompt = createMeetingPrompt({
     meetingSurface: appContext.meetingSurface,
     getBotId: () => client.user?.id,
+    getUser: (userId) => client.users.fetch(userId),
   });
   client.on('voiceStateUpdate', (oldState, newState) => {
     try {
