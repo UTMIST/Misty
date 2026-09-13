@@ -275,6 +275,102 @@ expose one.
 write routes alike, so a caller can't probe for the existence of a doc they may not see by
 watching status codes.
 
+## Retrieval layer: chunking + search strategy (RAG)
+
+> **Status: spike / decision record.** This is the "decide" stage of the RAG epic (#125).
+> It fixes the parameters the indexing pipeline (#175) and retrieval endpoint (#176) get
+> built on, so those decisions live here rather than in a comment thread. The numbers below
+> are *starting* values to be validated empirically by the evaluation set (#178), not
+> hand-tuned finals. When #178 moves one of them, update it here in the same PR.
+
+### What we are chunking
+
+The pipeline chunks the **stored plain text of a catalog entity**, not a URL-document. The
+source of that text is `docs.content_snapshot` (capped at `MAX_CONTENT_CHARS` = 1,000,000,
+see `src/content.py`), populated during ingest. Keying on the catalog entity rather than the
+URL-fetch path is deliberate: meeting records are coming and will be catalogued entities with
+no source URL, and a pipeline written around URL-fetched docs would silently exclude them.
+
+The text is already normalized and source-specific by the time it reaches storage. The shapes
+that actually exist today (all via the Google connector, `services/connectors/`):
+
+| Source | Extracted shape | Chunking implication |
+|--------|-----------------|----------------------|
+| Google Docs | Prose, paragraph-structured | Recursive split on paragraph then sentence boundaries |
+| Google Slides | One line per text run, slides joined by `\n` | Slide is a natural boundary; keep slides intact where they fit |
+| Google Sheets | Per-tab, `FORMATTED_VALUE` rows, row-capped | Split per tab, then per row-group; never split mid-row |
+| PDF / DOCX (Drive) | Flattened text, structure lossy | Fall back to plain recursive split |
+| Notion (#85), GitHub READMEs (#86) | Markdown (future) | Split on headings then paragraphs |
+
+The lesson: there is no single splitter. A recursive character splitter with a
+**per-source separator list** is the shape that generalizes, because each connector already
+emits structure this splitter can honor rather than a wall of text.
+
+### Chunk size and overlap
+
+Starting parameters, to be confirmed against #178:
+
+- **Chunk size: ~1,000 characters** (roughly 250 tokens at ~4 chars/token). Small enough that
+  a retrieved chunk is a precise, citable unit rather than a whole document, which matters
+  because #176 returns chunks a member reads directly.
+- **Overlap: ~150 characters (~15%).** Enough to keep a sentence that straddles a boundary
+  retrievable from either side, without inflating the index with near-duplicates.
+- **Respect boundaries first, size second.** Prefer splitting on the source's natural
+  separator (paragraph, slide, row-group, heading) and only fall back to a hard character cut
+  when a single unit exceeds the size. A budget line in a Sheet or a slide's bullet list is
+  meaningless cut in half.
+
+These are conservative middle-of-the-road values chosen because our corpus is small and
+mixed. #178 is the instrument that turns them from guesses into measurements: changing chunk
+size must produce a measurably different hit-rate, or the eval set is too small to be useful.
+
+### Hybrid vs pure vector
+
+**Decision: ship pure vector search for v1 (#176), design the schema so keyword search is a
+cheap fast-follow, and let #178 decide whether we actually need it.**
+
+Reasoning:
+
+- At our corpus size (dozens to low hundreds of docs, low thousands of chunks) pure vector
+  similarity is simpler and almost certainly sufficient for the common case, and it is the
+  shortest path to shipping the endpoint members can use.
+- The known weakness of pure vector at this scale is **exact-token recall of proper nouns**:
+  UTMIST-specific jargon, team names, and people's names, which are exactly the terms members
+  search for and exactly what embeddings blur. That is the case that would justify hybrid.
+- Postgres already ships full-text search (`tsvector` / `ts_rank`), so hybrid does not need a
+  new dependency. A `tsvector` column on the chunks table plus Reciprocal Rank Fusion over the
+  two result lists is a self-contained follow-up, not a rewrite. Adding the column in #174's
+  migration now (populated, unused) keeps that door open at zero cost.
+
+So the build order is: pure vector in #176, measure proper-noun queries in #178, add FTS + RRF
+only if the numbers say so. This keeps the decision empirical rather than architectural.
+
+### Index type
+
+`vector(N)` with **no ANN index (exact scan) to start.** At a few thousand chunks an exact
+nearest-neighbor scan is instant, and it gives 100% recall as the baseline #178 measures
+against. Introduce an **HNSW** index (pgvector >= 0.5) only once the corpus crosses roughly
+10k chunks, where the exact scan starts to cost. This is #174's "index appropriate for the
+expected corpus size": the right index for our current size is none.
+
+### Two decisions this spike also closes
+
+The epic left two questions open. This is where they land:
+
+- **Relevance floor: absolute cosine similarity, calibrated on #178.** Cosine similarity is
+  scale-free, so an absolute floor does not drift with corpus size the way a raw-distance
+  threshold would; the epic's worry about absolute thresholds is really about un-normalized
+  score distributions, which cosine avoids. A relative-to-top-hit floor fails in the case that
+  matters most, where the best hit is itself irrelevant and a relative floor still admits it.
+  Pick the number from the eval set, not from intuition, and revisit if corpus growth shifts
+  the distribution.
+- **`/doc search` uses the exact same visibility rule as `/doc list`.** It reuses
+  `doc_visible()` and the `Actor` / `SEE_ALL` / `DENY` context from the Visibility section
+  above, unchanged. Starting narrower would mean a second authorization code path (a second
+  place to leak) and a surprising inconsistency between two commands over the same catalog.
+  See #176: the visibility predicate is compiled *into* the similarity query, so top-k is
+  computed over only the rows the actor may see, never filtered after ranking.
+
 ## SSRF protection in the web fetcher
 
 Ingest fetches arbitrary caller-supplied URLs, which is a textbook SSRF sink: without a
