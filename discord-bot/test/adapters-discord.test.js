@@ -9,6 +9,7 @@ import {
   resolveEphemeral,
   wireDiscordClient,
   createAutoStop,
+  createMeetingPrompt,
 } from '../src/adapters/discord.js';
 import { DirectoryUnavailable } from '../src/directoryClient.js';
 import record from '../src/commands/record.js';
@@ -49,12 +50,14 @@ function fakeInteraction({ commandName, subcommand = null, calls }) {
 
 // Minimal EventEmitter-ish client stub capturing the interactionCreate handler.
 function fakeClient() {
-  let handler = null;
+  const handlers = new Map();
   return {
     on: (event, fn) => {
-      if (event === 'interactionCreate') handler = fn;
+      handlers.set(event, fn);
     },
-    emit: (interaction) => handler(interaction),
+    emit: (interaction) => handlers.get('interactionCreate')?.(interaction),
+    emitVoiceStateUpdate: (oldState, newState) =>
+      handlers.get('voiceStateUpdate')?.(oldState, newState),
   };
 }
 
@@ -474,7 +477,7 @@ test('/record status is PUBLIC: works for an unlinked caller without a directory
   assert.match(edit.payload.content, /no recording in progress/i);
 });
 
-// --- auto-stop when everyone leaves the recorded voice channel (debounced) ---
+// --- voice-state behavior ---
 
 // The head-count reads guild.voiceStates.cache (populated by GuildVoiceStates),
 // NOT channel.members (which needs the privileged GuildMembers intent). Model
@@ -492,7 +495,7 @@ function fakeVoiceChannel(id, occupants) {
       member: o.resolved === false ? null : { user: { bot: !!o.bot } },
     });
   }
-  return { id, guild: { voiceStates: { cache } } };
+  return { id, guild: { id: 'g1', voiceStates: { cache } } };
 }
 const botOcc = { userId: BOT_ID, bot: true };
 const botOccUnresolved = { userId: BOT_ID, resolved: false }; // member not cached
@@ -535,6 +538,122 @@ const makeAutoStop = (timer, meetingSurface) =>
     setTimer: timer.setTimer,
     clearTimer: timer.clearTimer,
   });
+
+test('meeting prompt DMs the first human to enter an empty voice channel', () => {
+  const sent = [];
+  const user = { send: (payload) => sent.push(payload) };
+  const voiceChannel = fakeVoiceChannel('vc1', [humanOcc('h1')]);
+  const onPrompt = createMeetingPrompt({
+    meetingSurface: { activeSession: () => null },
+    getBotId: () => BOT_ID,
+  });
+
+  onPrompt(
+    { channelId: null, guild: voiceChannel.guild },
+    {
+      id: 'h1',
+      channelId: 'vc1',
+      channel: voiceChannel,
+      guild: voiceChannel.guild,
+      member: { user },
+    },
+  );
+
+  assert.deepEqual(sent, [
+    {
+      content:
+        'A new meeting is starting. Run `/record start` to begin recording the voice channel.',
+    },
+  ]);
+});
+
+test('meeting prompt fetches the user when the voice-state member is uncached', async () => {
+  const sent = [];
+  const user = { send: (payload) => sent.push(payload) };
+  const voiceChannel = fakeVoiceChannel('vc1', [humanOcc('h1')]);
+  const onPrompt = createMeetingPrompt({
+    meetingSurface: { activeSession: () => null },
+    getBotId: () => BOT_ID,
+    getUser: async (userId) => {
+      assert.equal(userId, 'h1');
+      return user;
+    },
+  });
+
+  onPrompt(
+    { channelId: null, guild: voiceChannel.guild },
+    { id: 'h1', channelId: 'vc1', channel: voiceChannel, guild: voiceChannel.guild },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(sent.length, 1);
+});
+
+test('meeting prompt does not ping later entrants, bots, or an active meeting', () => {
+  const sent = [];
+  const laterVoiceChannel = fakeVoiceChannel('vc1', [humanOcc('h1'), humanOcc('h2')]);
+  const onPrompt = createMeetingPrompt({
+    meetingSurface: { activeSession: () => null },
+    getBotId: () => BOT_ID,
+  });
+
+  onPrompt(
+    { channelId: null, guild: laterVoiceChannel.guild },
+    { id: 'h2', channelId: 'vc1', channel: laterVoiceChannel, guild: laterVoiceChannel.guild },
+  );
+
+  const botVoiceChannel = fakeVoiceChannel('vc1', [botOcc]);
+  onPrompt(
+    { channelId: null, guild: botVoiceChannel.guild },
+    {
+      id: BOT_ID,
+      channelId: 'vc1',
+      channel: botVoiceChannel,
+      guild: botVoiceChannel.guild,
+      member: { user: { bot: true } },
+    },
+  );
+
+  const activeVoiceChannel = fakeVoiceChannel('vc1', [humanOcc('h3')]);
+  const activePrompt = createMeetingPrompt({
+    meetingSurface: { activeSession: () => ({ sessionId: 's1' }) },
+    getBotId: () => BOT_ID,
+  });
+  activePrompt(
+    { channelId: null, guild: activeVoiceChannel.guild },
+    { id: 'h3', channelId: 'vc1', channel: activeVoiceChannel, guild: activeVoiceChannel.guild },
+  );
+
+  assert.deepEqual(sent, []);
+});
+
+test('wireDiscordClient runs the meeting prompt on voice-state updates', () => {
+  const sent = [];
+  const user = { send: (payload) => sent.push(payload) };
+  const voiceChannel = fakeVoiceChannel('vc1', [humanOcc('h1')]);
+  const client = fakeClient();
+  client.user = { id: BOT_ID };
+  wireDiscordClient(client, {
+    commands: new Map(),
+    appContext: { meetingSurface: { activeSession: () => null } },
+  });
+
+  client.emitVoiceStateUpdate(
+    { channelId: null, guild: voiceChannel.guild },
+    {
+      id: 'h1',
+      channelId: 'vc1',
+      channel: voiceChannel,
+      guild: voiceChannel.guild,
+      member: { user },
+    },
+  );
+
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].content, /new meeting/i);
+});
+
+// --- auto-stop when everyone leaves the recorded voice channel (debounced) ---
 
 const leaveEvent = { channelId: 'vc1', guild: { id: 'g1' } };
 const nowInVc2 = { channelId: 'vc2', guild: { id: 'g1' } };
