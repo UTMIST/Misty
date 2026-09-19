@@ -213,16 +213,19 @@ What you must supply yourself, and only when you need that capability:
 |---|---|---|
 | `DISCORD_TOKEN`, `DISCORD_CLIENT_ID` | `npm start` — the real Discord surface | [Discord Developer Portal](https://discord.com/developers/applications). **Not needed for `npm run dev:web`.** |
 | `DIRECTORY_API_KEY` | the bot talking to team-tracking | Mint it — see below. Blank in the example on purpose. |
+| `INFRASTRUCTURE_DISCORD_USERNAME` | `/bug` — the infrastructure contact shown to users | Set it to the Discord username of the infrastructure contact. |
 | `AWS_REGION` + AWS credentials | `llm` actually calling Bedrock; `meeting` actually transcribing | Your AWS profile, or explicit `AWS_ACCESS_KEY_ID`/`SECRET`. Both services **boot and answer `/health` without them**; only the real calls fail. The test suites fake both. |
 | `RESEND_API_KEY` / `GMAIL_*` | `verification` sending real mail | Not needed locally — `EMAIL_BACKEND=fake` is the default and drops mail. |
 
 **The bot is the strict one.** `discord-bot/src/config.js` hard-fails at startup
-with `Missing required env vars: …` if any of these ten are unset:
+with `Missing required env vars: …` if any of these eleven are unset:
 `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DIRECTORY_BASE_URL`, `DIRECTORY_API_KEY`,
 `DOC_BASE_URL`, `DOC_API_KEY`, `LLM_BASE_URL`, `LLM_API_KEY`,
-`VERIFICATION_BASE_URL`, `VERIFICATION_API_KEY`. The example fills every one
-except `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, and `DIRECTORY_API_KEY` — those
-three are yours to provide. `MEETING_*` is genuinely optional: leave
+`VERIFICATION_BASE_URL`, `VERIFICATION_API_KEY`,
+`INFRASTRUCTURE_DISCORD_USERNAME`. The example fills every one except
+`DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DIRECTORY_API_KEY`, and
+`INFRASTRUCTURE_DISCORD_USERNAME` — those four are yours to provide.
+`MEETING_*` is genuinely optional: leave
 `MEETING_BASE_URL` blank and the bot boots fine with `/record` reporting
 "not configured".
 

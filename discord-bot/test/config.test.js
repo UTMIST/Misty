@@ -14,6 +14,7 @@ const FULL = {
   LLM_API_KEY: 'lk',
   VERIFICATION_BASE_URL: 'http://localhost:8003/',
   VERIFICATION_API_KEY: 'vk',
+  INFRASTRUCTURE_DISCORD_USERNAME: 'infra-user',
 };
 
 test('loadConfig returns typed config and strips trailing slash', () => {
@@ -22,6 +23,7 @@ test('loadConfig returns typed config and strips trailing slash', () => {
   assert.equal(cfg.discordToken, 't');
   assert.equal(cfg.directoryApiKey, 'k');
   assert.equal(cfg.discordGuildId, 'g');
+  assert.equal(cfg.infrastructureDiscordUsername, 'infra-user');
 });
 
 test('loadConfig throws listing missing vars', () => {
@@ -83,6 +85,7 @@ test('loadConfig exposes llmBaseUrl (trailing slash stripped) and llmApiKey', ()
     LLM_API_KEY: 'llmkey',
     VERIFICATION_BASE_URL: 'http://v',
     VERIFICATION_API_KEY: 'vk',
+    INFRASTRUCTURE_DISCORD_USERNAME: 'infra-user',
   });
   assert.equal(cfg.llmBaseUrl, 'http://llm.railway.internal:8000');
   assert.equal(cfg.llmApiKey, 'llmkey');
@@ -114,7 +117,13 @@ test('loadConfig exposes verificationBaseUrl (trailing slash stripped) and verif
     LLM_API_KEY: 'lk',
     VERIFICATION_BASE_URL: 'http://verify.railway.internal:8000/',
     VERIFICATION_API_KEY: 'verifykey',
+    INFRASTRUCTURE_DISCORD_USERNAME: 'infra-user',
   });
   assert.equal(cfg.verificationBaseUrl, 'http://verify.railway.internal:8000');
   assert.equal(cfg.verificationApiKey, 'verifykey');
+});
+
+test('loadConfig requires the infrastructure Discord username', () => {
+  const { INFRASTRUCTURE_DISCORD_USERNAME, ...rest } = FULL;
+  assert.throws(() => loadConfig(rest), /INFRASTRUCTURE_DISCORD_USERNAME/);
 });

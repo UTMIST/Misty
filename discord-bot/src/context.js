@@ -88,5 +88,6 @@ export function createAppContext(config, { poster, notify } = {}) {
     helperService,
     meetingSurface,
     discordGuildId: config.discordGuildId ?? null,
+    infrastructureDiscordUsername: config.infrastructureDiscordUsername,
   };
 }
