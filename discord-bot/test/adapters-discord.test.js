@@ -477,6 +477,126 @@ test('/record status is PUBLIC: works for an unlinked caller without a directory
   assert.match(edit.payload.content, /no recording in progress/i);
 });
 
+test('/record status explains that Misty will join the voice channel when recording starts', async () => {
+  const calls = [];
+  const voiceChannel = { id: 'vc1', name: 'Operations', guild: { name: 'UTMIST' } };
+  const appContext = {
+    meetingSurface: {
+      status: () => ({ status: 'not-recording' }),
+      activeSession: () => null,
+    },
+  };
+  const client = fakeClient();
+  wireDiscordClient(client, { commands: recordCommands, appContext });
+
+  await client.emit(fakeRecordInteraction({ subcommand: 'status', voiceChannel, calls }));
+
+  const edit = calls.find((c) => c.method === 'editReply');
+  assert.match(edit.payload.content, /Misty will join.*voice channel/i);
+  assert.match(edit.payload.content, /Operations/);
+});
+
+test('/record status identifies the active channel and stop requirements', async () => {
+  const calls = [];
+  const recordedChannel = { id: 'vc1', name: 'Operations', guild: { name: 'UTMIST' } };
+  const callerChannel = { id: 'vc2', name: 'Lounge', guild: { name: 'UTMIST' } };
+  const appContext = {
+    meetingSurface: {
+      status: () => ({ status: 'recording', elapsedMs: 12_000 }),
+      activeSession: () => ({ sessionId: 's1', voiceChannel: recordedChannel }),
+    },
+  };
+  const client = fakeClient();
+  wireDiscordClient(client, { commands: recordCommands, appContext });
+
+  await client.emit(
+    fakeRecordInteraction({ subcommand: 'status', voiceChannel: callerChannel, calls }),
+  );
+
+  const edit = calls.find((c) => c.method === 'editReply');
+  assert.match(edit.payload.content, /recording in.*Operations/i);
+  assert.match(edit.payload.content, /Lounge/);
+  assert.match(edit.payload.content, /participate or stop/i);
+  assert.match(edit.payload.content, /auto-stop.*everyone leaves/i);
+});
+
+test('/record start refuses a different voice channel when Misty is busy elsewhere', async () => {
+  const calls = [];
+  let startCalled = false;
+  const recordedChannel = { id: 'vc1', name: 'Operations', guild: { name: 'UTMIST' } };
+  const callerChannel = { id: 'vc2', name: 'Lounge', guild: { name: 'UTMIST' } };
+  const appContext = {
+    directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) },
+    meetingSurface: {
+      activeSession: () => ({ sessionId: 's1', voiceChannel: recordedChannel }),
+      start: () => {
+        startCalled = true;
+        return { status: 'recording' };
+      },
+    },
+  };
+  const client = fakeClient();
+  wireDiscordClient(client, { commands: recordCommands, appContext });
+
+  await client.emit(
+    fakeRecordInteraction({ subcommand: 'start', voiceChannel: callerChannel, calls }),
+  );
+
+  const edit = calls.find((c) => c.method === 'editReply');
+  assert.match(edit.payload.content, /may not start.*busy elsewhere/i);
+  assert.match(edit.payload.content, /Operations/);
+  assert.match(edit.payload.content, /Lounge/);
+  assert.equal(startCalled, false);
+});
+
+test('/record stop warns and refuses callers outside the recorded voice channel', async () => {
+  const calls = [];
+  let stopCalled = false;
+  const recordedChannel = { id: 'vc1', name: 'Operations', guild: { name: 'UTMIST' } };
+  const callerChannel = { id: 'vc2', name: 'Lounge', guild: { name: 'UTMIST' } };
+  const appContext = {
+    meetingSurface: {
+      activeSession: () => ({ sessionId: 's1', voiceChannel: recordedChannel }),
+      stop: async () => {
+        stopCalled = true;
+        return { status: 'stopped' };
+      },
+    },
+  };
+  const client = fakeClient();
+  wireDiscordClient(client, { commands: recordCommands, appContext });
+
+  await client.emit(
+    fakeRecordInteraction({ subcommand: 'stop', voiceChannel: callerChannel, calls }),
+  );
+
+  const edit = calls.find((c) => c.method === 'editReply');
+  assert.match(edit.payload.content, /should be in.*Operations/i);
+  assert.match(edit.payload.content, /auto-stop.*everyone leaves/i);
+  assert.equal(stopCalled, false);
+});
+
+test('/record stop identifies the recorded channel when stopped from that channel', async () => {
+  const calls = [];
+  const recordedChannel = { id: 'vc1', name: 'Operations', guild: { name: 'UTMIST' } };
+  const appContext = {
+    meetingSurface: {
+      activeSession: () => ({ sessionId: 's1', voiceChannel: recordedChannel }),
+      stop: async () => ({ status: 'stopped' }),
+    },
+  };
+  const client = fakeClient();
+  wireDiscordClient(client, { commands: recordCommands, appContext });
+
+  await client.emit(
+    fakeRecordInteraction({ subcommand: 'stop', voiceChannel: recordedChannel, calls }),
+  );
+
+  const edit = calls.find((c) => c.method === 'editReply');
+  assert.match(edit.payload.content, /stopped recording.*Operations/i);
+  assert.match(edit.payload.content, /minutes will post/i);
+});
+
 // --- voice-state behavior ---
 
 // The head-count reads guild.voiceStates.cache (populated by GuildVoiceStates),

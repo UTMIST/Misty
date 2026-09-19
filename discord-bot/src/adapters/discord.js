@@ -311,6 +311,83 @@ export function makeAttachmentPoster() {
 // equivalent on other surfaces, so it bypasses dispatch()/the router entirely
 // and talks straight to appContext.meetingSurface. commands/record.js exists
 // solely for slash-command registration metadata.
+
+function describeVoiceChannel(channel) {
+  if (!channel) return 'a voice channel';
+  const mention = channel.id ? `<#${channel.id}>` : null;
+  const label = channel.name ? `**${channel.name}**` : mention || 'the voice channel';
+  const channelReference = channel.name && mention ? ` (${mention})` : '';
+  const guild = channel.guild?.name ? ` in **${channel.guild.name}**` : '';
+  return `${label}${channelReference}${guild}`;
+}
+
+function currentVoiceChannel(interaction) {
+  return interaction.member?.voice?.channel ?? null;
+}
+
+function activeRecording(meetingSurface, guildId) {
+  return typeof meetingSurface.activeSession === 'function'
+    ? meetingSurface.activeSession(guildId)
+    : null;
+}
+
+function sameVoiceChannel(left, right) {
+  if (!left || !right) return false;
+  return left === right || (left.id && right.id && left.id === right.id);
+}
+
+function noRecordingMessage(interaction) {
+  const voiceChannel = currentVoiceChannel(interaction);
+  if (voiceChannel) {
+    return `No recording in progress. Misty will join the voice channel ${describeVoiceChannel(voiceChannel)} when you start recording.`;
+  }
+  return 'No recording in progress. Misty will join the voice channel where you start recording.';
+}
+
+function autoStopMessage(voiceChannel) {
+  return `Misty will auto-stop recording once everyone leaves ${describeVoiceChannel(voiceChannel)}.`;
+}
+
+function busyRecordingMessage(interaction, active) {
+  const recordingChannel = active?.voiceChannel;
+  const recordingLocation = describeVoiceChannel(recordingChannel);
+  const callerChannel = currentVoiceChannel(interaction);
+
+  if (sameVoiceChannel(callerChannel, recordingChannel)) {
+    return `Misty is already recording in ${recordingLocation}. No new recording was started. ${autoStopMessage(recordingChannel)}`;
+  }
+
+  const callerLocation = callerChannel
+    ? `You are currently in ${describeVoiceChannel(callerChannel)}.`
+    : 'You are not currently in a voice channel.';
+  return `Misty is already recording in ${recordingLocation}. ${callerLocation} You may not start another recording because Misty is busy elsewhere. Join ${recordingLocation} to participate. ${autoStopMessage(recordingChannel)}`;
+}
+
+function activeStatusMessage(interaction, result, active) {
+  const recordingChannel = active?.voiceChannel;
+  const recordingLocation = describeVoiceChannel(recordingChannel);
+  const elapsed = Math.round((result.elapsedMs ?? 0) / 1000);
+  const callerChannel = currentVoiceChannel(interaction);
+  let participation;
+  if (sameVoiceChannel(callerChannel, recordingChannel)) {
+    participation = `You are in ${recordingLocation}.`;
+  } else if (callerChannel) {
+    participation = `You are in ${describeVoiceChannel(callerChannel)}; join ${recordingLocation} to participate or stop the recording.`;
+  } else {
+    participation = `You are not in a voice channel; join ${recordingLocation} to participate or stop the recording.`;
+  }
+  return `🔴 Misty is recording in ${recordingLocation} (${elapsed}s elapsed). ${participation} ${autoStopMessage(recordingChannel)}`;
+}
+
+function wrongChannelStopMessage(interaction, active) {
+  const recordingLocation = describeVoiceChannel(active?.voiceChannel);
+  const callerChannel = currentVoiceChannel(interaction);
+  const callerLocation = callerChannel
+    ? `You are currently in ${describeVoiceChannel(callerChannel)}.`
+    : 'You are not currently in a voice channel.';
+  return `Misty is recording in ${recordingLocation}. ${callerLocation} You should be in ${recordingLocation} to stop the recording, so I left it running. ${autoStopMessage(active?.voiceChannel)}`;
+}
+
 async function handleRecordInteraction(interaction, appContext, recordCommand) {
   const subcommand = interaction.options.getSubcommand(false);
   await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -354,9 +431,18 @@ async function handleRecordInteraction(interaction, appContext, recordCommand) {
   if (subcommand === 'start') {
     const voiceChannel = interaction.member?.voice?.channel;
     if (!voiceChannel) {
-      await reply('Join a voice channel first.');
+      await reply(
+        'Join a voice channel first. Misty joins the voice channel you are in when recording starts.',
+      );
       return;
     }
+
+    const active = activeRecording(appContext.meetingSurface, interaction.guildId);
+    if (active) {
+      await reply(busyRecordingMessage(interaction, active));
+      return;
+    }
+
     let result;
     try {
       result = await appContext.meetingSurface.start({
@@ -372,25 +458,48 @@ async function handleRecordInteraction(interaction, appContext, recordCommand) {
       await reply("Couldn't start recording — the meeting service may be unavailable.");
       return;
     }
-    if (result.status === 'already-recording') await reply('Already recording.');
-    else if (result.status === 'error') {
+    if (result.status === 'already-recording') {
+      const activeAfterRace = activeRecording(appContext.meetingSurface, interaction.guildId);
+      if (activeAfterRace) await reply(busyRecordingMessage(interaction, activeAfterRace));
+      else await reply('Misty is already recording, so no new recording was started.');
+    } else if (result.status === 'error') {
       // The join failed (missing Connect permission, full channel, timeout).
       // Without this branch the failure fell through to "🔴 Recording…" --
       // the exact false positive this change exists to remove.
-      await reply("Couldn't start recording — I couldn't join that voice channel.");
+      await reply(
+        `Couldn't start recording — Misty couldn't join ${describeVoiceChannel(voiceChannel)}.`,
+      );
     } else if (result.status === 'unconfigured') await reply("Meeting recording isn't configured.");
-    else await reply('🔴 Recording…');
+    else if (result.status === 'recording') {
+      await reply(
+        `🔴 Misty is now recording in ${describeVoiceChannel(voiceChannel)}. ${autoStopMessage(voiceChannel)}`,
+      );
+    } else await reply("Couldn't start recording — the recording state is unavailable.");
     return;
   }
 
   if (subcommand === 'status') {
     const result = appContext.meetingSurface.status(interaction.guildId);
-    if (result.status === 'not-recording') await reply('No recording in progress.');
-    else await reply(`🔴 Recording (${Math.round((result.elapsedMs ?? 0) / 1000)}s elapsed).`);
+    if (result.status === 'not-recording') await reply(noRecordingMessage(interaction));
+    else {
+      const active = activeRecording(appContext.meetingSurface, interaction.guildId);
+      if (active) await reply(activeStatusMessage(interaction, result, active));
+      else {
+        await reply(
+          `🔴 Misty is recording (${Math.round((result.elapsedMs ?? 0) / 1000)}s elapsed), but its voice channel location is unavailable.`,
+        );
+      }
+    }
     return;
   }
 
   if (subcommand === 'stop') {
+    const active = activeRecording(appContext.meetingSurface, interaction.guildId);
+    if (active && !sameVoiceChannel(currentVoiceChannel(interaction), active.voiceChannel)) {
+      await reply(wrongChannelStopMessage(interaction, active));
+      return;
+    }
+
     let result;
     try {
       result = await appContext.meetingSurface.stop(interaction.guildId);
@@ -399,9 +508,16 @@ async function handleRecordInteraction(interaction, appContext, recordCommand) {
       await reply("Couldn't stop recording — please try again.");
       return;
     }
-    if (result.status === 'not-recording') await reply('No recording in progress.');
-    else if (result.status === 'error') await reply('Something went wrong stopping the recording.');
-    else await reply('⏳ Processing — minutes will post here shortly.');
+    if (result.status === 'not-recording') await reply(noRecordingMessage(interaction));
+    else if (result.status === 'error') {
+      await reply(
+        `Something went wrong stopping the recording in ${describeVoiceChannel(active?.voiceChannel)}. Please try again.`,
+      );
+    } else if (result.status === 'stopped') {
+      await reply(
+        `⏳ Misty stopped recording in ${describeVoiceChannel(active?.voiceChannel)}. Processing — minutes will post here shortly.`,
+      );
+    } else await reply("Couldn't determine whether the recording stopped.");
     return;
   }
 
