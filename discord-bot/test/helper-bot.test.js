@@ -9,6 +9,8 @@ import {
   wireDiscordClient,
 } from '../src/adapters/discord.js';
 import { DirectoryUnavailable } from '../src/directoryClient.js';
+import { createHelperRequestLimiter } from '../src/helperRequestLimiter.js';
+import { createHelperService } from '../src/helperService.js';
 
 const BOT = '999';
 
@@ -136,6 +138,7 @@ function ctx({
           : (principal?.person ?? null),
     },
     helperService: { answer: answer ?? (async () => ({ content: 'the answer' })) },
+    helperRequestLimiter: createHelperRequestLimiter(),
   };
 }
 
@@ -443,4 +446,157 @@ test('messageCreate listener: swallows a throw from handleMention', async () => 
   const message = fakeMessage({ content: `<@${BOT_ID}> hi`, channel });
 
   await assert.doesNotReject(() => handlers.messageCreate(message));
+});
+
+// Exercise the real helper service with a fake LLM boundary: no paid calls.
+test('over-limit Discord user is rejected before LLM/thread work; another user still gets an answer', async () => {
+  let llmCalls = 0;
+  const appContext = ctx();
+  appContext.directory.listTeams = async () => [];
+  appContext.directory.listMemberships = async () => [];
+  appContext.helperRequestLimiter = createHelperRequestLimiter({ maxRequests: 1 });
+  appContext.helperService = createHelperService({
+    directory: appContext.directory,
+    llmClient: {
+      chat: async () => {
+        llmCalls++;
+        return { content: 'answer' };
+      },
+    },
+  });
+  const firstThread = fakeChannel({ isThread: true });
+  await handleMention(
+    fakeMessage({
+      content: `<@${BOT_ID}> question`,
+      authorId: '1',
+      channel: fakeChannel(),
+      thread: firstThread,
+    }),
+    { appContext, botId: BOT_ID },
+  );
+  assert.equal(llmCalls, 1);
+  assert.deepEqual(firstThread.sent, ['answer']);
+
+  const deniedChannel = fakeChannel();
+  const denied = fakeMessage({
+    content: `<@${BOT_ID}> another question`,
+    authorId: '1',
+    channel: deniedChannel,
+  });
+  denied.startThread = async () => assert.fail('must not create a thread for a limited user');
+  await handleMention(denied, { appContext, botId: BOT_ID });
+  assert.equal(llmCalls, 1, 'the rejected request never invokes the LLM');
+  assert.match(deniedChannel.replies[0], /slow down.*Try again in/i);
+
+  // Same directory principal in this fake, but a distinct Discord ID still has
+  // its own allowance. An already-open thread must use the same guard.
+  const otherThread = fakeChannel({
+    isThread: true,
+    history: [
+      { author: { id: '1', username: 'alexx' }, content: 'earlier context' },
+      { author: { id: '2', username: 'bob' }, content: `<@${BOT_ID}> my question` },
+    ],
+  });
+  await handleMention(
+    fakeMessage({ content: `<@${BOT_ID}> my question`, authorId: '2', channel: otherThread }),
+    { appContext, botId: BOT_ID },
+  );
+  assert.equal(llmCalls, 2);
+  assert.deepEqual(otherThread.sent, ['answer']);
+  const fetchesBefore = otherThread.fetched.length;
+  await handleMention(
+    fakeMessage({ content: `<@${BOT_ID}> again`, authorId: '2', channel: otherThread }),
+    { appContext, botId: BOT_ID },
+  );
+  assert.equal(llmCalls, 2);
+  assert.equal(
+    otherThread.fetched.length,
+    fetchesBefore,
+    'rejection precedes thread history fetch',
+  );
+  assert.match(otherThread.replies[0], /slow down/i);
+});
+
+test('concurrent mentions cannot reserve the same final slot', async () => {
+  let calls = 0;
+  let release;
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  const appContext = ctx({
+    answer: async () => {
+      calls++;
+      await pending;
+      return { content: 'answer' };
+    },
+  });
+  appContext.helperRequestLimiter = createHelperRequestLimiter({ maxRequests: 1 });
+  const channel = fakeChannel();
+  const first = handleMention(
+    fakeMessage({
+      content: `<@${BOT_ID}> first`,
+      channel,
+      thread: fakeChannel({ isThread: true }),
+    }),
+    { appContext, botId: BOT_ID },
+  );
+  const second = handleMention(
+    fakeMessage({
+      content: `<@${BOT_ID}> second`,
+      channel,
+      thread: fakeChannel({ isThread: true }),
+    }),
+    { appContext, botId: BOT_ID },
+  );
+  release();
+  await Promise.all([first, second]);
+  assert.equal(calls, 1);
+  assert.equal(channel.replies.length, 1);
+  assert.match(channel.replies[0], /slow down/i);
+});
+
+test('failed admitted attempts count, but bare pings and unlinked callers do not', async () => {
+  const appContext = ctx({ principal: null });
+  appContext.helperRequestLimiter = createHelperRequestLimiter({ maxRequests: 1 });
+  const channel = fakeChannel();
+  await handleMention(fakeMessage({ content: `<@${BOT_ID}>`, channel }), {
+    appContext,
+    botId: BOT_ID,
+  });
+  await handleMention(fakeMessage({ content: `<@${BOT_ID}> unlinked`, channel }), {
+    appContext,
+    botId: BOT_ID,
+  });
+  appContext.directory.getPersonByDiscordId = async () => ({ id: 'p1', display_name: 'Alex' });
+  const setupFailure = fakeMessage({ content: `<@${BOT_ID}> question`, channel });
+  setupFailure.startThread = async () => {
+    throw new Error('missing permission');
+  };
+  await handleMention(setupFailure, { appContext, botId: BOT_ID });
+  assert.match(
+    channel.replies.at(-1),
+    /couldn't open a thread/i,
+    'first linked attempt was admitted',
+  );
+  await handleMention(setupFailure, { appContext, botId: BOT_ID });
+  assert.match(channel.replies.at(-1), /slow down/i, 'failed setup still consumed its slot');
+});
+
+test('LLM failures consume allowance rather than permitting unbounded retries', async () => {
+  let calls = 0;
+  const appContext = ctx({
+    answer: async () => {
+      calls++;
+      throw new Error('provider timeout');
+    },
+  });
+  appContext.helperRequestLimiter = createHelperRequestLimiter({ maxRequests: 1 });
+  const channel = fakeChannel();
+  const thread = fakeChannel({ isThread: true });
+  const message = fakeMessage({ content: `<@${BOT_ID}> question`, channel, thread });
+  await handleMention(message, { appContext, botId: BOT_ID });
+  await handleMention(message, { appContext, botId: BOT_ID });
+  assert.equal(calls, 1);
+  assert.match(thread.sent[0], /trouble/i);
+  assert.match(channel.replies[0], /slow down/i);
 });

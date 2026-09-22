@@ -215,6 +215,18 @@ export async function handleMention(message, { appContext, botId }) {
     return;
   }
 
+  // Charge the authenticated requester, never an author found in thread history.
+  // Reserve before any more awaits; even concurrent mentions share this limit.
+  const allowance = appContext.helperRequestLimiter.tryConsume(message.author.id);
+  if (!allowance.allowed) {
+    await message
+      .reply(
+        `Please slow down a little so everyone can use the helper. Try again in ${allowance.retryAfterSeconds} seconds.`,
+      )
+      .catch(() => {});
+    return;
+  }
+
   let target;
   let turns;
   try {
