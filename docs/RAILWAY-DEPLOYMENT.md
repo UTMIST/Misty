@@ -145,6 +145,7 @@ Set these per environment (staging vs production) per service.
 | `DIRECTORY_BASE_URL` / `DIRECTORY_API_KEY` | team-tracking; key set by the provisioning script |
 | `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system |
 | `VERIFICATION_BASE_URL` / `VERIFICATION_API_KEY` | verification |
+| `INFRASTRUCTURE_DISCORD_USERNAME` | Discord username shown by `/bug` for infrastructure support |
 | `MEETING_BASE_URL` / `MEETING_API_KEY` | meeting; a `meetings`-scoped consumer key |
 | `MEETING_WS_URL` | *optional* — derived from `MEETING_BASE_URL` if unset |
 

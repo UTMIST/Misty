@@ -15,6 +15,7 @@ test('meeting config: base url and ws url derivation', async (t) => {
       LLM_API_KEY: 'test',
       VERIFICATION_BASE_URL: 'http://localhost',
       VERIFICATION_API_KEY: 'test',
+      INFRASTRUCTURE_DISCORD_USERNAME: 'infra-user',
       MEETING_BASE_URL: 'http://meeting.railway.internal:8003/',
     });
     assert.equal(cfg.meetingBaseUrl, 'http://meeting.railway.internal:8003');
@@ -32,6 +33,7 @@ test('meeting config: base url and ws url derivation', async (t) => {
       LLM_API_KEY: 'test',
       VERIFICATION_BASE_URL: 'http://localhost',
       VERIFICATION_API_KEY: 'test',
+      INFRASTRUCTURE_DISCORD_USERNAME: 'infra-user',
       MEETING_BASE_URL: 'http://meeting.railway.internal:8003',
     });
     assert.equal(cfg.meetingWsUrl, 'ws://meeting.railway.internal:8003');
@@ -49,6 +51,7 @@ test('meeting config: base url and ws url derivation', async (t) => {
       LLM_API_KEY: 'test',
       VERIFICATION_BASE_URL: 'http://localhost',
       VERIFICATION_API_KEY: 'test',
+      INFRASTRUCTURE_DISCORD_USERNAME: 'infra-user',
       MEETING_BASE_URL: 'https://meeting.railway.internal:8003/',
     });
     assert.equal(cfg.meetingWsUrl, 'wss://meeting.railway.internal:8003');
@@ -66,6 +69,7 @@ test('meeting config: base url and ws url derivation', async (t) => {
       LLM_API_KEY: 'test',
       VERIFICATION_BASE_URL: 'http://localhost',
       VERIFICATION_API_KEY: 'test',
+      INFRASTRUCTURE_DISCORD_USERNAME: 'infra-user',
     });
     assert.equal(cfg.meetingBaseUrl, undefined);
     assert.equal(cfg.meetingWsUrl, undefined);
@@ -83,6 +87,7 @@ test('meeting config: base url and ws url derivation', async (t) => {
       LLM_API_KEY: 'test',
       VERIFICATION_BASE_URL: 'http://localhost',
       VERIFICATION_API_KEY: 'test',
+      INFRASTRUCTURE_DISCORD_USERNAME: 'infra-user',
       MEETING_API_KEY: 'test-key',
     });
     assert.equal(cfg.meetingApiKey, 'test-key');
@@ -100,6 +105,7 @@ test('meeting config: base url and ws url derivation', async (t) => {
       LLM_API_KEY: 'test',
       VERIFICATION_BASE_URL: 'http://localhost',
       VERIFICATION_API_KEY: 'test',
+      INFRASTRUCTURE_DISCORD_USERNAME: 'infra-user',
     });
     assert.equal(cfg.meetingApiKey, undefined);
   });
@@ -116,6 +122,7 @@ test('meeting config: base url and ws url derivation', async (t) => {
       LLM_API_KEY: 'test',
       VERIFICATION_BASE_URL: 'http://localhost',
       VERIFICATION_API_KEY: 'test',
+      INFRASTRUCTURE_DISCORD_USERNAME: 'infra-user',
       MEETING_BASE_URL: 'http://meeting.railway.internal:8003',
       MEETING_WS_URL: 'wss://custom.ws.url',
     });

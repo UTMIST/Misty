@@ -204,7 +204,10 @@ and skips them.
   > `start` is gated at `'linked'` because it consumes a voice connection and a
   > live session; `status`/`stop` are deliberately `'public'` so a directory
   > outage can't strand a running recording. See
-  > [`docs/MEETING-RECORDING.md` → Authorization](../docs/MEETING-RECORDING.md).
+   > [`docs/MEETING-RECORDING.md` → Authorization](../docs/MEETING-RECORDING.md).
+
+- `/bug` (public) — provides the GitHub issue link and the configured
+  infrastructure contact for reporting a bug.
 
 Every command is on the **stable** channel (`beta = false`), so they all register
 globally in every server the bot is in. There are currently no beta commands.
@@ -257,6 +260,8 @@ parallel to team-tracking's scoped-key auth.
 1. **Node 20+** required.
 2. `cp .env.example .env` and fill in:
    - Discord app credentials (`DISCORD_TOKEN`, `DISCORD_CLIENT_ID`).
+   - `INFRASTRUCTURE_DISCORD_USERNAME` — the Discord username shown by `/bug`
+     for infrastructure support.
    - `DISCORD_GUILD_ID` — dedicated testing guild ID. **Beta** commands register
      exclusively here; stable commands are always global. Required only if you
      have beta commands (see "Release channels" above).

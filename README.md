@@ -24,6 +24,8 @@ UTMIST is a student org with rotating leadership and mixed technical fluency. Ev
 - **`/doc`** — catalog and browse links (subcommands: `add`, `list`, `show`, `remove`), backed by documentation-system. Reads are public; writes are admin-only. Team-owner field has slug autocomplete.
 - **`/record`** — record the voice channel you're in and get meeting minutes back (subcommands: `start`, `status`, `stop`). When the first human enters an empty voice channel, the bot sends them a direct message prompting them to run `/record start`. Recording ends on `/record stop` **or automatically once everyone leaves the voice channel** (with a 4h backstop). On stop, the bot posts a branded `meeting-minutes.pdf` (LLM-generated title, summary, decisions, action items, full transcript) into the channel, @-mentioning whoever started the recording. Audio is never returned or persisted — it streams straight to AWS as transcription input and is never written to disk. `start` requires you to be linked; `status`/`stop` are public so a directory outage can't strand a running recording.
 - **`/help`** — list the commands you can use, or show details for one. Public.
+- **`/bug`** — get the GitHub issue link or the configured infrastructure contact
+  for reporting a bug. Public.
 
 There are currently no beta commands.
 

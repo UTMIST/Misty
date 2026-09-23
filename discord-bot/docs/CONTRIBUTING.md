@@ -12,7 +12,7 @@ The bot is the platform's only consumer-facing surface. It's Node 20+ with `disc
 - **Auth policies fail closed.** `public` / `linked` / `admin` / `superuser`, evaluated in `auth/policy.js`. An unknown policy denies.
 - **Replies default to ephemeral.** Bot replies carry personal directory and team information. `ephemeral: false` is an explicit, deliberate choice.
 - **Service clients degrade, they don't crash.** Every backend call goes through a client (`directoryClient.js`, `docClient.js`, …) that normalizes failures. A directory outage produces "temporarily unavailable", not a stack trace in a channel.
-- **The bot hard-fails at boot on missing config.** `src/config.js` lists ten required env vars and exits with `Missing required env vars: …`. That's deliberate — see `startupGuard.js`.
+- **The bot hard-fails at boot on missing config.** `src/config.js` lists eleven required env vars and exits with `Missing required env vars: …`. That's deliberate — see `startupGuard.js`.
 
 ## Local setup
 
@@ -131,7 +131,7 @@ CI runs `node-test` (`npm ci` + `npm test`) plus a Docker build with a boot smok
 
 - **`DIRECTORY_API_KEY` must be issued against main (port 8000), not the playground.** A key issued against the scratch DB dies when that DB is wiped, and the symptom is "directory is temporarily unavailable". Verify with `curl http://localhost:8000/api-keys/self -H "X-API-Key: <key>"`.
 - **Mint directory keys with `uv --project services/team-tracking run team-tracking-keys …`.** A bare invocation can resolve documentation-system's CLI and mint a `doc_`-prefixed key that team-tracking rejects. The token must start with `tt_`.
-- **The bot needs ten env vars to boot** — `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DIRECTORY_BASE_URL`, `DIRECTORY_API_KEY`, `DOC_BASE_URL`, `DOC_API_KEY`, `LLM_BASE_URL`, `LLM_API_KEY`, `VERIFICATION_BASE_URL`, `VERIFICATION_API_KEY`. `MEETING_*` is genuinely optional.
+- **The bot needs eleven env vars to boot** — `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DIRECTORY_BASE_URL`, `DIRECTORY_API_KEY`, `DOC_BASE_URL`, `DOC_API_KEY`, `LLM_BASE_URL`, `LLM_API_KEY`, `VERIFICATION_BASE_URL`, `VERIFICATION_API_KEY`, and `INFRASTRUCTURE_DISCORD_USERNAME`. `MEETING_*` is genuinely optional.
 - **Registering commands is manual and separate from deploying.** A merged command that was never registered doesn't exist to users.
 - **Beta commands only appear in the testing guild.** If a `beta: true` command isn't showing up, check `DISCORD_GUILD_ID`.
 
