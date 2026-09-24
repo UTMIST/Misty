@@ -34,7 +34,7 @@ def create_app() -> FastAPI:
     @app.get("/health/ready")
     def readiness(storage: StorageAdapter = Depends(get_storage)) -> dict[str, str]:
         if not storage.is_ready():
-            raise HTTPException(status_code=503, detail="database unavailable")
+            raise HTTPException(status_code=503, detail="team-tracking database unavailable")
         return {"status": "ok"}
 
     app.include_router(people.router)

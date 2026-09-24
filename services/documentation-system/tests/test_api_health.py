@@ -44,7 +44,7 @@ def test_readiness_fails_but_liveness_survives_database_outage():
         readiness = client.get("/health/ready")
         liveness = client.get("/health")
     assert readiness.status_code == 503
-    assert readiness.json() == {"detail": "database unavailable"}
+    assert readiness.json() == {"detail": "documentation-system database unavailable"}
     assert liveness.status_code == 200
     assert liveness.json() == {"status": "ok"}
 

@@ -13,8 +13,8 @@ your document. Treat the service internals as a black box — everything you nee
 database. `GET /health/ready` is an unauthenticated readiness check that runs
 `SELECT 1` against this service's Postgres database. Both return
 `{"status":"ok"}` when healthy; readiness returns `503` with
-`{"detail":"database unavailable"}` if the database is unreachable. Railway
-uses `/health/ready` for deployment health checks.
+`{"detail":"documentation-system database unavailable"}` if the database is
+unreachable. Railway uses `/health/ready` for deployment health checks.
 
 The OpenAPI schema is the authoritative, always-current contract. This page explains the
 *semantics* the schema can't — idempotency, degrade behavior, and error meaning — and
