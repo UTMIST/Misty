@@ -5,7 +5,7 @@ export function buildHealthServer(client) {
   server.get('/health/ready', async (_request, reply) => {
     if (!client.isReady()) {
       reply.code(503);
-      return { status: 'unavailable' };
+      return { status: 'discord bot unavailable' };
     }
     return { status: 'ok' };
   });
