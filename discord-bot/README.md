@@ -198,6 +198,9 @@ and skips them.
   The posted PDF does contain the full transcript, and that lives in Discord
   like any other attachment.
 
+  When the first human enters an empty voice channel, the bot @-mentions them
+  via direct message and prompts them to run `/record start`.
+
   > `start` is gated at `'linked'` because it consumes a voice connection and a
   > live session; `status`/`stop` are deliberately `'public'` so a directory
   > outage can't strand a running recording. See
