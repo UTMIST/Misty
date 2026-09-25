@@ -8,7 +8,7 @@ test('Discord health follows gateway readiness through connect and disconnect', 
   try {
     const before = await server.inject({ method: 'GET', url: '/health/ready' });
     assert.equal(before.statusCode, 503);
-    assert.deepEqual(before.json(), { status: 'unavailable' });
+    assert.deepEqual(before.json(), { status: 'discord bot unavailable' });
 
     ready = true;
     const connected = await server.inject({ method: 'GET', url: '/health/ready' });
@@ -18,7 +18,7 @@ test('Discord health follows gateway readiness through connect and disconnect', 
     ready = false;
     const disconnected = await server.inject({ method: 'GET', url: '/health/ready' });
     assert.equal(disconnected.statusCode, 503);
-    assert.deepEqual(disconnected.json(), { status: 'unavailable' });
+    assert.deepEqual(disconnected.json(), { status: 'discord bot unavailable' });
   } finally {
     await server.close();
   }
