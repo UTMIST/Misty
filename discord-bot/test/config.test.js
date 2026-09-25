@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadConfig } from '../src/config.js';
+import { createAppContext } from '../src/context.js';
 
 const FULL = {
   DISCORD_TOKEN: 't',
@@ -117,4 +118,53 @@ test('loadConfig exposes verificationBaseUrl (trailing slash stripped) and verif
   });
   assert.equal(cfg.verificationBaseUrl, 'http://verify.railway.internal:8000');
   assert.equal(cfg.verificationApiKey, 'verifykey');
+});
+
+test('helper user limits default safely and accept explicit overrides', () => {
+  const defaults = loadConfig(FULL);
+  assert.equal(defaults.helperUserMaxRequests, 10);
+  assert.equal(defaults.helperUserWindowSeconds, 3600);
+  const overrides = loadConfig({
+    ...FULL,
+    HELPER_USER_MAX_REQUESTS: '3',
+    HELPER_USER_WINDOW_SECONDS: '60',
+  });
+  assert.equal(overrides.helperUserMaxRequests, 3);
+  assert.equal(overrides.helperUserWindowSeconds, 60);
+});
+
+test('invalid helper user limits reject startup instead of disabling the guard', () => {
+  for (const name of ['HELPER_USER_MAX_REQUESTS', 'HELPER_USER_WINDOW_SECONDS']) {
+    for (const value of [
+      '',
+      ' ',
+      '0',
+      '-1',
+      '1.5',
+      'NaN',
+      'Infinity',
+      'no-limit',
+      '9007199254740992',
+    ]) {
+      assert.throws(() => loadConfig({ ...FULL, [name]: value }), new RegExp(name));
+    }
+  }
+  assert.throws(
+    () => loadConfig({ ...FULL, HELPER_USER_WINDOW_SECONDS: '9007199254740991' }),
+    /HELPER_USER_WINDOW_SECONDS/,
+  );
+});
+
+test('application context wires the configured allowance once for all mentions', () => {
+  const config = loadConfig({
+    ...FULL,
+    HELPER_USER_MAX_REQUESTS: '1',
+    HELPER_USER_WINDOW_SECONDS: '30',
+  });
+  const app = createAppContext(config);
+  assert.equal(app.helperRequestLimiter.tryConsume('a').allowed, true);
+  const denied = app.helperRequestLimiter.tryConsume('a');
+  assert.equal(denied.allowed, false);
+  assert.ok(denied.retryAfterSeconds > 0 && denied.retryAfterSeconds <= 30);
+  assert.equal(app.helperRequestLimiter.tryConsume('b').allowed, true);
 });

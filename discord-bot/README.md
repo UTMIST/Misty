@@ -5,10 +5,10 @@ The Discord frontend for the UTMIST platform — a thin Node.js layer over the
 slash commands to link their Discord account, look up teams and rosters, and
 (if they're an admin) manage the directory from Discord itself.
 
-The bot holds **no database and no business logic** — every action is an HTTP
-call to the directory (the API-only source of truth). It's designed to run in
-many Discord servers from a single deployment, with a proper **auth layer**
-gating each command.
+The bot holds **no database**. Directory data remains in the backend API;
+helper-bot request allowances are transient, per-user state in this process.
+It runs in many Discord servers from a single deployment, with an auth layer
+gating commands and helper mentions.
 
 **Status:** Deployed to Railway (staging + production). Staging runs against a
 Neon staging branch in a private test guild; production runs globally against
@@ -288,6 +288,23 @@ parallel to team-tracking's scoped-key auth.
    propagate); **beta** commands go only to the testing guild. See "Release
    channels" above.
 5. `npm start` — then invite the bot to any server via its OAuth2 URL.
+
+## Helper-bot request limits
+
+| Configuration | Default | Meaning |
+| --- | --- | --- |
+| `HELPER_USER_MAX_REQUESTS` | `10` | Admitted helper mentions per Discord user per window |
+| `HELPER_USER_WINDOW_SECONDS` | `3600` | Fixed window duration, starting at that user's first admitted mention |
+
+Both settings are optional positive integers. Omit them to use defaults; blank,
+zero, negative, fractional, non-numeric, or unsafe values fail startup. There is
+no unlimited/disabled sentinel. Set them on the **discord-bot** deployment, not
+the LLM service, and restart to apply changes.
+
+An exhausted user gets a slowdown reply with the seconds until their next
+allowance. Other users remain independent, including in the same thread.
+See [helper limits](docs/helper-limits.md) for accounting, failure behavior,
+reset semantics, deployment limitations, and offline verification.
 
 ## Web playground (local dev)
 

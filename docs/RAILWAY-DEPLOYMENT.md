@@ -142,6 +142,7 @@ Set these per environment (staging vs production) per service.
 | `DISCORD_CLIENT_ID` | per app |
 | `DISCORD_GUILD_ID` | test guild (staging) / blank (prod) |
 | `ENABLE_DISCORD` / `ENABLE_WEB` | `true` / `false` |
+| `HELPER_USER_MAX_REQUESTS` / `HELPER_USER_WINDOW_SECONDS` | optional helper allowance overrides; see [bot configuration and reset semantics](../discord-bot/README.md#helper-bot-request-limits) |
 | `DIRECTORY_BASE_URL` / `DIRECTORY_API_KEY` | team-tracking; key set by the provisioning script |
 | `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system |
 | `VERIFICATION_BASE_URL` / `VERIFICATION_API_KEY` | verification |

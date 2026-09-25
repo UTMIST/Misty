@@ -1,3 +1,17 @@
+import {
+  DEFAULT_HELPER_USER_MAX_REQUESTS,
+  DEFAULT_HELPER_USER_WINDOW_SECONDS,
+} from './helperRequestLimiter.js';
+
+function positiveInteger(env, name, fallback, maximum = Number.MAX_SAFE_INTEGER) {
+  if (env[name] === undefined) return fallback;
+  const value = Number(env[name]);
+  if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
+    throw new Error(`${name} must be a positive integer no greater than ${maximum}`);
+  }
+  return value;
+}
+
 const REQUIRED = [
   'DISCORD_TOKEN',
   'DISCORD_CLIENT_ID',
@@ -28,6 +42,17 @@ export function loadConfig(env = process.env) {
     docApiKey: env.DOC_API_KEY,
     llmBaseUrl: env.LLM_BASE_URL.replace(/\/+$/, ''),
     llmApiKey: env.LLM_API_KEY,
+    helperUserMaxRequests: positiveInteger(
+      env,
+      'HELPER_USER_MAX_REQUESTS',
+      DEFAULT_HELPER_USER_MAX_REQUESTS,
+    ),
+    helperUserWindowSeconds: positiveInteger(
+      env,
+      'HELPER_USER_WINDOW_SECONDS',
+      DEFAULT_HELPER_USER_WINDOW_SECONDS,
+      Math.floor(Number.MAX_SAFE_INTEGER / 1000),
+    ),
     verificationBaseUrl: env.VERIFICATION_BASE_URL.replace(/\/+$/, ''),
     verificationApiKey: env.VERIFICATION_API_KEY,
     meetingBaseUrl: env.MEETING_BASE_URL ? env.MEETING_BASE_URL.replace(/\/+$/, '') : undefined,
