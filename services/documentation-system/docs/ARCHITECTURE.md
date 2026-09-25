@@ -283,13 +283,18 @@ watching status codes.
 > are *starting* values to be validated empirically by the evaluation set (#178), not
 > hand-tuned finals. When #178 moves one of them, update it here in the same PR.
 
+**Decision (#208, [PR #219](https://github.com/UTMIST/Misty/pull/219)): ~500-token chunks,
+~50-token overlap (10%), and hybrid keyword/vector retrieval.** Character equivalents below
+are estimates for the sampled text, not alternative fixed-character defaults.
+
 ### What we are chunking
 
 The pipeline chunks the **stored plain text of a catalog entity**, not a URL-document. The
-source of that text is `docs.content_snapshot` (capped at `MAX_CONTENT_CHARS` = 1,000,000,
-see `src/content.py`), populated during ingest. Keying on the catalog entity rather than the
-URL-fetch path is deliberate: meeting records are coming and will be catalogued entities with
-no source URL, and a pipeline written around URL-fetched docs would silently exclude them.
+source of that text is `doc_content.content_text` (capped at `MAX_CONTENT_CHARS` = 1,000,000,
+see `src/content.py`), not the shorter `docs.content_snapshot`. It is populated during ingest.
+Keying on the catalog entity rather than the URL-fetch path is deliberate: meeting records are
+coming and will be catalogued entities with no source URL, and a pipeline written around
+URL-fetched docs would silently exclude them.
 
 The text is already normalized and source-specific by the time it reaches storage. The shapes
 that actually exist today (all via the Google connector, `services/connectors/`):
@@ -302,56 +307,79 @@ that actually exist today (all via the Google connector, `services/connectors/`)
 | PDF / DOCX (Drive) | Flattened text, structure lossy | Fall back to plain recursive split |
 | Notion (#85), GitHub READMEs (#86) | Markdown (future) | Split on headings then paragraphs |
 
-The lesson: there is no single splitter. A recursive character splitter with a
-**per-source separator list** is the shape that generalizes, because each connector already
-emits structure this splitter can honor rather than a wall of text.
+A boundary-aware recursive splitter with a **per-source separator list** can honor the
+structure each connector emits while targeting the token budget below. The spike used
+character counts as a proxy for that budget; it did not establish fixed-character defaults.
 
 ### Chunk size and overlap
 
-Starting parameters, to be confirmed against #178:
+The spike sampled real UTMIST Google Docs rather than synthetic examples: structured GitHub
+standards, sparse and dense transition-report templates, loosely structured Senior Exec meeting
+notes, and a degenerate single-link stub. The sampled documents ranged from ~26 to ~3,421
+tokens. The dense transition reports exposed an important preprocessing requirement: Google
+Docs table-cell line breaks are exported as the literal string `&#10;`, not real newlines.
 
-- **Chunk size: ~1,000 characters** (roughly 250 tokens at ~4 chars/token). Small enough that
-  a retrieved chunk is a precise, citable unit rather than a whole document, which matters
-  because #176 returns chunks a member reads directly.
-- **Overlap: ~150 characters (~15%).** Enough to keep a sentence that straddles a boundary
-  retrievable from either side, without inflating the index with near-duplicates.
-- **Respect boundaries first, size second.** Prefer splitting on the source's natural
-  separator (paragraph, slide, row-group, heading) and only fall back to a hard character cut
-  when a single unit exceeds the size. A budget line in a Sheet or a slide's bullet list is
-  meaningless cut in half.
+**Normalize encoded newlines inside table cells before splitting.** In the sampled Technical
+Writing transition report, the longest literal line was 2,189 characters (~547 tokens), already
+larger than the target chunk; after replacing `&#10;` with real line breaks it was 357 characters.
+This occurred 74 times in that document, and the same transition-report template is reused
+across roughly 9–10 departments, so this is a corpus-level pattern rather than an edge case.
+Without normalization, paragraph/list boundaries inside these cells are invisible to the
+splitter.
 
-These are conservative middle-of-the-road values chosen because our corpus is small and
-mixed. #178 is the instrument that turns them from guesses into measurements: changing chunk
-size must produce a measurably different hit-rate, or the eval set is too small to be useful.
+Starting parameters:
+
+- **Chunk size: ~500 tokens (~2,000 characters at ~4 chars/token).**
+- **Overlap: ~50 tokens (~200 characters, 10%).**
+- **Respect boundaries first, size second:** try markdown headers → top-level list items →
+  paragraph breaks → sentences → words, only falling through when a unit is still oversized.
+
+The sampled corpus supports 500 tokens better than the alternatives: 300-token chunks produced
+11–16 chunks for the longer documents and more often split table-cell blobs or single bullet-list
+answers across chunks; 800-token chunks reduced longer documents to as few as 5–6 chunks and
+often merged unrelated department or role blocks. At 500 tokens, chunks were large enough to hold
+a `ROLE: X` table block or a department status block while remaining narrow enough for retrieval.
+Short documents remained at 1–4 chunks rather than becoming pathologically fragmented.
+
+The 10% overlap is carried through unchanged from testing: it preserves continuity across
+table-row or list-item boundaries without materially inflating storage or embedding cost at this
+corpus size. The spike used character-based proxies, not an embedding-model tokenizer.
+#218 must document its counting method and validate it against the model and input constraints
+selected in #173; four characters per token is not a guaranteed conversion. The boundary shape
+and `&#10;` normalization requirement do not depend on the exact tokenizer.
 
 ### Hybrid vs pure vector
 
-**Decision: ship pure vector search for v1 (#176), design the schema so keyword search is a
-cheap fast-follow, and let #178 decide whether we actually need it.**
+**Decision: use hybrid retrieval — pgvector cosine similarity combined with Postgres full-text
+search (`tsvector`/`tsquery`, optionally `pg_trgm` for fuzzy acronym/name matches), merged with
+something like Reciprocal Rank Fusion — rather than pure vector search.**
 
-Reasoning:
+The spike sampled roughly 25 distinct Google Docs from targeted Drive folder look-ins across the
+2026–2027 departmental storage and 2025–2026 transition-report sets. This was not an exhaustive
+census, but suggests the reachable Google Doc corpus is on the order of **low hundreds of
+documents**, plausibly **1,000–5,000 chunks** at the chosen chunk size. That is comfortably
+within what Postgres full-text search handles natively and does not justify introducing a
+dedicated search service.
 
-- At our corpus size (dozens to low hundreds of docs, low thousands of chunks) pure vector
-  similarity is simpler and almost certainly sufficient for the common case, and it is the
-  shortest path to shipping the endpoint members can use.
-- The known weakness of pure vector at this scale is **exact-token recall of proper nouns**:
-  UTMIST-specific jargon, team names, and people's names, which are exactly the terms members
-  search for and exactly what embeddings blur. That is the case that would justify hybrid.
-- Postgres already ships full-text search (`tsvector` / `ts_rank`), so hybrid does not need a
-  new dependency. A `tsvector` column on the chunks table plus Reciprocal Rank Fusion over the
-  two result lists is a self-contained follow-up, not a rewrite. Adding the column in #174's
-  migration now (populated, unused) keeps that door open at zero cost.
+The corpus is also dense with exact-match terms that embeddings may blur: UTMIST-specific
+acronyms (`CPSIF`, `MLF`, `deMISTify`, `CUCAI`, `EigenAI`), people's names, Discord handles,
+emails, exact dollar figures, and exact dates. Lexical search is a better fit for queries such
+as "who do I email about CPSIF" and helps distinguish semantically similar but distinct events
+such as `AI²`, `GenAI Genesis`, and `Academic Journal Workshops`.
 
-So the build order is: pure vector in #176, measure proper-noun queries in #178, add FTS + RRF
-only if the numbers say so. This keeps the decision empirical rather than architectural.
+This also fits the planned storage in #174: vectors live in Postgres, and adding a `tsvector`
+column with a GIN index keeps both retrieval paths in-stack without introducing
+Elasticsearch/OpenSearch or another service. Hybrid should be revisited if the corpus grows by
+roughly an order of magnitude into the low thousands of documents, or if measured latency or
+relevance problems appear that hybrid cannot address.
 
 ### Index type
 
 `vector(N)` with **no ANN index (exact scan) to start.** At a few thousand chunks an exact
-nearest-neighbor scan is instant, and it gives 100% recall as the baseline #178 measures
-against. Introduce an **HNSW** index (pgvector >= 0.5) only once the corpus crosses roughly
-10k chunks, where the exact scan starts to cost. This is #174's "index appropriate for the
-expected corpus size": the right index for our current size is none.
+nearest-neighbor scan provides a simple 100%-recall baseline for #178. Introduce an **HNSW**
+index (pgvector >= 0.5) only once the corpus crosses roughly 10k chunks and exact scans start
+to cost materially. This applies to the vector branch only; the keyword branch uses the GIN
+index described above.
 
 ### Two decisions this spike also closes
 
@@ -359,17 +387,53 @@ The epic left two questions open. This is where they land:
 
 - **Relevance floor: absolute cosine similarity, calibrated on #178.** Cosine similarity is
   scale-free, so an absolute floor does not drift with corpus size the way a raw-distance
-  threshold would; the epic's worry about absolute thresholds is really about un-normalized
-  score distributions, which cosine avoids. A relative-to-top-hit floor fails in the case that
-  matters most, where the best hit is itself irrelevant and a relative floor still admits it.
-  Pick the number from the eval set, not from intuition, and revisit if corpus growth shifts
-  the distribution.
+  threshold would; the concern with absolute thresholds is primarily un-normalized score
+  distributions. A relative-to-top-hit floor can admit an irrelevant result when the best hit is
+  itself irrelevant. Pick the threshold from the evaluation set, not intuition, and revisit it if
+  corpus growth shifts the score distribution.
 - **`/doc search` uses the exact same visibility rule as `/doc list`.** It reuses
-  `doc_visible()` and the `Actor` / `SEE_ALL` / `DENY` context from the Visibility section
-  above, unchanged. Starting narrower would mean a second authorization code path (a second
-  place to leak) and a surprising inconsistency between two commands over the same catalog.
-  See #176: the visibility predicate is compiled *into* the similarity query, so top-k is
-  computed over only the rows the actor may see, never filtered after ranking.
+  `doc_visible()` and the `Actor` / `SEE_ALL` / `DENY` context unchanged. The visibility
+  predicate is compiled *into both* the vector and keyword queries before top-k selection and
+  result fusion. Neither branch ranks unauthorized rows and filters them afterward. This keeps
+  search and list behavior consistent.
+
+### Spike methodology and limitations
+
+This spike measured chunk shape and boundary behavior against real Google Docs from the
+connector's actual Drive corpus; no document text was committed or persisted outside the spike.
+A small local Python harness simulated recursive splitting and measured character/line counts.
+It was not an embedding or retrieval harness and is not a substitute for #178's hand-built
+question set, expected sources, and hit-rate@k evaluation.
+
+Limitations:
+
+- **No exact corpus count.** The low-hundreds estimate comes from targeted folder sampling,
+  not an exhaustive walk of the four academic-year trees. #175 should record the real count on
+  first full ingest and revisit this decision if it differs by an order of magnitude.
+- **Google Docs only.** Sheets, Slides, PDFs, GitHub content, and future sources were not
+  validated by this spike; the results should not be assumed to generalize to GitHub (#86).
+  Notion (#85) is canceled and was not tested.
+- **No retrieval-quality measurement.** Chunk shape was measured, but retrieval hit-rate was not.
+  That requires the embedding model from #173 and belongs to #178.
+- **Extracted text length matters more than Drive file size.** One sampled document reported an
+  884KB Drive file size but extracted to only ~14KB of plain text, likely because the file size
+  includes images/revision metadata. Chunk counts should therefore be based on extracted text.
+- **Large-document extraction can truncate.** The extraction tool cut off `Senior Exec Meeting
+  #10` mid-sentence, so the true size of the largest documents may be larger than measured.
+
+### Carrying this into implementation
+
+- **#218 (pure chunker):** implement the recursive header → list-item → paragraph → sentence →
+  word splitter targeting 500 tokens / 50-token overlap (10%), with `&#10;` normalization as a
+  documented preprocessing step. Document counting and source-offset conventions and validate
+  input limits against the model selected in #173.
+- **#174 (storage):** store vectors and keyword-search metadata for the same document chunks.
+- **#175 (indexing/lifecycle):** populate and maintain each chunk's embedding and `tsvector`
+  from the same chunk text, including replacement and deletion. Retrieval belongs to #176.
+- **#176 (retrieval):** combine keyword and vector results, applying the same actor visibility
+  predicate inside both queries before ranking and fusion.
+- **#178 (evaluation):** build the real question set and measure retrieval hit-rate@k, including
+  exact-name/acronym/date queries, before treating the starting parameters as final.
 
 ## SSRF protection in the web fetcher
 
