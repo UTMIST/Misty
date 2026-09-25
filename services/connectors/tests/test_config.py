@@ -11,6 +11,16 @@ def test_defaults_are_local_and_dev():
     assert s.api_key.get_secret_value() == DEFAULT_DEV_API_KEY
     assert s.consumer_keys.get_secret_value() == ""
     assert s.google_credentials_json.get_secret_value() == ""
+    assert s.max_file_bytes == 25 * 1024 * 1024
+
+
+def test_max_file_bytes_is_configurable():
+    assert Settings(max_file_bytes=1234).max_file_bytes == 1234
+
+
+def test_max_file_bytes_must_be_positive():
+    with pytest.raises(ValueError):
+        Settings(max_file_bytes=0)
 
 
 @pytest.mark.parametrize("dev_key", [DEFAULT_DEV_API_KEY, SecretStr(DEFAULT_DEV_API_KEY)])
