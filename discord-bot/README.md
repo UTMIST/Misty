@@ -187,7 +187,8 @@ and skips them.
 - `/doc <add|list|show|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
 
 - `/record start` (**linked**) — joins your current voice channel and starts
-  recording the meeting. `/record status` (**public**) — shows elapsed recording
+  recording the meeting (one recording at a time **per guild** — sessions are
+  keyed by `guildId`). `/record status` (**public**) — shows elapsed recording
   time and the voice channel Misty is in; when idle, it explains which voice
   channel Misty will join when recording starts. `/record stop` (**public**) —
   ends the recording when you are in Misty's recorded voice channel and, within roughly
@@ -195,12 +196,14 @@ and skips them.
   decisions, action items, full transcript) back into the text channel,
   @-mentioning whoever started the recording. Recording also stops
   **automatically** once everyone leaves the voice channel (after a short grace
-  period), with a 4h hard backstop. Starting in a different voice channel while
-  Misty is busy, or stopping from outside the recorded channel, is refused with
-  the active channel and auto-stop guidance. The meeting service persists
-  nothing: it streams audio straight to AWS and never writes audio or transcript to disk.
-  The posted PDF does contain the full transcript, and that lives in Discord
-  like any other attachment.
+  period), with a 4h hard backstop. Starting while a recording is already
+  active in the guild, or stopping from outside the recorded channel, is
+  refused with the active channel and auto-stop guidance — except stopping
+  from outside is still allowed once that channel is empty of humans, the
+  escape hatch for a runaway recording auto-stop failed to catch. The meeting
+  service persists nothing: it streams audio straight to AWS and never writes
+  audio or transcript to disk. The posted PDF does contain the full
+  transcript, and that lives in Discord like any other attachment.
 
   When the first human enters an empty voice channel, the bot @-mentions them
   via direct message and prompts them to run `/record start`.

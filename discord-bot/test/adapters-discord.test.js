@@ -435,6 +435,13 @@ test('/record start fails closed (no start) when the directory is unavailable', 
 test('/record stop is PUBLIC: an unlinked caller can still stop a runaway recording', async () => {
   const calls = [];
   let stopped = false;
+  // A real meetingSurface always has an activeSession -- a fixture without one
+  // (the old shape of this test) passes the wrong-channel guard vacuously and
+  // proves nothing. Model the runaway shape the public policy exists for: the
+  // caller isn't even in a voice channel, and the recorded channel has emptied
+  // out (auto-stop's own voiceStateUpdate was missed, or the channel is since
+  // private/full/deleted) -- the escape hatch, not just "no guard configured".
+  const emptiedRecordedChannel = fakeVoiceChannel('vc1', [botOcc]); // only the bot remains
   const appContext = {
     // A directory OUTAGE must not strand a live recording -- stop must not even
     // depend on the lookup. (Throw to prove stop never calls resolvePrincipal.)
@@ -444,6 +451,7 @@ test('/record stop is PUBLIC: an unlinked caller can still stop a runaway record
       },
     },
     meetingSurface: {
+      activeSession: () => ({ sessionId: 's1', voiceChannel: emptiedRecordedChannel }),
       stop: async () => {
         stopped = true;
         return { status: 'stopped' };
@@ -451,6 +459,7 @@ test('/record stop is PUBLIC: an unlinked caller can still stop a runaway record
     },
   };
   const client = fakeClient();
+  client.user = { id: BOT_ID };
   wireDiscordClient(client, { commands: recordCommands, appContext });
 
   await client.emit(fakeRecordInteraction({ subcommand: 'stop', calls }));
@@ -479,7 +488,7 @@ test('/record status is PUBLIC: works for an unlinked caller without a directory
 
 test('/record status explains that Misty will join the voice channel when recording starts', async () => {
   const calls = [];
-  const voiceChannel = { id: 'vc1', name: 'Operations', guild: { name: 'UTMIST' } };
+  const voiceChannel = { id: 'vc1' };
   const appContext = {
     meetingSurface: {
       status: () => ({ status: 'not-recording' }),
@@ -493,13 +502,13 @@ test('/record status explains that Misty will join the voice channel when record
 
   const edit = calls.find((c) => c.method === 'editReply');
   assert.match(edit.payload.content, /Misty will join.*voice channel/i);
-  assert.match(edit.payload.content, /Operations/);
+  assert.match(edit.payload.content, /<#vc1>/);
 });
 
 test('/record status identifies the active channel and stop requirements', async () => {
   const calls = [];
-  const recordedChannel = { id: 'vc1', name: 'Operations', guild: { name: 'UTMIST' } };
-  const callerChannel = { id: 'vc2', name: 'Lounge', guild: { name: 'UTMIST' } };
+  const recordedChannel = { id: 'vc1' };
+  const callerChannel = { id: 'vc2' };
   const appContext = {
     meetingSurface: {
       status: () => ({ status: 'recording', elapsedMs: 12_000 }),
@@ -514,17 +523,17 @@ test('/record status identifies the active channel and stop requirements', async
   );
 
   const edit = calls.find((c) => c.method === 'editReply');
-  assert.match(edit.payload.content, /recording in.*Operations/i);
-  assert.match(edit.payload.content, /Lounge/);
+  assert.match(edit.payload.content, /recording in.*<#vc1>/i);
+  assert.match(edit.payload.content, /<#vc2>/);
   assert.match(edit.payload.content, /participate or stop/i);
   assert.match(edit.payload.content, /auto-stop.*everyone leaves/i);
 });
 
-test('/record start refuses a different voice channel when Misty is busy elsewhere', async () => {
+test('/record start refuses a different voice channel when a recording is already active in the guild', async () => {
   const calls = [];
   let startCalled = false;
-  const recordedChannel = { id: 'vc1', name: 'Operations', guild: { name: 'UTMIST' } };
-  const callerChannel = { id: 'vc2', name: 'Lounge', guild: { name: 'UTMIST' } };
+  const recordedChannel = { id: 'vc1' };
+  const callerChannel = { id: 'vc2' };
   const appContext = {
     directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) },
     meetingSurface: {
@@ -543,17 +552,64 @@ test('/record start refuses a different voice channel when Misty is busy elsewhe
   );
 
   const edit = calls.find((c) => c.method === 'editReply');
-  assert.match(edit.payload.content, /may not start.*busy elsewhere/i);
-  assert.match(edit.payload.content, /Operations/);
-  assert.match(edit.payload.content, /Lounge/);
+  assert.match(edit.payload.content, /may not start.*already active in this server/i);
+  assert.match(edit.payload.content, /<#vc1>/);
+  assert.match(edit.payload.content, /<#vc2>/);
   assert.equal(startCalled, false);
 });
 
-test('/record stop warns and refuses callers outside the recorded voice channel', async () => {
+test('/record start already-recording race: reports the location resolved after losing the race', async () => {
+  const calls = [];
+  const voiceChannel = { id: 'vc1' };
+  const recordedChannel = { id: 'vc1' };
+  let activeSessionCalls = 0;
+  const appContext = {
+    directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) },
+    meetingSurface: {
+      // Pre-start check finds nothing free to start; a concurrent caller's
+      // start() wins between that check and ours, so start() itself reports
+      // 'already-recording' and we look again to describe where it landed.
+      activeSession: () => {
+        activeSessionCalls += 1;
+        return activeSessionCalls === 1 ? null : { sessionId: 's1', voiceChannel: recordedChannel };
+      },
+      start: async () => ({ status: 'already-recording' }),
+    },
+  };
+  const client = fakeClient();
+  wireDiscordClient(client, { commands: recordCommands, appContext });
+
+  await client.emit(fakeRecordInteraction({ subcommand: 'start', voiceChannel, calls }));
+
+  const edit = calls.find((c) => c.method === 'editReply');
+  assert.match(edit.payload.content, /already recording/i);
+  assert.match(edit.payload.content, /<#vc1>/);
+});
+
+test('/record start already-recording race: falls back to a generic message when the session is still unresolvable', async () => {
+  const calls = [];
+  const voiceChannel = { id: 'vc1' };
+  const appContext = {
+    directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) },
+    meetingSurface: {
+      activeSession: () => null, // never resolves, even right after the race
+      start: async () => ({ status: 'already-recording' }),
+    },
+  };
+  const client = fakeClient();
+  wireDiscordClient(client, { commands: recordCommands, appContext });
+
+  await client.emit(fakeRecordInteraction({ subcommand: 'start', voiceChannel, calls }));
+
+  const edit = calls.find((c) => c.method === 'editReply');
+  assert.match(edit.payload.content, /already recording, so no new recording was started/i);
+});
+
+test('/record stop warns and refuses callers outside the recorded voice channel while it is still occupied', async () => {
   const calls = [];
   let stopCalled = false;
-  const recordedChannel = { id: 'vc1', name: 'Operations', guild: { name: 'UTMIST' } };
-  const callerChannel = { id: 'vc2', name: 'Lounge', guild: { name: 'UTMIST' } };
+  const recordedChannel = fakeVoiceChannel('vc1', [humanOcc('h1')]);
+  const callerChannel = { id: 'vc2' };
   const appContext = {
     meetingSurface: {
       activeSession: () => ({ sessionId: 's1', voiceChannel: recordedChannel }),
@@ -564,6 +620,7 @@ test('/record stop warns and refuses callers outside the recorded voice channel'
     },
   };
   const client = fakeClient();
+  client.user = { id: BOT_ID };
   wireDiscordClient(client, { commands: recordCommands, appContext });
 
   await client.emit(
@@ -571,14 +628,67 @@ test('/record stop warns and refuses callers outside the recorded voice channel'
   );
 
   const edit = calls.find((c) => c.method === 'editReply');
-  assert.match(edit.payload.content, /should be in.*Operations/i);
+  assert.match(edit.payload.content, /should be in.*<#vc1>/i);
   assert.match(edit.payload.content, /auto-stop.*everyone leaves/i);
   assert.equal(stopCalled, false);
 });
 
+test('/record stop escape hatch: succeeds from outside the recorded channel once it is empty of humans', async () => {
+  const calls = [];
+  let stopCalled = false;
+  // Only the bot remains -- auto-stop should have caught this, but its
+  // voiceStateUpdate can be missed, and this is the backstop short of the 4h
+  // hard cap: /record stop is public precisely so anyone can end it.
+  const recordedChannel = fakeVoiceChannel('vc1', [botOcc]);
+  const callerChannel = { id: 'vc2' };
+  const appContext = {
+    meetingSurface: {
+      activeSession: () => ({ sessionId: 's1', voiceChannel: recordedChannel }),
+      stop: async () => {
+        stopCalled = true;
+        return { status: 'stopped' };
+      },
+    },
+  };
+  const client = fakeClient();
+  client.user = { id: BOT_ID };
+  wireDiscordClient(client, { commands: recordCommands, appContext });
+
+  await client.emit(
+    fakeRecordInteraction({ subcommand: 'stop', voiceChannel: callerChannel, calls }),
+  );
+
+  assert.equal(
+    stopCalled,
+    true,
+    'a caller outside the recorded channel must still be able to stop it once nobody is left in it',
+  );
+});
+
+test('/record stop race: recording ends between the guard check and stop() itself', async () => {
+  const calls = [];
+  const recordedChannel = { id: 'vc1' };
+  const appContext = {
+    meetingSurface: {
+      activeSession: () => ({ sessionId: 's1', voiceChannel: recordedChannel }),
+      // Lost the race -- auto-stop (or a concurrent /record stop) got there first.
+      stop: async () => ({ status: 'not-recording' }),
+    },
+  };
+  const client = fakeClient();
+  wireDiscordClient(client, { commands: recordCommands, appContext });
+
+  await client.emit(
+    fakeRecordInteraction({ subcommand: 'stop', voiceChannel: recordedChannel, calls }),
+  );
+
+  const edit = calls.find((c) => c.method === 'editReply');
+  assert.match(edit.payload.content, /already ended/i);
+});
+
 test('/record stop identifies the recorded channel when stopped from that channel', async () => {
   const calls = [];
-  const recordedChannel = { id: 'vc1', name: 'Operations', guild: { name: 'UTMIST' } };
+  const recordedChannel = { id: 'vc1' };
   const appContext = {
     meetingSurface: {
       activeSession: () => ({ sessionId: 's1', voiceChannel: recordedChannel }),
@@ -593,7 +703,7 @@ test('/record stop identifies the recorded channel when stopped from that channe
   );
 
   const edit = calls.find((c) => c.method === 'editReply');
-  assert.match(edit.payload.content, /stopped recording.*Operations/i);
+  assert.match(edit.payload.content, /stopped recording.*<#vc1>/i);
   assert.match(edit.payload.content, /minutes will post/i);
 });
 

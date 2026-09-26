@@ -312,13 +312,16 @@ export function makeAttachmentPoster() {
 // and talks straight to appContext.meetingSurface. commands/record.js exists
 // solely for slash-command registration metadata.
 
+// A single `<#id>` mention is enough: Discord renders it as the channel's
+// live name/link client-side, so there's nothing to keep in sync and no user-
+// controlled name to wrap in markdown (a channel named e.g. `a_b*c` would
+// otherwise break the surrounding bold). It also avoids repeating "in
+// **Guild**" once per mention when a reply names the same channel multiple
+// times -- every reply is already scoped to the interaction's own guild.
 function describeVoiceChannel(channel) {
   if (!channel) return 'a voice channel';
-  const mention = channel.id ? `<#${channel.id}>` : null;
-  const label = channel.name ? `**${channel.name}**` : mention || 'the voice channel';
-  const channelReference = channel.name && mention ? ` (${mention})` : '';
-  const guild = channel.guild?.name ? ` in **${channel.guild.name}**` : '';
-  return `${label}${channelReference}${guild}`;
+  if (channel.id) return `<#${channel.id}>`;
+  return channel.name ?? 'the voice channel';
 }
 
 function currentVoiceChannel(interaction) {
@@ -360,7 +363,9 @@ function busyRecordingMessage(interaction, active) {
   const callerLocation = callerChannel
     ? `You are currently in ${describeVoiceChannel(callerChannel)}.`
     : 'You are not currently in a voice channel.';
-  return `Misty is already recording in ${recordingLocation}. ${callerLocation} You may not start another recording because Misty is busy elsewhere. Join ${recordingLocation} to participate. ${autoStopMessage(recordingChannel)}`;
+  // "This server" (not "elsewhere"/"Misty"): sessions are keyed by guildId, so
+  // the one-recording-at-a-time limit is per guild, not a global Misty-wide cap.
+  return `Misty is already recording in ${recordingLocation}. ${callerLocation} You may not start another recording while one is already active in this server. Join ${recordingLocation} to participate. ${autoStopMessage(recordingChannel)}`;
 }
 
 function activeStatusMessage(interaction, result, active) {
@@ -388,7 +393,7 @@ function wrongChannelStopMessage(interaction, active) {
   return `Misty is recording in ${recordingLocation}. ${callerLocation} You should be in ${recordingLocation} to stop the recording, so I left it running. ${autoStopMessage(active?.voiceChannel)}`;
 }
 
-async function handleRecordInteraction(interaction, appContext, recordCommand) {
+async function handleRecordInteraction(interaction, appContext, recordCommand, botId) {
   const subcommand = interaction.options.getSubcommand(false);
   await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
 
@@ -495,7 +500,16 @@ async function handleRecordInteraction(interaction, appContext, recordCommand) {
 
   if (subcommand === 'stop') {
     const active = activeRecording(appContext.meetingSurface, interaction.guildId);
-    if (active && !sameVoiceChannel(currentVoiceChannel(interaction), active.voiceChannel)) {
+    // The wrong-channel guard exists to stop an accidental drive-by stop, not
+    // to trap a runaway recording: if auto-stop missed a `voiceStateUpdate`
+    // and the recorded channel is now empty (or private/full/deleted and
+    // unreadable), a caller sitting outside it is the ONLY escape hatch short
+    // of the 4h backstop. So the guard only applies while the recorded
+    // channel still has a human in it -- once it's empty, /record stop works
+    // from anywhere, same as the public policy already intends.
+    const wrongChannel =
+      active && !sameVoiceChannel(currentVoiceChannel(interaction), active.voiceChannel);
+    if (wrongChannel && humansIn(active.voiceChannel, botId) > 0) {
       await reply(wrongChannelStopMessage(interaction, active));
       return;
     }
@@ -508,8 +522,16 @@ async function handleRecordInteraction(interaction, appContext, recordCommand) {
       await reply("Couldn't stop recording — please try again.");
       return;
     }
-    if (result.status === 'not-recording') await reply(noRecordingMessage(interaction));
-    else if (result.status === 'error') {
+    if (result.status === 'not-recording') {
+      // `active` was truthy a moment ago (we just passed the wrong-channel
+      // guard using it) -- reaching `not-recording` here means the recording
+      // ended between that check and this call (auto-stop's own race, or a
+      // concurrent /record stop). "No recording in progress ... when you
+      // start recording" reads like nothing ever happened; say what did.
+      await reply(
+        active ? 'The recording already ended — nothing to stop.' : noRecordingMessage(interaction),
+      );
+    } else if (result.status === 'error') {
       await reply(
         `Something went wrong stopping the recording in ${describeVoiceChannel(active?.voiceChannel)}. Please try again.`,
       );
@@ -539,10 +561,15 @@ export const AUTO_STOP_GRACE_MS = 20_000;
 // member-cache dependency. We exclude the recorder bot by its own user id (the
 // reliable signal) and other bots best-effort via any resolved member.
 function humansIn(voiceChannel, botId) {
-  const guild = voiceChannel?.guild;
-  if (!guild) return 0;
+  // No cache to count from (e.g. the recorded channel is gone/inaccessible, or
+  // a caller passed a channel stub without one) => treat as empty rather than
+  // throwing. Callers that gate a destructive action on "still occupied" get
+  // the fail-open behavior they want here: unknown reads as unoccupied, never
+  // as "someone's still in there, leave it running".
+  const cache = voiceChannel?.guild?.voiceStates?.cache;
+  if (!cache) return 0;
   let count = 0;
-  for (const state of guild.voiceStates.cache.values()) {
+  for (const state of cache.values()) {
     if (state.channelId !== voiceChannel.id) continue;
     if (botId && state.id === botId) continue; // the recorder bot itself
     if (state.member?.user?.bot) continue; // other bots (best-effort; may be uncached)
@@ -708,7 +735,12 @@ export function wireDiscordClient(client, { commands, appContext }) {
     // command/router contract stays surface-agnostic.
     if (interaction.commandName === 'record') {
       try {
-        await handleRecordInteraction(interaction, appContext, commands.get('record'));
+        await handleRecordInteraction(
+          interaction,
+          appContext,
+          commands.get('record'),
+          client.user?.id,
+        );
       } catch (err) {
         console.error('Unhandled /record error:', err);
       }
