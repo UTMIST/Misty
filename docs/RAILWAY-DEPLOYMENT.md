@@ -11,7 +11,7 @@ Railway + Neon dashboards / CLIs.
 | `team-tracking` | `/` | Neon (own project) | `alembic upgrade head` | Deploy first — everything references it. |
 | `documentation-system` | `/` | Neon (own project) | `alembic upgrade head` | Consumes team-tracking (hard dependency) and connectors (soft — recommended to deploy connectors first, not required). |
 | `verification` | `/` | Neon (own project) | `alembic upgrade head` | Email one-time codes. |
-| `llm` | `/` | **none** | — | Stateless Bedrock proxy; keys from `CONSUMER_KEYS`. |
+| `llm` | `/` | **none** | — | Stateless Bedrock chat + OpenAI embedding API; keys from `CONSUMER_KEYS`. |
 | `meeting` | `/` | **none** | — | **Stateful in-memory**; keys from `CONSUMER_KEYS`. See the single-replica warning in step 2, and the WebSocket keepalive note in the Notes section — its `startCommand` is the one that isn't the plain template. |
 | `connectors` | `/` | **none** | — | Stateless outbound adapter (Google Drive/Docs); keys from `CONSUMER_KEYS`. Recommended to deploy before `documentation-system` (not required) — see its `CONNECTORS_API_KEY` note in step 3. |
 | `discord-bot` | `discord-bot` | none | — | Node; the only consumer-facing surface. |
@@ -24,7 +24,8 @@ Railway's internal network as `<service>.railway.internal:<PORT>`.
 - A Neon account.
 - `uv` locally (for the key-provisioning script and the key-minting CLIs).
 - An AWS account with Bedrock **and** Amazon Transcribe enabled in your
-  `AWS_REGION`, for `llm` and `meeting` respectively.
+  `AWS_REGION`, for `llm` chat and `meeting` respectively.
+- An OpenAI API key for `llm` embeddings, configured before the target environment auto-deploys.
 
 ## Branching + auto-deploy model
 Each Railway environment is wired to a git branch. Merging a PR flips a deploy.
@@ -123,15 +124,24 @@ Set these per environment (staging vs production) per service.
 | `PORT` | `8000` | `8000` | `8000` |
 | `AWS_REGION` | e.g. `us-east-1` (Bedrock) | e.g. `us-east-1` (Transcribe) | — |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | yes | yes | — |
-| `LLM_PROVIDER` / `LLM_MODEL` | `bedrock-converse` / `claude-sonnet-4-6` | — | — |
+| `LLM_PROVIDER` / `LLM_MODEL` | `bedrock-converse` / `claude-sonnet-4-6` (chat) | — | — |
+| `EMBED_MODEL` | `openai-embed-3-small` → `text-embedding-3-small`, **1536 dimensions** | — | — |
+| `OPENAI_API_KEY` | required outside `local` | — | — |
+| `EMBED_MAX_REQUEST_CHARS` | optional; default `400000` total characters, a coarse input guard | — | — |
 | `LLM_BASE_URL` | — | `http://${{llm.RAILWAY_PRIVATE_DOMAIN}}:${{llm.PORT}}` | — |
 | `LLM_API_KEY` | — | an `llm` consumer key with the `chat` scope | — |
 | `MAX_MEETING_MS` | — | optional; defaults to the 4h backstop | — |
 | `DISCONNECT_GRACE_S` | — | optional; defaults to 60s. How long a disconnected session is held so `POST /stop` can still finalize it | — |
 | `GOOGLE_CREDENTIALS_JSON` | — | — | base64 Google service-account key; empty is a valid running state (Google fetches 503, rest of the service works) |
 
-> Bedrock usage bills as **Amazon Bedrock** (credits apply) — do *not* point
-> `llm` at Claude Platform on AWS.
+> **Before merging or deploying llm**, configure a real `OPENAI_API_KEY` in the target
+> Railway environment, even for chat-only consumers. The boot check verifies presence,
+> not credential validity; follow the
+> [llm rollout prerequisites](../services/llm/docs/DEPLOYMENT.md#embeddings-post-embed).
+
+> Bedrock chat usage bills as **Amazon Bedrock** (credits apply) — do *not* point
+> `llm` at Claude Platform on AWS. Embeddings use **OpenAI billing**, not AWS
+> credits.
 
 **discord-bot:**
 
@@ -254,6 +264,16 @@ stderr**. Wire them like this:
 
 Then redeploy the service whose `CONSUMER_KEYS` you changed — the store is
 built at boot, so the new key isn't live until it restarts.
+
+For an **approved internal embedding caller**, mint an additional key from the repo root:
+
+```bash
+uv --project services/llm run llm-keys --name embedding-caller --scopes embed
+```
+
+Install it using [llm's consumer-key steps](../services/llm/docs/DEPLOYMENT.md#consumer-keys).
+`chat` does not grant `embed`; grant both only when needed. This provisions access,
+not a documentation-system indexing pipeline.
 
 **Revocation is a redeploy.** There is no `revoke` command; drop the entry from
 `CONSUMER_KEYS` and redeploy. `CONSUMER_KEYS` must stay a JSON **array** —
