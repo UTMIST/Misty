@@ -97,9 +97,15 @@ class OpenAIEmbeddingProvider:
 
         try:
             client = self._get_client()
-            response = client.embeddings.create(
+            raw_response = client.embeddings.with_raw_response.create(
                 model=model_id, input=request.inputs, dimensions=dimensions
             )
+            payload = raw_response.http_response.json()
+            if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+                for i, item in enumerate(payload["data"]):
+                    if isinstance(item, dict) and isinstance(item.get("embedding"), list):
+                        validate_vector(item["embedding"], i, dimensions)
+            response = raw_response.parse()
         except RateLimitError as exc:
             raise ProviderRateLimited("OpenAI embedding rate limited") from exc
         except (APITimeoutError, APIConnectionError) as exc:

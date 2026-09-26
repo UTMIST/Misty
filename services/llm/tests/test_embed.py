@@ -1,7 +1,9 @@
 from unittest.mock import Mock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
+from openai import OpenAI
 
 from platform_auth import InMemoryKeyStore
 
@@ -265,3 +267,48 @@ def test_batch_at_the_ceiling_is_allowed(env_key, monkeypatch):
     resp = client.post("/embed", json={"inputs": ["a" * 1000]}, headers=headers)
 
     assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("value", [True, False])
+@pytest.mark.parametrize(
+    "model,model_id",
+    [
+        ("openai-embed-3-small", "text-embedding-3-small"),
+        ("openai-embed-3-large", "text-embedding-3-large"),
+    ],
+)
+def test_real_sdk_boolean_vectors_are_502(env_key, value, model, model_id):
+    from src.providers.openai_embed import OpenAIEmbeddingProvider
+
+    vector = [0.125] * 1536
+    vector[768] = value
+    upstream = Mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "model": model_id,
+                "data": [{"object": "embedding", "index": 0, "embedding": vector}],
+                "usage": {"prompt_tokens": 3, "total_tokens": 3},
+            },
+        )
+    )
+    with httpx.Client(transport=httpx.MockTransport(upstream), trust_env=False) as http_client:
+        with OpenAI(
+            api_key="test-key",
+            base_url="https://openai.invalid/v1",
+            http_client=http_client,
+            max_retries=0,
+        ) as sdk:
+            provider = OpenAIEmbeddingProvider(
+                api_key="test-key", default_model=model, timeout_s=30.0, client=sdk
+            )
+            client, headers = _client(env_key, provider)
+            with client:
+                resp = client.post(
+                    "/embed", json={"inputs": ["synthetic input"], "model": model}, headers=headers
+                )
+
+    upstream.assert_called_once()
+    assert resp.status_code == 502
+    assert resp.json() == {"detail": "embedding provider error"}

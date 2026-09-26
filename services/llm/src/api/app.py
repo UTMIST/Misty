@@ -1,4 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from platform_auth import AuditLogMiddleware
 
@@ -22,6 +24,19 @@ def create_app() -> FastAPI:
         description="Shared internal LLM API (Bedrock chat and OpenAI embeddings).",
     )
     app.add_middleware(AuditLogMiddleware, logger_name="llm.audit")
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": [
+                    {key: error[key] for key in ("type", "loc", "msg")} for error in exc.errors()
+                ]
+            },
+        )
 
     from src.api.routers import chat as chat_router
     from src.api.routers import embed as embed_router

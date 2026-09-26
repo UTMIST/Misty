@@ -62,6 +62,10 @@ neutral dataclasses, the same `ProviderError` hierarchy, and injected clients in
 `LLM_PROVIDER` selects only the Bedrock chat backend; embeddings have no provider selector
 or automatic fallback. The embedding SDK client is built lazily on first use.
 
+Float-array vectors are validated in the raw JSON response before SDK parsing, which
+would otherwise coerce boolean components into floats and hide malformed upstream data.
+Decoded base64 vectors pass the same validation after parsing.
+
 The async `/embed` route offloads SDK work; `/health` is also async.
 See [API.md](API.md#batching-and-timeouts) for concurrency and timeout behavior.
 
@@ -110,7 +114,10 @@ Both bill as **standard Amazon Bedrock** (AWS credits apply) — deliberately no
 `ProviderError` itself is the catch-all → 502. A provider that raises a raw vendor exception is a bug: the router's `except ProviderError` won't catch it, and it becomes a 500.
 
 Validation and scope checks reject locally checkable failures before any paid call.
-See [API.md](API.md#post-embed) for embedding limits and HTTP errors.
+The app's request-validation handler omits rejected inputs and error context so non-finite
+numbers or invalid Unicode in those values cannot turn a validation failure into a 500.
+See [API.md](API.md#validation-errors) for the shared field-error format and
+[embedding limits and HTTP errors](API.md#post-embed).
 
 ## Why no persistence
 

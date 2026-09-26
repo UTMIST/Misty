@@ -57,17 +57,18 @@ def _provider(client=None, model="openai-embed-3-small", api_key="test-key"):
 
 @contextmanager
 def _boundary(response, backend="fake", *, model="openai-embed-3-small"):
-    if backend == "fake":
-        call = Mock(return_value=response)
-        yield _provider(Mock(embeddings=Mock(create=call)), model), call
-        return
-    call = Mock(
-        return_value=httpx.Response(
-            200,
-            content=json.dumps(response, default=vars),
-            headers={"content-type": "application/json"},
-        )
+    http_response = httpx.Response(
+        200,
+        content=json.dumps(response, default=vars),
+        headers={"content-type": "application/json"},
     )
+    if backend == "fake":
+        call = Mock(
+            return_value=Mock(http_response=http_response, parse=Mock(return_value=response))
+        )
+        yield _provider(Mock(embeddings=Mock(with_raw_response=Mock(create=call))), model), call
+        return
+    call = Mock(return_value=http_response)
     with httpx.Client(transport=httpx.MockTransport(call), trust_env=False) as http_client:
         with OpenAI(
             api_key="test-key",
@@ -106,6 +107,7 @@ def test_batch_mapping_and_order(model, override, model_id, backend, encoding):
     sent = {"model": model_id, "input": ["a", "b", "c"], "dimensions": 1536}
     if backend == "fake":
         call.assert_called_once_with(**sent)
+        call.return_value.parse.assert_called_once_with()
         assert all(actual is original for actual, original in zip(result.vectors, original_vectors))
     else:
         call.assert_called_once()
@@ -139,9 +141,28 @@ def test_batch_mapping_and_order(model, override, model_id, backend, encoding):
     ],
 )
 def test_failures_normalize(exc, expected):
-    client = Mock(embeddings=Mock(create=Mock(side_effect=exc)))
+    call = Mock(side_effect=exc)
+    client = Mock(embeddings=Mock(with_raw_response=Mock(create=call)))
     with pytest.raises(expected) as caught:
         _provider(client).embed(EmbeddingRequest(inputs=["a"]))
+    call.assert_called_once_with(model="text-embedding-3-small", input=["a"], dimensions=1536)
+    assert "private-upstream-payload" not in str(caught.value)
+
+
+@pytest.mark.parametrize("stage", ["json", "parse"])
+def test_raw_response_decoding_failures_normalize(stage):
+    failure = Mock(side_effect=ValueError("private-upstream-payload"))
+    with _boundary(_response()) as (provider, call):
+        if stage == "json":
+            call.return_value.http_response.json = failure
+        else:
+            call.return_value.parse = failure
+        with pytest.raises(
+            ProviderUnavailable, match="openai embedding failed: ValueError"
+        ) as caught:
+            provider.embed(EmbeddingRequest(inputs=["a"]))
+    call.assert_called_once()
+    failure.assert_called_once_with()
     assert "private-upstream-payload" not in str(caught.value)
 
 
@@ -343,12 +364,12 @@ def test_invalid_indices_normalize(indices, count, backend):
     assert "private-upstream-payload" not in str(caught.value)
 
 
+@pytest.mark.parametrize("backend", ["fake", "sdk"])
 @pytest.mark.parametrize(
     "vector,message",
     [
         pytest.param(True, "not a vector", id="bool-vector"),
         pytest.param("private-upstream-payload", "not a vector", id="text-vector"),
-        pytest.param((0.1,) * 1536, "not a vector", id="tuple-vector"),
         pytest.param(
             {i: "private-upstream-payload" for i in range(1536)},
             "not a vector",
@@ -368,17 +389,42 @@ def test_invalid_indices_normalize(indices, count, backend):
         pytest.param([-(10**1000)] * 1536, "not finite", id="negative-huge-integer"),
     ],
 )
-def test_invalid_vectors_normalize(vector, message):
+def test_invalid_vectors_normalize(vector, message, backend):
     """Reject non-finite and overflowing vector components."""
     response = _response()
     response.data[0].embedding = deepcopy(vector)
-    with _boundary(response) as (provider, call):
-        with pytest.raises(ProviderUnavailable, match=message) as caught:
+    expected = message
+    if backend == "sdk" and not isinstance(vector, list):
+        expected += "|openai embedding failed:"
+    with _boundary(response, backend) as (provider, call):
+        with pytest.raises(ProviderUnavailable, match=expected) as caught:
             provider.embed(EmbeddingRequest(inputs=["a"]))
     call.assert_called_once()
     assert "private-upstream-payload" not in str(caught.value)
     if message == "not finite":
         assert str(vector[0]) not in str(caught.value)
+    if backend == "fake" and isinstance(vector, list):
+        call.return_value.parse.assert_not_called()
+
+
+@pytest.mark.parametrize("value", [True, False])
+@pytest.mark.parametrize("index", [0, 768, 1535])
+def test_real_sdk_boolean_component_is_rejected(value, index):
+    response = _response()
+    response.data[0].embedding[index] = value
+    with _boundary(response, "sdk") as (provider, call):
+        with pytest.raises(ProviderUnavailable, match="non-numeric"):
+            provider.embed(EmbeddingRequest(inputs=["a"]))
+    call.assert_called_once()
+
+
+def test_tuple_vector_is_not_coerced():
+    response = _response()
+    response.data[0].embedding = (0.1,) * 1536
+    with _boundary(response) as (provider, call):
+        with pytest.raises(ProviderUnavailable, match="not a vector"):
+            provider.embed(EmbeddingRequest(inputs=["a"]))
+    call.assert_called_once()
 
 
 @pytest.mark.parametrize("backend", ["fake", "sdk"])
