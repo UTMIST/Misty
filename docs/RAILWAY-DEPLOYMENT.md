@@ -142,6 +142,7 @@ Set these per environment (staging vs production) per service.
 | `DISCORD_CLIENT_ID` | per app |
 | `DISCORD_GUILD_ID` | test guild (staging) / blank (prod) |
 | `ENABLE_DISCORD` / `ENABLE_WEB` | `true` / `false` |
+| `PORT` | Railway-injected port for the Discord readiness listener; defaults to `3002` locally |
 | `DIRECTORY_BASE_URL` / `DIRECTORY_API_KEY` | team-tracking; key set by the provisioning script |
 | `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system |
 | `VERIFICATION_BASE_URL` / `VERIFICATION_API_KEY` | verification |
@@ -336,9 +337,14 @@ by an existing admin running `/seed` from Discord.
 - **APIs:** for each of the six services —
   `railway run --service <name> --environment <env> -- bash -c 'curl -s localhost:$PORT/health'`
   → `{"status":"ok"}`. `/health` is unauthenticated on every service, so no key
-  is needed. For the three DB-backed ones, pre-deploy logs should also show
-  `alembic upgrade head` ran.
-- **Bot:** Railway logs show `Bot ready as …` — staging bot appears in the test guild; prod bot registers globally.
+  is needed. For team-tracking and documentation-system, also request
+  `/health/ready` to verify their own database connections; Railway uses that
+  path for those two services. For the three DB-backed services, pre-deploy
+  logs should also show `alembic upgrade head` ran.
+- **Bot:** Railway checks `/health/ready` on its injected `PORT`. It returns
+  `503` before Discord is ready or after a disconnect, and 200 once connected.
+  Logs show `Bot ready as …`; staging bot appears in the test guild and prod
+  bot registers globally.
 - **End-to-end (directory):** run a bot command (e.g. `/whoami`) in the staging guild → reaches staging team-tracking → staging Neon branch. If it returns "directory is temporarily unavailable," the two most common causes are (1) `DIRECTORY_BASE_URL` template not resolving (see the `PORT=8000` note above), or (2) `DIRECTORY_API_KEY` missing on the consumer (re-run the provisioning script).
 - **End-to-end (`/record`):** join a staging voice channel, `/record start`,
   talk for ~30s, `/record stop`. Within roughly 30–60s a `meeting-minutes.pdf`

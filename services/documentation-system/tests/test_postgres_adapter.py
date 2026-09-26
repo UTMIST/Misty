@@ -24,6 +24,10 @@ def adapter():
     return PostgresStorageAdapter(engine)
 
 
+def test_readiness_query(adapter):
+    assert adapter.is_ready() is True
+
+
 def _mk(adapter, url="https://x.com", tags=None):
     return adapter.create_doc(
         url=url,
