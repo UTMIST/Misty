@@ -9,13 +9,20 @@ your document. Treat the service internals as a black box — everything you nee
 - **Interactive Swagger UI:** `GET /swagger`
 - **Machine-readable OpenAPI schema:** `GET /openapi.json`
 
+`GET /health` is an unauthenticated liveness check that does not contact the
+database. `GET /health/ready` is an unauthenticated readiness check that runs
+`SELECT 1` against this service's Postgres database. Both return
+`{"status":"ok"}` when healthy; readiness returns `503` with
+`{"detail":"documentation-system database unavailable"}` if the database is
+unreachable. Railway uses `/health/ready` for deployment health checks.
+
 The OpenAPI schema is the authoritative, always-current contract. This page explains the
 *semantics* the schema can't — idempotency, degrade behavior, and error meaning — and
 links to the schema rather than restating it.
 
 ## Authentication
 
-Every request requires an `X-API-Key` header. A request with a missing or invalid key is
+Other requests require an `X-API-Key` header. A request with a missing or invalid key is
 rejected with **401 Unauthorized**.
 
 ```bash

@@ -45,6 +45,11 @@ Set in Railway per environment; see the runbook's env-var table for the full lis
 | `TT_ENV` | `staging` or `production`. Controls the `dev:spoof` scope safety gates (the CLI refuses to issue such keys and the middleware 403s them when `TT_ENV=production`). |
 | `PORT` | `8000` (explicit — required so cross-service refs from consumers resolve). |
 
+Railway checks `GET /health/ready` before promoting a deployment. This route
+queries this service's Postgres database and returns `503` if it is unreachable;
+`GET /health` remains a DB-independent liveness check. Neither route needs an
+API key. See [API.md](API.md) for response bodies.
+
 > Why no `tt_` prefix on `API_KEY`: the auth layer routes any key shaped like `tt_<prefix>_<secret>` to the DB-issued-key path. A `tt_`-prefixed env key would take that path, find no matching row, and 401. Keep the env bootstrap key in a plain format so it falls through to the env check.
 
 ---
@@ -173,7 +178,7 @@ Ship somewhere off-platform (S3, Backblaze, another shared drive). Test the rest
 
 After any deploy, from a machine with `railway` linked to the environment:
 
-- [ ] `railway run --service team-tracking --environment <env> -- bash -c 'curl -s localhost:$PORT/health'` returns `{"status":"ok"}`
+- [ ] `GET /health/ready` returns `{"status":"ok"}` without an API key; `GET /health` remains available for liveness.
 - [ ] Recent deploy logs show `alembic upgrade head` ran cleanly (see the pre-deploy step)
 - [ ] Request without `X-API-Key` returns 401 (with an audit line for it)
 - [ ] Request with wrong key returns 401
