@@ -4,9 +4,11 @@ from pydantic import ValidationError
 from src.config import DEFAULT_DEV_API_KEY, Settings, verify_production_secrets
 
 
-def test_non_positive_timeout_rejected():
+@pytest.mark.parametrize("field", ["request_timeout_s", "embed_max_request_chars"])
+@pytest.mark.parametrize("value", [0, -1])
+def test_non_positive_limits_rejected(field, value):
     with pytest.raises(ValidationError):
-        Settings(request_timeout_s=0)
+        Settings(**{field: value})
 
 
 def test_defaults_are_local_and_dev():
@@ -14,14 +16,23 @@ def test_defaults_are_local_and_dev():
     assert s.llm_env == "local"
     assert s.api_key.get_secret_value() == DEFAULT_DEV_API_KEY
     assert s.consumer_keys.get_secret_value() == ""
+    assert s.embed_model == "openai-embed-3-small"
+    assert s.openai_api_key.get_secret_value() == ""
+    assert s.embed_max_request_chars == 400_000
+    assert s.request_timeout_s == 60.0
 
 
 def test_local_env_never_raises():
-    verify_production_secrets(Settings(llm_env="local"))  # no raise
+    verify_production_secrets(Settings(llm_env="local", openai_api_key=""))  # no raise
 
 
 def test_production_with_default_key_raises():
-    s = Settings(llm_env="production", api_key=DEFAULT_DEV_API_KEY, aws_region="us-east-1")
+    s = Settings(
+        llm_env="production",
+        api_key=DEFAULT_DEV_API_KEY,
+        aws_region="us-east-1",
+        openai_api_key="synthetic-openai-key",
+    )
     with pytest.raises(RuntimeError, match="API_KEY"):
         verify_production_secrets(s)
 
@@ -34,20 +45,51 @@ def test_dev_api_key_guard_still_fires_after_secretstr_conversion(env):
     # comparison is False forever, the service happily boots to staging/prod
     # with the committed dev secret, and nothing else in this suite notices.
     # This test is the thing that notices.
-    s = Settings(llm_env=env, api_key=DEFAULT_DEV_API_KEY, aws_region="us-east-1")
+    s = Settings(
+        llm_env=env,
+        api_key=DEFAULT_DEV_API_KEY,
+        aws_region="us-east-1",
+        openai_api_key="synthetic-openai-key",
+    )
     with pytest.raises(RuntimeError, match="API_KEY"):
         verify_production_secrets(s)
 
 
 def test_production_with_empty_region_raises():
-    s = Settings(llm_env="production", api_key="strong-unique-key", aws_region="")
+    s = Settings(
+        llm_env="production",
+        api_key="strong-unique-key",
+        aws_region="",
+        openai_api_key="synthetic-openai-key",
+    )
     with pytest.raises(RuntimeError, match="AWS_REGION"):
         verify_production_secrets(s)
 
 
-def test_production_fully_configured_ok():
-    s = Settings(llm_env="production", api_key="strong-unique-key", aws_region="us-east-1")
+@pytest.mark.parametrize("env", ["staging", "production"])
+def test_non_local_fully_configured_ok(env):
+    # Non-local deploys need OPENAI_API_KEY as well as the chat credentials.
+    s = Settings(
+        llm_env=env,
+        api_key="strong-unique-key",
+        aws_region="us-east-1",
+        openai_api_key="synthetic-openai-key",
+    )
     verify_production_secrets(s)  # no raise
+
+
+@pytest.mark.parametrize("env", ["staging", "production"])
+@pytest.mark.parametrize("chat_provider", ["bedrock", "bedrock-converse"])
+def test_non_local_requires_openai_key_with_either_chat_provider(env, chat_provider):
+    s = Settings(
+        llm_env=env,
+        llm_provider=chat_provider,
+        api_key="strong-unique-key",
+        aws_region="us-east-1",
+        openai_api_key="",
+    )
+    with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+        verify_production_secrets(s)
 
 
 def test_api_key_never_leaks_via_string_conversion():
@@ -78,6 +120,16 @@ def test_consumer_keys_never_leaks_via_string_conversion():
     assert secret not in str(s)
     assert secret not in str(s.consumer_keys)
     assert s.consumer_keys.get_secret_value() == secret
+
+
+def test_openai_key_never_leaks_via_string_conversion():
+    secret = "synthetic-private-openai-key"
+    s = Settings(openai_api_key=secret)
+
+    assert secret not in repr(s)
+    assert secret not in str(s)
+    assert secret not in str(s.openai_api_key)
+    assert s.openai_api_key.get_secret_value() == secret
 
 
 def test_malformed_consumer_keys_fails_on_boot(monkeypatch):

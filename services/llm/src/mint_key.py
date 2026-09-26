@@ -3,7 +3,7 @@
 Prints the plaintext key ONCE to stdout (give it to the consumer) and the
 CONSUMER_KEYS JSON entry to stderr (add it to the service's config). No DB.
 
-USAGE: uv run llm-keys --name <consumer> [--scopes chat ...]
+USAGE: uv run llm-keys --name <consumer> [--scopes chat embed ...]
 """
 
 import argparse
@@ -20,7 +20,11 @@ def main(argv: list[str] | None = None) -> int:
         "--scopes",
         nargs="*",
         default=[],
-        help="Scopes (default: none). Grant 'chat' to allow calling POST /chat.",
+        help=(
+            "Scopes (default: none). 'chat' allows POST /chat, 'embed' allows "
+            "POST /embed. Neither implies the other — grant both if the consumer "
+            "needs both. 'admin' is a wildcard over all scopes."
+        ),
     )
     args = parser.parse_args(argv)
 
