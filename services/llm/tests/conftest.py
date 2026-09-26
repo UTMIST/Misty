@@ -34,6 +34,8 @@ def _clear_settings_cache(_no_dotenv):
 
     get_settings.cache_clear()
     deps._key_store.cache_clear()
+    deps._embedder.cache_clear()
     yield
     get_settings.cache_clear()
     deps._key_store.cache_clear()
+    deps._embedder.cache_clear()

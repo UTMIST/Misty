@@ -34,6 +34,19 @@ class Settings(BaseSettings):
     consumer_keys: SecretStr = SecretStr("")
     llm_provider: str = "bedrock-converse"
     llm_model: str = "claude-sonnet-4-6"
+    # Selected independently of the chat pair above.
+    embed_model: str = "openai-embed-3-small"
+    # SecretStr for the same reason as api_key above; unwrapped by
+    # registry.get_embedding_provider and verify_production_secrets.
+    openai_api_key: SecretStr = SecretStr("")
+    # Aggregate input guard for one /embed request, in characters.
+    # Per-input caps in contracts/embed.py multiply across a batch:
+    # 96 x 32,000 is ~3M characters without an aggregate ceiling.
+    # Character counts are available before any upstream call and require
+    # no model-specific tokenizer. They are not exact token or cost limits.
+    # The default permits 96 inputs of roughly 2,000 characters each while
+    # still rejecting much larger batches before provider work begins.
+    embed_max_request_chars: int = Field(default=400_000, gt=0)
     aws_region: str = ""
     request_timeout_s: float = Field(default=60.0, gt=0)
     thinking_default: bool = True
@@ -60,6 +73,8 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
         insecure.append("API_KEY")
     if not settings.aws_region:
         insecure.append("AWS_REGION")
+    if not settings.openai_api_key.get_secret_value():
+        insecure.append("OPENAI_API_KEY")
     if insecure:
         raise RuntimeError(
             f"Refusing to start in llm_env={settings.llm_env!r}: "
