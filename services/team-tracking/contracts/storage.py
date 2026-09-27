@@ -37,6 +37,10 @@ class StorageAdapter(Protocol):
       `end_membership` for soft-removal.
     """
 
+    def is_ready(self) -> bool:
+        """Return whether the backing store can answer a trivial query."""
+        ...
+
     # People
     def create_person(self, payload: PersonCreate, *, actor: str) -> Person: ...
     def get_person(self, person_id: UUID) -> Person | None: ...
