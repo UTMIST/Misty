@@ -108,13 +108,16 @@ Every endpoint except `/health` requires `X-API-Key`.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `messages` | `[{role, content}]` | Required, non-empty. `role` is `user` or `assistant`; `content` non-empty. |
+| `messages` | `[{role, content}]` | Required, non-empty. `role` is `user` or `assistant`; `content` is non-empty text or structured blocks. |
 | `system` | string \| null | Optional system prompt. |
 | `model` | string \| null | Optional. Must be one of `claude-sonnet-4-6`, `claude-opus-4-6`; defaults to `LLM_MODEL`. |
 | `max_tokens` | int | Default `16000`, range `1`–`64000`. |
 | `thinking` | bool \| null | Extended thinking; defaults to `THINKING_DEFAULT` when omitted. |
+| `tools` | list \| null | Optional client-executed tool definitions; see the [tool-use contract](docs/API.md#client-executed-tools). |
 
-**Response** (`ChatResponse`): `{ "content", "model", "stop_reason", "usage": { "input_tokens", "output_tokens" } }`.
+**Response** (`ChatResponse`): `{ "content", "model", "stop_reason", "usage": { "input_tokens", "output_tokens" } }` for legacy text-only requests. Tool or structured-message requests additionally return ordered `content_blocks` for stateless continuation.
+
+Tool use is transport, not execution: consumers authorize and run tools, then send their results in the next request. Both providers preserve signed reasoning and redacted continuation blocks when thinking is enabled. Keep those blocks out of visible answers and logs; see [API.md](docs/API.md#client-executed-tools) for validation, limits, and replay rules.
 
 **Provider errors** are normalized to HTTP status: rate limit → **429**, timeout → **504**, other upstream/5xx/config faults → **502**. Validation failures (empty `messages`, unknown `model`) → **422**.
 
@@ -123,13 +126,15 @@ Every endpoint except `/health` requires `X-API-Key`.
 ```
 llm/
 ├── contracts/
-│   └── chat.py            Pydantic request/response models (ChatRequest, ChatResponse, Usage)
+│   ├── chat.py            Chat request/response models and history invariants
+│   ├── tools.py           Strict tool definitions and tagged content blocks
+│   └── tool_validation.py Framework-free JSON, identifier, and payload checks
 │
 ├── src/
 │   ├── api/               FastAPI application
 │   │   ├── app.py         App factory (create_app); mounts /chat + /health, audit middleware
 │   │   ├── auth.py        Builds require_scope / get_actor from platform_auth (envelope="llm_")
-│   │   ├── deps.py        get_key_store / get_llm — the single wiring point (both lru_cached)
+│   │   ├── deps.py        get_key_store / get_llm — wiring point; private builders are cached
 │   │   ├── hashing.py     Thin shim over platform_auth: llm_-envelope key generation
 │   │   └── routers/
 │   │       └── chat.py    POST /chat — require_scope("chat"), maps body → provider → response
@@ -138,6 +143,8 @@ llm/
 │   │   ├── base.py            LLMRequest/LLMResult/LLMProvider Protocol + normalized error hierarchy
 │   │   ├── bedrock_converse.py  Default: Claude via bedrock-runtime Converse API (US-regional profiles)
 │   │   ├── bedrock.py           Alt: Claude via AnthropicBedrockMantle (Messages endpoint)
+│   │   ├── tool_blocks.py       Neutral tool-mode validation for both codecs
+│   │   ├── raw_responses.py     Strict JSON and pre-SDK wire validation
 │   │   └── registry.py          Config-driven provider selection (LLM_PROVIDER → builder)
 │   │
 │   ├── mint_key.py        llm-keys CLI — prints a key + its CONSUMER_KEYS entry, no store writes
@@ -160,7 +167,7 @@ Both bill as standard Amazon Bedrock; they differ only in the Bedrock endpoint a
 - **`bedrock-converse`** (default) — `BedrockConverseProvider` calls the `bedrock-runtime` **Converse** API. Used because this account's model access is US-regional cross-region inference profiles (`us.anthropic.claude-sonnet-4-6`), which the Messages endpoint can't target. Maps neutral model names to inference-profile ids via an explicit table.
 - **`bedrock`** — `BedrockClaudeProvider` calls the **Mantle Messages** endpoint via `AnthropicBedrockMantle`. Needs global/Messages model access.
 
-In tests, neither is used: a `_FakeProvider` implementing the `LLMProvider` protocol is injected via `dependency_overrides`, so the suite runs with no AWS credentials and no network.
+API tests inject a `_FakeProvider` through `dependency_overrides`. Provider and round-trip tests also exercise both concrete adapters with stubbed SDK clients or intercepted HTTP transports and dummy credentials. No tests call live AWS or Anthropic endpoints.
 
 ## Testing
 
@@ -183,7 +190,7 @@ uv run ruff format .
 
 ## Status
 
-v0.1: a stateless `POST /chat` proxy over Amazon Bedrock, config-seeded scoped API keys (`chat` / `admin`) with an attested-actor audit trail, two swappable Bedrock providers behind a neutral Protocol, normalized provider-error mapping, and a fast 65-test suite with no external dependencies.
+A stateless `POST /chat` proxy over Amazon Bedrock with optional tool-use transport, config-seeded scoped API keys (`chat` / `admin`), an attested-actor audit trail, two swappable Bedrock providers behind a neutral Protocol, normalized provider-error mapping, and an offline test suite. Tool execution and the consumer loop (#71) remain outside this service.
 
 **Not implemented (by design):**
 

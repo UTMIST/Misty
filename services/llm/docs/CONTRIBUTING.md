@@ -22,6 +22,31 @@ uv run pytest          # confirm the environment works — no Docker, no network
 
 You only need AWS credentials to make *real* Bedrock calls. The suite uses a fake provider.
 
+## Changing tool-use transport
+
+Read [API.md](API.md#client-executed-tools) before changing structured messages.
+Wire models stay in `contracts/`; provider dataclasses stay in
+`src/providers/base.py`; only the chat router maps between them. Framework-free
+JSON validation helpers may be shared without importing the wire models into
+providers. Update both Bedrock codecs for a supported block or tool field.
+History validation exists at the HTTP boundary (`ChatRequest`) and the reusable
+provider boundary (`validate_tool_request`); change and test both together so
+invalid HTTP input stays a 422 instead of becoming a provider-side 502.
+
+Preserve the exact no-tools/string-message request mapping and response JSON.
+Tool tests must also exercise a complete round-trip through a stubbed real SDK,
+including signed reasoning, redacted bytes, parallel calls, and error results.
+Botocore Stubber does not exercise response parsing: retain the intercepted real
+HTTP-transport tests when changing the raw boundary or upgrading the SDK. Unknown
+upstream shape members intentionally fail closed; review SDK and codec support
+rather than removing validation if a provider adds new fields.
+Unknown or malformed upstream blocks must normalize to a provider error rather
+than being silently discarded or coerced into valid-looking data. Invalid input
+must fail before inference and must not echo or log tool/continuation data.
+
+Do not implement execution, authorization decisions for named tools, or a loop
+inside this service. Those remain consumer responsibilities (#71).
+
 ## Walkthrough: add a provider backend
 
 Say you're adding a direct-to-Anthropic-API backend alongside the two Bedrock ones.

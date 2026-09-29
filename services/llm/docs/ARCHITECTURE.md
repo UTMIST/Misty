@@ -61,6 +61,60 @@ Both bill as **standard Amazon Bedrock** (AWS credits apply) — deliberately no
 
 `bedrock-converse` is the default because **this account's model access is US-regional inference profiles**, which the Messages endpoint cannot target. It maps neutral model names (`claude-sonnet-4-6`) to profile ids through an explicit table. If model access on the AWS account changes, that's the first thing to revisit.
 
+## Stateless tool-use transport
+
+Issue #70 adds tool definitions and structured content to the same `/chat` route,
+not an agent runtime. Both providers translate the neutral tool, text, reasoning,
+redacted-reasoning, and tool-result dataclasses in `src/providers/base.py`. The API
+router remains the only wire-model/dataclass translator. Shared JSON and identifier
+checks live in the framework-free `contracts/tool_validation.py`; they do not
+import application code, Pydantic, or vendor SDKs.
+
+The legacy string-message path keeps its request mapping and response fields.
+Tools or structured message content opt into ordered `content_blocks`, while
+`content` remains the concatenated visible answer. Optional block fields are
+omitted from legacy responses rather than adding `null` keys. This preserves
+existing meeting and bot clients without making them understand tool calls.
+
+Ordered blocks are necessary for more than displaying tool names: adaptive
+thinking signs continuation data. Discarding reasoning or redacted blocks makes a
+subsequent tool-result turn invalid. Tool-mode responses therefore preserve that
+data for exact replay instead of exposing it as visible answer text. The service
+checks its structure but cannot authenticate a vendor signature locally. The
+consumer must keep the same conversation/model/provider for the exchange and must
+not replay context that its current authorization no longer permits.
+
+Tool-mode input has explicit bounds and conversation invariants, documented in
+[API.md](API.md#client-executed-tools). Provider output is also untrusted: malformed
+blocks, unknown calls, duplicate IDs, non-finite JSON, and contradictory stop
+reasons are provider failures, not usable tool requests. Raw tool payloads must be
+validated before SDK coercion can hide invalid fields. `raw_responses.py` checks
+bounded JSON bytes, duplicate keys, scalar types, unions, canonical binary data,
+and modeled metadata. Mantle uses the SDK's raw-response interface. Converse uses
+its `before-parse` event, gated by a context-local active-provider identity; both
+legacy and tool calls restore the prior context in `finally`. Concurrent calls,
+nested legacy calls, and different providers sharing a client remain isolated.
+No SDK source or response bytes are rewritten.
+
+Unknown modeled fields/shapes fail closed; an upstream schema addition may require
+a reviewed SDK/codec update. Well-formed upstream errors retain native SDK retries.
+Malformed Converse error envelopes fail immediately with 502 instead of entering
+SDK parsing or retry evaluation, even when their HTTP status might be retryable.
+This is deliberate: passing corrupted error data through can itself raise a 500 or
+log input-derived fields. The raw-body cap is checked after SDK HTTP buffering,
+not while downloading. See the rollout limits in [DEPLOYMENT.md](DEPLOYMENT.md).
+
+These paths have offline HTTP/SDK round-trip tests, not just handcrafted provider
+stubs. Botocore Stubber short-circuits before parsing; the separate wire tests use
+an intercepted real HTTP transport to exercise the parser boundary.
+
+The consumer, not this service, owns tool allowlisting, argument-schema validation,
+actor and document permissions, actual execution, error results, iteration limits,
+and cost limits. A `chat` key grants model inference, not permission to execute any
+named internal operation. #71 supplies the helper-bot loop; RAG and source ACLs
+remain outside #70. There is no new scope, credential, configuration variable,
+database, scheduler, or dependency for this transport.
+
 ## Error normalization
 
 `src/providers/base.py` defines three provider errors; the router maps each to one status:

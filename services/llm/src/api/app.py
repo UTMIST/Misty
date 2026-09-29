@@ -1,4 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from platform_auth import AuditLogMiddleware
 
@@ -18,6 +20,23 @@ def create_app() -> FastAPI:
         description="Shared internal LLM API (Claude via Amazon Bedrock).",
     )
     app.add_middleware(AuditLogMiddleware, logger_name="llm.audit")
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        errors = exc.errors()
+        for error in errors:
+            if error["type"] == "union_tag_invalid":
+                error["msg"] = "Unsupported content block type"
+            if error["type"] == "extra_forbidden":
+                error["loc"] = error["loc"][:-1]
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": [{key: error[key] for key in ("type", "loc", "msg")} for error in errors]
+            },
+        )
 
     from src.api.routers import chat as chat_router
 

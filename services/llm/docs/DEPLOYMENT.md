@@ -61,6 +61,31 @@ Then redeploy llm. **Revoking is the reverse**: drop the entry and redeploy. The
 
 This is a genuine hard dependency, unlike `documentation-system` → `connectors`, which degrades gracefully.
 
+## Tool-use rollout
+
+Tool-use transport (#70) uses the existing `/chat` route, `chat` scope, credentials,
+and provider selection. It needs no new environment variables or migration, and
+both Bedrock backends implement the same wire contract. Deploy the service before
+a consumer starts sending tool definitions or structured history. Existing
+text-only consumers do not need to change.
+
+Keep the configured provider stable across a tool exchange; signed continuation
+blocks are not a cross-provider migration format. Consumers should pin a neutral
+request model and a thinking setting across all rounds. Rolling back the service
+while a tool-capable consumer is active requires disabling that consumer's tool
+flow first; the older contract does not implement it.
+
+Tool-mode provider bodies are validated before SDK parsing, but after HTTP
+buffering. Malformed Converse error bodies become 502 without entering SDK retry
+evaluation; well-formed errors retain native SDK retries. Account for that
+fail-closed behavior and the absence of a streaming download-size limit.
+
+All repository tests use offline SDK doubles. Before enabling a real consumer,
+perform an explicitly authorized smoke test of a complete tool-call/result/final
+answer exchange with the deployed AWS model, including reasoning replay when
+thinking is enabled. This PR does not execute tools or deploy the bot loop (#71).
+See [API.md](API.md#client-executed-tools) for the consumer contract.
+
 ## Rollback
 
 `git revert` + push. No schema to reverse, no state to reconcile.
@@ -78,7 +103,7 @@ Note that **a key rotation is not covered by a code rollback** — `CONSUMER_KEY
 
 - **Every `/chat` returns 502.** The usual causes, in order: AWS credentials missing or wrong in the environment; `AWS_REGION` set to a region without model access; the configured `LLM_MODEL` not enabled on the account. All three normalize to `ProviderUnavailable`. `/health` stays green through all of them.
 - **502 only for one model.** That model is in `ALLOWED_MODELS` but either unmapped in `BedrockConverseProvider`'s profile table or not enabled on the account.
-- **429s under load.** Bedrock throttling. There is no retry or queue in this service by design — the consumer decides whether to back off.
+- **429s under load.** Bedrock throttling. There is no application-level retry loop or queue; the SDKs' retry policies still apply. Consumers must account for retries and per-attempt timeouts in their overall budgets and decide whether to back off.
 - **504s.** `REQUEST_TIMEOUT_S` (default 60) is shorter than the completion took. Large `max_tokens` with thinking enabled can exceed it.
 - **Container dies at boot.** `LLM_ENV` is non-`local` and either `API_KEY` is still the dev default or `AWS_REGION` is unset — the error names which. Or `CONSUMER_KEYS` isn't a JSON **array**.
 - **A consumer suddenly gets 403.** Its key is valid but lacks `chat`. Check the `scopes` on its `CONSUMER_KEYS` entry — a key minted with the wrong scopes authenticates fine and fails only at authorization.
