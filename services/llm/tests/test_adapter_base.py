@@ -3,7 +3,6 @@ from src.providers.base import (
     LLMProvider,
     LLMRequest,
     LLMResult,
-    LLMTool,
     ProviderError,
     ProviderRateLimited,
     ProviderTimeout,
@@ -46,15 +45,3 @@ def test_protocol_is_runtime_usable():
     provider: LLMProvider = _Fake()
     out = provider.chat(LLMRequest(messages=[LLMMessage(role="user", content="x")]))
     assert out.content == "ok"
-
-
-def test_tool_lists_are_not_shared_between_requests():
-    first = LLMRequest()
-    second = LLMRequest()
-    first.tools.append(LLMTool(name="lookup", input_schema={"type": "object"}))
-    assert second.tools == []
-
-
-def test_legacy_results_do_not_opt_into_content_blocks():
-    result = LLMResult("ok", "model", "end_turn", 1, 1)
-    assert result.content_blocks is None

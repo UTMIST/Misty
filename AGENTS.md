@@ -22,6 +22,7 @@ discord-bot/                    Discord frontend + web playground
 1. **Read the service's own `docs/CONTRIBUTING.md`** before changing it. Every service has one, and each ends with a pre-push checklist specific to that service. They are not boilerplate — `verification`'s opens with a warning about the confirm-code state machine, `meeting`'s explains why you must not buffer audio.
 2. **Copy the nearest existing example.** The codebase is intentionally repetitive so patterns are easy to imitate. Find the closest existing case and mirror its shape rather than inventing a new one.
 3. **Prefer the smallest change that works.** This is a student org with rotating maintainers; clever is a liability.
+4. **Justify every changed file.** Explain why each created, edited, or deleted file is necessary in the PR description or a linked audit report.
 
 ## Hard invariants
 

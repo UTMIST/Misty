@@ -167,7 +167,7 @@ Both bill as standard Amazon Bedrock; they differ only in the Bedrock endpoint a
 - **`bedrock-converse`** (default) — `BedrockConverseProvider` calls the `bedrock-runtime` **Converse** API. Used because this account's model access is US-regional cross-region inference profiles (`us.anthropic.claude-sonnet-4-6`), which the Messages endpoint can't target. Maps neutral model names to inference-profile ids via an explicit table.
 - **`bedrock`** — `BedrockClaudeProvider` calls the **Mantle Messages** endpoint via `AnthropicBedrockMantle`. Needs global/Messages model access.
 
-API tests inject a `_FakeProvider` through `dependency_overrides`. Provider and round-trip tests also exercise both concrete adapters with stubbed SDK clients or intercepted HTTP transports and dummy credentials. No tests call live AWS or Anthropic endpoints.
+API tests inject a `_FakeProvider` through `dependency_overrides`. Existing provider tests exercise the ordinary chat path with stubbed SDK clients. No tests call live AWS or Anthropic endpoints.
 
 ## Testing
 
@@ -178,6 +178,11 @@ uv run pytest
 ```
 
 Runs against a fake provider injected via `app.dependency_overrides`. Covers the `/chat` happy path and neutral-type mapping, the auth paths (missing key → 401, key without `chat` → 403, `chat` scope → 200, `admin` wildcard → 200), request validation (empty messages, unknown model → 422), provider-error → HTTP-status mapping, the key store, the `llm-keys` CLI, config/boot checks, both Bedrock adapters (with stubbed clients), the audit log, and the OpenAPI schema.
+
+The tool-use test additions were removed after the initial audit. The retained
+suite covers the pre-existing behavior, not the new tool protocol. Historical
+verification and the cleanup rationale are recorded in
+[docs/TOOL-USE-AUDIT.md](docs/TOOL-USE-AUDIT.md#test-cleanup).
 
 Lint and format with ruff:
 

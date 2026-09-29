@@ -104,9 +104,12 @@ This is deliberate: passing corrupted error data through can itself raise a 500 
 log input-derived fields. The raw-body cap is checked after SDK HTTP buffering,
 not while downloading. See the rollout limits in [DEPLOYMENT.md](DEPLOYMENT.md).
 
-These paths have offline HTTP/SDK round-trip tests, not just handcrafted provider
-stubs. Botocore Stubber short-circuits before parsing; the separate wire tests use
-an intercepted real HTTP transport to exercise the parser boundary.
+The initial audit exercised these paths with offline HTTP/SDK round trips and
+intercepted real HTTP transports. Those tool-specific tests were subsequently
+removed at the user's request; they are not part of the retained suite. See the
+[audit record](TOOL-USE-AUDIT.md#test-cleanup) for the historical evidence and
+coverage limitation. Botocore Stubber short-circuits before parsing and cannot
+alone verify the raw boundary.
 
 The consumer, not this service, owns tool allowlisting, argument-schema validation,
 actor and document permissions, actual execution, error results, iteration limits,

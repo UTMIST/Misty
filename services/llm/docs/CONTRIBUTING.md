@@ -36,9 +36,11 @@ invalid HTTP input stays a 422 instead of becoming a provider-side 502.
 Preserve the exact no-tools/string-message request mapping and response JSON.
 Tool tests must also exercise a complete round-trip through a stubbed real SDK,
 including signed reasoning, redacted bytes, parallel calls, and error results.
-Botocore Stubber does not exercise response parsing: retain the intercepted real
-HTTP-transport tests when changing the raw boundary or upgrading the SDK. Unknown
-upstream shape members intentionally fail closed; review SDK and codec support
+Botocore Stubber does not exercise response parsing: use intercepted real
+HTTP transports when testing the raw boundary or an SDK upgrade. The initial
+tool-specific tests are no longer retained; see the
+[audit record](TOOL-USE-AUDIT.md#test-cleanup) for the current coverage limitation.
+Unknown upstream shape members intentionally fail closed; review SDK and codec support
 rather than removing validation if a provider adds new fields.
 Unknown or malformed upstream blocks must normalize to a provider error rather
 than being silently discarded or coerced into valid-looking data. Invalid input
