@@ -106,6 +106,7 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 
 ## Gotchas that will cost you an hour
 
+- **Cross-worktree tests need source-path verification.** Pytest can prepend a historical tests checkout to `sys.path` and import its `contracts` instead of the edited code. Pin the target `src` and `contracts` packages before collection and verify imported modules' `__file__` paths; passing against the wrong checkout is not verification.
 - **`uv --project` is mandatory for the key CLIs.** Both `services/team-tracking` and `services/documentation-system` declare a top-level `src` package with a console script at `src.cli:main`. In the shared workspace venv they collide, so a bare `team-tracking-keys …` can resolve documentation-system's CLI and mint a `doc_`-envelope key that team-tracking rejects. Always `uv --project services/<service> run <service>-keys …`, and verify the token's prefix.
 - **documentation-system and verification both bind host port 5434.** They cannot run locally at the same time. Remap one (`-p 5435:5432`) and update its `DATABASE_URL`. If Alembic reports an unknown revision, you're almost certainly pointed at the other service's database.
 - **documentation-system's Swagger is at `/swagger`, not `/docs`** — `/docs` is a real docs-resource router on that service.

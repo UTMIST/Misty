@@ -24,6 +24,14 @@ There is **no `X-Actor` header** and no `dev:spoof` scope. This is a service-to-
 | Missing or unparseable `X-API-Key` | 401 |
 | Valid key lacking the `chat` scope | 403 — rejected **before** the provider is called, so no tokens are billed |
 
+## Validation errors
+
+Request field and JSON syntax errors return **422** with a `detail` list. Each item
+contains `loc`, `msg`, and `type`; rejected `input` values and error context are omitted.
+Unknown discriminator values are not echoed, and forbidden extra-field locations
+identify the parent object rather than the caller-supplied field name.
+Text sent upstream must be valid UTF-8; invalid text is rejected before a provider call.
+
 ---
 
 ## `POST /chat`
@@ -152,6 +160,8 @@ request model during the exchange. Do not copy the provider-specific response
 `model` into the request's model allowlist. The consumer owns round limits,
 timeouts, spending limits, tool allowlisting, and document/person/channel access.
 Tool definitions and model-generated arguments are not authorization credentials.
+Service audit logs exclude definitions, arguments, results, reasoning, signatures,
+and redacted continuation data.
 
 #### Structured content blocks
 
@@ -224,11 +234,8 @@ apply to well-formed upstream errors.
 
 ### Errors
 
-Validation `detail` entries contain only `type`, `loc`, and `msg`, including for
-legacy requests. Raw `input`, exception context, and unknown discriminator values
-are not echoed. Unknown extra-field locations identify the parent object rather
-than repeating the caller-supplied field name. Successful legacy response bodies
-are unchanged; error-input echoing is intentionally not backward compatible.
+See the shared [validation-error format](#validation-errors). Successful legacy
+response bodies are unchanged; error-input echoing is intentionally not backward compatible.
 
 | Condition | Status | Detail |
 |---|---|---|
@@ -258,4 +265,8 @@ Answers `200` without AWS credentials. A green healthcheck does **not** imply Be
 
 ## Audit log
 
-One JSON line per request with the resolved actor, endpoint, status, and duration. `/chat` additionally records the resolved `model`, and on success `input_tokens` / `output_tokens` (`request.state.audit_extra`). Prompt and completion text are never logged. Tool definitions, arguments, results, reasoning text, signatures, and redacted continuation data are also excluded.
+One JSON line per request with the attested actor, endpoint, status, and duration.
+Requests reaching provider work record the selected **neutral model alias** from the
+request or configuration, not the resolved model id returned in the response.
+Successful calls add token usage through `request.state.audit_extra`; `/chat` records
+`input_tokens` / `output_tokens`. Request and response content are never logged.

@@ -1,22 +1,48 @@
 # Issue #70 — tool-use implementation and audit
 
 This records the implementation against `staging` baseline `e8e362a`, the initial
-review at `a847327`, and the subsequent test cleanup. It is not a certification of
-future changes or a live AWS rollout.
+review at `a847327`, the test cleanup at `69fe1ac`, and the owner-audit follow-up.
+It is not a certification of future changes or a live AWS rollout.
 
 ## Test cleanup
 
 After the initial audit, the user explicitly requested removal of all test
 additions from PR #241, rather than trimming overlapping coverage. The cleanup
-removes the new test files and restores `tests/test_adapter_base.py` to the
-baseline. Runtime code is unchanged, and no pre-existing tests are removed.
+removed the new test files and restored `tests/test_adapter_base.py` to the
+baseline without changing runtime code or removing pre-existing tests.
 
 The [initial audited tests](https://github.com/UTMIST/Misty/tree/a847327f9d6a5608975a2ee676b17be09c0dee39/services/llm/tests)
 remain available in Git history, not in the current checkout or its CI suite.
-All tool-specific test evidence below refers to that historical revision.
-The final PR does not retain the new tool-use tests requested by #70's acceptance
-criteria. Passing the remaining baseline suite is not ongoing regression coverage
-for the new tool protocol, its validation, or its raw SDK boundary.
+Initial-review evidence below refers to that historical revision; the follow-up
+separately identifies replays against corrected code. The PR still does not retain
+the new tool-use tests requested by #70's acceptance criteria. Passing the remaining
+baseline suite is not ongoing regression coverage for the tool protocol or SDK boundary.
+
+## Owner-audit follow-up
+
+- **Invalid legacy system text:** high/low surrogate probes returned 200 and reached
+  the provider. `ChatRequest` now checks UTF-8 encodability and raises a fixed
+  validation error before inference. Valid Unicode, empty/omitted/null system prompts,
+  ignored legacy extras, and ordinary response bodies remain compatible. This is the
+  only runtime change after `69fe1ac`; the same guard is applied separately in #234.
+- **Cross-PR conflicts:** #234 and #241 conflicted in the bootstrap and four guides.
+  Their validation handler/contract and shared documentation now agree. Feature-specific
+  source descriptions, audit fields, and maintenance guidance remain in their own
+  sections so either merge order retains both capabilities. The embedding change keeps
+  its async health route and lazy provider boot validation. No feature is merged here.
+- **Incorrect audit metadata description:** logs record the selected neutral model alias,
+  not the resolved provider identifier. The shared API wording now matches the router.
+  Troubleshooting distinguishes SDK timeouts from whole-request deadlines and links the
+  applicable boot checks rather than assuming chat is the only capability.
+- **Verification isolation:** the historical suite and new scratch probes were replayed
+  against the corrected branch with settings isolated before collection, outbound
+  networking blocked, and imported `src`/`contracts` paths checked. An earlier cross-tree
+  run imported historical contracts and was discarded as evidence for the new fix.
+  Combined-tree results and exact revision/count information belong in the PR test plan.
+
+The embedding duplicate-field and strict-usage fixes belong to #234. RAG extraction,
+source-offset, relevance-floor, and person/channel handoff corrections are a separate
+documentation change. No removed tool tests are reintroduced by this follow-up.
 
 ## Scope
 
@@ -85,7 +111,7 @@ Paths are relative to `services/llm`, except the root guidance entry.
 
 | File | Change and justification |
 |---|---|
-| `contracts/chat.py` | Adds definitions and structured messages/results, preserves legacy defaults, and validates histories and normalized bounds before paid inference. |
+| `contracts/chat.py` | Adds definitions and structured messages/results, preserves legacy defaults, and validates histories and normalized bounds before paid inference. The follow-up rejects invalid UTF-8 in legacy system prompts before provider invocation. |
 | `contracts/tools.py` | Separates reusable strict tagged wire blocks and opaque continuation fields from chat-history validation. |
 | `contracts/tool_validation.py` | Shares bounded JSON, identifier, schema-shape, UTF-8, and base64 checks without making providers depend on Pydantic/FastAPI. |
 | `src/providers/base.py` | Adds neutral tool/content dataclasses and independent default lists so both backends use one stateless protocol. |
@@ -95,13 +121,13 @@ Paths are relative to `services/llm`, except the root guidance entry.
 | `src/providers/bedrock.py` | Implements equivalent Mantle transport and strict raw decoding; per-call timeout avoids the pinned SDK's option-copy issue on the new path. |
 | `src/providers/tool_blocks.py` | Centralizes neutral history, declaration, usage, payload, and stop-reason checks needed by both codecs. |
 | `src/providers/raw_responses.py` | Validates raw JSON before SDK coercion, field loss, parser failures, or unknown-union logging; shares decoding across the two backends. |
-| `README.md` | Introduces the transport and source layout, and accurately distinguishes retained baseline tests from the removed tool-use suite. |
-| `docs/API.md` | Specifies definitions, blocks, replay, limits, legacy success compatibility, redacted errors, and consumer responsibilities. |
+| `README.md` | Introduces the transport and retained coverage. Separates tool-specific source descriptions from the shared tree/status text to resolve overlap with #234 without losing either feature's guidance. |
+| `docs/API.md` | Specifies definitions, blocks, replay, limits, compatibility, and consumer responsibilities. Aligns shared validation/audit sections with #234 and corrects the neutral-versus-resolved model claim. |
 | `docs/ARCHITECTURE.md` | Explains continuation, raw validation, context isolation, execution/authorization boundaries, and the current coverage limitation. |
-| `docs/CONTRIBUTING.md` | Records how to maintain both codecs/validators and why raw-boundary tests need real transports rather than Stubber alone; discloses that the original tests are no longer retained. |
-| `docs/DEPLOYMENT.md` | Documents rollout/rollback sequencing, stable provider/model context, retry/buffering limits, and authorized live verification. |
-| `docs/TOOL-USE-AUDIT.md` | Preserves the requested findings and file-specific rationale while separating historical verification from the final PR's coverage. |
-| Root `AGENTS.md` | Corrects the blanket claim that all LLM DTOs ignore extras and records the requirement to justify every changed file. This deliberately includes the `root` ownership zone. |
+| `docs/CONTRIBUTING.md` | Records both-codec maintenance and real-transport testing, including removed coverage. Places the tool guide before local setup to avoid the embedding guide's insertion point. |
+| `docs/DEPLOYMENT.md` | Documents rollout/rollback, stable provider/model context, retry/buffering limits, and live verification. Shared troubleshooting now composes with #234 and avoids claiming SDK timeouts are whole-request deadlines. |
+| `docs/TOOL-USE-AUDIT.md` | Preserves initial and follow-up findings, file-specific rationale, and the distinction between retained tests and separately replayed regressions. |
+| Root `AGENTS.md` | Corrects strict-DTO guidance, requires file-specific rationale, and records the reproduced cross-worktree import hazard. This deliberately includes the `root` ownership zone. |
 
 ## Why each test file was removed or restored
 
@@ -135,9 +161,11 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-The cleanup also checks that runtime paths match `a847327` and the entire test tree
-matches `e8e362a`. Fresh CI applies to the reduced tree, not the removed regressions.
-The pre-existing Starlette/httpx TestClient deprecation may still be reported.
+At `69fe1ac`, runtime paths matched `a847327` and the test tree matched `e8e362a`.
+The follow-up changes the system-prompt validator, not the test tree; runtime equality
+with the initial revision is no longer claimed. CI still runs the reduced suite, not
+the separately replayed regressions. The pre-existing Starlette/httpx TestClient
+deprecation may still be reported.
 
 Docker is unavailable locally; image-build/import verification comes from CI. No
 live AWS account/model access, real signature acceptance, latency/spend behavior,
@@ -146,5 +174,6 @@ round trip remains required before enabling the consumer feature; see
 [DEPLOYMENT.md](DEPLOYMENT.md#tool-use-rollout).
 
 Parsed-data/raw-response caps are not HTTP ingress or streaming download limits.
-The baseline synchronous `/health` behavior is unchanged. The separate embedding
-work in PR #234 and the original user's uncommitted checkout remain untouched.
+This standalone branch retains baseline synchronous `/health`; the combined tree
+retains #234's async health route. The owner audit updates #234 separately, without
+merging either feature or changing the original user's uncommitted checkout.

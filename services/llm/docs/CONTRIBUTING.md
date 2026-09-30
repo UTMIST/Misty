@@ -11,17 +11,6 @@ Task walkthroughs for working on `llm`. Assumes you've read the [README](../READ
 - **Validate before you spend.** Anything checkable without calling the model belongs in the Pydantic model or a dependency, so it 422s/403s before a paid call.
 - **Credentials are `SecretStr`.** Every credential field in `Settings` is `pydantic.SecretStr`; unwrap with `.get_secret_value()` at the boundary. See [`packages/auth/README.md`](../../../packages/auth/README.md#credential-config-convention).
 
-## Local setup
-
-```bash
-cd services/llm
-cp .env.example .env
-uv sync --extra dev
-uv run pytest          # confirm the environment works — no Docker, no network, no AWS
-```
-
-You only need AWS credentials to make *real* Bedrock calls. The suite uses a fake provider.
-
 ## Changing tool-use transport
 
 Read [API.md](API.md#client-executed-tools) before changing structured messages.
@@ -48,6 +37,17 @@ must fail before inference and must not echo or log tool/continuation data.
 
 Do not implement execution, authorization decisions for named tools, or a loop
 inside this service. Those remain consumer responsibilities (#71).
+
+## Local setup
+
+```bash
+cd services/llm
+cp .env.example .env
+uv sync --extra dev
+uv run pytest          # confirm the environment works — no Docker, no network, no AWS
+```
+
+You only need AWS credentials to make *real* Bedrock calls. The suite uses a fake provider.
 
 ## Walkthrough: add a provider backend
 

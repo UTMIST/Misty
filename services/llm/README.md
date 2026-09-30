@@ -123,18 +123,21 @@ Tool use is transport, not execution: consumers authorize and run tools, then se
 
 ## Repo layout
 
+Tool transport additionally uses `contracts/tools.py` and `contracts/tool_validation.py`
+for wire validation, and `src/providers/tool_blocks.py` and `src/providers/raw_responses.py`
+for shared provider checks. See the [architecture](docs/ARCHITECTURE.md#stateless-tool-use-transport)
+for their boundaries and the [audit record](docs/TOOL-USE-AUDIT.md) for file-specific rationale.
+
 ```
 llm/
 ├── contracts/
-│   ├── chat.py            Chat request/response models and history invariants
-│   ├── tools.py           Strict tool definitions and tagged content blocks
-│   └── tool_validation.py Framework-free JSON, identifier, and payload checks
+│   └── chat.py            Pydantic request/response models (ChatRequest, ChatResponse, Usage)
 │
 ├── src/
 │   ├── api/               FastAPI application
 │   │   ├── app.py         App factory (create_app); mounts /chat + /health, audit middleware
 │   │   ├── auth.py        Builds require_scope / get_actor from platform_auth (envelope="llm_")
-│   │   ├── deps.py        get_key_store / get_llm — wiring point; private builders are cached
+│   │   ├── deps.py        Dependency wiring via cached private builders
 │   │   ├── hashing.py     Thin shim over platform_auth: llm_-envelope key generation
 │   │   └── routers/
 │   │       └── chat.py    POST /chat — require_scope("chat"), maps body → provider → response
@@ -143,8 +146,6 @@ llm/
 │   │   ├── base.py            LLMRequest/LLMResult/LLMProvider Protocol + normalized error hierarchy
 │   │   ├── bedrock_converse.py  Default: Claude via bedrock-runtime Converse API (US-regional profiles)
 │   │   ├── bedrock.py           Alt: Claude via AnthropicBedrockMantle (Messages endpoint)
-│   │   ├── tool_blocks.py       Neutral tool-mode validation for both codecs
-│   │   ├── raw_responses.py     Strict JSON and pre-SDK wire validation
 │   │   └── registry.py          Config-driven provider selection (LLM_PROVIDER → builder)
 │   │
 │   ├── mint_key.py        llm-keys CLI — prints a key + its CONSUMER_KEYS entry, no store writes
@@ -195,7 +196,8 @@ uv run ruff format .
 
 ## Status
 
-A stateless `POST /chat` proxy over Amazon Bedrock with optional tool-use transport, config-seeded scoped API keys (`chat` / `admin`), an attested-actor audit trail, two swappable Bedrock providers behind a neutral Protocol, normalized provider-error mapping, and an offline test suite. Tool execution and the consumer loop (#71) remain outside this service.
+Stateless inference with scoped API keys, an attested-actor audit trail,
+neutral provider Protocols, normalized failures, and offline tests.
 
 **Not implemented (by design):**
 
