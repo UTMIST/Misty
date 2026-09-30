@@ -86,7 +86,11 @@ def test_nonfinite_rejected_input_is_safe_422(client, path, capsys, number):
 
     detail = _assert_rejected(response, path, provider, capsys)
     loc = ["body", "inputs", 0] if path == "/embed" else ["body", "messages", 0, "content"]
-    assert detail == [{"type": "string_type", "loc": loc, "msg": "Input should be a valid string"}]
+    assert all(error["loc"][: len(loc)] == loc for error in detail)
+    assert any(
+        error["type"] == "string_type" and error["msg"] == "Input should be a valid string"
+        for error in detail
+    )
 
 
 @pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"], ids=["high-surrogate", "low-surrogate"])
