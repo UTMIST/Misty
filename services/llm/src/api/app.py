@@ -29,12 +29,16 @@ def create_app() -> FastAPI:
     async def validation_error_handler(
         _request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        errors = exc.errors()
+        for error in errors:
+            if error["type"] == "union_tag_invalid":
+                error["msg"] = "Unsupported content block type"
+            if error["type"] == "extra_forbidden":
+                error["loc"] = error["loc"][:-1]
         return JSONResponse(
             status_code=422,
             content={
-                "detail": [
-                    {key: error[key] for key in ("type", "loc", "msg")} for error in exc.errors()
-                ]
+                "detail": [{key: error[key] for key in ("type", "loc", "msg")} for error in errors]
             },
         )
 

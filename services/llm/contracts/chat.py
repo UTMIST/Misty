@@ -24,6 +24,16 @@ class ChatRequest(BaseModel):
             raise ValueError(f"model must be one of {sorted(ALLOWED_MODELS)}")
         return v
 
+    @field_validator("system")
+    @classmethod
+    def _validate_system(cls, v: str | None) -> str | None:
+        if v is not None:
+            try:
+                v.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError("system must be valid UTF-8") from None
+        return v
+
 
 class Usage(BaseModel):
     input_tokens: int

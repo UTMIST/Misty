@@ -107,6 +107,28 @@ def test_surrogate_in_rejected_model_is_safe_422(client, path, capsys, surrogate
     ]
 
 
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"], ids=["high-surrogate", "low-surrogate"])
+def test_surrogate_input_text_is_safe_422(client, path, capsys, surrogate):
+    test_client, provider, _ = client
+    payload = _payload(path, _PRIVATE_TEXT + surrogate)
+
+    response = test_client.post(path, content=json.dumps(payload), headers={"X-API-Key": _API_KEY})
+
+    _assert_rejected(response, path, provider, capsys)
+
+
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"], ids=["high-surrogate", "low-surrogate"])
+def test_surrogate_system_prompt_is_safe_422(client, capsys, surrogate):
+    test_client, provider, _ = client
+    payload = {**_payload("/chat"), "system": _PRIVATE_TEXT + surrogate}
+
+    response = test_client.post(
+        "/chat", content=json.dumps(payload), headers={"X-API-Key": _API_KEY}
+    )
+
+    _assert_rejected(response, "/chat", provider, capsys)
+
+
 @pytest.mark.parametrize(
     "value,error_type,message",
     [

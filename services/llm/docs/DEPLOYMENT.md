@@ -99,8 +99,7 @@ Note that **a key rotation is not covered by a code rollback** — `CONSUMER_KEY
 
 - **Every `/chat` returns 502.** The usual causes, in order: AWS credentials missing or wrong in the environment; `AWS_REGION` set to a region without model access; the configured `LLM_MODEL` not enabled on the account. All three normalize to `ProviderUnavailable`. `/health` stays green through all of them.
 - **502 only for one chat model.** That model is in `ALLOWED_MODELS` but either unmapped in `BedrockConverseProvider`'s profile table or not enabled on the account.
-- **Embedding failures.** See the [embedding error reference](API.md#post-embed).
 - **429s under load.** Upstream throttling; the consumer decides whether to back off.
-- **504s.** Provider timeout or connection failure; see [embedding timeout semantics](API.md#batching-and-timeouts). Large `max_tokens` with thinking enabled can hit chat timeouts.
-- **Container dies at boot.** Outside `local`, check for the dev-default `API_KEY`, missing `AWS_REGION`, or missing `OPENAI_API_KEY`. Also check `EMBED_MODEL` is allowed and `CONSUMER_KEYS` is a JSON **array**.
-- **A consumer suddenly gets 403.** Its key is valid but lacks the endpoint's `chat` or `embed` scope. Check its `CONSUMER_KEYS` entry — a key minted with the wrong scopes authenticates fine and fails only at authorization.
+- **504s.** Provider timeout or connection failure. SDK timeouts are not hard whole-request deadlines; account for phase timeouts and provider-specific retry behavior in consumer budgets.
+- **Container dies at boot.** Check the [boot requirements](#variables) and that `CONSUMER_KEYS` is a JSON **array**. The startup error names the failing check.
+- **A consumer suddenly gets 403.** Its key is valid but lacks the endpoint's required scope. Check the `scopes` on its `CONSUMER_KEYS` entry — authentication is not authorization.

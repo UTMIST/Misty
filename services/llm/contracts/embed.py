@@ -27,6 +27,10 @@ class EmbedRequest(BaseModel):
                 raise ValueError(
                     f"inputs[{i}] is {len(text)} characters, over the {MAX_INPUT_CHARS} limit"
                 )
+            try:
+                text.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError(f"inputs[{i}] must be valid UTF-8") from None
         return v
 
     @field_validator("model")

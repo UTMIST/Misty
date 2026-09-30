@@ -56,10 +56,10 @@ def _provider(client=None, model="openai-embed-3-small", api_key="test-key"):
 
 
 @contextmanager
-def _boundary(response, backend="fake", *, model="openai-embed-3-small"):
+def _boundary(response, backend="fake", *, model="openai-embed-3-small", raw_body=None):
     http_response = httpx.Response(
         200,
-        content=json.dumps(response, default=vars),
+        content=raw_body if raw_body is not None else json.dumps(response, default=vars),
         headers={"content-type": "application/json"},
     )
     if backend == "fake":
@@ -162,7 +162,7 @@ def test_raw_response_decoding_failures_normalize(stage):
         ) as caught:
             provider.embed(EmbeddingRequest(inputs=["a"]))
     call.assert_called_once()
-    failure.assert_called_once_with()
+    failure.assert_called_once()
     assert "private-upstream-payload" not in str(caught.value)
 
 
@@ -418,6 +418,25 @@ def test_real_sdk_boolean_component_is_rejected(value, index):
     call.assert_called_once()
 
 
+@pytest.mark.parametrize("backend", ["fake", "sdk"])
+@pytest.mark.parametrize("encoding", ["float", "base64"])
+@pytest.mark.parametrize("field", ["model", "index", "embedding"])
+def test_conflicting_duplicate_response_fields_are_rejected(backend, encoding, field):
+    response = _response()
+    if encoding == "base64":
+        response.data[0].embedding = _base64_vector(response.data[0].embedding)
+    raw = json.dumps(response, default=vars).replace(
+        f'"{field}": ', f'"{field}": "private-upstream-payload", "{field}": ', 1
+    )
+    with _boundary(response, backend, raw_body=raw) as (provider, call):
+        with pytest.raises(ProviderUnavailable, match="duplicate JSON fields") as caught:
+            provider.embed(EmbeddingRequest(inputs=["a"]))
+    call.assert_called_once()
+    assert "private-upstream-payload" not in str(caught.value)
+    if backend == "fake":
+        call.return_value.parse.assert_not_called()
+
+
 def test_tuple_vector_is_not_coerced():
     response = _response()
     response.data[0].embedding = (0.1,) * 1536
@@ -440,6 +459,11 @@ def test_tuple_vector_is_not_coerced():
             pytest.param({"usage": SimpleNamespace(prompt_tokens=value)}, id=f"count-{name}")
             for name, value in [
                 ("text", "many"),
+                ("numeric-text", "7"),
+                ("padded-text", "0007"),
+                ("whitespace-text", " 7 "),
+                ("float", 1.0),
+                ("fractional", 7.9),
                 ("null", None),
                 ("mapping", {}),
                 ("list", []),

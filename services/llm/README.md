@@ -139,7 +139,7 @@ llm/
 │   ├── api/               FastAPI application
 │   │   ├── app.py         App factory (create_app); mounts /chat + /embed + /health, audit middleware
 │   │   ├── auth.py        Builds require_scope / get_actor from platform_auth (envelope="llm_")
-│   │   ├── deps.py        get_key_store / get_llm / get_embedder — wiring via cached private builders
+│   │   ├── deps.py        Dependency wiring via cached private builders
 │   │   ├── hashing.py     Thin shim over platform_auth: llm_-envelope key generation
 │   │   └── routers/
 │   │       ├── chat.py    POST /chat — require_scope("chat"), maps body → provider → response
@@ -195,7 +195,8 @@ uv run ruff format .
 
 ## Status
 
-Stateless Bedrock chat and OpenAI batch embeddings, config-seeded scoped API keys (`chat` / `embed` / `admin`) with an attested-actor audit trail, neutral provider Protocols, normalized failures, and offline tests.
+Stateless inference with scoped API keys, an attested-actor audit trail,
+neutral provider Protocols, normalized failures, and offline tests.
 
 **Not implemented (by design):**
 

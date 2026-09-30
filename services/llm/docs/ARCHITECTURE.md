@@ -62,9 +62,12 @@ neutral dataclasses, the same `ProviderError` hierarchy, and injected clients in
 `LLM_PROVIDER` selects only the Bedrock chat backend; embeddings have no provider selector
 or automatic fallback. The embedding SDK client is built lazily on first use.
 
-Float-array vectors are validated in the raw JSON response before SDK parsing, which
-would otherwise coerce boolean components into floats and hide malformed upstream data.
-Decoded base64 vectors pass the same validation after parsing.
+Duplicate JSON object fields are rejected before SDK parsing so conflicting model,
+index, or vector values cannot be silently overwritten. Float-array vectors are
+validated at the same raw boundary; SDK parsing would otherwise coerce boolean
+components into floats. Decoded base64 vectors pass the same validation after parsing.
+Usage comes from the raw JSON integer count; malformed counts become zero rather
+than being rounded or coerced into valid-looking usage.
 
 The async `/embed` route offloads SDK work; `/health` is also async.
 See [API.md](API.md#batching-and-timeouts) for concurrency and timeout behavior.

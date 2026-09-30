@@ -31,7 +31,9 @@ There is **no `X-Actor` header** and no `dev:spoof` scope. This is a service-to-
 
 Request field and JSON syntax errors return **422** with a `detail` list. Each item
 contains `loc`, `msg`, and `type`; rejected `input` values and error context are omitted.
-This format applies to both `/chat` and `/embed` without echoing the raw request body.
+Unknown discriminator values are not echoed, and forbidden extra-field locations
+identify the parent object rather than the caller-supplied field name.
+Text sent upstream must be valid UTF-8; invalid text is rejected before a provider call.
 
 ---
 
@@ -155,7 +157,11 @@ There is one embedding per input, in input order, with zero-based `index` values
 
 **Check model and dimensions before persisting.** Equal widths do not make vectors from
 different models interchangeable. `usage.input_tokens` is the upstream-reported batch
-usage, or `0` when unavailable.
+usage, or `0` when unavailable or invalid; fractional counts and numeric strings are
+not rounded or coerced.
+
+Audit metadata records `input_count` / `input_chars`, and on success `dimensions` /
+`input_tokens`. Embedded text and vectors are never logged.
 
 ### Batching and timeouts
 
@@ -177,7 +183,7 @@ timeout phases, **not a hard whole-HTTP deadline**. Limiter waiting is not inclu
 | Missing `OPENAI_API_KEY` in local development | 503 | Not configured; no upstream call |
 | Provider rate limited (upstream 429) | 429 | `embedding provider rate limited` |
 | Provider timeout or connection failure | 504 | `embedding provider timeout` |
-| Other upstream error or malformed response, including missing/mismatched model metadata or wrong-width/non-numeric/non-finite vectors | 502 | `embedding provider error` |
+| Other upstream error or malformed response, including duplicate JSON fields, missing/mismatched model metadata, or wrong-width/non-numeric/non-finite vectors | 502 | `embedding provider error` |
 
 For **422**, Pydantic field errors use a `detail` list; the aggregate character limit uses
 a `detail` string. Invalid vectors are rejected, not returned as a successful batch.
@@ -204,7 +210,6 @@ provider calls. A green healthcheck does **not** imply Bedrock chat or OpenAI em
 
 One JSON line per request with the attested actor, endpoint, status, and duration.
 Requests reaching provider work record the selected **neutral model alias** from the
-request or configuration, not the resolved model id returned in the response. `/chat`
-adds `input_tokens` / `output_tokens` on success. `/embed` adds `input_count` / `input_chars`,
-and on success `dimensions` / `input_tokens` (`request.state.audit_extra`). Prompt,
-completion, and embedded text are never logged, and neither are the vectors.
+request or configuration, not the resolved model id returned in the response.
+Successful calls add token usage through `request.state.audit_extra`; `/chat` records
+`input_tokens` / `output_tokens`. Request and response content are never logged.

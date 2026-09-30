@@ -35,6 +35,13 @@ _MODEL_DIMENSIONS = {
 }
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value = dict(pairs)
+    if len(value) != len(pairs):
+        raise ProviderUnavailable("OpenAI returned duplicate JSON fields")
+    return value
+
+
 class OpenAIEmbeddingProvider:
     def __init__(self, *, api_key: str, default_model: str, timeout_s: float, client=None):
         if default_model not in _MODEL_IDS:
@@ -100,7 +107,7 @@ class OpenAIEmbeddingProvider:
             raw_response = client.embeddings.with_raw_response.create(
                 model=model_id, input=request.inputs, dimensions=dimensions
             )
-            payload = raw_response.http_response.json()
+            payload = raw_response.http_response.json(object_pairs_hook=_unique_object)
             if isinstance(payload, dict) and isinstance(payload.get("data"), list):
                 for i, item in enumerate(payload["data"]):
                     if isinstance(item, dict) and isinstance(item.get("embedding"), list):
@@ -145,13 +152,13 @@ class OpenAIEmbeddingProvider:
 
         # Usage reporting must never turn a 200 into a 500, so a malformed count
         # is dropped rather than cast blindly.
-        usage = getattr(response, "usage", None)
-        raw_tokens = getattr(usage, "prompt_tokens", 0)
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        raw_tokens = usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0
+        input_tokens = raw_tokens if type(raw_tokens) is int else 0
         try:
-            input_tokens = int(raw_tokens or 0)
-            if isinstance(raw_tokens, bool) or input_tokens < 0 or not math.isfinite(input_tokens):
+            if input_tokens < 0 or not math.isfinite(input_tokens):
                 input_tokens = 0
-        except (TypeError, ValueError, OverflowError):
+        except OverflowError:
             input_tokens = 0
 
         return EmbeddingResult(
