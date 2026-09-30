@@ -70,7 +70,8 @@ def test_embed_concurrency_does_not_block_health(monkeypatch):
                         tasks.start_soon(post_embed)
                     with anyio.fail_after(10):
                         await full.wait()
-                        await anyio.wait_all_tasks_blocked()
+                        while limiter.statistics().tasks_waiting == 0:
+                            await anyio.wait_all_tasks_blocked()
                         assert calls == 8
                         assert limiter.statistics().tasks_waiting == 1
                         assert anyio.to_thread.current_default_thread_limiter().borrowed_tokens == 0
