@@ -333,10 +333,10 @@ test('wireDiscordClient responds to autocomplete with suggestions', async () => 
 
 // --- /record auth enforcement (dedicated adapter path, bypasses the router PEP) ---
 
-function fakeRecordInteraction({ subcommand, voiceChannel = null, calls }) {
+function fakeRecordInteraction({ subcommand, voiceChannel = null, calls, guildId = 'g1' }) {
   return {
     commandName: 'record',
-    guildId: 'g1',
+    guildId,
     user: { id: 'u1', username: 'alex' },
     channel: { id: 'tc1' },
     member: { voice: { channel: voiceChannel } },
@@ -529,6 +529,43 @@ test('/record status identifies the active channel and stop requirements', async
   assert.match(edit.payload.content, /auto-stop.*everyone leaves/i);
 });
 
+test('/record rejects invocation outside a guild (e.g. in DMs)', async () => {
+  const calls = [];
+  const client = fakeClient();
+  wireDiscordClient(client, { commands: recordCommands, appContext: {} });
+
+  await client.emit(fakeRecordInteraction({ subcommand: 'status', calls, guildId: null }));
+
+  const edit = calls.find((c) => c.method === 'editReply');
+  assert.match(edit.payload.content, /only be used in a server channel/i);
+});
+
+test('/record status explains the channel is empty and can be stopped when no humans remain', async () => {
+  const calls = [];
+  const recordedChannel = fakeVoiceChannel('vc1', [botOcc]);
+  const callerChannel = { id: 'vc2' };
+  const appContext = {
+    meetingSurface: {
+      status: () => ({ status: 'recording', elapsedMs: 15_000 }),
+      activeSession: () => ({ sessionId: 's1', voiceChannel: recordedChannel }),
+    },
+  };
+  const client = fakeClient();
+  client.user = { id: BOT_ID };
+  wireDiscordClient(client, { commands: recordCommands, appContext });
+
+  await client.emit(
+    fakeRecordInteraction({ subcommand: 'status', voiceChannel: callerChannel, calls }),
+  );
+
+  const edit = calls.find((c) => c.method === 'editReply');
+  assert.match(edit.payload.content, /recording in.*<#vc1>/i);
+  assert.match(edit.payload.content, /channel is empty/i);
+  assert.match(edit.payload.content, /<#vc2>/);
+  assert.match(edit.payload.content, /auto-stop shortly/i);
+  assert.match(edit.payload.content, /\/record stop/i);
+});
+
 test('/record start refuses a different voice channel when a recording is already active in the guild', async () => {
   const calls = [];
   let startCalled = false;
@@ -555,6 +592,37 @@ test('/record start refuses a different voice channel when a recording is alread
   assert.match(edit.payload.content, /may not start.*already active in this server/i);
   assert.match(edit.payload.content, /<#vc1>/);
   assert.match(edit.payload.content, /<#vc2>/);
+  assert.equal(startCalled, false);
+});
+
+test('/record start explains cooldown and stop option when the recorded channel is empty', async () => {
+  const calls = [];
+  let startCalled = false;
+  const recordedChannel = fakeVoiceChannel('vc1', [botOcc]);
+  const callerChannel = { id: 'vc2' };
+  const appContext = {
+    directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) },
+    meetingSurface: {
+      activeSession: () => ({ sessionId: 's1', voiceChannel: recordedChannel }),
+      start: () => {
+        startCalled = true;
+        return { status: 'recording' };
+      },
+    },
+  };
+  const client = fakeClient();
+  client.user = { id: BOT_ID };
+  wireDiscordClient(client, { commands: recordCommands, appContext });
+
+  await client.emit(
+    fakeRecordInteraction({ subcommand: 'start', voiceChannel: callerChannel, calls }),
+  );
+
+  const edit = calls.find((c) => c.method === 'editReply');
+  assert.match(edit.payload.content, /channel is empty and will auto-stop shortly/i);
+  assert.match(edit.payload.content, /<#vc1>/);
+  assert.match(edit.payload.content, /<#vc2>/);
+  assert.match(edit.payload.content, /\/record stop/i);
   assert.equal(startCalled, false);
 });
 
