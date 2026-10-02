@@ -59,8 +59,9 @@ Each Google editor type has a native API that returns far richer structure than 
 ```
 GoogleSource.fetch(url)
   → parse_file_id(url)                    regex table, one pattern per URL shape
-  → drive.files().get(...)                metadata: name + mimeType
+  → drive.files().get(...)                metadata: name + mimeType + optional size
   → EXTRACTORS[mime]                      or the text/* Drive-export fallback
+  → media size guard                       PDF/.docx/text/* before byte download
   → extractor.extract(services, file_id, mime)  → ExtractedText(text, warnings)
   → SourceResult(title, content[:max], warnings)
 ```
@@ -94,6 +95,7 @@ Two clamps exist, and only one of them is meant to fire:
 
 - connectors' `MAX_CONTENT_CHARS` defaults to **1,200,000**.
 - documentation-system's own `MAX_CONTENT_CHARS` is **1,000,000**.
+- connectors' `MAX_FILE_BYTES` defaults to **25 MiB** and rejects oversized uploaded PDF, `.docx`, and `text/*` files before media download.
 
 The gap is deliberate. The consumer's clamp trips first and reports a truncation warning to whoever ingested the doc; connectors' clamp is a transport backstop that should never be the visible one. If you change either, keep connectors' the larger of the two.
 
