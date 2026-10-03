@@ -18,7 +18,7 @@
  *    - Remove `infrastructureDiscordUsername` from `src/config.js` and `src/context.js`,
  *      and clean up `INFRASTRUCTURE_DISCORD_USERNAME` in `.env.example` and docs.
  *    - Remove `discord-bot/test/bug-command.test.js`.
- *    - Re-run Discord command registration (`npm run register:commands`) to drop the
+ *    - Re-run Discord command registration (`npm run register`) to drop the
  *      command from Discord globally.
  */
 
