@@ -24,26 +24,47 @@ A redeploy is a plain restart — nothing to migrate, no state to drain. In-flig
 | `API_KEY` | a real random string | **Required** by the boot check |
 | `CONSUMER_KEYS` | JSON array | Malformed → boot failure |
 | `AWS_REGION` | e.g. `us-east-1` | **Required** by the boot check |
-| `LLM_PROVIDER` | `bedrock-converse` | Leave at default unless model access changed |
-| `LLM_MODEL` | `claude-sonnet-4-6` | Default when a request omits `model` |
-| `REQUEST_TIMEOUT_S` | `60` | Per-request timeout to the provider |
-| `THINKING_DEFAULT` | `true` | Applied when a request omits `thinking` |
+| `LLM_PROVIDER` | `bedrock-converse` | Chat backend; leave at default unless model access changed |
+| `LLM_MODEL` | `claude-sonnet-4-6` | Default when a `/chat` request omits `model` |
+| `REQUEST_TIMEOUT_S` | `60` | SDK timeout setting; see [embedding semantics](API.md#batching-and-timeouts) |
+| `THINKING_DEFAULT` | `true` | Applied when a `/chat` request omits `thinking` |
 
-AWS credentials come from the standard chain — `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, or `AWS_BEARER_TOKEN_BEDROCK`.
+AWS credentials for chat come from the standard chain — `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, or `AWS_BEARER_TOKEN_BEDROCK`.
 
-**The boot check requires `API_KEY` (overridden from the dev default) and `AWS_REGION`.** It does *not* verify that the credentials work or that the account has model access — those only surface on a real `/chat` call, as a 502.
+**Outside `local`, the boot check requires `API_KEY` (overridden from the dev default), `AWS_REGION`, and `OPENAI_API_KEY`.** It checks configuration, not whether credentials work or the account has model access; those failures surface on a real provider call.
 
-Usage bills as **standard Amazon Bedrock** (AWS credits apply), deliberately not Claude Platform on AWS / Marketplace.
+Chat usage bills as **standard Amazon Bedrock** (AWS credits apply), deliberately not Claude Platform on AWS / Marketplace.
+
+## Embeddings (`POST /embed`)
+
+Embeddings bill through **OpenAI, not AWS credits**. Callers need the independent
+[`embed` scope](#consumer-keys).
+
+| Variable | Default | Notes |
+|---|---|---|
+| `EMBED_MODEL` | `openai-embed-3-small` | **1536 dimensions**; see [model choice and compatibility](ARCHITECTURE.md#initial-embedding-model) |
+| `OPENAI_API_KEY` | `""` | **Required outside `local`**, even when current consumers only use `/chat` |
+| `EMBED_MAX_REQUEST_CHARS` | `400000` | Aggregate character cap; see [API limits](API.md#post-embed) |
+
+**Before merging to an auto-deploy branch or deploying llm, ensure a real `OPENAI_API_KEY`
+is configured in the target environment.** A missing key stops non-local startup. Locally,
+the service still boots without it: `/embed` returns 503, `/health` stays usable, and
+`/chat` continues to use its own Bedrock configuration.
 
 ## Consumer keys
 
-llm has no `api_keys` table. Keys live in `CONSUMER_KEYS`, and the CLI only *prints*:
+llm has no `api_keys` table. Keys live in `CONSUMER_KEYS`, and the CLI only *prints*.
+Run from the repo root; provision a new embedding caller only when approved:
 
 ```bash
 uv --project services/llm run llm-keys --name meeting --scopes chat
+# Example embedding-only caller, not an indexing-pipeline deployment:
+uv --project services/llm run llm-keys --name embedding-caller --scopes embed
 ```
 
-- **stdout** — the plaintext key, shown **once**. Set it as the consumer's `LLM_API_KEY`.
+`chat` and `embed` are independent; use `--scopes chat embed` only when a caller needs both.
+
+- **stdout** — the plaintext key, shown **once**. Give it to the consumer for `X-API-Key` (`meeting` stores it as `LLM_API_KEY`).
 - **stderr** — the JSON object. Append it to llm's `CONSUMER_KEYS` array.
 
 Then redeploy llm. **Revoking is the reverse**: drop the entry and redeploy. There is no revoke command, because there is no database.
