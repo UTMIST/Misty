@@ -32,10 +32,14 @@ class _FakeFiles:
         self._meta, self._payload = meta, payload
         self._get_error, self._export_error = get_error, export_error
         self.export_mime = None
+        self.metadata_fields = None
+        self.media_calls = 0
 
     def get(self, *, fileId, fields=None, alt=None):
         if alt == "media":
+            self.media_calls += 1
             return _FakeRequest(result=self._payload, error=self._export_error)
+        self.metadata_fields = fields
         return _FakeRequest(result=self._meta, error=self._get_error)
 
     def export(self, *, fileId, mimeType):
@@ -100,9 +104,11 @@ class _FakeSheetsService:
 
 
 def _source(files, **kwargs):
+    max_file_bytes = kwargs.pop("max_file_bytes", 25 * 1024 * 1024)
     return GoogleSource(
         credentials_json_b64="fake",
         max_content_chars=1000,
+        max_file_bytes=max_file_bytes,
         services={"drive": _FakeService(files)},
         **kwargs,
     )
@@ -116,6 +122,7 @@ def test_google_doc_routes_to_the_native_docs_extractor():
     source = GoogleSource(
         credentials_json_b64="fake",
         max_content_chars=1000,
+        max_file_bytes=25 * 1024 * 1024,
         services={"drive": _FakeService(files), "docs": docs},
     )
     result = source.fetch(DOC_URL)
@@ -131,6 +138,7 @@ def test_slides_routes_to_the_native_slides_extractor():
     source = GoogleSource(
         credentials_json_b64="fake",
         max_content_chars=1000,
+        max_file_bytes=25 * 1024 * 1024,
         services={"drive": _FakeService(files), "slides": slides},
     )
     result = source.fetch(SLIDES_URL)
@@ -146,6 +154,7 @@ def test_sheets_routes_to_the_native_sheets_extractor():
     source = GoogleSource(
         credentials_json_b64="fake",
         max_content_chars=1000,
+        max_file_bytes=25 * 1024 * 1024,
         services={"drive": _FakeService(files), "sheets": sheets},
     )
     result = source.fetch(SHEET_URL)
@@ -157,6 +166,57 @@ def test_plain_text_upload_downloads_via_media():
     files = _FakeFiles(meta={"name": "notes.txt", "mimeType": "text/plain"}, payload=b"raw notes")
     result = _source(files).fetch(DRIVE_URL)
     assert result.content == "raw notes"
+    assert files.metadata_fields == "name,mimeType,size"
+    assert files.media_calls == 1
+
+
+@pytest.mark.parametrize(
+    "mime",
+    [
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "text/plain",
+    ],
+)
+def test_oversized_media_file_is_rejected_before_download(mime):
+    files = _FakeFiles(
+        meta={"name": "too-large", "mimeType": mime, "size": "101"},
+        payload=b"must not be downloaded",
+    )
+
+    with pytest.raises(SourceUnsupported, match="MAX_FILE_BYTES"):
+        _source(files, max_file_bytes=100).fetch(DRIVE_URL)
+
+    assert files.media_calls == 0
+
+
+def test_allowed_size_media_file_is_downloaded():
+    files = _FakeFiles(
+        meta={"name": "allowed.txt", "mimeType": "text/plain", "size": "100"},
+        payload=b"allowed",
+    )
+
+    result = _source(files, max_file_bytes=100).fetch(DRIVE_URL)
+
+    assert result.content == "allowed"
+    assert files.media_calls == 1
+
+
+def test_native_google_file_without_size_is_not_rejected():
+    files = _FakeFiles(
+        meta={"name": "Native doc", "mimeType": "application/vnd.google-apps.document"}
+    )
+    docs = _FakeDocsService({"title": "T", "body": {"content": []}})
+    source = GoogleSource(
+        credentials_json_b64="fake",
+        max_content_chars=1000,
+        max_file_bytes=1,
+        services={"drive": _FakeService(files), "docs": docs},
+    )
+
+    source.fetch(DOC_URL)
+
+    assert files.media_calls == 0
 
 
 def test_binary_file_is_unsupported():
@@ -172,7 +232,9 @@ def test_unrecognized_url_is_not_found():
 
 
 def test_missing_credentials_raise_not_configured():
-    source = GoogleSource(credentials_json_b64="", max_content_chars=1000)
+    source = GoogleSource(
+        credentials_json_b64="", max_content_chars=1000, max_file_bytes=25 * 1024 * 1024
+    )
     with pytest.raises(SourceNotConfigured):
         source.fetch(DOC_URL)
 
@@ -187,6 +249,7 @@ def test_content_is_bounded_by_max_content_chars_on_the_media_path():
     source = GoogleSource(
         credentials_json_b64="fake",
         max_content_chars=100,
+        max_file_bytes=25 * 1024 * 1024,
         services={"drive": _FakeService(files)},
     )
     result = source.fetch(DRIVE_URL)
@@ -286,7 +349,9 @@ def test_credentials_are_built_once_but_transports_are_rebuilt_per_fetch():
     # never be shared across concurrent /fetch calls, so it is rebuilt fresh
     # every time — this is what a counting fake for each half proves here.
     files = _FakeFiles(meta={"name": "Doc", "mimeType": "text/plain"}, payload=b"hi")
-    source = GoogleSource(credentials_json_b64="fake", max_content_chars=1000)
+    source = GoogleSource(
+        credentials_json_b64="fake", max_content_chars=1000, max_file_bytes=25 * 1024 * 1024
+    )
 
     creds_calls = {"n": 0}
 
@@ -344,6 +409,7 @@ def test_request_timeout_s_reaches_the_http_transport(monkeypatch):
     source = GoogleSource(
         credentials_json_b64=fake_creds_b64,
         max_content_chars=1000,
+        max_file_bytes=25 * 1024 * 1024,
         request_timeout_s=7.5,
     )
     credentials = source._get_credentials()

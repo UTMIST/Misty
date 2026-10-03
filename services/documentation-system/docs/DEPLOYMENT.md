@@ -110,6 +110,12 @@ Health/observability: the audit middleware emits one JSON log line per
 request to stdout. On Railway, view via `railway service logs --service
 documentation-system --environment <env>` or the Railway dashboard.
 
+Railway probes `GET /health/ready` before promoting a deployment. This route
+checks this service's own Postgres connection and returns `503` on failure;
+it does not probe team-tracking or connectors. `GET /health` remains a
+DB-independent liveness check. Neither route needs an API key; response
+bodies are documented in [API.md](API.md).
+
 ## Issuing API keys (`doc-keys` CLI)
 
 Consumers authenticate with scoped keys issued via the `doc-keys` CLI, which talks

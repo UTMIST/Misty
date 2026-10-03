@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     # catalog's clamp must remain the authoritative one, or its "content
     # truncated" warning can never fire.
     max_content_chars: int = Field(default=1_200_000, gt=0)
+    # Pre-download guard for uploaded files whose bytes are fetched through
+    # Drive media. Native Google editor types use their APIs and do not need a
+    # Drive byte-size check. A missing Drive size is treated as unknown.
+    max_file_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
     request_timeout_s: float = Field(default=30.0, gt=0)
 
 

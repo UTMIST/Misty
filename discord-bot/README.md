@@ -104,6 +104,15 @@ npm start                                # or: npm run dev for both surfaces
 Wait for `Logged in as <bot name>` in terminal 2, then use the slash commands
 in whichever Discord server you invited the bot to.
 
+Discord mode always starts a health listener; it does not require `PORT` or
+production configuration. It serves unauthenticated `GET /health/ready` on
+`0.0.0.0:$PORT` (default `3002` locally). It returns `503` until the Discord
+gateway is ready (and again after a disconnect), or `{"status":"ok"}` with
+HTTP 200 while connected. Railway supplies `PORT` and uses this route for
+deployment health checks. Locally, request
+`http://localhost:3002/health/ready` to inspect the gateway state. This
+listener is separate from the playground's default `WEB_PORT=3001`.
+
 **Requires that `DIRECTORY_API_KEY` in `.env` is a valid key against main
 team-tracking**, not a scratch key. If Discord returns "directory is
 temporarily unavailable," check the key with:

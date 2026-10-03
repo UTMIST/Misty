@@ -25,6 +25,7 @@ Because there is no database and no state, a redeploy is a plain restart — not
 | `CONSUMER_KEYS` | JSON array | See below. Malformed → boot failure. |
 | `GOOGLE_CREDENTIALS_JSON` | base64 of the service-account JSON | May be empty — see [Deploying before Google exists](#deploying-before-google-exists) |
 | `MAX_CONTENT_CHARS` | leave at default | Keep **above** documentation-system's (1,000,000) |
+| `MAX_FILE_BYTES` | leave at default (`26214400`) | Pre-download limit for uploaded PDF, `.docx`, and `text/*` files; oversized files return 422 before media download |
 | `REQUEST_TIMEOUT_S` | leave at default (30) | Per-request timeout to Google |
 
 ### What the boot check does and does not cover

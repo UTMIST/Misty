@@ -6,9 +6,16 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for design decisions. The machine-readabl
 
 ## Base URL and auth
 
+`GET /health` is an unauthenticated liveness check. It returns `{"status":"ok"}`
+without contacting Postgres. `GET /health/ready` is an unauthenticated readiness
+check: it runs `SELECT 1` against this service's database, returning the same
+body on success or `503` with
+`{"detail":"team-tracking database unavailable"}` on failure. Railway uses
+`/health/ready` for deployment health checks.
+
 Local development: `http://localhost:8000`. In staging/production the API is deployed to Railway and reachable **only over Railway's private network** (no public domain) — consumers (bot, docs-system) hit it at `http://team-tracking.railway.internal:8000`. External access is a one-click "add public domain" in Railway if ever needed.
 
-Every request — read or write — must include a valid **scoped API key** in the `X-API-Key` header:
+Other requests — read or write — must include a valid **scoped API key** in the `X-API-Key` header:
 
 ```
 X-API-Key: tt_<prefix>_<secret>
