@@ -1,4 +1,5 @@
 from datetime import date
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
@@ -12,6 +13,7 @@ from contracts.types import (
     TeamCreate,
     TeamMembershipCreate,
     TeamMembershipUpdate,
+    TeamUpdate,
 )
 from src.storage.errors import UnknownParentTeamError
 from src.storage.postgres import PostgresStorageAdapter
@@ -539,3 +541,33 @@ def test_pg_generic_identifier_ops_reject_email_provider(adapter):
         )
     with pytest.raises(ValueError, match="email_not_addressable_by_provider"):
         adapter.delete_person_identifier(p.id, "email")
+
+
+def test_pg_channel_teams_replace_retire_clear(adapter):
+    a = adapter.create_team(TeamCreate(slug="a", label="A"), actor="t")
+    b = adapter.create_team(TeamCreate(slug="b", label="B"), actor="t")
+    assert adapter.get_channel_teams("1", "2").team_ids == []
+
+    set_ = adapter.replace_channel_teams("1", "2", [a.id, b.id], actor="bot")
+    assert set_.team_ids == sorted([a.id, b.id])
+    assert set_.updated_by == "bot"
+
+    adapter.update_team(a.id, TeamUpdate(active=False), actor="t")
+    after = adapter.get_channel_teams("1", "2")
+    assert after.team_ids == [b.id]
+    assert after.updated_at > set_.updated_at
+
+    adapter.clear_channel_teams("1", "2")
+    assert adapter.get_channel_teams("1", "2").team_ids == []
+    adapter.clear_channel_teams("1", "2")
+
+
+def test_pg_channel_teams_rejects_inactive_and_keeps_config(adapter):
+    a = adapter.create_team(TeamCreate(slug="a", label="A"), actor="t")
+    b = adapter.create_team(TeamCreate(slug="b", label="B"), actor="t")
+    adapter.replace_channel_teams("1", "2", [a.id], actor="bot")
+    adapter.update_team(b.id, TeamUpdate(active=False), actor="t")
+    for bad in (b.id, uuid4()):
+        with pytest.raises(ValueError, match="unknown_or_inactive_team"):
+            adapter.replace_channel_teams("1", "2", [a.id, bad], actor="bot")
+    assert adapter.get_channel_teams("1", "2").team_ids == [a.id]

@@ -172,6 +172,35 @@ class PersonIdentifierUpdate(BaseModel):
     handle: str | None = None
 
 
+class ChannelTeams(BaseModel):
+    """Teams whose documents may inform answers in a Discord channel.
+
+    An unconfigured channel has `team_ids == []` and no document access.
+    `updated_at` changes whenever the configuration or any referenced team
+    (including one since retired) changes, so consumers can use it as a
+    cache version.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    guild_id: str
+    channel_id: str
+    team_ids: list[UUID]  # active teams only
+    updated_at: datetime | None = None
+    updated_by: str | None = None
+
+
+class ChannelTeamsReplace(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    team_ids: list[UUID]
+
+    @field_validator("team_ids")
+    @classmethod
+    def no_duplicates(cls, v: list[UUID]) -> list[UUID]:
+        if len(set(v)) != len(v):
+            raise ValueError("team_ids must not contain duplicates")
+        return v
+
+
 class ApiKey(DirectoryBase):
     """A named, scoped API key. `key_hash` is never returned by public APIs
     (only exists on writes back to storage); consumers get to see the plaintext

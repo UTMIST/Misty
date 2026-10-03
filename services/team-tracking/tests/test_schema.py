@@ -59,3 +59,13 @@ def test_people_has_access_level_column():
     col = people.c.access_level
     assert col is not None
     assert not col.nullable
+
+
+def test_channel_team_access_primary_key():
+    from src.storage.schema import channel_team_access
+
+    assert {c.name for c in channel_team_access.primary_key.columns} == {
+        "guild_id",
+        "channel_id",
+        "team_id",
+    }

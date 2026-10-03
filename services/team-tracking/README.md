@@ -38,7 +38,7 @@ docker compose up -d postgres
 # 2. Install dependencies (including dev tools)
 uv sync --extra dev
 
-# 3. Apply database migrations (creates all 7 tables + seeds)
+# 3. Apply database migrations (creates all 8 tables + seeds)
 uv run alembic upgrade head
 
 # 4. Start the API server
@@ -95,6 +95,7 @@ Scopes recognized today:
 - `people:elevate` — required to set a non-`member` `access_level` when creating (`POST /people`) or to change `access_level` at all when updating (`PATCH /people/{id}`); a plain `people:write` key gets **403** if the payload would set/change `access_level`. The `admin` wildcard still satisfies it.
 - `memberships:read`, `memberships:write`
 - `identifiers:read`, `identifiers:write`
+- `channels:read`, `channels:write`
 - `providers:read`, `providers:write`
 - `role_kinds:read`, `role_kinds:write`
 - `admin` — wildcard, grants all scopes
@@ -118,10 +119,10 @@ team-tracking/
 │   │   ├── hashing.py      Thin shim over `platform_auth`: argon2 key hashing + tt_<prefix>_<secret> generation
 │   │   ├── deps.py         get_storage() dependency (injects the Postgres adapter)
 │   │   └── routers/        One file per resource:
-│   │                       people, teams, role_kinds, memberships, providers, identifiers
+│   │                       people, teams, role_kinds, memberships, providers, identifiers, channels
 │   │
 │   ├── storage/            StorageAdapter implementations
-│   │   ├── schema.py       SQLAlchemy Core table definitions (7 tables)
+│   │   ├── schema.py       SQLAlchemy Core table definitions (8 tables)
 │   │   ├── in_memory.py    InMemoryStorageAdapter — used in tests + prototyping
 │   │   └── postgres.py     PostgresStorageAdapter — used in production
 │   │
@@ -137,12 +138,13 @@ team-tracking/
 │       ├── 004_person_identifiers.py providers + person_identifiers; seeds 4 providers
 │       ├── 005_person_access_level.py    people.access_level column
 │       ├── 006_email_provider_multivalued.py  multi-valued email identifiers
-│       └── 007_membership_no_overlap.py membership temporal-overlap EXCLUDE constraint
+│       ├── 007_membership_no_overlap.py membership temporal-overlap EXCLUDE constraint
+│       └── 008_channel_team_access.py   channel_team_access (Discord channel → teams)
 │
 ├── tests/                  Two-mode test suite (see Testing below)
 │
 ├── docs/
-│   ├── API.md              Consumer-facing endpoint reference (all 26 endpoints)
+│   ├── API.md              Consumer-facing endpoint reference (all 29 endpoints)
 │   ├── ARCHITECTURE.md     Contributor orientation: boundaries, adapters, auth, data model
 │   ├── CONTRIBUTING.md     Task walkthroughs: add an endpoint, adapter method, migration, tests
 │   └── DEPLOYMENT.md       Ops reference: security posture, key management CLI, audit log
@@ -152,8 +154,8 @@ team-tracking/
                             self-host. See docs/RAILWAY-DEPLOYMENT.md for the live path.
 ```
 
-**Seven tables:** `people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `providers`, `person_identifiers`.
-**Seven routers, 26 endpoints.** **Seven migrations (001–007);** the latest, 007, adds the membership temporal-overlap constraint.
+**Eight tables:** `people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `providers`, `person_identifiers`, `channel_team_access`.
+**Eight routers, 29 endpoints.** **Eight migrations (001–008);** the latest, 008, adds `channel_team_access`.
 
 **Dependency direction:** `contracts/` imports nothing from `src/`. The API layer imports only from `contracts/` and `src/config`. The storage layer imports `contracts/` for types and defines its own schema. Nothing imports from `src/storage/` except `src/api/deps.py` (the single wiring point). This is the **Protocol boundary** — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -186,6 +188,9 @@ Every endpoint requires an `X-API-Key`. The actor stamped into `created_by`/`upd
 | GET | `/memberships/{id}` | `memberships:read` | Get one membership |
 | PATCH | `/memberships/{id}` | `memberships:write` | Update a membership |
 | POST | `/memberships/{id}/end` | `memberships:write` | End a membership (set `ended_at`) |
+| GET | `/channels/{guild_id}/{channel_id}/teams` | `channels:read` | A channel's active teams (empty if unconfigured) |
+| PUT | `/channels/{guild_id}/{channel_id}/teams` | `channels:write` | Replace a channel's teams |
+| DELETE | `/channels/{guild_id}/{channel_id}/teams` | `channels:write` | Clear a channel's teams |
 
 See [docs/API.md](docs/API.md) for full request/response shapes, query parameters, error codes, and curl examples.
 
@@ -233,7 +238,7 @@ See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for task walkthroughs.
 
 ## Where to find things
 
-- [docs/API.md](docs/API.md) — consumer-facing endpoint reference (all 26 endpoints, scopes, errors, curl)
+- [docs/API.md](docs/API.md) — consumer-facing endpoint reference (all 29 endpoints, scopes, errors, curl)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — contributor orientation: Protocol boundary, adapters, temporal memberships, Level-2 auth, data model
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — task walkthroughs for adding endpoints, adapter methods, migrations
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — ops reference: security posture, key management CLI, audit log
@@ -242,7 +247,7 @@ Machine-readable OpenAPI schema: `GET /openapi.json`. Interactive Swagger UI: `G
 
 ## Status
 
-Seven tables (`people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `providers`, `person_identifiers`), 26 endpoints across 7 routers, two storage adapters, migrations 001–007 (latest: 007, membership temporal-overlap constraint). Level-2 auth (DB-issued scoped argon2 keys + attested actor + audit log) is merged, as is the `person_identifiers`/providers identity-mapping feature.
+Eight tables (`people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `providers`, `person_identifiers`, `channel_team_access`), 29 endpoints across 8 routers, two storage adapters, migrations 001–008 (latest: 008, channel team access). Level-2 auth (DB-issued scoped argon2 keys + attested actor + audit log) is merged, as is the `person_identifiers`/providers identity-mapping feature.
 
 **Not implemented (by design):**
 

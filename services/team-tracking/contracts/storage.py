@@ -4,6 +4,7 @@ from uuid import UUID
 
 from contracts.types import (
     ApiKey,
+    ChannelTeams,
     Person,
     PersonCreate,
     PersonIdentifier,
@@ -183,4 +184,23 @@ class StorageAdapter(Protocol):
     def get_person_by_identifier(self, provider: str, external_id: str) -> Person | None:
         """Reverse lookup: resolve an external account to its Person, or None.
         For provider='email' the external_id is normalized before matching."""
+        ...
+
+    # Channel team access (current state, like person identifiers)
+    def get_channel_teams(self, guild_id: str, channel_id: str) -> ChannelTeams:
+        """Return the channel's active teams. Never None: an unconfigured channel
+        returns empty `team_ids` with `updated_at`/`updated_by` None. Retired teams
+        are omitted from `team_ids` but still count toward `updated_at`."""
+        ...
+
+    def replace_channel_teams(
+        self, guild_id: str, channel_id: str, team_ids: list[UUID], *, actor: str
+    ) -> ChannelTeams:
+        """Atomically replace the channel's team set. An empty list clears it.
+        Raises ValueError('unknown_or_inactive_team') if any id is not an active
+        team, leaving the existing configuration untouched."""
+        ...
+
+    def clear_channel_teams(self, guild_id: str, channel_id: str) -> None:
+        """Hard-delete the channel's configuration. Idempotent."""
         ...
