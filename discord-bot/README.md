@@ -166,12 +166,14 @@ guild). If any command is beta and `DISCORD_GUILD_ID` is unset, registration war
 and skips them.
 
 > **Local vs. Railway.** `npm run register` uses `--env-file=.env`, so it targets
-> your **local test bot** only. To register the deployed bots, use the
-> Railway-targeted wrappers — `npm run register:all` (staging then production),
-> or `npm run register:staging` / `npm run register:production` for one
-> environment. There's also a guarded `./scripts/register.sh <staging|production|all>`
-> that confirms before touching production. See
-> [RAILWAY-DEPLOYMENT.md §5](../docs/RAILWAY-DEPLOYMENT.md).
+> your **local test bot** only. The deployed bots register themselves: Railway
+> runs `node src/registerCommands.js` as the bot's `preDeployCommand` (see
+> `railway.json`) on every deploy to staging or production. To re-register
+> *without* deploying, use the Railway-targeted wrappers — `npm run register:all`
+> (staging then production), or `npm run register:staging` /
+> `npm run register:production` for one environment. There's also a guarded
+> `./scripts/register.sh <staging|production|all>` that confirms before touching
+> production. See [RAILWAY-DEPLOYMENT.md §5](../docs/RAILWAY-DEPLOYMENT.md).
 
 ## Commands
 
@@ -224,8 +226,8 @@ globally in every server the bot is in. There are currently no beta commands.
 > `/record` requires the `meeting` service to be deployed in the target
 > environment, with `MEETING_BASE_URL` + `MEETING_API_KEY` set on the bot. It was
 > promoted from beta in the staging → main release; provision `meeting` in an
-> environment **before** registering commands there, or `/record` will be visible
-> and fail.
+> environment **before** deploying the bot there (the deploy registers the
+> commands), or `/record` will be visible and fail.
 
 ### Meeting recording (`/record`) infra
 
@@ -440,7 +442,7 @@ local `.env`.
 | `src/messages.js` | Pure reply-string rendering. |
 | `src/commands/*.js` | Thin discord.js interaction handlers + registry. |
 | `src/index.js` | Client setup + interaction routing. |
-| `src/registerCommands.js` | One-shot slash-command registration (stable → global; beta → testing guild only). |
+| `src/registerCommands.js` | Slash-command registration (stable → global; beta → testing guild only). Runs as Railway's `preDeployCommand` on every deploy; `npm run register` runs it locally. |
 | `src/defineCommand.js` | Neutral, surface-agnostic command factory. |
 | `src/adapters/discord.js` | The ONLY module that imports from discord.js — turns interactions into intents. |
 | `scripts/dev-web.js` | Orchestrator: ephemeral scratch DB + scratch team-tracking + web server. |
