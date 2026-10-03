@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Register the Discord bot's slash commands against a Railway environment.
-# Thin wrapper over `railway run … node src/registerCommands.js` so the routine
-# "re-register after a command change" step is one memorable command and can't
-# silently skip staging (see #38, #39).
+#
+# You normally don't need this: discord-bot/railway.json runs registerCommands.js
+# as the Railway preDeployCommand, so every deploy to staging or production
+# registers that environment's bot. This wrapper is for re-registering WITHOUT a
+# deploy (e.g. after changing DISCORD_GUILD_ID, or to clear stale guild
+# commands). It's a thin wrapper over `railway run … node src/registerCommands.js`
+# that can't silently skip staging (see #38, #39).
 #
 # Prereqs:
 #   - `railway` CLI installed + authed (`railway login`), linked to the project

@@ -14,7 +14,7 @@ Railway + Neon dashboards / CLIs.
 | `llm` | `/` | **none** | — | Stateless Bedrock chat + OpenAI embedding API; keys from `CONSUMER_KEYS`. |
 | `meeting` | `/` | **none** | — | **Stateful in-memory**; keys from `CONSUMER_KEYS`. See the single-replica warning in step 2, and the WebSocket keepalive note in the Notes section — its `startCommand` is the one that isn't the plain template. |
 | `connectors` | `/` | **none** | — | Stateless outbound adapter (Google Drive/Docs); keys from `CONSUMER_KEYS`. Recommended to deploy before `documentation-system` (not required) — see its `CONNECTORS_API_KEY` note in step 3. |
-| `discord-bot` | `discord-bot` | none | — | Node; the only consumer-facing surface. |
+| `discord-bot` | `discord-bot` | none | `node src/registerCommands.js` | Node; the only consumer-facing surface. Pre-deploy registers the slash commands with Discord (step 5). |
 
 All seven are **private** — no public domains. They reach each other over
 Railway's internal network as `<service>.railway.internal:<PORT>`.
@@ -74,9 +74,10 @@ from main). Copy the six connection strings (3 projects × 2 branches). Use the
      directory stays `discord-bot`.
 
    Railway picks up each service's `railway.json` (Dockerfile build, start
-   command, health check, and — for the three DB-backed services only — the
-   `alembic upgrade head` pre-deploy step). `llm`, `meeting`, and `connectors`
-   have no `preDeployCommand` because they have no schema.
+   command, health check, and the pre-deploy step: `alembic upgrade head` for
+   the three DB-backed services, `node src/registerCommands.js` for the bot).
+   `llm`, `meeting`, and `connectors` have no `preDeployCommand` because they
+   have no schema.
 3. Keep **every** service private (no public domain). The bot needs no domain.
 4. **Pin `meeting` to a single replica.** It keeps each live meeting's session
    entirely in process memory, so a given `session_id`'s WebSocket,
@@ -284,30 +285,23 @@ both services reject any other shape at boot, deliberately, so a malformed
 variable fails the deploy rather than silently disabling auth.
 
 ## 5. Register Discord slash commands
-The bot has to tell Discord which slash commands it supports. Re-run whenever the
-command set changes (new commands, beta→stable promotions, option tweaks). It's
-idempotent — safe to re-run.
+The bot has to tell Discord which slash commands it supports. **This happens
+automatically on every deploy**: `discord-bot/railway.json` sets
+`preDeployCommand` to `node src/registerCommands.js`, so Railway runs the
+registration in the freshly built image — with that environment's variables —
+between build and start, exactly the way the DB-backed services run
+`alembic upgrade head`. Merging to `staging` registers the staging bot; merging
+to `main` registers the production bot. It's idempotent, so re-running on a
+deploy that changed no commands is harmless.
 
-Use the wrapper so you register **both** environments in one go and can't
-accidentally skip staging (a partial run leaves stale duplicate guild commands —
-see #38). It always does staging first:
-
-```bash
-cd discord-bot
-npm run register:all          # staging, then production
-```
-
-To target a single environment: `npm run register:staging` or
-`npm run register:production`. There's also a guarded shell wrapper that prompts
-before touching production: `./scripts/register.sh all` (or `staging` /
-`production`).
-
-> **Not** `npm run register` — that hardcodes `--env-file=.env` and only hits
-> your **local test bot**. The `register:*` scripts (and `register.sh`) are the
-> Railway-targeted ones; Railway injects each environment's secrets.
-
-Under the hood each script runs
-`railway run --service discord-bot --environment <env> -- node src/registerCommands.js`.
+If registration fails (bad token, Discord rejects a command definition) the
+deploy fails and the previous deployment keeps running — a broken command set
+can't ship half-registered. `preDeployTimeoutSeconds` caps the step at 120 s
+(it normally takes a few seconds) so a hung Discord API call fails the deploy
+instead of holding it in progress forever. The pre-deploy log shows
+`Registered N stable commands globally` on success; that line is also the
+proof the service is reading `railway.json` at all (see the
+`railwayConfigFile` note in [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md)).
 
 The script partitions commands into **stable** (registered globally — visible
 in every server the bot is in) and **beta** (registered only to
@@ -316,14 +310,33 @@ leave it blank in production, staging gets `beta` commands in the test guild
 only, and production correctly skips them.
 
 Global registrations can take up to ~1 hour to propagate through Discord's
-cache. Guild-scoped (staging) commands appear instantly.
+cache. Guild-scoped (staging) commands appear instantly. Because registration
+runs *before* the new bot process starts, a brand-new command can be visible for
+a few seconds while the old process is still serving — it answers "application
+did not respond" in that window, then works once the new deployment is live.
 
-> **Provision `meeting` before registering in an environment.** `/record` is now
-> stable and registers globally, so it becomes visible to every member the
-> moment you register. If `meeting` isn't deployed there (or `MEETING_BASE_URL`
-> is unset on the bot) the command answers "not configured" — visible but
-> useless. Either provision `meeting` first, or accept the degraded state
-> knowingly.
+### Registering by hand
+
+You only need this when you want to re-register **without** a deploy — for
+example to clear stale guild commands after changing `DISCORD_GUILD_ID`, or to
+check what a branch would register before merging it. The manual wrappers run
+the same script via `railway run`, which injects that environment's secrets:
+
+```bash
+cd discord-bot
+npm run register:staging      # or register:production, or register:all
+./scripts/register.sh all     # same, but prompts before touching production
+```
+
+> **Not** `npm run register` — that hardcodes `--env-file=.env` and only hits
+> your **local test bot**.
+
+> **Provision `meeting` before deploying the bot to an environment.** `/record`
+> is stable and registers globally, so it becomes visible to every member the
+> moment the bot deploys. If `meeting` isn't deployed there (or
+> `MEETING_BASE_URL` is unset on the bot) the command answers "not configured"
+> — visible but useless. Either provision `meeting` first, or accept the
+> degraded state knowingly.
 
 ## 6. Seed the first admin
 Nobody is a directory admin on a fresh production DB. Seed yourself as a
@@ -364,8 +377,10 @@ by an existing admin running `/seed` from Discord.
   logs should also show `alembic upgrade head` ran.
 - **Bot:** Railway checks `/health/ready` on its injected `PORT`. It returns
   `503` before Discord is ready or after a disconnect, and 200 once connected.
-  Logs show `Bot ready as …`; staging bot appears in the test guild and prod
-  bot registers globally.
+  The pre-deploy log shows `Registered N stable commands globally` (and, on
+  staging, `Registered N beta commands to testing guild …`); the deploy log
+  shows `Bot ready as …`. Staging bot appears in the test guild and prod bot
+  registers globally.
 - **End-to-end (directory):** run a bot command (e.g. `/whoami`) in the staging guild → reaches staging team-tracking → staging Neon branch. If it returns "directory is temporarily unavailable," the two most common causes are (1) `DIRECTORY_BASE_URL` template not resolving (see the `PORT=8000` note above), or (2) `DIRECTORY_API_KEY` missing on the consumer (re-run the provisioning script).
 - **End-to-end (`/record`):** join a staging voice channel, `/record start`,
   talk for ~30s, `/record stop`. Within roughly 30–60s a `meeting-minutes.pdf`
