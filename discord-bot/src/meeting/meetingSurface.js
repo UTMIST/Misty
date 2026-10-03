@@ -210,6 +210,13 @@ export function createMeetingSurface({
     return { sessionId: session.sessionId, voiceChannel: session.voiceChannel };
   }
 
+  // Discord can move the bot while recording. The adapter supplies the new
+  // opaque channel so status, stop permissions, and auto-stop share its location.
+  function updateVoiceChannel(guildId, voiceChannel) {
+    const session = sessions.get(guildId);
+    if (session) session.voiceChannel = voiceChannel;
+  }
+
   async function stop(guildId) {
     const session = sessions.get(guildId);
     if (!session) return { status: 'not-recording' };
@@ -255,5 +262,5 @@ export function createMeetingSurface({
     }
   }
 
-  return { start, status, stop, activeSession };
+  return { start, status, stop, activeSession, updateVoiceChannel };
 }
