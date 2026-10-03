@@ -10,9 +10,11 @@ import {
   wireDiscordClient,
   createAutoStop,
   createMeetingPrompt,
+  AUTO_STOP_GRACE_MS,
 } from '../src/adapters/discord.js';
 import { DirectoryUnavailable } from '../src/directoryClient.js';
 import record from '../src/commands/record.js';
+import { createMeetingSurface } from '../src/meeting/meetingSurface.js';
 
 // A minimal fake discord.js interaction that tracks the response lifecycle the
 // way the real one does: deferReply() flips `deferred`, reply() flips `replied`.
@@ -432,6 +434,34 @@ test('/record start fails closed (no start) when the directory is unavailable', 
   assert.equal(startCalled, false);
 });
 
+test('/record start reports the current channel after a move during the join', async () => {
+  const calls = [];
+  const original = { id: 'vc1' };
+  const destination = { id: 'vc2' };
+  let active = null;
+  const appContext = {
+    directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) },
+    meetingSurface: {
+      activeSession: () => active,
+      start: async ({ voiceChannel }) => {
+        assert.equal(voiceChannel, original);
+        // A bot move updates the session while the voice connection is joining.
+        active = { sessionId: 's1', voiceChannel: destination };
+        return { status: 'recording', sessionId: 's1' };
+      },
+    },
+  };
+  const client = fakeClient();
+  wireDiscordClient(client, { commands: recordCommands, appContext });
+
+  await client.emit(fakeRecordInteraction({ subcommand: 'start', voiceChannel: original, calls }));
+
+  const content = calls.find((c) => c.method === 'editReply').payload.content;
+  assert.match(content, /now recording in <#vc2>/i);
+  assert.match(content, /auto-stop recording once everyone leaves <#vc2>/i);
+  assert.doesNotMatch(content, /<#vc1>/);
+});
+
 test('/record stop is PUBLIC: an unlinked caller can still stop a runaway recording', async () => {
   const calls = [];
   let stopped = false;
@@ -836,6 +866,82 @@ const makeAutoStop = (timer, meetingSurface) =>
     setTimer: timer.setTimer,
     clearTimer: timer.clearTimer,
   });
+
+// Use the real session lifecycle so a bot move must update stored state before
+// either the command guard or auto-stop can see the destination channel.
+async function recordingWithTwoChannels() {
+  const original = fakeVoiceChannel('vc1', [botOcc, humanOcc('h1')]);
+  const destination = { id: 'vc2', guild: original.guild };
+  const cache = original.guild.voiceStates.cache;
+  cache.set('h2', { id: 'h2', channelId: 'vc2', member: { user: { bot: false } } });
+  const meetingSurface = createMeetingSurface({
+    meetingClient: {
+      openStream: () => ({ close() {}, endAudio() {} }),
+      stop: async () => ({}),
+    },
+    makeRecorder: () => ({ start: async () => {}, stop: async () => {} }),
+    poster: async () => {},
+  });
+  const client = fakeClient();
+  client.user = { id: BOT_ID };
+  wireDiscordClient(client, { commands: recordCommands, appContext: { meetingSurface } });
+  await meetingSurface.start({ guildId: 'g1', voiceChannel: original, textChannel: {} });
+
+  function move(userId, from, to) {
+    cache.get(userId).channelId = to?.id ?? null;
+    client.emitVoiceStateUpdate(
+      { id: userId, channelId: from.id, channel: from, guild: original.guild },
+      { id: userId, channelId: to?.id ?? null, channel: to, guild: original.guild },
+    );
+  }
+
+  return { client, meetingSurface, original, destination, move };
+}
+
+test('/record follows a moved bot for status and stop permissions', async () => {
+  const { client, meetingSurface, original, destination, move } = await recordingWithTwoChannels();
+  const calls = [];
+  move(BOT_ID, original, destination);
+
+  await client.emit(
+    fakeRecordInteraction({ subcommand: 'status', voiceChannel: destination, calls }),
+  );
+  assert.match(calls.at(-1).payload.content, /recording in <#vc2>/i);
+  assert.doesNotMatch(calls.at(-1).payload.content, /<#vc1>/);
+
+  await client.emit(fakeRecordInteraction({ subcommand: 'stop', voiceChannel: original, calls }));
+  assert.match(calls.at(-1).payload.content, /should be in <#vc2>/i);
+  assert.ok(meetingSurface.activeSession('g1'));
+
+  await client.emit(
+    fakeRecordInteraction({ subcommand: 'stop', voiceChannel: destination, calls }),
+  );
+  assert.match(calls.at(-1).payload.content, /stopped recording in <#vc2>/i);
+  assert.equal(meetingSurface.activeSession('g1'), null);
+});
+
+test('auto-stop follows a bot move and ignores humans remaining in the old channel', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { meetingSurface, original, destination, move } = await recordingWithTwoChannels();
+  move(BOT_ID, original, destination);
+  move('h2', destination, null);
+
+  assert.ok(meetingSurface.activeSession('g1'), 'the grace period still applies after a move');
+  t.mock.timers.tick(AUTO_STOP_GRACE_MS);
+  assert.equal(meetingSurface.activeSession('g1'), null);
+});
+
+test('a bot move to an occupied channel cancels auto-stop from the old channel', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { meetingSurface, original, destination, move } = await recordingWithTwoChannels();
+  move('h1', original, null);
+  assert.equal(meetingSurface.activeSession('g1').voiceChannel, original);
+
+  move(BOT_ID, original, destination);
+  t.mock.timers.tick(AUTO_STOP_GRACE_MS);
+  assert.equal(meetingSurface.activeSession('g1')?.voiceChannel, destination);
+  await meetingSurface.stop('g1');
+});
 
 test('meeting prompt DMs the first human to enter an empty voice channel', () => {
   const sent = [];

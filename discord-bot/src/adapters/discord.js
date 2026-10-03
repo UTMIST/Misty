@@ -500,8 +500,11 @@ async function handleRecordInteraction(interaction, appContext, recordCommand, b
       );
     } else if (result.status === 'unconfigured') await reply("Meeting recording isn't configured.");
     else if (result.status === 'recording') {
+      const recordingChannel =
+        activeRecording(appContext.meetingSurface, interaction.guildId)?.voiceChannel ??
+        voiceChannel;
       await reply(
-        `🔴 Misty is now recording in ${describeVoiceChannel(voiceChannel)}. ${autoStopMessage(voiceChannel)}`,
+        `🔴 Misty is now recording in ${describeVoiceChannel(recordingChannel)}. ${autoStopMessage(recordingChannel)}`,
       );
     } else await reply("Couldn't start recording — the recording state is unavailable.");
     return;
@@ -817,6 +820,21 @@ export function wireDiscordClient(client, { commands, appContext }) {
   });
   client.on('voiceStateUpdate', (oldState, newState) => {
     try {
+      // Track bot moves before auto-stop counts occupants. The voice connection
+      // follows Discord's move, so the session must follow it too.
+      const botId = client.user?.id;
+      if (
+        botId &&
+        newState?.id === botId &&
+        newState.channelId &&
+        newState.channelId !== oldState?.channelId
+      ) {
+        const channel =
+          newState.channel ?? newState.guild?.channels?.cache?.get(newState.channelId);
+        if (channel) {
+          appContext.meetingSurface?.updateVoiceChannel?.(newState.guild.id, channel);
+        }
+      }
       onVoiceStateUpdate(oldState, newState);
       onMeetingPrompt(oldState, newState);
     } catch (err) {
