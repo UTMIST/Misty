@@ -222,6 +222,9 @@ and skips them.
   > outage can't strand a running recording. See
   > [`docs/MEETING-RECORDING.md` → Authorization](../docs/MEETING-RECORDING.md).
 
+- `/bug` (public) — where to report a bug (GitHub issue link and optional
+  infrastructure contact).
+
 Every command is on the **stable** channel (`beta = false`), so they all register
 globally in every server the bot is in. There are currently no beta commands.
 
