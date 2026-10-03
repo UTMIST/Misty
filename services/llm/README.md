@@ -115,19 +115,27 @@ Every endpoint except `/health` requires `X-API-Key`.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `messages` | `[{role, content}]` | Required, non-empty. `role` is `user` or `assistant`; `content` non-empty. |
+| `messages` | `[{role, content}]` | Required, non-empty. `role` is `user` or `assistant`; `content` is non-empty text or structured blocks. |
 | `system` | string \| null | Optional system prompt. |
 | `model` | string \| null | Optional. Must be one of `claude-sonnet-4-6`, `claude-opus-4-6`; defaults to `LLM_MODEL`. |
 | `max_tokens` | int | Default `16000`, range `1`–`64000`. |
 | `thinking` | bool \| null | Extended thinking; defaults to `THINKING_DEFAULT` when omitted. |
+| `tools` | list \| null | Optional client-executed tool definitions; see the [tool-use contract](docs/API.md#client-executed-tools). |
 
-**Response** (`ChatResponse`): `{ "content", "model", "stop_reason", "usage": { "input_tokens", "output_tokens" } }`.
+**Response** (`ChatResponse`): `{ "content", "model", "stop_reason", "usage": { "input_tokens", "output_tokens" } }` for legacy text-only requests. Tool or structured-message requests additionally return ordered `content_blocks` for stateless continuation.
+
+Tool use is transport, not execution: consumers authorize and run tools, then send their results in the next request. Both providers preserve signed reasoning and redacted continuation blocks when thinking is enabled. Keep those blocks out of visible answers and logs; see [API.md](docs/API.md#client-executed-tools) for validation, limits, and replay rules.
 
 **Chat provider errors** are normalized to HTTP status: rate limit → **429**, timeout → **504**, other upstream/5xx/config faults → **502**. Validation failures (empty `messages`, unknown `model`) → **422**.
 
 For the embedding contract, limits, and errors, see [`POST /embed`](docs/API.md#post-embed).
 
 ## Repo layout
+
+Tool transport additionally uses `contracts/tools.py` and `contracts/tool_validation.py`
+for wire validation, and `src/providers/tool_blocks.py` and `src/providers/raw_responses.py`
+for shared provider checks. See the [architecture](docs/ARCHITECTURE.md#stateless-tool-use-transport)
+for their boundaries and the [audit record](docs/TOOL-USE-AUDIT.md) for file-specific rationale.
 
 ```
 llm/
@@ -172,7 +180,7 @@ Both bill as standard Amazon Bedrock; they differ only in the Bedrock endpoint a
 - **`bedrock-converse`** (default) — `BedrockConverseProvider` calls the `bedrock-runtime` **Converse** API. Used because this account's model access is US-regional cross-region inference profiles (`us.anthropic.claude-sonnet-4-6`), which the Messages endpoint can't target. Maps neutral model names to inference-profile ids via an explicit table.
 - **`bedrock`** — `BedrockClaudeProvider` calls the **Mantle Messages** endpoint via `AnthropicBedrockMantle`. Needs global/Messages model access.
 
-In tests, neither is used: a `_FakeProvider` implementing the `LLMProvider` protocol is injected via `dependency_overrides`, so the suite runs with no AWS credentials and no network.
+API tests inject a `_FakeProvider` through `dependency_overrides`. Existing provider tests exercise the ordinary chat path with stubbed SDK clients. No tests call live AWS or Anthropic endpoints.
 
 ## Testing
 
@@ -183,6 +191,11 @@ uv run pytest
 ```
 
 Route tests inject fake chat and embedding providers via `app.dependency_overrides`. Adapter tests use stubbed clients or mock transports, never real provider calls. Coverage includes auth/scopes, request limits, ordered fixed-width embeddings, normalized failures, key provisioning, config/boot checks, audit metadata, and OpenAPI.
+
+The tool-use test additions were removed after the initial audit. The retained
+suite covers the pre-existing behavior, not the new tool protocol. Historical
+verification and the cleanup rationale are recorded in
+[docs/TOOL-USE-AUDIT.md](docs/TOOL-USE-AUDIT.md#test-cleanup).
 
 Lint and format with ruff:
 
