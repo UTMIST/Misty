@@ -22,6 +22,10 @@ def adapter(clean_db: Engine) -> PostgresStorageAdapter:
     return PostgresStorageAdapter(clean_db)
 
 
+def test_readiness_query(adapter):
+    assert adapter.is_ready() is True
+
+
 def test_create_and_get_person(adapter):
     p = adapter.create_person(
         PersonCreate(display_name="Alex", primary_email="alex@utmist.ca"),

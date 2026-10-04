@@ -104,6 +104,15 @@ npm start                                # or: npm run dev for both surfaces
 Wait for `Logged in as <bot name>` in terminal 2, then use the slash commands
 in whichever Discord server you invited the bot to.
 
+Discord mode always starts a health listener; it does not require `PORT` or
+production configuration. It serves unauthenticated `GET /health/ready` on
+`0.0.0.0:$PORT` (default `3002` locally). It returns `503` until the Discord
+gateway is ready (and again after a disconnect), or `{"status":"ok"}` with
+HTTP 200 while connected. Railway supplies `PORT` and uses this route for
+deployment health checks. Locally, request
+`http://localhost:3002/health/ready` to inspect the gateway state. This
+listener is separate from the playground's default `WEB_PORT=3001`.
+
 **Requires that `DIRECTORY_API_KEY` in `.env` is a valid key against main
 team-tracking**, not a scratch key. If Discord returns "directory is
 temporarily unavailable," check the key with:
@@ -187,16 +196,23 @@ and skips them.
 - `/doc <add|list|show|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
 
 - `/record start` (**linked**) — joins your current voice channel and starts
-  recording the meeting. `/record status` (**public**) — shows elapsed recording
-  time. `/record stop` (**public**) — ends the recording and, within roughly
+  recording the meeting (one recording at a time **per guild** — sessions are
+  keyed by `guildId`). `/record status` (**public**) — shows elapsed recording
+  time and the voice channel Misty is in; when idle, it explains which voice
+  channel Misty will join when recording starts. `/record stop` (**public**) —
+  ends the recording when you are in Misty's recorded voice channel and, within roughly
   30–60s, posts a branded `meeting-minutes.pdf` (LLM-generated title, summary,
   decisions, action items, full transcript) back into the text channel,
   @-mentioning whoever started the recording. Recording also stops
   **automatically** once everyone leaves the voice channel (after a short grace
-  period), with a 4h hard backstop. The meeting service persists nothing: it
-  streams audio straight to AWS and never writes audio or transcript to disk.
-  The posted PDF does contain the full transcript, and that lives in Discord
-  like any other attachment.
+  period), with a 4h hard backstop. Starting while a recording is already
+  active in the guild, or stopping from outside the recorded channel, is
+  refused with the active channel and auto-stop guidance — except stopping
+  from outside is still allowed once that channel is empty of humans, the
+  escape hatch for a runaway recording auto-stop failed to catch. The meeting
+  service persists nothing: it streams audio straight to AWS and never writes
+  audio or transcript to disk. The posted PDF does contain the full
+  transcript, and that lives in Discord like any other attachment.
 
   When the first human enters an empty voice channel, the bot @-mentions them
   via direct message and prompts them to run `/record start`.
@@ -205,6 +221,9 @@ and skips them.
   > live session; `status`/`stop` are deliberately `'public'` so a directory
   > outage can't strand a running recording. See
   > [`docs/MEETING-RECORDING.md` → Authorization](../docs/MEETING-RECORDING.md).
+
+- `/bug` (public) — where to report a bug (GitHub issue link and optional
+  infrastructure contact).
 
 Every command is on the **stable** channel (`beta = false`), so they all register
 globally in every server the bot is in. There are currently no beta commands.

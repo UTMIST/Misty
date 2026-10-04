@@ -188,6 +188,7 @@ async function main() {
     discordToken: null,
     discordClientId: null,
     discordGuildId: undefined,
+    infrastructureDiscordUsername: 'infrastructure-team',
   };
   const appContext = createAppContext(config);
 
