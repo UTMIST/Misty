@@ -171,7 +171,7 @@ llm/
                            (stateless — nothing to migrate).
 ```
 
-**Dependency direction:** `contracts/` imports nothing from `src/`. `src/api/` depends only on `contracts/`, `src/config`, and the provider Protocols. `src/providers/` implements the `LLMProvider` and `EmbeddingProvider` Protocols and knows nothing about FastAPI. `src/api/deps.py` is the only place the concrete providers and key store get wired in — so tests override `get_llm` / `get_embedder` / `get_key_store` via `app.dependency_overrides`.
+**Dependency direction:** `contracts/` imports nothing from `src/`. `src/api/` depends on `contracts/`, `src/config`, and provider-neutral types and validation helpers, never vendor SDKs. `src/providers/` implements the `LLMProvider` and `EmbeddingProvider` Protocols and knows nothing about FastAPI. `src/api/deps.py` is the only place the concrete providers and key store get wired in — so tests override `get_llm` / `get_embedder` / `get_key_store` via `app.dependency_overrides`.
 
 ### The two Bedrock chat providers
 
@@ -192,10 +192,11 @@ uv run pytest
 
 Route tests inject fake chat and embedding providers via `app.dependency_overrides`. Adapter tests use stubbed clients or mock transports, never real provider calls. Coverage includes auth/scopes, request limits, ordered fixed-width embeddings, normalized failures, key provisioning, config/boot checks, audit metadata, and OpenAPI.
 
-The tool-use test additions were removed after the initial audit. The retained
-suite covers the pre-existing behavior, not the new tool protocol. Historical
-verification and the cleanup rationale are recorded in
-[docs/TOOL-USE-AUDIT.md](docs/TOOL-USE-AUDIT.md#test-cleanup).
+The broad tool-use suite was removed after the initial audit. Focused regressions
+in `tests/test_tool_stop_reasons.py` now cover empty completions and truncated tool
+responses through both SDKs, plus metadata, router, and validation controls. They do
+not replace the removed protocol-wide coverage. Historical verification and the
+cleanup rationale are recorded in [docs/TOOL-USE-AUDIT.md](docs/TOOL-USE-AUDIT.md#test-cleanup).
 
 Lint and format with ruff:
 

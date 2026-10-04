@@ -26,14 +26,18 @@ Preserve the exact no-tools/string-message request mapping and response JSON.
 Tool tests must also exercise a complete round-trip through a stubbed real SDK,
 including signed reasoning, redacted bytes, parallel calls, and error results.
 Botocore Stubber does not exercise response parsing: use intercepted real
-HTTP transports when testing the raw boundary or an SDK upgrade. The initial
-tool-specific tests are no longer retained; see the
-[audit record](TOOL-USE-AUDIT.md#test-cleanup) for the current coverage limitation.
+HTTP transports when testing the raw boundary or an SDK upgrade. Focused review
+regressions are retained in `tests/test_tool_stop_reasons.py`: empty completions,
+truncated tool calls, metadata/audit preservation, and strict-request controls.
+Keep response-side empty-list support separate from request validation. The initial
+broad tool suite remains removed; see the [audit record](TOOL-USE-AUDIT.md#test-cleanup).
 Unknown upstream shape members intentionally fail closed; review SDK and codec support
 rather than removing validation if a provider adds new fields.
 Unknown or malformed upstream blocks must normalize to a provider error rather
-than being silently discarded or coerced into valid-looking data. Invalid input
-must fail before inference and must not echo or log tool/continuation data.
+than being silently discarded or coerced into valid-looking data. The explicit
+exception is withholding tool calls from `max_tokens` turns; preserve the truncation
+metadata instead of treating incomplete arguments as executable. Invalid input must
+fail before inference and must not echo or log tool/continuation data.
 
 Do not implement execution, authorization decisions for named tools, or a loop
 inside this service. Those remain consumer responsibilities (#71).

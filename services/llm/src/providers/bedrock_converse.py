@@ -39,6 +39,7 @@ from src.providers.raw_responses import validate_converse_response
 from src.providers.tool_blocks import (
     content_list,
     object_fields,
+    response_blocks,
     tool_mode,
     usage_values,
     validate_response_blocks,
@@ -283,7 +284,13 @@ class BedrockConverseProvider:
             input_tokens, output_tokens = usage_values(
                 response.get("usage"), "inputTokens", "outputTokens"
             )
-            blocks = [_from_converse_block(block) for block in content_list(message["content"])]
+            blocks = response_blocks(
+                [
+                    _from_converse_block(block)
+                    for block in content_list(message["content"], allow_empty=True)
+                ],
+                stop_reason,
+            )
             text = validate_response_blocks(
                 blocks, tool_names=tool_names, used_ids=used_ids, stop_reason=stop_reason
             )

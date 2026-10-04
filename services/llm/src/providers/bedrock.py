@@ -26,6 +26,7 @@ from src.providers.raw_responses import decode_json_object
 from src.providers.tool_blocks import (
     content_list,
     object_fields,
+    response_blocks,
     text_value,
     tool_mode,
     usage_values,
@@ -193,7 +194,13 @@ class BedrockClaudeProvider:
             input_tokens, output_tokens = usage_values(
                 response.get("usage"), "input_tokens", "output_tokens"
             )
-            blocks = [_from_mantle_block(block) for block in content_list(response.get("content"))]
+            blocks = response_blocks(
+                [
+                    _from_mantle_block(block)
+                    for block in content_list(response.get("content"), allow_empty=True)
+                ],
+                stop_reason,
+            )
             text = validate_response_blocks(
                 blocks, tool_names=tool_names, used_ids=used_ids, stop_reason=stop_reason
             )

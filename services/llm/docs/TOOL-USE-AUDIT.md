@@ -1,8 +1,9 @@
 # Issue #70 — tool-use implementation and audit
 
 This records the implementation against `staging` baseline `e8e362a`, the initial
-review at `a847327`, the test cleanup at `69fe1ac`, and the owner-audit follow-up.
-It is not a certification of future changes or a live AWS rollout.
+review at `a847327`, the test cleanup at `69fe1ac`, the owner-audit follow-up, and
+Ethan's subsequent stop-reason findings. It is not a certification of future changes
+or a live AWS rollout.
 
 ## Test cleanup
 
@@ -13,18 +14,44 @@ baseline without changing runtime code or removing pre-existing tests.
 
 The [initial audited tests](https://github.com/UTMIST/Misty/tree/a847327f9d6a5608975a2ee676b17be09c0dee39/services/llm/tests)
 remain available in Git history, not in the current checkout or its CI suite.
-Initial-review evidence below refers to that historical revision; the follow-up
-separately identifies replays against corrected code. The PR still does not retain
-the new tool-use tests requested by #70's acceptance criteria. Passing the remaining
-baseline suite is not ongoing regression coverage for the tool protocol or SDK boundary.
+Initial-review evidence below refers to that historical revision; the owner follow-up
+separately identifies replays against corrected code. The user subsequently approved
+retaining only the focused stop-reason regressions requested by Ethan. These do not
+restore the broad suite or establish complete ongoing coverage of the tool protocol.
+
+## PR review follow-up
+
+Ethan's findings were reproduced against `b5583b9`, which includes the subsequent
+`staging` merges, using dummy credentials and intercepted real-SDK HTTP responses:
+
+- **[Empty `end_turn`](https://github.com/UTMIST/Misty/pull/241#discussion_r4171396845):**
+  both providers returned 502 after a valid tool-result continuation because output
+  reused a non-empty request-list rule. Response parsing, neutral validation, the
+  router, and `ChatResponse` now accept an empty list while request messages remain
+  non-empty. The successful response retains its stop reason and usage.
+- **[Truncated tool calls](https://github.com/UTMIST/Misty/pull/241#discussion_r4176480492):**
+  `max_tokens` with tool blocks returned 502 instead of exposing recovery metadata.
+  A shared non-mutating filter removes every tool call from that turn before
+  executable-call validation, including partial JSON arguments and complete-looking
+  siblings. Other supported blocks retain their relative order. Both providers and
+  the router enforce this policy; metadata and success-audit token counts survive.
+  Retry the original history with an appropriate output budget, not the truncated
+  turn. No automatic retry or tool execution is added.
+
+`tests/test_tool_stop_reasons.py` retains HTTP-through-SDK regressions for both
+backends, mixed parallel calls, metadata/audit privacy, router-only controls, and
+strict empty-request/malformed-response checks. Missing/null lists, invalid usage,
+oversized lists, and malformed executable calls remain errors. This deliberately
+small suite replaces neither the removed tests nor an authorized live-model check.
+See the [consumer recovery rules](API.md#completion-and-truncation).
 
 ## Owner-audit follow-up
 
 - **Invalid legacy system text:** high/low surrogate probes returned 200 and reached
   the provider. `ChatRequest` now checks UTF-8 encodability and raises a fixed
   validation error before inference. Valid Unicode, empty/omitted/null system prompts,
-  ignored legacy extras, and ordinary response bodies remain compatible. This is the
-  only runtime change after `69fe1ac`; the same guard is applied separately in #234.
+  ignored legacy extras, and ordinary response bodies remain compatible. This was the
+  only runtime change in that owner follow-up; the same guard was applied in #234.
 - **Cross-PR conflicts:** #234 and #241 conflicted in the bootstrap and four guides.
   Their validation handler/contract and shared documentation now agree. Feature-specific
   source descriptions, audit fields, and maintenance guidance remain in their own
@@ -105,28 +132,31 @@ signatures never established deployed-model cryptographic acceptance.
 See [ARCHITECTURE.md](ARCHITECTURE.md#stateless-tool-use-transport) for the complete
 boundary and maintenance rationale.
 
-## Why each remaining changed file is necessary
+## File-by-file implementation rationale
 
-Paths are relative to `services/llm`, except the root guidance entry.
+Paths are relative to `services/llm`, except the root guidance entry. This table
+retains the rationale across revisions, including changes later inherited from
+`staging`; the PR description lists the files in its current diff.
 
 | File | Change and justification |
 |---|---|
-| `contracts/chat.py` | Adds definitions and structured messages/results, preserves legacy defaults, and validates histories and normalized bounds before paid inference. The follow-up rejects invalid UTF-8 in legacy system prompts before provider invocation. |
+| `contracts/chat.py` | Adds definitions and structured messages/results, preserves legacy defaults, and validates histories and normalized bounds before paid inference. Follow-ups reject invalid system Unicode and permit empty response blocks without relaxing request content. |
 | `contracts/tools.py` | Separates reusable strict tagged wire blocks and opaque continuation fields from chat-history validation. |
 | `contracts/tool_validation.py` | Shares bounded JSON, identifier, schema-shape, UTF-8, and base64 checks without making providers depend on Pydantic/FastAPI. |
 | `src/providers/base.py` | Adds neutral tool/content dataclasses and independent default lists so both backends use one stateless protocol. |
-| `src/api/routers/chat.py` | Provides the sole DTO/dataclass translation, conditionally returns ordered blocks, validates results, and preserves content-free audit metadata. |
+| `src/api/routers/chat.py` | Provides the sole DTO/dataclass translation and validates results. The review fix independently withholds truncated calls from any provider, accepts empty completions, and preserves the success-audit usage path. |
 | `src/api/app.py` | Prevents validation-error serialization failures and input/context disclosure, including sensitive tool data and caller-controlled field names. |
-| `src/providers/bedrock_converse.py` | Maps Converse definitions/calls/results and binary reasoning; isolates pre-parser validation by provider context while preserving the legacy path. |
-| `src/providers/bedrock.py` | Implements equivalent Mantle transport and strict raw decoding; per-call timeout avoids the pinned SDK's option-copy issue on the new path. |
-| `src/providers/tool_blocks.py` | Centralizes neutral history, declaration, usage, payload, and stop-reason checks needed by both codecs. |
+| `src/providers/bedrock_converse.py` | Maps Converse tools and reasoning with request-scoped pre-parser validation. The review fix accepts empty output and applies the shared truncated-call policy while keeping stop reason, usage, and the legacy path intact. |
+| `src/providers/bedrock.py` | Implements equivalent Mantle transport and strict raw decoding. The review fix accepts empty output and suppresses truncated calls before executable-argument validation, retaining response metadata. |
+| `src/providers/tool_blocks.py` | Centralizes neutral validation. Empty lists are opt-in for responses, never requests; shared non-mutating filtering suppresses all `max_tokens` calls after checking the original list bounds. |
 | `src/providers/raw_responses.py` | Validates raw JSON before SDK coercion, field loss, parser failures, or unknown-union logging; shares decoding across the two backends. |
-| `README.md` | Introduces the transport and retained coverage. Separates tool-specific source descriptions from the shared tree/status text to resolve overlap with #234 without losing either feature's guidance. |
-| `docs/API.md` | Specifies definitions, blocks, replay, limits, compatibility, and consumer responsibilities. Aligns shared validation/audit sections with #234 and corrects the neutral-versus-resolved model claim. |
-| `docs/ARCHITECTURE.md` | Explains continuation, raw validation, context isolation, execution/authorization boundaries, and the current coverage limitation. |
-| `docs/CONTRIBUTING.md` | Records both-codec maintenance and real-transport testing, including removed coverage. Places the tool guide before local setup to avoid the embedding guide's insertion point. |
+| `tests/test_tool_stop_reasons.py` | Retains the narrowly approved regressions for Ethan's findings through both real SDKs and the router, including usage/audit preservation, partial parallel batches, and strict-request/malformed-response controls. |
+| `README.md` | Introduces the transport and source layout. The review follow-up distinguishes focused retained coverage from the removed broad suite and accurately describes shared provider-neutral validation helpers. |
+| `docs/API.md` | Specifies definitions, blocks, replay, limits, and consumer responsibilities. The review follow-up documents empty completions, withheld truncated calls, and retrying original history without executing a partial batch. |
+| `docs/ARCHITECTURE.md` | Explains continuation, raw validation, and execution boundaries. The review follow-up explains why response emptiness and safe truncation differ from request validation and records the limited retained coverage. |
+| `docs/CONTRIBUTING.md` | Records both-codec maintenance and real-transport testing. The review follow-up points maintainers to the focused regressions and the explicit truncation exception rather than claiming all tool tests remain removed. |
 | `docs/DEPLOYMENT.md` | Documents rollout/rollback, stable provider/model context, retry/buffering limits, and live verification. Shared troubleshooting now composes with #234 and avoids claiming SDK timeouts are whole-request deadlines. |
-| `docs/TOOL-USE-AUDIT.md` | Preserves initial and follow-up findings, file-specific rationale, and the distinction between retained tests and separately replayed regressions. |
+| `docs/TOOL-USE-AUDIT.md` | Preserves initial and follow-up findings, file-specific rationale, and the distinction between retained tests and separately replayed regressions. The review follow-up links both comments and records the changed test-retention decision. |
 | Root `AGENTS.md` | Corrects strict-DTO guidance, requires file-specific rationale, and records the reproduced cross-worktree import hazard. This deliberately includes the `root` ownership zone. |
 
 ## Why each test file was removed or restored
@@ -153,7 +183,8 @@ and GitHub CI including Docker build/import. Its wire auditor also ran the LLM s
 with process-wide network blocking. Those are historical results, not checks still
 executed by the cleaned-up checkout.
 
-Current checkout verification uses the remaining baseline suite and pinned tools:
+Current checkout verification uses the retained suite, focused review regressions,
+and pinned tools:
 
 ```bash
 uv run pytest
@@ -162,10 +193,11 @@ uv run ruff format --check .
 ```
 
 At `69fe1ac`, runtime paths matched `a847327` and the test tree matched `e8e362a`.
-The follow-up changes the system-prompt validator, not the test tree; runtime equality
-with the initial revision is no longer claimed. CI still runs the reduced suite, not
-the separately replayed regressions. The pre-existing Starlette/httpx TestClient
-deprecation may still be reported.
+The owner follow-up changed the system-prompt validator, not the test tree. Later
+`staging` merges brought in the embedding implementation and its tests. This review
+follow-up adds only the focused stop-reason suite; neither runtime equality with
+the initial revision nor restoration of the removed broad suite is claimed.
+The pre-existing Starlette/httpx TestClient deprecation may still be reported.
 
 Docker is unavailable locally; image-build/import verification comes from CI. No
 live AWS account/model access, real signature acceptance, latency/spend behavior,
@@ -174,6 +206,6 @@ round trip remains required before enabling the consumer feature; see
 [DEPLOYMENT.md](DEPLOYMENT.md#tool-use-rollout).
 
 Parsed-data/raw-response caps are not HTTP ingress or streaming download limits.
-This standalone branch retains baseline synchronous `/health`; the combined tree
-retains #234's async health route. The owner audit updates #234 separately, without
-merging either feature or changing the original user's uncommitted checkout.
+The current branch includes #234's async health route through the later `staging`
+merges. This review follow-up changes neither embedding behavior nor health handling,
+and leaves the original user's uncommitted checkout untouched.

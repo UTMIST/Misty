@@ -196,9 +196,27 @@ unanswered, wrong-role, or mismatched calls/results are rejected before inferenc
 The service never turns a tool failure into an executed operation; consumers can
 report a failure with `is_error: true`.
 
-`content_blocks` preserves assistant block order. A final response can contain
-text and reasoning blocks but no tool calls; use `content` for visible answer text.
-Do not concatenate, reorder, trim, or reconstruct the blocks for continuation.
+`content_blocks` preserves the relative order of returned assistant blocks. A final
+response can contain text and reasoning blocks but no tool calls; use `content` for
+visible answer text. For a `tool_use` response, do not concatenate, reorder, trim,
+or reconstruct the blocks for continuation.
+
+#### Completion and truncation
+
+Check `stop_reason` before deciding what to do next. A valid `end_turn` can return
+`content: ""` and `content_blocks: []`, especially after tool results. This is a
+successful terminal response with its usage intact, not a provider error or a
+reason to retry unchanged. Request messages must still have non-empty content;
+do not append an empty assistant message to the next request.
+
+A valid `max_tokens` response also returns **200** with its original stop reason
+and usage. All tool-use blocks from that truncated turn are omitted, including
+complete-looking calls in a parallel batch; none are safe to execute or replay.
+Other supported blocks and visible text are retained. The consumer may retry the
+original request history with a larger output budget within its spending limits
+and the API's `max_tokens` cap. Do not append the truncated assistant turn or
+fabricate tool results. The service does not automatically retry a successful
+truncated response. Only `stop_reason: "tool_use"` permits the tool-result exchange.
 
 #### Thinking and continuation
 
@@ -237,7 +255,10 @@ are defined in `contracts/tool_validation.py`:
 These are parsed-data limits, not an HTTP ingress body-size limit. They do not
 truncate content or signatures. Existing string-only chat requests keep their
 previous limits. Malformed provider tool responses normalize to a safe **502**,
-including unknown or duplicate calls, invalid JSON, and contradictory stop reasons.
+including unknown or duplicate executable calls, invalid JSON, and contradictory
+stop reasons. Empty completions and suppressed `max_tokens` tool calls follow the
+[completion and truncation rules](#completion-and-truncation), not the request-side
+non-empty-content rule.
 Raw successful provider JSON bodies are also capped at 1,048,576 bytes before
 parsing, after the SDK has buffered them. Malformed Converse error bodies are
 rejected as 502 before SDK parsing/retries; the normal throttling/error mappings

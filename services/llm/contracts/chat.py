@@ -172,6 +172,4 @@ class ChatResponse(BaseModel):
     model: str
     stop_reason: str
     usage: Usage
-    content_blocks: list[AssistantBlock] | None = Field(
-        default=None, min_length=1, max_length=MAX_CONTENT_BLOCKS
-    )
+    content_blocks: list[AssistantBlock] | None = Field(default=None, max_length=MAX_CONTENT_BLOCKS)

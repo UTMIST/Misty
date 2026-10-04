@@ -36,8 +36,11 @@ def object_fields(value, required: set[str], optional: set[str] | None = None) -
     return value
 
 
-def content_list(value) -> list:
-    if not isinstance(value, list) or not 1 <= len(value) <= MAX_CONTENT_BLOCKS:
+def content_list(value, *, allow_empty: bool = False) -> list:
+    if (
+        not isinstance(value, list)
+        or not (0 if allow_empty else 1) <= len(value) <= MAX_CONTENT_BLOCKS
+    ):
         raise ValueError("invalid content block list")
     return value
 
@@ -47,6 +50,18 @@ def text_value(value, *, nonempty: bool = False) -> str:
         raise ValueError("invalid string value")
     validate_json_value(value, max_bytes=MAX_TOOL_PAYLOAD_BYTES)
     return value
+
+
+def response_blocks(
+    blocks: list[LLMContentBlock] | None, stop_reason: str
+) -> list[LLMContentBlock]:
+    blocks = content_list(blocks, allow_empty=True)
+    text_value(stop_reason, nonempty=True)
+    return [
+        block
+        for block in blocks
+        if stop_reason != "max_tokens" or not isinstance(block, LLMToolUseBlock)
+    ]
 
 
 def validate_payload(value) -> None:
@@ -192,7 +207,7 @@ def validate_response_blocks(
     used_ids: set[str],
     stop_reason: str,
 ) -> str:
-    content_list(blocks)
+    content_list(blocks, allow_empty=True)
     text_value(stop_reason, nonempty=True)
     calls = set()
     payload = []

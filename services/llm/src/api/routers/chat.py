@@ -2,7 +2,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from contracts.chat import ChatRequest, ChatResponse, Usage
 from contracts.tool_validation import (
-    MAX_CONTENT_BLOCKS,
     MAX_JSON_DEPTH,
     MAX_TOOL_PAYLOAD_BYTES,
     validate_json_value,
@@ -35,6 +34,7 @@ from src.providers.base import (
     ProviderRateLimited,
     ProviderTimeout,
 )
+from src.providers.tool_blocks import response_blocks
 
 router = APIRouter()
 
@@ -70,11 +70,10 @@ def _to_assistant_block(block: LLMContentBlock) -> AssistantBlock:
 def _to_response(result: LLMResult, body: ChatRequest) -> ChatResponse:
     blocks = None
     if body.tool_mode:
-        if not isinstance(result.content_blocks, list) or not (
-            1 <= len(result.content_blocks) <= MAX_CONTENT_BLOCKS
-        ):
-            raise ValueError("invalid assistant content blocks")
-        blocks = [_to_assistant_block(block) for block in result.content_blocks]
+        blocks = [
+            _to_assistant_block(block)
+            for block in response_blocks(result.content_blocks, result.stop_reason)
+        ]
         if result.content != "".join(
             block.text for block in blocks if isinstance(block, TextBlock)
         ):

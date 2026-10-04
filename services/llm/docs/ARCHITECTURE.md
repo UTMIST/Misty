@@ -126,12 +126,21 @@ consumer must keep the same conversation/model/provider for the exchange and mus
 not replay context that its current authorization no longer permits.
 
 Tool-mode input has explicit bounds and conversation invariants, documented in
-[API.md](API.md#client-executed-tools). Provider output is also untrusted: malformed
-blocks, unknown calls, duplicate IDs, non-finite JSON, and contradictory stop
-reasons are provider failures, not usable tool requests. Raw tool payloads must be
-validated before SDK coercion can hide invalid fields. `raw_responses.py` checks
-bounded JSON bytes, duplicate keys, scalar types, unions, canonical binary data,
-and modeled metadata. Mantle uses the SDK's raw-response interface. Converse uses
+[API.md](API.md#client-executed-tools). Response lists may be empty even though request
+messages must not be: an empty `end_turn` is a successful completion. For `max_tokens`,
+both codecs and the router share a non-mutating filter that withholds every tool call
+before validating executable blocks, retaining usage, stop reason, and the order of
+other blocks. This avoids exposing incomplete arguments or executing a partial parallel
+batch before a retry. Consumers retry the original history, not the filtered turn;
+see [completion and truncation](API.md#completion-and-truncation).
+
+Provider output is still untrusted: malformed envelopes or non-tool blocks, unknown
+executable calls, duplicate executable IDs, non-finite JSON, and contradictory stop
+reasons are provider failures, not usable tool requests. List limits apply before
+filtering. Raw tool payloads must be validated before SDK coercion can hide invalid
+fields. `raw_responses.py` checks bounded JSON bytes, duplicate keys, scalar types,
+unions, canonical binary data, and modeled metadata. Mantle uses the SDK's raw-response
+interface. Converse uses
 its `before-parse` event, gated by a context-local active-provider identity; both
 legacy and tool calls restore the prior context in `finally`. Concurrent calls,
 nested legacy calls, and different providers sharing a client remain isolated.
@@ -146,11 +155,12 @@ log input-derived fields. The raw-body cap is checked after SDK HTTP buffering,
 not while downloading. See the rollout limits in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 The initial audit exercised these paths with offline HTTP/SDK round trips and
-intercepted real HTTP transports. Those tool-specific tests were subsequently
-removed at the user's request; they are not part of the retained suite. See the
-[audit record](TOOL-USE-AUDIT.md#test-cleanup) for the historical evidence and
-coverage limitation. Botocore Stubber short-circuits before parsing and cannot
-alone verify the raw boundary.
+intercepted real HTTP transports. That broad suite was subsequently removed at the
+user's request. The retained `tests/test_tool_stop_reasons.py` now covers the review's
+empty-completion and truncation regressions with both real SDKs, plus router and
+request-validation controls; it does not replace the removed coverage. See the
+[audit record](TOOL-USE-AUDIT.md#test-cleanup). Botocore Stubber short-circuits before
+parsing and cannot alone verify the raw boundary.
 
 The consumer, not this service, owns tool allowlisting, argument-schema validation,
 actor and document permissions, actual execution, error results, iteration limits,
