@@ -6,7 +6,7 @@ Feature owner: Misty #92. Related: [platform ARCHITECTURE](ARCHITECTURE.md), [`s
 
 ## What it does
 
-A **linked** member (identity resolved via the directory — see "Authorization" below) runs `/record start` in a Discord voice channel. Before a recording is active, the first human to enter an empty voice channel receives a direct message prompting them to start one. The bot joins, and as people talk it streams their audio to the `meeting` service, which transcribes each speaker live into a rolling transcript. Recording ends on `/record stop` **or automatically when everyone leaves the voice channel** (the bot ends the meeting once no non-bot member remains). On stop the service turns the transcript into minutes (via the `llm` service), renders a PDF, and hands it back; the bot posts the **PDF** to the text channel, @-mentioning whoever started the recording. Nothing is persisted — the transcript lives in memory for the meeting and is discarded after the report is returned.
+A **linked** member (identity resolved via the directory — see "Authorization" below) runs `/record start` in a Discord voice channel. Before a recording is active, the first human to enter an empty voice channel receives a direct message prompting them to start one. The bot joins, and as people talk it streams their audio to the `meeting` service, which transcribes each speaker live into a rolling transcript. Recording ends on `/record stop` **or automatically when everyone leaves the voice channel** (the bot ends the meeting once no non-bot member remains). On stop the service turns the transcript into minutes (via the `llm` service), renders a PDF, and hands it back; the bot posts the **PDF** to the text channel, @-mentioning whoever started the recording. Nothing is persisted — the transcript lives in memory for the meeting and is discarded after the report is returned. *Planned (#222/#223):* the minutes PDF is also delivered to Google Drive; the transcript and audio are still discarded. See "Durable records" below.
 
 ## The boundary, and the one constraint that forces it
 
@@ -48,6 +48,47 @@ Discord voice  ──Opus──▶  bot recorder ──sendFrame──▶  meeti
 **Stop:** `POST /meetings/{id}/stop` closes each speaker's Transcribe stream (concurrently, so latency is one flush and not N), assembles the transcript, calls the `llm` service for minutes, renders the PDF, returns it base64-encoded, and discards the session.
 
 **Timeline correctness:** each forwarded frame carries `ts_ms` = milliseconds since the meeting started. AWS Transcribe reports word times relative to *each speaker's own* stream, and a speaker's stream carries only the frames they actually spoke — silence is never sent. So the service records an **anchor** whenever a frame arrives later than the audio already streamed accounts for, and maps word times through the nearest preceding anchor. Anchoring on the first `ts_ms` alone is not enough: it fixes only the speaker's first word, leaving cross-speaker order wrong past the opening minute and collapsing each speaker into one segment (the gap rule never sees a gap). `ts_ms` must always be sent and honored.
+
+## Durable records (design, #212)
+
+**Status: design only — not built.** Implementation is #222 (persist after stop) and #223 (delivery). Until those ship, the "Nothing is persisted" behavior above is what runs.
+
+**Storage owner: Google Drive, and only Drive.** No service gains a database for meetings. `meeting` stays as described above — its session, the transcript, and the audio are discarded after `POST /stop` returns. The minutes PDF delivered to Drive is the only durable artifact.
+
+**Location.** `Interdepartmental/Meeting Notes/{voiceChannelSnowflake}/`, one folder per Discord voice channel, keyed on the channel's snowflake so a channel rename doesn't orphan its history.
+
+**Contents.** The minutes PDF the service already renders — stored as-is, not regenerated on demand. No transcript, no audio.
+
+**Identity.** Filename `YYYY-MM-DD {channel name}.pdf`, the channel name captured at meeting time. A second meeting in the same channel on the same UTC day gets the start time added: `YYYY-MM-DD HHMM {channel name}.pdf`. The canonical meeting identity is folder snowflake + filename. Because the result is an ordinary Drive file with a real, fetchable URL, the catalog's URL-based ingest and dedup (and #125's indexing) take it unchanged — connectors can already read it. No synthetic, non-fetchable identity is introduced, so nothing can mistake one for a source URL.
+
+**Writer: `connectors`.** All Google egress stays in one service (the #60/#82 pattern), so `connectors` gains a write path. Its service account is read-only today (`DRIVE_READONLY` in `required_scopes()`, [`services/connectors/src/sources/google.py`](../services/connectors/src/sources/google.py)); delivery needs a Drive write scope (`drive.file` if it suffices, else `drive`) and a new consumer-key scope for the write endpoint. Which service calls it — the bot, which already holds the PDF, or `meeting` — is #223's decision.
+
+**Visibility.** Same model as text channels: the voice channel is associated with Misty teams (channel-to-team settings, #238), each Misty team is 1:1 with a Google Group (#237), and the snowflake folder is shared with those groups. A channel with no team association gets a folder shared with no one beyond the service account and Drive admins — matching #238's "empty configuration grants no access". Folders are created automatically on first delivery, and their sharing is re-synced when the channel's team association changes. That automation depends on #237, which is blocked on #236 (Google administration access).
+
+**Consent.** When a recording starts, the bot announces in the channel that the notes will be saved to Drive. There is no per-meeting opt-out; starting `/record` is the decision.
+
+**Retention.** Kept indefinitely; deletion is manual, by Drive admins. A member who leaves loses access through Google Group membership sync (#237) — files are never rewritten to remove them.
+
+**Invariant.** Audio is never persisted or written to disk, in any service, regardless of this design.
+
+```mermaid
+flowchart LR
+  bot[discordBot] -->|"POST /stop"| meeting[meetingService]
+  meeting -->|minutes PDF| bot
+  bot -->|"PDF + channel snowflake + name"| connectors[connectorsService]
+  connectors -->|"read teams for channel"| tt[teamTracking]
+  tt -->|team Google Groups| connectors
+  connectors -->|"upload + share folder"| drive[GoogleDrive]
+  bot -->|"post PDF + Drive link"| channel[DiscordTextChannel]
+```
+
+The `bot → connectors` edge is drawn for the bot as caller; #223 may move it to `meeting`.
+
+### Open questions
+
+- **Transcript for RAG.** Whether to also store the raw transcript as `.md` beside the PDF for retrieval ingestion. Undecided; it would be the first stored transcript and needs its own visibility review.
+- **Interim sharing.** While #236/#237 are blocked, are snowflake folders shared manually by a Drive admin, or is delivery held until groups exist?
+- **Caller.** Whether the bot or `meeting` calls `connectors` (#223).
 
 ## The wire contract (keep both sides in lock-step)
 
