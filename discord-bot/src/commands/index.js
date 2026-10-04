@@ -9,6 +9,7 @@ import myTeams from './my-teams.js';
 import doc from './doc.js';
 import help from './help.js';
 import record from './record.js';
+import bug from './bug.js';
 
 // Single source of truth for the command set: consumed by the router (dispatch)
 // and by registerCommands.js (Discord registration). Add a command = one import
@@ -25,6 +26,7 @@ export const commands = new Map([
   [doc.name, doc],
   [help.name, help],
   [record.name, record],
+  [bug.name, bug],
 ]);
 
 // Split a command list into release channels for registration:
