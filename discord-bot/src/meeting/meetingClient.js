@@ -142,12 +142,13 @@ export function createMeetingClient({
     }
   }
 
-  async function stop(sessionId) {
+  async function stop(sessionId, { title } = {}) {
     let resp;
     try {
       resp = await fetchImpl(`${baseUrl}/meetings/${sessionId}/stop`, {
         method: 'POST',
-        headers: { 'X-API-Key': apiKey },
+        headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify(title ? { title } : {}),
       });
     } catch {
       throw new MeetingUnavailable('network error reaching meeting service');
