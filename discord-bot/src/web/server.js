@@ -3,6 +3,9 @@ import fastifyStatic from '@fastify/static';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dispatch } from '../router.js';
+import { resolvePrincipal } from '../auth/principal.js';
+import { authorize } from '../auth/policy.js';
+import { DirectoryUnavailable } from '../directoryClient.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -14,6 +17,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  */
 export async function buildServer({ commands, appContext, onReset }) {
   const server = Fastify({ logger: false });
+  const dmHistory = new Map();
 
   await server.register(fastifyStatic, {
     root: path.join(__dirname, 'public'),
@@ -61,8 +65,37 @@ export async function buildServer({ commands, appContext, onReset }) {
       reply.code(501);
       return { error: 'reset not available' };
     }
+    dmHistory.clear();
     await onReset();
     return { ok: true };
+  });
+
+  server.post('/api/helper/dm', async (req, reply) => {
+    const { actingAs, content } = req.body ?? {};
+    if (typeof actingAs !== 'string' || !actingAs.trim() || typeof content !== 'string') {
+      reply.code(400);
+      return { error: 'actingAs and content are required' };
+    }
+    let principal;
+    try {
+      principal = await resolvePrincipal(appContext.directory, actingAs);
+    } catch (e) {
+      if (e instanceof DirectoryUnavailable) {
+        reply.code(503);
+        return { error: "I can't verify you right now — the directory is unavailable." };
+      }
+      throw e;
+    }
+    if (!authorize('linked', principal).ok) {
+      reply.code(403);
+      return { error: 'You need to link your account first. Run `/link` in Discord.' };
+    }
+    const turns = dmHistory.get(actingAs) ?? [];
+    turns.push({ role: 'user', text: content.trim(), authorId: actingAs, authorName: 'You' });
+    const { content: answer } = await appContext.helperService.answer({ turns, principal });
+    turns.push({ role: 'assistant', text: answer ?? '' });
+    dmHistory.set(actingAs, turns);
+    return { content: answer ?? '' };
   });
 
   server.post('/api/commands/:name/run', async (req, reply) => {
