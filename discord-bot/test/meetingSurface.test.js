@@ -154,26 +154,6 @@ test('stop calls recorder.stop, stream.close, meetingClient.stop, then poster wi
     pdf_b64: 'p',
   });
 
-  test('stop carries the meeting name and start time through to the client and poster', async () => {
-    const fakes = makeFakes();
-    const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1', now: () => 1234 });
-    await surface.start({
-      guildId: 'g1',
-      voiceChannel: { id: 'vc1' },
-      textChannel: { id: 'tc1' },
-      name: 'Sponsorship Sync',
-    });
-
-    await surface.stop('g1');
-
-    assert.deepEqual(fakes.posterCalls[0], {
-      channel: fakes.posterCalls[0].channel,
-      report: { transcript: 't', minutes: 'm', pdf_b64: 'p' },
-      requesterId: undefined,
-      name: 'Sponsorship Sync',
-      startedAt: 1234,
-    });
-  });
   // Critical ordering: meetingClient.stop (finalize server-side) MUST happen
   // before stream.close() -- closing the WS first races the session into
   // being discarded server-side (WS-disconnect-without-prior-/stop => discard,
@@ -184,6 +164,27 @@ test('stop calls recorder.stop, stream.close, meetingClient.stop, then poster wi
     'client.stop',
     'stream.close',
   ]);
+});
+
+test('stop carries the meeting name and start time through to the client and poster', async () => {
+  const fakes = makeFakes();
+  const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1', now: () => 1234 });
+  await surface.start({
+    guildId: 'g1',
+    voiceChannel: { id: 'vc1' },
+    textChannel: { id: 'tc1' },
+    name: 'Sponsorship Sync',
+  });
+
+  await surface.stop('g1');
+
+  assert.deepEqual(fakes.posterCalls[0], {
+    channel: fakes.posterCalls[0].channel,
+    report: { transcript: 't', minutes: 'm', pdf_b64: 'p' },
+    requesterId: undefined,
+    name: 'Sponsorship Sync',
+    startedAt: 1234,
+  });
 });
 
 test('stop with no active session returns not-recording', async () => {
