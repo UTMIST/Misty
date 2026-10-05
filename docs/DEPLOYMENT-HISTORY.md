@@ -123,6 +123,10 @@ Minting them is a manual per-environment step — see the runbook's
 - **`node-test`** — the bot's `node --test` suite + ESLint and Prettier `--check` (the JS counterpart to the ruff pair)
 - **`docker-build`** — builds *and boot-smoke-tests* every service image (`python -c "import src.api.app"` for the six APIs, `node --check src/index.js` for the bot)
 
+The same jobs also run on pushes to `staging` and `main`, and on
+`merge_group` events targeting `staging`. Queue enforcement is configured
+separately in GitHub; see the [rollout guide](DEVELOPMENT.md#merge-queue-on-staging).
+
 **All ten are required status checks** in branch protection on both `staging`
 and `main`; `main` additionally requires `main-source-guard`. A red job on any
 of them blocks the merge — there is no "runs but doesn't gate" tier.

@@ -49,6 +49,8 @@ feature branch  ──PR──▶  staging  ──PR──▶  main
 - Both branches are protected; **all ten** CI jobs are required status checks,
   and `main` additionally requires `main-source-guard`. See
   [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md) for what each job covers.
+- CI supports a merge queue on `staging`; enable it only after the workflow
+  support has landed. See the [rollout guide](DEVELOPMENT.md#merge-queue-on-staging).
 
 ## 1. Neon: databases + branches
 Create **three Neon projects** — `team-tracking`, `documentation-system`, and
