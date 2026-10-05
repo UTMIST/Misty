@@ -9,7 +9,7 @@ Base URL (local): `http://localhost:8004` · Swagger UI: `/docs` · Schema: `/op
 | GET | `/health` | none | Liveness probe |
 | WS | `/meetings/{id}/stream` | `?key=` or first frame | Live audio ingest + control |
 | GET | `/meetings/{id}/transcript` | `X-API-Key` | Poll the rolling transcript |
-| POST | `/meetings/{id}/stop` | `X-API-Key` | Finalize: transcript + minutes + PDF |
+| POST | `/meetings/{id}/stop` | `X-API-Key` | Finalize: transcript + minutes + PDF; accepts an optional title |
 
 ## Authentication
 
@@ -115,6 +115,17 @@ It is a **cumulative view, not a diff**. Each response is the whole transcript s
 ## `POST /meetings/{session_id}/stop`
 
 End the session and get everything back. This is the only call that produces minutes.
+
+The optional request body can provide a caller-selected PDF title. It is limited
+to 100 characters:
+
+```json
+{"title": "Sponsorship Sync"}
+```
+
+When present, `title` takes precedence over the LLM-generated title. Omitting
+the body preserves the LLM title behavior, with `Meeting Minutes` as the final
+fallback.
 
 What it does, in order: wait for the end-of-audio barrier (max 5 s) → close the Transcribe streams → assemble the final transcript → call `llm` for minutes → render the PDF → tear the session down.
 

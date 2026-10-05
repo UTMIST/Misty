@@ -49,6 +49,8 @@ feature branch  ──PR──▶  staging  ──PR──▶  main
 - Both branches are protected; **all ten** CI jobs are required status checks,
   and `main` additionally requires `main-source-guard`. See
   [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md) for what each job covers.
+- CI supports a merge queue on `staging`; enable it only after the workflow
+  support has landed. See the [rollout guide](DEVELOPMENT.md#merge-queue-on-staging).
 
 ## 1. Neon: databases + branches
 Create **three Neon projects** — `team-tracking`, `documentation-system`, and
@@ -367,9 +369,9 @@ by an existing admin running `/seed` from Discord.
   Logs show `Bot ready as …`; staging bot appears in the test guild and prod
   bot registers globally.
 - **End-to-end (directory):** run a bot command (e.g. `/whoami`) in the staging guild → reaches staging team-tracking → staging Neon branch. If it returns "directory is temporarily unavailable," the two most common causes are (1) `DIRECTORY_BASE_URL` template not resolving (see the `PORT=8000` note above), or (2) `DIRECTORY_API_KEY` missing on the consumer (re-run the provisioning script).
-- **End-to-end (`/record`):** join a staging voice channel, `/record start`,
-  talk for ~30s, `/record stop`. Within roughly 30–60s a `meeting-minutes.pdf`
-  should be posted to the text channel. This exercises the whole chain —
+- **End-to-end (`/record`):** join a staging voice channel, `/record start
+  name:Smoke-Test`, talk for ~30s, `/record stop`. Within roughly 30–60s a
+  named PDF should be posted to the text channel. This exercises the whole chain —
   bot → `meeting` (WS) → Transcribe → `llm` → Bedrock → PDF. Failure modes to
   check in order: `MEETING_API_KEY` wrong (WS closes with code 1008),
   `LLM_API_KEY`/`LLM_BASE_URL` wrong on `meeting` (PDF arrives with degraded,

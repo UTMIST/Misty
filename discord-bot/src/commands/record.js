@@ -25,6 +25,15 @@ export default defineCommand({
       // must be authenticated.
       name: 'start',
       description: 'Start recording the voice channel you are in',
+      options: [
+        {
+          name: 'name',
+          type: 'string',
+          required: false,
+          description: 'Name for the meeting minutes',
+          maxLength: 100,
+        },
+      ],
       handler: unreachable,
     },
     {
