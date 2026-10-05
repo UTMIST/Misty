@@ -21,6 +21,7 @@ class FakeSession:
         self.guild_id = guild_id
         self.feed_calls: list[tuple[str, str, bytes, int]] = []
         self.stop_called = False
+        self.stop_title = None
         self.discard_called = False
         self._segments = [Segment(speaker="alice", start_ms=0, text="hello")]
         self.raise_on_feed_for: set[str] = set()
@@ -35,8 +36,9 @@ class FakeSession:
     async def transcript_view(self):
         return self._segments
 
-    async def stop(self):
+    async def stop(self, title=None):
         self.stop_called = True
+        self.stop_title = title
         return StopResponse(
             transcript="[00:00] alice: hello",
             minutes=Minutes(summary="s", decisions=[], action_items=[]),
@@ -162,6 +164,18 @@ def test_post_stop_returns_fake_stop_response(client, registry, consumer_key):
     assert body["transcript"] == "[00:00] alice: hello"
     assert body["minutes"]["summary"] == "s"
     assert session.stop_called is True
+
+
+def test_post_stop_passes_optional_title_to_session(client, registry, consumer_key):
+    session = registry.create("s1", "g1")
+    resp = client.post(
+        "/meetings/s1/stop",
+        headers={"X-API-Key": consumer_key},
+        json={"title": "Sponsorship Sync"},
+    )
+
+    assert resp.status_code == 200
+    assert session.stop_title == "Sponsorship Sync"
 
 
 def test_post_stop_requires_key(client, registry):

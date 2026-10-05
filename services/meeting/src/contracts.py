@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Minutes(BaseModel):
@@ -22,3 +22,7 @@ class StopResponse(BaseModel):
     transcript: str
     minutes: Minutes
     pdf_b64: str
+
+
+class StopRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=100)
