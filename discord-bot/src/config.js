@@ -55,6 +55,7 @@ export function loadConfig(env = process.env) {
     ),
     verificationBaseUrl: env.VERIFICATION_BASE_URL.replace(/\/+$/, ''),
     verificationApiKey: env.VERIFICATION_API_KEY,
+    infrastructureDiscordUsername: env.INFRASTRUCTURE_DISCORD_USERNAME || undefined,
     meetingBaseUrl: env.MEETING_BASE_URL ? env.MEETING_BASE_URL.replace(/\/+$/, '') : undefined,
     meetingApiKey: env.MEETING_API_KEY || undefined,
     meetingWsUrl:

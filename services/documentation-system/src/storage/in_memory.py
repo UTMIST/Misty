@@ -13,6 +13,9 @@ class InMemoryStorageAdapter:
     """In-process adapter for tests. Not thread-safe, not persistent. Enforces
     the same invariants as Postgres (dedup by url_normalized, tag uniqueness)."""
 
+    def is_ready(self) -> bool:
+        return True
+
     def __init__(self, seed_sources: list[Source] | None = None) -> None:
         self._docs: dict[UUID, Doc] = {}
         self._tags: dict[UUID, set[str]] = {}

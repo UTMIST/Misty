@@ -104,6 +104,15 @@ npm start                                # or: npm run dev for both surfaces
 Wait for `Logged in as <bot name>` in terminal 2, then use the slash commands
 in whichever Discord server you invited the bot to.
 
+Discord mode always starts a health listener; it does not require `PORT` or
+production configuration. It serves unauthenticated `GET /health/ready` on
+`0.0.0.0:$PORT` (default `3002` locally). It returns `503` until the Discord
+gateway is ready (and again after a disconnect), or `{"status":"ok"}` with
+HTTP 200 while connected. Railway supplies `PORT` and uses this route for
+deployment health checks. Locally, request
+`http://localhost:3002/health/ready` to inspect the gateway state. This
+listener is separate from the playground's default `WEB_PORT=3001`.
+
 **Requires that `DIRECTORY_API_KEY` in `.env` is a valid key against main
 team-tracking**, not a scratch key. If Discord returns "directory is
 temporarily unavailable," check the key with:
@@ -157,12 +166,14 @@ guild). If any command is beta and `DISCORD_GUILD_ID` is unset, registration war
 and skips them.
 
 > **Local vs. Railway.** `npm run register` uses `--env-file=.env`, so it targets
-> your **local test bot** only. To register the deployed bots, use the
-> Railway-targeted wrappers — `npm run register:all` (staging then production),
-> or `npm run register:staging` / `npm run register:production` for one
-> environment. There's also a guarded `./scripts/register.sh <staging|production|all>`
-> that confirms before touching production. See
-> [RAILWAY-DEPLOYMENT.md §5](../docs/RAILWAY-DEPLOYMENT.md).
+> your **local test bot** only. The deployed bots register themselves: Railway
+> runs `node src/registerCommands.js` as the bot's `preDeployCommand` (see
+> `railway.json`) on every deploy to staging or production. To re-register
+> *without* deploying, use the Railway-targeted wrappers — `npm run register:all`
+> (staging then production), or `npm run register:staging` /
+> `npm run register:production` for one environment. There's also a guarded
+> `./scripts/register.sh <staging|production|all>` that confirms before touching
+> production. See [RAILWAY-DEPLOYMENT.md §5](../docs/RAILWAY-DEPLOYMENT.md).
 
 ## Commands
 
@@ -186,17 +197,26 @@ and skips them.
 - `/my-teams` (linked) — list your active memberships.
 - `/doc <add|list|show|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
 
-- `/record start` (**linked**) — joins your current voice channel and starts
-  recording the meeting. `/record status` (**public**) — shows elapsed recording
-  time. `/record stop` (**public**) — ends the recording and, within roughly
-  30–60s, posts a branded `meeting-minutes.pdf` (LLM-generated title, summary,
-  decisions, action items, full transcript) back into the text channel,
+- `/record start [name:<meeting name>]` (**linked**) — joins your current voice channel and starts
+  recording the meeting (one recording at a time **per guild** — sessions are
+  keyed by `guildId`). `/record status` (**public**) — shows elapsed recording
+  time and the voice channel Misty is in; when idle, it explains which voice
+  channel Misty will join when recording starts. `/record stop` (**public**) —
+  ends the recording when you are in Misty's recorded voice channel and, within roughly
+  30–60s, posts a branded PDF named from the optional meeting name and
+  America/Toronto start timestamp (or `meeting_<timestamp>.pdf` when unnamed).
+  The name becomes the PDF title; otherwise it uses the LLM-generated title,
+  summary, decisions, action items, and full transcript back into the text channel,
   @-mentioning whoever started the recording. Recording also stops
   **automatically** once everyone leaves the voice channel (after a short grace
-  period), with a 4h hard backstop. The meeting service persists nothing: it
-  streams audio straight to AWS and never writes audio or transcript to disk.
-  The posted PDF does contain the full transcript, and that lives in Discord
-  like any other attachment.
+  period), with a 4h hard backstop. Starting while a recording is already
+  active in the guild, or stopping from outside the recorded channel, is
+  refused with the active channel and auto-stop guidance — except stopping
+  from outside is still allowed once that channel is empty of humans, the
+  escape hatch for a runaway recording auto-stop failed to catch. The meeting
+  service persists nothing: it streams audio straight to AWS and never writes
+  audio or transcript to disk. The posted PDF does contain the full
+  transcript, and that lives in Discord like any other attachment.
 
   When the first human enters an empty voice channel, the bot @-mentions them
   via direct message and prompts them to run `/record start`.
@@ -206,14 +226,17 @@ and skips them.
   > outage can't strand a running recording. See
   > [`docs/MEETING-RECORDING.md` → Authorization](../docs/MEETING-RECORDING.md).
 
+- `/bug` (public) — where to report a bug (GitHub issue link and optional
+  infrastructure contact).
+
 Every command is on the **stable** channel (`beta = false`), so they all register
 globally in every server the bot is in. There are currently no beta commands.
 
 > `/record` requires the `meeting` service to be deployed in the target
 > environment, with `MEETING_BASE_URL` + `MEETING_API_KEY` set on the bot. It was
 > promoted from beta in the staging → main release; provision `meeting` in an
-> environment **before** registering commands there, or `/record` will be visible
-> and fail.
+> environment **before** deploying the bot there (the deploy registers the
+> commands), or `/record` will be visible and fail.
 
 ### Meeting recording (`/record`) infra
 
@@ -299,7 +322,9 @@ parallel to team-tracking's scoped-key auth.
 Both settings are optional positive integers. Omit them to use defaults; blank,
 zero, negative, fractional, non-numeric, or unsafe values fail startup. There is
 no unlimited/disabled sentinel. Set them on the **discord-bot** deployment, not
-the LLM service, and restart to apply changes.
+the LLM service. Administrators can change the live values without a restart
+with `/helper-limits set`; `/helper-limits show` displays the current values.
+Changing the values preserves each user's existing usage.
 
 An exhausted user gets a slowdown reply with the seconds until their next
 allowance. Other users remain independent, including in the same thread.
@@ -445,7 +470,7 @@ local `.env`.
 | `src/messages.js` | Pure reply-string rendering. |
 | `src/commands/*.js` | Thin discord.js interaction handlers + registry. |
 | `src/index.js` | Client setup + interaction routing. |
-| `src/registerCommands.js` | One-shot slash-command registration (stable → global; beta → testing guild only). |
+| `src/registerCommands.js` | Slash-command registration (stable → global; beta → testing guild only). Runs as Railway's `preDeployCommand` on every deploy; `npm run register` runs it locally. |
 | `src/defineCommand.js` | Neutral, surface-agnostic command factory. |
 | `src/adapters/discord.js` | The ONLY module that imports from discord.js — turns interactions into intents. |
 | `scripts/dev-web.js` | Orchestrator: ephemeral scratch DB + scratch team-tracking + web server. |

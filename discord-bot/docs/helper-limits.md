@@ -44,10 +44,13 @@ reset boundary; this is not a rolling-window or concurrency limit.
 Counters live only in a `Map`, with expired entries removed lazily on the next
 allowance check. There is no timer, database, background service, or persisted
 usage. Restart/redeploy or a new application context resets all allowances.
-Environment changes require restart and therefore reset usage too. Run this
-with awareness that each process/replica has its **own** allowance; it is not a
-shared quota across replicas or staging/production deployments. Host clock
-changes can move the effective reset time.
+The startup environment values provide the initial settings; administrators can
+change them live with `/helper-limits show` and `/helper-limits set`. A live
+update changes the active limit and window while retaining every user's current
+request count and window start. Run this with awareness that each
+process/replica has its **own** allowance; it is not a shared quota across
+replicas or staging/production deployments. Host clock changes can move the
+effective reset time.
 
 Configuration validation fails boot for invalid values rather than silently
 turning protection off. Request limits must fit a positive JavaScript safe
@@ -69,7 +72,8 @@ helper service with a fake LLM client: an exhausted user never makes the next
 LLM call, while another Discord ID still succeeds. It also covers existing
 threads, concurrent mentions, authorization/non-question exclusions, and failed
 attempts. `test/helperRequestLimiter.test.js` checks independent windows, exact
-expiry, non-extending denials, defaults, reset-on-new-instance, and invalid
-inputs using an injected clock. `test/config.test.js` checks startup validation
-and application-context wiring. No live Discord connection or paid provider
-call is needed.
+expiry, non-extending denials, defaults, runtime updates that preserve usage,
+reset-on-new-instance, and invalid inputs using an injected clock.
+`test/helper-limits-command.test.js` checks the admin runtime control surface.
+`test/config.test.js` checks startup validation and application-context wiring.
+No live Discord connection or paid provider call is needed.

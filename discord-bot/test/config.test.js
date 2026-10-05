@@ -23,6 +23,7 @@ test('loadConfig returns typed config and strips trailing slash', () => {
   assert.equal(cfg.discordToken, 't');
   assert.equal(cfg.directoryApiKey, 'k');
   assert.equal(cfg.discordGuildId, 'g');
+  assert.equal(cfg.infrastructureDiscordUsername, undefined);
 });
 
 test('loadConfig throws listing missing vars', () => {
@@ -167,4 +168,24 @@ test('application context wires the configured allowance once for all mentions',
   assert.equal(denied.allowed, false);
   assert.ok(denied.retryAfterSeconds > 0 && denied.retryAfterSeconds <= 30);
   assert.equal(app.helperRequestLimiter.tryConsume('b').allowed, true);
+});
+
+test('loadConfig allows optional infrastructure Discord username', () => {
+  const withoutUsername = loadConfig(FULL);
+  assert.equal(withoutUsername.infrastructureDiscordUsername, undefined);
+
+  const withUsername = loadConfig({
+    ...FULL,
+    INFRASTRUCTURE_DISCORD_USERNAME: 'infra-user',
+  });
+  assert.equal(withUsername.infrastructureDiscordUsername, 'infra-user');
+});
+
+test('missing-var error does not list the optional INFRASTRUCTURE_DISCORD_USERNAME', () => {
+  try {
+    loadConfig({ DISCORD_TOKEN: 't' });
+    assert.fail('expected loadConfig to throw');
+  } catch (err) {
+    assert.doesNotMatch(err.message, /INFRASTRUCTURE_DISCORD_USERNAME/);
+  }
 });

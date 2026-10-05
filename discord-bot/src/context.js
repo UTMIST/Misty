@@ -94,5 +94,6 @@ export function createAppContext(config, { poster, notify } = {}) {
     helperRequestLimiter,
     meetingSurface,
     discordGuildId: config.discordGuildId ?? null,
+    infrastructureDiscordUsername: config.infrastructureDiscordUsername,
   };
 }

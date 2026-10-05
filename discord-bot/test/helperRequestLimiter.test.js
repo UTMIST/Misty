@@ -60,3 +60,20 @@ test('invalid limits and missing identities fail closed', () => {
     assert.throws(() => limiter.tryConsume(id), /Discord user ID/);
   }
 });
+
+test('runtime limit updates preserve usage and apply the new window to active users', () => {
+  let time = 0;
+  const limiter = createHelperRequestLimiter({
+    maxRequests: 2,
+    windowSeconds: 10,
+    now: () => time,
+  });
+  limiter.tryConsume('a');
+  limiter.updateLimits({ maxRequests: 1, windowSeconds: 20 });
+  assert.deepEqual(limiter.getLimits(), { maxRequests: 1, windowSeconds: 20 });
+  assert.equal(limiter.tryConsume('a').allowed, false);
+  time = 10001;
+  assert.equal(limiter.tryConsume('a').allowed, false);
+  time = 20000;
+  assert.equal(limiter.tryConsume('a').allowed, true);
+});

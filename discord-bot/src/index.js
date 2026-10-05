@@ -2,6 +2,7 @@ import { Client, GatewayIntentBits } from 'discord.js';
 import { loadConfig } from './config.js';
 import { createAppContext } from './context.js';
 import { commands } from './commands/index.js';
+import { startHealthServer } from './healthServer.js';
 import {
   wireDiscordClient,
   makeAttachmentPoster,
@@ -36,6 +37,7 @@ async function main() {
     });
     wireDiscordClient(client, { commands, appContext });
     client.once('clientReady', (c) => console.log(`Bot ready as ${c.user.tag}`));
+    await startHealthServer(client, process.env.PORT || 3002);
     await client.login(config.discordToken).catch((err) => {
       console.error('Discord login failed:', err.message);
       process.exit(1);

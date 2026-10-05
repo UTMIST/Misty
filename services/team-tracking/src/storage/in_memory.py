@@ -52,6 +52,9 @@ class InMemoryStorageAdapter:
     the Postgres adapter (email uniqueness, slug uniqueness, no schema surprises).
     """
 
+    def is_ready(self) -> bool:
+        return True
+
     def __init__(
         self,
         seed_role_kinds: list[RoleKind] | None = None,

@@ -18,6 +18,10 @@ class StorageAdapter(Protocol):
     """Stable contract between the service and persistence. Concrete adapters
     (Postgres, in-memory) implement these with identical semantics."""
 
+    def is_ready(self) -> bool:
+        """Return whether the backing store can answer a trivial query."""
+        ...
+
     # Docs
     def create_doc(
         self,

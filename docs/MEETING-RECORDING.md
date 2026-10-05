@@ -6,7 +6,7 @@ Feature owner: Misty #92. Related: [platform ARCHITECTURE](ARCHITECTURE.md), [`s
 
 ## What it does
 
-A **linked** member (identity resolved via the directory — see "Authorization" below) runs `/record start` in a Discord voice channel. Before a recording is active, the first human to enter an empty voice channel receives a direct message prompting them to start one. The bot joins, and as people talk it streams their audio to the `meeting` service, which transcribes each speaker live into a rolling transcript. Recording ends on `/record stop` **or automatically when everyone leaves the voice channel** (the bot ends the meeting once no non-bot member remains). On stop the service turns the transcript into minutes (via the `llm` service), renders a PDF, and hands it back; the bot posts the **PDF** to the text channel, @-mentioning whoever started the recording. Nothing is persisted — the transcript lives in memory for the meeting and is discarded after the report is returned.
+A **linked** member (identity resolved via the directory — see "Authorization" below) runs `/record start` in a Discord voice channel, optionally supplying a name up to 100 characters. Before a recording is active, the first human to enter an empty voice channel receives a direct message prompting them to start one. The bot joins, and as people talk it streams their audio to the `meeting` service, which transcribes each speaker live into a rolling transcript. Recording ends on `/record stop` **or automatically when everyone leaves the voice channel** (the bot ends the meeting once no non-bot member remains). On stop the service turns the transcript into minutes (via the `llm` service), renders a PDF, and hands it back; the bot posts the **PDF** to the text channel, @-mentioning whoever started the recording. A supplied name becomes the PDF title and is sanitized into the attachment filename as `<name>_<YYYY-MM-DD_HHMM>.pdf` in America/Toronto; unnamed recordings use `meeting_<YYYY-MM-DD_HHMM>.pdf`, based on the meeting start time. Nothing is persisted — the transcript lives in memory for the meeting and is discarded after the report is returned.
 
 ## The boundary, and the one constraint that forces it
 
@@ -57,7 +57,7 @@ The bot's `meetingClient.encodeFrame` and the service's `_parse_frame` are inver
 - **Binary audio frame:** `[2-byte big-endian speaker_id length][speaker_id UTF-8][8-byte big-endian ts_ms][raw Opus payload]`
 - **Control frame (text/JSON):** `{"speaker_id": "...", "display_name": "..."}` — registers the display name shown for a speaker.
 - **Auth:** the `platform_auth` consumer key — on the WS as the first text frame `{"key": "…"}` (or a `?key=` query param; both server-supported), and on `GET /transcript` / `POST /stop` as the `X-API-Key` header. The `meetings` scope is required.
-- **`POST /stop` response:** `{ transcript, minutes, pdf_b64 }` (PDF base64-encoded). The bot posts it @-mentioning whoever ran `/record start` — including on the auto-stop path, where there is no interaction to read the requester off.
+- **`POST /stop` request:** optional `{ "title": "..." }` body, limited to 100 characters. A supplied title wins over the LLM-generated title. **Response:** `{ transcript, minutes, pdf_b64 }` (PDF base64-encoded). The bot posts it @-mentioning whoever ran `/record start` — including on the auto-stop path, where there is no interaction to read the requester off.
 
 ## The "separate surface" in the bot
 
@@ -73,6 +73,30 @@ Instead, `/record` is a **dedicated path in the Discord adapter**: `adapters/dis
 - `status` / `stop` → `'public'`: `status` is a local read (no directory call), and `stop` is *de-escalating* — gating it would mean a directory outage could strand a running recording (with no length cap, that's the memory escape hatch). So both work regardless of link state.
 
 If `start` is ever silently downgraded to public, any guild member could drive live voice capture unauthenticated — keep it gated.
+
+The dedicated adapter also checks voice-channel context before changing state.
+A start attempt is refused while a recording is already active in the guild —
+whether the caller is in the recorded channel (a duplicate start) or a
+different one (Misty is busy elsewhere in the server; recordings are one at a
+time **per guild**, sessions being keyed by `guildId`, not a single global
+slot) — and a stop from outside the recorded channel is refused too, with the
+active channel and auto-stop guidance. That stop guard has one exception:
+`stop` is public precisely so anyone can end a runaway recording, so it does
+not apply once the recorded channel is already empty of humans (the same
+`humansIn` head-count auto-stop itself uses). Without that carve-out, a missed
+`voiceStateUpdate`, or a recorded channel that's since gone private, full, or
+been deleted, would strand the recording until the 4h backstop with nobody
+able to stop it. Status always names the recorded channel; when idle it tells
+the caller that Misty will join the voice channel when recording starts, and
+when the recorded channel is empty it notes the imminent auto-stop and the
+`/record stop` option. Start attempts while the recorded channel is empty
+similarly explain that Misty is wrapping up and can be ended immediately with
+`/record stop`.
+
+If a moderator moves Misty during a recording, the adapter updates the session's
+voice channel before checking auto-stop. Status, stop permissions, and the
+empty-channel check then follow the destination channel. The minutes still post
+to the text channel where recording was started.
 
 **Auto-stop.** `wireDiscordClient` listens for `voiceStateUpdate` (via `createAutoStop`); when the channel being recorded goes empty of non-bot members it **debounces** — schedules a stop after a grace period (`AUTO_STOP_GRACE_MS`) and cancels it if a human is back either on a later event or at fire time (re-check). This avoids a transient client blip or a voice-region failover irreversibly finalizing a live meeting on a single stray "last member left" event. When it does fire it calls `meetingSurface.stop(guildId)` — the same path as `/record stop`. The recorded channel is read from the live session via `meetingSurface.activeSession(guildId)` (which returns the `{ sessionId, voiceChannel }` snapshot opaquely, so `meetingSurface` keeps no `discord.js` dependency), which keeps the head-count honest and makes the listener a no-op once a session is torn down. Each pending timer is **bound to its `sessionId`**, so a timer scheduled for one recording can never terminate a *later* recording that reuses the same guild (a real bug caught in review): a new recording always schedules its own full-grace timer, and a stale one no-ops at fire time. The head-count is computed from **`guild.voiceStates.cache`** (maintained by the `GuildVoiceStates` intent — the same one that powers voice receive), *not* from `channel.members`. `channel.members` resolves each occupant to a `GuildMember` via `guild.members.cache`, which only the privileged `GuildMembers` intent keeps populated; without it that resolution is unreliable and miscounts occupants — including the recorder bot itself, whose member often isn't cached — which is what made auto-stop silently never fire in an early version. Counting voice states avoids that dependency entirely, and the recorder bot is excluded by its own user id (`client.user.id`), so `GuildMembers` is deliberately **not** required.
 
