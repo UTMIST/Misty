@@ -11,6 +11,37 @@ Task walkthroughs for working on `llm`. Assumes you've read the [README](../READ
 - **Validate before you spend.** Anything checkable without calling the model belongs in the Pydantic model or a dependency, so it 422s/403s before a paid call.
 - **Credentials are `SecretStr`.** Every credential field in `Settings` is `pydantic.SecretStr`; unwrap with `.get_secret_value()` at the boundary. See [`packages/auth/README.md`](../../../packages/auth/README.md#credential-config-convention).
 
+## Changing tool-use transport
+
+Read [API.md](API.md#client-executed-tools) before changing structured messages.
+Wire models stay in `contracts/`; provider dataclasses stay in
+`src/providers/base.py`; only the chat router maps between them. Framework-free
+JSON validation helpers may be shared without importing the wire models into
+providers. Update both Bedrock codecs for a supported block or tool field.
+History validation exists at the HTTP boundary (`ChatRequest`) and the reusable
+provider boundary (`validate_tool_request`); change and test both together so
+invalid HTTP input stays a 422 instead of becoming a provider-side 502.
+
+Preserve the exact no-tools/string-message request mapping and response JSON.
+Tool tests must also exercise a complete round-trip through a stubbed real SDK,
+including signed reasoning, redacted bytes, parallel calls, and error results.
+Botocore Stubber does not exercise response parsing: use intercepted real
+HTTP transports when testing the raw boundary or an SDK upgrade. Focused review
+regressions are retained in `tests/test_tool_stop_reasons.py`: empty completions,
+truncated tool calls, metadata/audit preservation, and strict-request controls.
+Keep response-side empty-list support separate from request validation. The initial
+broad tool suite remains removed; see the [audit record](TOOL-USE-AUDIT.md#test-cleanup).
+Unknown upstream shape members intentionally fail closed; review SDK and codec support
+rather than removing validation if a provider adds new fields.
+Unknown or malformed upstream blocks must normalize to a provider error rather
+than being silently discarded or coerced into valid-looking data. The explicit
+exception is withholding tool calls from `max_tokens` turns; preserve the truncation
+metadata instead of treating incomplete arguments as executable. Invalid input must
+fail before inference and must not echo or log tool/continuation data.
+
+Do not implement execution, authorization decisions for named tools, or a loop
+inside this service. Those remain consumer responsibilities (#71).
+
 ## Local setup
 
 ```bash

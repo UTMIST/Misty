@@ -82,6 +82,31 @@ Then redeploy llm. **Revoking is the reverse**: drop the entry and redeploy. The
 
 This is a genuine hard dependency, unlike `documentation-system` → `connectors`, which degrades gracefully.
 
+## Tool-use rollout
+
+Tool-use transport (#70) uses the existing `/chat` route, `chat` scope, credentials,
+and provider selection. It needs no new environment variables or migration, and
+both Bedrock backends implement the same wire contract. Deploy the service before
+a consumer starts sending tool definitions or structured history. Existing
+text-only consumers do not need to change.
+
+Keep the configured provider stable across a tool exchange; signed continuation
+blocks are not a cross-provider migration format. Consumers should pin a neutral
+request model and a thinking setting across all rounds. Rolling back the service
+while a tool-capable consumer is active requires disabling that consumer's tool
+flow first; the older contract does not implement it.
+
+Tool-mode provider bodies are validated before SDK parsing, but after HTTP
+buffering. Malformed Converse error bodies become 502 without entering SDK retry
+evaluation; well-formed errors retain native SDK retries. Account for that
+fail-closed behavior and the absence of a streaming download-size limit.
+
+All repository tests use offline SDK doubles. Before enabling a real consumer,
+perform an explicitly authorized smoke test of a complete tool-call/result/final
+answer exchange with the deployed AWS model, including reasoning replay when
+thinking is enabled. This PR does not execute tools or deploy the bot loop (#71).
+See [API.md](API.md#client-executed-tools) for the consumer contract.
+
 ## Rollback
 
 `git revert` + push. No schema to reverse, no state to reconcile.
