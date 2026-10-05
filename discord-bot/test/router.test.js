@@ -104,7 +104,7 @@ test('dispatch: Discord handler context includes beta commands only in the testi
 });
 
 test('dispatch: optional identification degrades to anonymous when directory is unavailable', async () => {
-  const { DirectoryUnavailable } = await import('../src/directoryClient.js');
+  const { DirectoryUnavailable } = await import('../src/clients/directoryClient.js');
   const cmd = defineCommand({
     name: 'help',
     description: 'help',
@@ -154,7 +154,7 @@ test('dispatch: linked user gets handler payload', async () => {
 });
 
 test('dispatch: DirectoryUnavailable → fail-closed payload', async () => {
-  const { DirectoryUnavailable } = await import('../src/directoryClient.js');
+  const { DirectoryUnavailable } = await import('../src/clients/directoryClient.js');
   const directory = {
     async getPersonByDiscordId() {
       throw new DirectoryUnavailable('down');

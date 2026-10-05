@@ -3,7 +3,7 @@ import { dispatch, dispatchAutocomplete } from '../router.js';
 import { authMessages } from '../messages.js';
 import { resolvePrincipal } from '../auth/principal.js';
 import { authorize } from '../auth/policy.js';
-import { DirectoryUnavailable } from '../directoryClient.js';
+import { DirectoryUnavailable } from '../clients/directoryClient.js';
 
 // The ONLY module (aside from src/index.js and src/registerCommands.js) that
 // imports from discord.js. Everything else — router, commands, services —

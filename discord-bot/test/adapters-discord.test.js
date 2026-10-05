@@ -12,7 +12,7 @@ import {
   createMeetingPrompt,
   AUTO_STOP_GRACE_MS,
 } from '../src/adapters/discord.js';
-import { DirectoryUnavailable } from '../src/directoryClient.js';
+import { DirectoryUnavailable } from '../src/clients/directoryClient.js';
 import record from '../src/commands/record.js';
 import { createMeetingSurface } from '../src/meeting/meetingSurface.js';
 

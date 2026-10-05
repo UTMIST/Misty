@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHelperService } from '../src/helperService.js';
-import { LlmUnavailable } from '../src/llmClient.js';
-import { DirectoryUnavailable } from '../src/directoryClient.js';
+import { createHelperService } from '../src/services/helperService.js';
+import { LlmUnavailable } from '../src/clients/llmClient.js';
+import { DirectoryUnavailable } from '../src/clients/directoryClient.js';
 
 function fakeLlm(capture, { throws = false } = {}) {
   return {

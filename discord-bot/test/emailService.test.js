@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEmailService } from '../src/emailService.js';
+import { createEmailService } from '../src/services/emailService.js';
 import {
   RateLimited,
   CodeExpired,
@@ -8,8 +8,8 @@ import {
   TooManyAttempts,
   NoPendingCode,
   VerificationUnavailable,
-} from '../src/verificationClient.js';
-import { EmailAlreadyRegistered, DirectoryUnavailable } from '../src/directoryClient.js';
+} from '../src/clients/verificationClient.js';
+import { EmailAlreadyRegistered, DirectoryUnavailable } from '../src/clients/directoryClient.js';
 
 const okVerification = {
   requestCode: async () => undefined,

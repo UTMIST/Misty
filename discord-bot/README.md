@@ -178,7 +178,7 @@ and skips them.
 - `/link email:<your UTMIST email>` (public) — starts linking your Discord account
   to your directory record. Your email must already be in the directory (execs seed
   members). It emails a one-time code to that address; run `/verify-code` with the
-  code to finish linking. Backed by the verification service via `src/linkService.js`.
+  code to finish linking. Backed by the verification service via `src/services/linkService.js`.
 - `/verify-code code:<6-digit>` (public) — confirms the code emailed by `/link` and
   completes the link.
 - `/whoami` (linked) — shows which directory record you're linked to. Requires you
@@ -441,8 +441,11 @@ local `.env`.
 |---|---|
 | `src/config.js` | Load + validate env. |
 | `src/context.js` | Wire application services once. |
-| `src/directoryClient.js` | The only module that knows the team-tracking HTTP shape. |
-| `src/linkService.js` | Orchestrates `/link` + `/verify-code` — email one-time-code verification via the verification service. |
+| `src/clients/*.js` | Backend HTTP clients and shared request handling. |
+| `src/services/*.js` | Application orchestration over injected clients. |
+| `src/meeting/*.js` | Recording client, session orchestration, and voice recorder. |
+| `src/clients/directoryClient.js` | The only module that knows the team-tracking HTTP shape. |
+| `src/services/linkService.js` | Orchestrates `/link` + `/verify-code` — email one-time-code verification via the verification service. |
 | `src/auth/principal.js` | Authentication: Discord id → Principal. |
 | `src/auth/policy.js` | Authorization: policy + principal → allow/deny. |
 | `src/router.js` | Policy Enforcement Point: authN → authZ → dispatch. |

@@ -9,7 +9,7 @@ import {
   TeamNotFound,
   MembershipInvalid,
   EmailAlreadyRegistered,
-} from '../src/directoryClient.js';
+} from '../src/clients/directoryClient.js';
 
 function fakeFetch(responses) {
   const calls = [];

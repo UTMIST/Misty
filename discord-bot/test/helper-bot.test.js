@@ -8,7 +8,7 @@ import {
   handleMention,
   wireDiscordClient,
 } from '../src/adapters/discord.js';
-import { DirectoryUnavailable } from '../src/directoryClient.js';
+import { DirectoryUnavailable } from '../src/clients/directoryClient.js';
 
 const BOT = '999';
 
