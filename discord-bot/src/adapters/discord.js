@@ -283,11 +283,38 @@ export function makeChannelNotifier() {
   };
 }
 
+function meetingFilenamePart(name) {
+  const withoutControls = Array.from(name ?? '', (char) =>
+    char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127 ? ' ' : char,
+  ).join('');
+  return withoutControls
+    .replace(/[<>:"/\\|?*]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function meetingTimestamp(startedAt) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Toronto',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(startedAt));
+  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return `${values.year}-${values.month}-${values.day}_${values.hour}${values.minute}`;
+}
+
 export function makeAttachmentPoster() {
-  return async ({ channel, report, requesterId }) => {
+  return async ({ channel, report, requesterId, name, startedAt }) => {
     try {
+      const timestamp = meetingTimestamp(startedAt ?? Date.now());
+      const safeName = meetingFilenamePart(name);
+      const filename = `${safeName || 'meeting'}_${timestamp}.pdf`;
       const pdfFile = new AttachmentBuilder(Buffer.from(report.pdf_b64, 'base64'), {
-        name: 'meeting-minutes.pdf',
+        name: filename,
       });
       // No requesterId (e.g. a recording started before this field existed, or
       // any path that couldn't resolve one) => post unaddressed rather than
@@ -480,6 +507,7 @@ async function handleRecordInteraction(interaction, appContext, recordCommand, b
         // Remembered for the whole session so the minutes @-mention whoever
         // started the recording, even when auto-stop ends it.
         requesterId: interaction.user.id,
+        name: interaction.options.getString?.('name') ?? null,
       });
     } catch (e) {
       console.error('meetingSurface.start failed:', e.message);

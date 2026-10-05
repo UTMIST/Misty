@@ -97,7 +97,7 @@ from src.api.auth import require_scope
 from src.api.deps import get_key_store
 from src.api.wiring import get_session_registry
 from src.config import get_settings
-from src.contracts import StopResponse, TranscriptView
+from src.contracts import StopRequest, StopResponse, TranscriptView
 from src.key_store import InMemoryKeyStore
 from src.sessions import SessionAlreadyExistsError, SessionRegistry
 
@@ -230,6 +230,7 @@ async def get_transcript(
 @router.post("/meetings/{session_id}/stop", response_model=StopResponse)
 async def stop_meeting(
     session_id: str,
+    request: StopRequest | None = None,
     _key=Depends(require_scope(MEETINGS_SCOPE)),
     registry: SessionRegistry = Depends(get_session_registry),
 ) -> StopResponse:
@@ -238,7 +239,7 @@ async def stop_meeting(
     session = registry.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="unknown session")
-    return await session.stop()
+    return await session.stop(request.title if request else None)
 
 
 @router.websocket("/meetings/{session_id}/stream")

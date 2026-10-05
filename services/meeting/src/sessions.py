@@ -367,16 +367,13 @@ class MeetingSession:
         segments.sort(key=lambda s: s.start_ms)
         return segments
 
-    def _meta(self) -> dict:
+    def _meta(self, title: str | None = None) -> dict:
         elapsed_s = (self._deps["now"]() - self._started_at).total_seconds()
         minutes = max(0, int(elapsed_s // 60))
         with self._lock:
             participants = [buf.display_name for buf in self._speakers.values()]
         return {
-            # No code-invented title: the meeting title is LLM-generated (see
-            # minutes.summarize_minutes / Minutes.title). Left blank so the PDF
-            # falls back to a clean default only if the LLM produced none.
-            "title": "",
+            "title": title or "",
             "started_at": str(self._started_at),
             "duration_label": f"{minutes}m",
             "participants": participants,
@@ -423,7 +420,7 @@ class MeetingSession:
                 timeout,
             )
 
-    async def stop(self) -> StopResponse:
+    async def stop(self, title: str | None = None) -> StopResponse:
         # Wait for the tail BEFORE quiescing: the last frames may still be in
         # flight on the WS, and refusing them is exactly how the transcript lost
         # its ending. Stream them in, THEN cut.
@@ -469,7 +466,7 @@ class MeetingSession:
             # as-is -- thread-offloading at this async boundary is the chosen
             # fix, not an async rewrite of those modules.
             minutes, pdf_bytes = await asyncio.to_thread(
-                self._deps["report_builder"], segments, self._meta()
+                self._deps["report_builder"], segments, self._meta(title)
             )
             pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
 

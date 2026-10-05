@@ -195,14 +195,16 @@ and skips them.
 - `/my-teams` (linked) — list your active memberships.
 - `/doc <add|list|show|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
 
-- `/record start` (**linked**) — joins your current voice channel and starts
+- `/record start [name:<meeting name>]` (**linked**) — joins your current voice channel and starts
   recording the meeting (one recording at a time **per guild** — sessions are
   keyed by `guildId`). `/record status` (**public**) — shows elapsed recording
   time and the voice channel Misty is in; when idle, it explains which voice
   channel Misty will join when recording starts. `/record stop` (**public**) —
   ends the recording when you are in Misty's recorded voice channel and, within roughly
-  30–60s, posts a branded `meeting-minutes.pdf` (LLM-generated title, summary,
-  decisions, action items, full transcript) back into the text channel,
+  30–60s, posts a branded PDF named from the optional meeting name and
+  America/Toronto start timestamp (or `meeting_<timestamp>.pdf` when unnamed).
+  The name becomes the PDF title; otherwise it uses the LLM-generated title,
+  summary, decisions, action items, and full transcript back into the text channel,
   @-mentioning whoever started the recording. Recording also stops
   **automatically** once everyone leaves the voice channel (after a short grace
   period), with a 4h hard backstop. Starting while a recording is already
