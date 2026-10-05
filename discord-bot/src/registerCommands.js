@@ -6,6 +6,7 @@ function applyOption(target, o) {
   if (o.type === 'string') {
     target.addStringOption((so) => {
       so.setName(o.name).setDescription(o.description).setRequired(!!o.required);
+      if (o.maxLength !== undefined) so.setMaxLength(o.maxLength);
       if (o.autocomplete) so.setAutocomplete(true);
       else if (o.choices) so.addChoices(...o.choices);
       return so;

@@ -122,6 +122,15 @@ test('stop POSTs the stop endpoint with X-API-Key and returns parsed JSON', asyn
   assert.equal(call.opts.headers['X-API-Key'], KEY);
 });
 
+test('stop sends an optional caller title as JSON', async () => {
+  const fetchImpl = fakeFetch([{ status: 200, body: {} }]);
+  const client = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, fetchImpl });
+  await client.stop('sess-1', { title: 'Sponsorship Sync' });
+
+  assert.equal(fetchImpl.calls[0].opts.body, JSON.stringify({ title: 'Sponsorship Sync' }));
+  assert.equal(fetchImpl.calls[0].opts.headers['Content-Type'], 'application/json');
+});
+
 test('stop throws MeetingUnavailable on non-ok response and on transport error', async () => {
   const fetchImpl = fakeFetch([{ status: 500, body: {} }]);
   const client = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY, fetchImpl });
