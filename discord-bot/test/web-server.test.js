@@ -238,6 +238,7 @@ test('POST /api/helper/dm keeps history isolated by acting Discord ID', async ()
       },
     },
   });
+
   await server.ready();
   try {
     const first = await server.inject({
@@ -260,6 +261,53 @@ test('POST /api/helper/dm keeps history isolated by acting Discord ID', async ()
     assert.equal(followUp.statusCode, 200);
     assert.deepEqual(seen, [['hello'], ['hello'], ['hello', 'answer 1', 'follow up']]);
   } finally {
+    await server.close();
+  }
+});
+
+test('POST /api/helper/dm serializes overlapping requests for one Discord ID', async () => {
+  const seen = [];
+  let releaseFirst;
+  const firstAnswerStarted = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  let answerCount = 0;
+  const server = await buildServer({
+    commands: new Map(),
+    appContext: {
+      directory: {
+        getPersonByDiscordId: async (id) => ({ id: `person-${id}`, display_name: id }),
+      },
+      helperService: {
+        answer: async ({ turns }) => {
+          seen.push(turns.map((turn) => turn.text));
+          answerCount += 1;
+          if (answerCount === 1) await firstAnswerStarted;
+          return { content: `answer ${answerCount}` };
+        },
+      },
+    },
+  });
+  await server.ready();
+  try {
+    const first = server.inject({
+      method: 'POST',
+      url: '/api/helper/dm',
+      payload: { actingAs: 'alice', content: 'first' },
+    });
+    while (answerCount !== 1) await new Promise((resolve) => setImmediate(resolve));
+    const second = server.inject({
+      method: 'POST',
+      url: '/api/helper/dm',
+      payload: { actingAs: 'alice', content: 'second' },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(seen, [['first']]);
+    releaseFirst();
+    await Promise.all([first, second]);
+    assert.deepEqual(seen, [['first'], ['first', 'answer 1', 'second']]);
+  } finally {
+    releaseFirst();
     await server.close();
   }
 });

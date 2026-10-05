@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import {
   startsWithBotMention,
   stripLeadingMention,
@@ -32,7 +33,10 @@ test('directMessageHistoryToTurns isolates a DM from other human authors', () =>
     '1',
     BOT_ID,
   );
-  assert.deepEqual(turns.map((turn) => turn.text), ['private question', 'private answer']);
+  assert.deepEqual(
+    turns.map((turn) => turn.text),
+    ['private question', 'private answer'],
+  );
 });
 
 test('stripLeadingMention removes the leading ping and following whitespace', () => {
@@ -62,11 +66,10 @@ test('handleDirectMessage answers linked users and replays only their DM history
   });
   message.id = 'current';
   await handleDirectMessage(message, { appContext: ctx({ answer }), botId: BOT_ID });
-  assert.deepEqual(seen.turns.map((turn) => turn.text), [
-    'first question',
-    'first answer',
-    'follow up',
-  ]);
+  assert.deepEqual(
+    seen.turns.map((turn) => turn.text),
+    ['first question', 'first answer', 'follow up'],
+  );
   assert.deepEqual(seen.principal, { person: { id: 'p1', display_name: 'Alex' } });
   assert.deepEqual(channel.sent, ['private answer']);
 });
@@ -123,6 +126,22 @@ test('messageCreate listener: dispatches DM messages without a mention', async (
   await handlers.messageCreate(message);
 
   assert.deepEqual(channel.sent, ['the answer']);
+});
+
+test('Discord SDK messageCreate event dispatches uncached DM messages', async () => {
+  const client = new Client({
+    intents: [GatewayIntentBits.DirectMessages],
+    partials: [Partials.Channel],
+  });
+  client.user = { id: BOT_ID };
+  wireDiscordClient(client, { commands: new Map(), appContext: ctx() });
+
+  const channel = fakeChannel({ isDM: true });
+  client.emit('messageCreate', fakeMessage({ content: 'private question', channel }));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(channel.sent, ['the answer']);
+  client.destroy();
 });
 
 test('threadHistoryToTurns drops empty turns', () => {

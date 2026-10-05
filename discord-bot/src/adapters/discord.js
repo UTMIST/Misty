@@ -266,9 +266,7 @@ export async function handleMention(message, { appContext, botId }) {
 
 function isDirectMessage(message) {
   return Boolean(
-    message.channel?.isDMBased?.() ||
-      message.channel?.type === 'DM' ||
-      message.channel?.type === 1, // discord.js ChannelType.DM
+    message.channel?.isDMBased?.() || message.channel?.type === 'DM' || message.channel?.type === 1, // discord.js ChannelType.DM
   );
 }
 
@@ -331,11 +329,15 @@ export async function handleDirectMessage(message, { appContext, botId }) {
     return;
   }
   if (!content || !content.trim()) {
-    await message.channel.send(EMPTY_ANSWER).catch((e) => console.error('helper reply failed:', e.message));
+    await message.channel
+      .send(EMPTY_ANSWER)
+      .catch((e) => console.error('helper reply failed:', e.message));
     return;
   }
   for (const chunk of chunkForDiscord(content)) {
-    await message.channel.send(chunk).catch((e) => console.error('helper reply failed:', e.message));
+    await message.channel
+      .send(chunk)
+      .catch((e) => console.error('helper reply failed:', e.message));
   }
 }
 
