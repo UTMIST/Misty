@@ -64,7 +64,7 @@ do, because merging to staging deploys immediately.
 - [ ] **New env var** — name(s), which services, and the value's source. Must be set *before* this merges or the deploy fails at boot.
 - [ ] **New/rotated API key** — which service mints it, which consumer receives it, which `CONSUMER_KEYS` array it goes into.
 - [ ] **Deploy order** — this must ship before/after another service. Which, and why.
-- [ ] **Command registration** — a Discord command was added or changed. The bot's `preDeployCommand` registers it on deploy; confirm the pre-deploy log shows `Registered N stable commands globally`.
+- [ ] **Command registration** — a Discord command was added or changed. The bot's `preDeployCommand` registers it on deploy; confirm the pre-deploy step succeeded (exit 0 — on staging both `Registered …` lines, not just the global one).
 - [ ] **Breaking change for a consumer** — what breaks, and what has to be updated alongside.
 
 ## Anything you're unsure about

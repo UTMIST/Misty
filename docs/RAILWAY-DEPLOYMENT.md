@@ -294,14 +294,32 @@ between build and start, exactly the way the DB-backed services run
 to `main` registers the production bot. It's idempotent, so re-running on a
 deploy that changed no commands is harmless.
 
-If registration fails (bad token, Discord rejects a command definition) the
-deploy fails and the previous deployment keeps running — a broken command set
-can't ship half-registered. `preDeployTimeoutSeconds` caps the step at 120 s
-(it normally takes a few seconds) so a hung Discord API call fails the deploy
-instead of holding it in progress forever. The pre-deploy log shows
-`Registered N stable commands globally` on success; that line is also the
-proof the service is reading `railway.json` at all (see the
-`railwayConfigFile` note in [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md)).
+If registration fails, the deploy fails and the previous deployment keeps
+running. `preDeployTimeoutSeconds` caps the step at 120 s (it normally takes a
+few seconds) so a hung Discord API call fails the deploy instead of holding it
+in progress forever. The success signal is the step's exit code, not a log
+line: on staging a clean run prints **both** `Registered N stable commands
+globally` and `Registered N beta commands to testing guild …`, and the deploy
+proceeds to start the new process. Seeing either line is also proof the
+service is reading `railway.json` at all (see the `railwayConfigFile` note in
+[`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md)).
+
+**A failure can leave Discord half-updated.** The script does two sequential
+bulk overwrites: global commands first, then the testing guild's. A failure
+*before* the first call — a rejected command definition, a bad token — changes
+nothing. A failure *between* the two (global succeeded, guild rejected) leaves
+the global set already overwritten while the old bot process keeps running,
+so members may see new commands the running code can't serve, and the guild
+set is stale. The `Registered N stable commands globally` line prints before
+the guild step, so it does not by itself mean the step succeeded. To recover,
+pick one:
+
+- **Finish the deployment.** Fix the cause and push again; the next successful
+  pre-deploy overwrites both sets. This is the normal path.
+- **Restore the running revision's command set.** Find the commit the live
+  deployment was built from (`railway status`, or the deployment's page in the
+  dashboard), check it out, and run the manual wrapper for that environment
+  (below). Both overwrites then match the code that is actually serving.
 
 The script partitions commands into **stable** (registered globally — visible
 in every server the bot is in) and **beta** (registered only to
@@ -317,10 +335,11 @@ did not respond" in that window, then works once the new deployment is live.
 
 ### Registering by hand
 
-You only need this when you want to re-register **without** a deploy — for
-example to clear stale guild commands after changing `DISCORD_GUILD_ID`, or to
-check what a branch would register before merging it. The manual wrappers run
-the same script via `railway run`, which injects that environment's secrets:
+You only need this when you want to re-register **without** a deploy — to
+restore the running revision's commands after a failed pre-deploy (above), or
+to check what a branch would register before merging it. The manual wrappers
+run the same script via `railway run`, which injects that environment's
+secrets:
 
 ```bash
 cd discord-bot
@@ -330,6 +349,30 @@ npm run register:staging      # or register:production, or register:all
 
 > **Not** `npm run register` — that hardcodes `--env-file=.env` and only hits
 > your **local test bot**.
+
+### Moving the testing guild (changing `DISCORD_GUILD_ID`)
+
+`registerCommands.js` only ever writes to the guild that is *currently*
+configured. Changing `DISCORD_GUILD_ID` from guild A to guild B and
+re-registering (by deploy or by hand) populates B and leaves A's command set
+exactly as it was — stale beta commands in A stay visible to that server and
+fail when invoked. Clear A explicitly, with its old id, as a separate step:
+
+```bash
+cd discord-bot
+OLD_GUILD_ID=<guild A id> railway run --service discord-bot --environment staging -- \
+  node --input-type=module -e '
+const { REST, Routes } = await import("discord.js");
+await new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN)
+  .put(Routes.applicationGuildCommands(process.env.DISCORD_CLIENT_ID, process.env.OLD_GUILD_ID), { body: [] });
+console.log(`cleared guild commands for ${process.env.OLD_GUILD_ID}`);'
+```
+
+`railway run` injects the environment's `DISCORD_TOKEN` / `DISCORD_CLIENT_ID`
+and passes your shell's `OLD_GUILD_ID` through. An empty bulk overwrite
+removes every command the bot had registered in that guild and nothing else.
+Then set the new `DISCORD_GUILD_ID` on the service and register into B — a
+redeploy does it, or `npm run register:staging`.
 
 > **Provision `meeting` before deploying the bot to an environment.** `/record`
 > is stable and registers globally, so it becomes visible to every member the
@@ -377,9 +420,9 @@ by an existing admin running `/seed` from Discord.
   logs should also show `alembic upgrade head` ran.
 - **Bot:** Railway checks `/health/ready` on its injected `PORT`. It returns
   `503` before Discord is ready or after a disconnect, and 200 once connected.
-  The pre-deploy log shows `Registered N stable commands globally` (and, on
-  staging, `Registered N beta commands to testing guild …`); the deploy log
-  shows `Bot ready as …`. Staging bot appears in the test guild and prod bot
+  The pre-deploy step exits 0 and its log shows `Registered N stable commands
+  globally` (and, on staging, `Registered N beta commands to testing guild …`
+  — both lines, see step 5); the deploy log shows `Bot ready as …`. Staging bot appears in the test guild and prod bot
   registers globally.
 - **End-to-end (directory):** run a bot command (e.g. `/whoami`) in the staging guild → reaches staging team-tracking → staging Neon branch. If it returns "directory is temporarily unavailable," the two most common causes are (1) `DIRECTORY_BASE_URL` template not resolving (see the `PORT=8000` note above), or (2) `DIRECTORY_API_KEY` missing on the consumer (re-run the provisioning script).
 - **End-to-end (`/record`):** join a staging voice channel, `/record start`,
