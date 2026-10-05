@@ -73,6 +73,9 @@ Violating any of these is a bug even if tests pass.
 
 - **Keep a PR inside one CODEOWNERS zone.** `pr-zone-check.yml` warns (non-blocking) when a PR spans multiple zones. [`docs/CODE-OWNERSHIP.md`](docs/CODE-OWNERSHIP.md) is the zone list and what each one covers — note that editing *this* file puts a PR in `root`. If a change genuinely spans zones — a protocol change touching both `meeting` and `discord-bot` — that's fine, but it should be deliberate, not incidental.
 - **Open PRs into `staging`.** Green CI is required.
+- **Keep required staging checks compatible with `merge_group`.** CI supports
+  a staging merge queue; enforcement is a separate GitHub setting. Follow the
+  [rollout guide](docs/DEVELOPMENT.md#merge-queue-on-staging) before enabling it.
 - **Don't commit or push unless asked.** Especially don't push to `staging` or `main` directly.
 - **Issues declare blockers in the form's "Blocked by" field** (`#40, #42`), which drives the `blocked`/`ready` labels (`blocked-ready-automation.yml`). The pre-forms inline shape, `Blocked by: #40, #42` anywhere in the body, still works — issues filed before the forms landed use it.
 - **Zones label PRs; areas label issues.** `zone: *` comes from the changed paths and is single-valued (a PR should stay in one). `area/*` comes from the issue form's Area dropdown and is multi-valued. An issue is never given a zone. See [`docs/CODE-OWNERSHIP.md`](docs/CODE-OWNERSHIP.md).

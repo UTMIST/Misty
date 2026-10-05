@@ -301,11 +301,12 @@ that actually exist today (all via the Google connector, `services/connectors/`)
 
 | Source | Extracted shape | Chunking implication |
 |--------|-----------------|----------------------|
-| Google Docs | Prose, paragraph-structured | Recursive split on paragraph then sentence boundaries |
-| Google Slides | One line per text run, slides joined by `\n` | Slide is a natural boundary; keep slides intact where they fit |
-| Google Sheets | Per-tab, `FORMATTED_VALUE` rows, row-capped | Split per tab, then per row-group; never split mid-row |
-| PDF / DOCX (Drive) | Flattened text, structure lossy | Fall back to plain recursive split |
-| Notion (#85), GitHub READMEs (#86) | Markdown (future) | Split on headings then paragraphs |
+| Google Docs | Markdown headings, bullets, links, and tables; cell paragraphs joined with spaces | Respect headings, paragraphs, and table rows where they fit |
+| Google Slides | `## Slide N`, title/body text, tables, and speaker notes | Preserve slide boundaries where they fit; table-cell newlines become `<br>` |
+| Google Sheets | Per-tab headings and CSV of `FORMATTED_VALUE` rows, row-capped | Split per tab and logical CSV record, not every newline; quoted cells may span lines |
+| PDF (Drive) | `## Page N` boundaries with extracted page text; internal structure can be lossy | Respect pages where they fit, then use recursive splitting |
+| DOCX (Drive) | Markdown headings, bullets, and tables in document order | Respect rendered structure where it fits; table-cell newlines become `<br>` |
+| GitHub READMEs (#86) | Markdown (future) | Split on headings then paragraphs |
 
 A boundary-aware recursive splitter with a **per-source separator list** can honor the
 structure each connector emits while targeting the token budget below. The spike used
@@ -316,16 +317,19 @@ character counts as a proxy for that budget; it did not establish fixed-characte
 The spike sampled real UTMIST Google Docs rather than synthetic examples: structured GitHub
 standards, sparse and dense transition-report templates, loosely structured Senior Exec meeting
 notes, and a degenerate single-link stub. The sampled documents ranged from ~26 to ~3,421
-tokens. The dense transition reports exposed an important preprocessing requirement: Google
-Docs table-cell line breaks are exported as the literal string `&#10;`, not real newlines.
+tokens. The sampled transition-report exports contained literal `&#10;` table-cell line breaks.
+The spike reported a longest literal line of 2,189 characters (~547 tokens) in the Technical
+Writing transition report, reduced to 357 after replacing the encoded breaks. It reported
+74 occurrences in that document and similar templates across roughly 9–10 departments.
+These are historical export observations, not a guarantee about current stored connector output.
 
-**Normalize encoded newlines inside table cells before splitting.** In the sampled Technical
-Writing transition report, the longest literal line was 2,189 characters (~547 tokens), already
-larger than the target chunk; after replacing `&#10;` with real line breaks it was 357 characters.
-This occurred 74 times in that document, and the same transition-report template is reused
-across roughly 9–10 departments, so this is a corpus-level pattern rather than an edge case.
-Without normalization, paragraph/list boundaries inside these cells are invisible to the
-splitter.
+**Split the actual stored representation, not an assumed export format.** The current native
+Docs extractor joins cell paragraphs with spaces; it does not emit `&#10;` separators. The
+shared Markdown renderer encodes retained newlines in Slides/DOCX cells as `<br>`. See
+`services/connectors/src/sources/google_extractors/{docs,markdown,docx,slides}.py`.
+Do not globally decode entity-like text: it may be literal document content, and changing its
+length invalidates source offsets. If #218 introduces normalization, define its source-specific
+rules and mapping back to the original `doc_content.content_text`.
 
 Starting parameters:
 
@@ -345,8 +349,8 @@ The 10% overlap is carried through unchanged from testing: it preserves continui
 table-row or list-item boundaries without materially inflating storage or embedding cost at this
 corpus size. The spike used character-based proxies, not an embedding-model tokenizer.
 #218 must document its counting method and validate it against the model and input constraints
-selected in #173; four characters per token is not a guaranteed conversion. The boundary shape
-and `&#10;` normalization requirement do not depend on the exact tokenizer.
+selected in #173; four characters per token is not a guaranteed conversion. Validate
+boundary handling against current connector fixtures, not only the spike's exported samples.
 
 ### Hybrid vs pure vector
 
@@ -381,21 +385,24 @@ index (pgvector >= 0.5) only once the corpus crosses roughly 10k chunks and exac
 to cost materially. This applies to the vector branch only; the keyword branch uses the GIN
 index described above.
 
-### Two decisions this spike also closes
+### Retrieval constraints and open decisions
 
-The epic left two questions open. This is where they land:
-
-- **Relevance floor: absolute cosine similarity, calibrated on #178.** Cosine similarity is
-  scale-free, so an absolute floor does not drift with corpus size the way a raw-distance
-  threshold would; the concern with absolute thresholds is primarily un-normalized score
-  distributions. A relative-to-top-hit floor can admit an irrelevant result when the best hit is
-  itself irrelevant. Pick the threshold from the evaluation set, not intuition, and revisit it if
-  corpus growth shifts the score distribution.
-- **`/doc search` uses the exact same visibility rule as `/doc list`.** It reuses
-  `doc_visible()` and the `Actor` / `SEE_ALL` / `DENY` context unchanged. The visibility
-  predicate is compiled *into both* the vector and keyword queries before top-k selection and
-  result fusion. Neither branch ranks unauthorized rows and filters them afterward. This keeps
-  search and list behavior consistent.
+- **Relevance floor: choose in #176, calibrate on #178.** An absolute cosine floor remains
+  a proposal, not a measured threshold or a closed decision. Neither cosine similarity nor
+  distance between fixed vectors depends on corpus size; adding candidates can change the
+  distribution of retrieved scores. A relative-to-top-hit floor can admit an irrelevant best
+  hit. Evaluate abstention and define how the floor interacts with lexical-only matches and
+  rank fusion; fused ranks are not cosine scores. Recalibrate when corpus or model changes
+  materially affect retrieval quality.
+- **Visibility follows the explicit person or channel context in #77/#176.** Direct search
+  and DMs preserve the person's access. Shared-channel answers use the configured teams'
+  Google Group entitlement; #238 supplies the channel-to-team mapping. Never use the asker's
+  private grants or a model-supplied team list. Reuse and extend grant semantics rather than
+  treating the current person-only `Actor` / `SEE_ALL` / `DENY` types as a complete channel
+  contract. Resolve channel scope through the authenticated directory API; missing configuration
+  or unavailable scope must not broaden access. Compile the authorized predicate *into both*
+  the vector and keyword queries before top-k selection and fusion. Neither branch ranks unauthorized
+  rows and filters them afterward, and no unfiltered retrieval variant is allowed.
 
 ### Spike methodology and limitations
 
@@ -424,14 +431,15 @@ Limitations:
 ### Carrying this into implementation
 
 - **#218 (pure chunker):** implement the recursive header → list-item → paragraph → sentence →
-  word splitter targeting 500 tokens / 50-token overlap (10%), with `&#10;` normalization as a
-  documented preprocessing step. Document counting and source-offset conventions and validate
+  word splitter targeting 500 tokens / 50-token overlap (10%). Test current connector output,
+  preserve source offsets through any normalization, and document the counting method. Validate
   input limits against the model selected in #173.
 - **#174 (storage):** store vectors and keyword-search metadata for the same document chunks.
 - **#175 (indexing/lifecycle):** populate and maintain each chunk's embedding and `tsvector`
   from the same chunk text, including replacement and deletion. Retrieval belongs to #176.
-- **#176 (retrieval):** combine keyword and vector results, applying the same actor visibility
-  predicate inside both queries before ranking and fusion.
+- **#176 (retrieval):** combine keyword and vector results, resolving the authorized person or
+  channel context and applying its predicate inside both queries before ranking and fusion.
+  Choose and document the relevance-floor policy using #178; no unfiltered fallback.
 - **#178 (evaluation):** build the real question set and measure retrieval hit-rate@k, including
   exact-name/acronym/date queries, before treating the starting parameters as final.
 
