@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits } from 'discord.js';
+import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import { loadConfig } from './config.js';
 import { createAppContext } from './context.js';
 import { commands } from './commands/index.js';
@@ -23,17 +23,16 @@ async function main() {
   const enableWeb = process.env.ENABLE_WEB === 'true';
 
   if (enableDiscord) {
-    // GuildMessages (non-privileged) is enough for the @mention helper: Discord
-    // always delivers message.content for messages that mention the bot, so the
-    // privileged MessageContent intent is intentionally NOT requested.
-    // (Consequence: thread messages that don't re-mention the bot arrive with
-    // empty content and are ignored — matches the "re-mention to follow up" design.)
+    // GuildMessages is enough for the @mention helper, while DirectMessages
+    // delivers private conversations without requiring a server channel.
     const client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.DirectMessages,
         GatewayIntentBits.GuildVoiceStates,
       ],
+      partials: [Partials.Channel],
     });
     wireDiscordClient(client, { commands, appContext });
     client.once('clientReady', (c) => console.log(`Bot ready as ${c.user.tag}`));

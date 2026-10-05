@@ -1,9 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import {
   startsWithBotMention,
   stripLeadingMention,
   threadHistoryToTurns,
+  directMessageHistoryToTurns,
+  handleDirectMessage,
   chunkForDiscord,
   handleMention,
   wireDiscordClient,
@@ -20,10 +23,70 @@ test('startsWithBotMention: true only when the ping leads the message', () => {
   assert.equal(startsWithBotMention('', BOT), false);
 });
 
+test('directMessageHistoryToTurns isolates a DM from other human authors', () => {
+  const turns = directMessageHistoryToTurns(
+    [
+      { author: { id: '1', username: 'alexx' }, content: 'private question' },
+      { author: { id: '2', username: 'bobl' }, content: 'group DM leak' },
+      { author: { id: BOT_ID, username: 'misty' }, content: 'private answer' },
+    ],
+    '1',
+    BOT_ID,
+  );
+  assert.deepEqual(
+    turns.map((turn) => turn.text),
+    ['private question', 'private answer'],
+  );
+});
+
 test('stripLeadingMention removes the leading ping and following whitespace', () => {
   assert.equal(stripLeadingMention(`<@${BOT}>   how do I link?`, BOT), 'how do I link?');
   assert.equal(stripLeadingMention(`<@!${BOT}> hi`, BOT), 'hi');
   assert.equal(stripLeadingMention('no mention here', BOT), 'no mention here');
+});
+
+test('handleDirectMessage answers linked users and replays only their DM history', async () => {
+  let seen;
+  const answer = async ({ turns, principal }) => {
+    seen = { turns, principal };
+    return { content: 'private answer' };
+  };
+  const channel = fakeChannel({
+    isDM: true,
+    history: [
+      { author: { id: '1', username: 'alexx' }, content: 'first question', createdTimestamp: 1 },
+      { author: { id: '2', username: 'bobl' }, content: 'group DM leak', createdTimestamp: 2 },
+      { author: { id: BOT_ID, username: 'misty' }, content: 'first answer', createdTimestamp: 3 },
+    ],
+  });
+  const message = fakeMessage({
+    content: 'follow up',
+    channel,
+    thread: null,
+  });
+  message.id = 'current';
+  await handleDirectMessage(message, { appContext: ctx({ answer }), botId: BOT_ID });
+  assert.deepEqual(
+    seen.turns.map((turn) => turn.text),
+    ['first question', 'first answer', 'follow up'],
+  );
+  assert.deepEqual(seen.principal, { person: { id: 'p1', display_name: 'Alex' } });
+  assert.deepEqual(channel.sent, ['private answer']);
+});
+
+test('handleDirectMessage gives unlinked users linking guidance without calling the helper', async () => {
+  let called = false;
+  const channel = fakeChannel({ isDM: true });
+  const message = fakeMessage({ content: 'hello', channel });
+  await handleDirectMessage(message, {
+    appContext: {
+      ...ctx({ principal: null }),
+      helperService: { answer: async () => (called = true) },
+    },
+    botId: BOT_ID,
+  });
+  assert.equal(called, false);
+  assert.match(channel.replies[0], /link/i);
 });
 
 test('threadHistoryToTurns maps roles, keeps speakers separate, drops leading assistant', () => {
@@ -46,6 +109,39 @@ test('threadHistoryToTurns maps roles, keeps speakers separate, drops leading as
     { role: 'assistant', text: 'answer part 2' },
     { role: 'user', text: 'follow up', authorId: '1', authorName: 'Alex Q' }, // nickname wins
   ]);
+});
+
+test('messageCreate listener: dispatches DM messages without a mention', async () => {
+  const handlers = {};
+  const client = {
+    user: { id: BOT_ID },
+    on: (evt, fn) => {
+      handlers[evt] = fn;
+    },
+  };
+  wireDiscordClient(client, { commands: new Map(), appContext: ctx() });
+
+  const channel = fakeChannel({ isDM: true });
+  const message = fakeMessage({ content: 'private question', channel });
+  await handlers.messageCreate(message);
+
+  assert.deepEqual(channel.sent, ['the answer']);
+});
+
+test('Discord SDK messageCreate event dispatches uncached DM messages', async () => {
+  const client = new Client({
+    intents: [GatewayIntentBits.DirectMessages],
+    partials: [Partials.Channel],
+  });
+  client.user = { id: BOT_ID };
+  wireDiscordClient(client, { commands: new Map(), appContext: ctx() });
+
+  const channel = fakeChannel({ isDM: true });
+  client.emit('messageCreate', fakeMessage({ content: 'private question', channel }));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(channel.sent, ['the answer']);
+  client.destroy();
 });
 
 test('threadHistoryToTurns drops empty turns', () => {
@@ -82,7 +178,13 @@ const BOT_ID = '999';
 // `starter` models ThreadChannel#fetchStarterMessage: the message the thread was
 // opened from, which for a text-channel thread lives in the parent channel and
 // is therefore absent from `history`. `starterThrows` models a deleted one.
-function fakeChannel({ isThread = false, history = [], starter, starterThrows = false } = {}) {
+function fakeChannel({
+  isThread = false,
+  isDM = false,
+  history = [],
+  starter,
+  starterThrows = false,
+} = {}) {
   const sent = [];
   const fetched = [];
   return {
@@ -90,6 +192,7 @@ function fakeChannel({ isThread = false, history = [], starter, starterThrows = 
     fetched, // args of each messages.fetch call
     typing: 0,
     isThread: () => isThread,
+    isDMBased: () => isDM,
     async send(content) {
       sent.push(content);
     },

@@ -16,6 +16,8 @@ const resetBtn = document.getElementById('reset-btn');
 const commandList = document.getElementById('command-list');
 const transcript = document.getElementById('transcript');
 const formStrip = document.getElementById('form-strip');
+const dmForm = document.getElementById('dm-form');
+const dmContent = document.getElementById('dm-content');
 
 // --- Init ---
 async function main() {
@@ -24,6 +26,30 @@ async function main() {
   initTopStrip();
   refreshPeoplePicker();
   wireResetButton();
+  dmForm.addEventListener('submit', submitDm);
+}
+
+async function submitDm(event) {
+  event.preventDefault();
+  if (!state.actingAs) return;
+  const content = dmContent.value.trim();
+  if (!content) return;
+  const el = messageElement({ author: 'You (DM)', avatar: 'Y', klass: 'you' });
+  el.querySelector('.body').textContent = content;
+  transcript.appendChild(el);
+  dmContent.value = '';
+  try {
+    const res = await fetch('/api/helper/dm', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ actingAs: state.actingAs, content }),
+    });
+    const payload = await res.json();
+    if (!res.ok) appendErrorMessage(`HTTP ${res.status}: ${payload.error || res.statusText}`);
+    else appendBotMessage(payload);
+  } catch (e) {
+    appendErrorMessage(e.message);
+  }
 }
 
 async function loadCommands() {

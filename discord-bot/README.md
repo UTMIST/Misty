@@ -348,6 +348,10 @@ That boots an orchestrator (`scripts/dev-web.js`) which:
 
 ### Using the playground
 
+The **DM Misty** composer exercises the same linked-only helper flow as a
+Discord DM. Its history is kept separately per selected Discord ID, so switching
+the Acting as picker cannot leak one person's conversation into another's.
+
 Open `http://127.0.0.1:3001`, paste one of the three Dev IDs above into
 "Acting as" (or pick from the datalist), click a command in the sidebar, fill
 the form, and run. Replies stream into the transcript above.

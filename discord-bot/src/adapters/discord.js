@@ -167,6 +167,8 @@ const LLM_UNAVAILABLE =
 const EMPTY_ANSWER = "I couldn't come up with an answer that time — please try rephrasing.";
 const THREAD_UNAVAILABLE =
   "I couldn't open a thread for that — please try again. (I may be missing the 'Create Public Threads' or 'Read Message History' permission.)";
+const DM_HISTORY_UNAVAILABLE =
+  "I couldn't read this conversation right now — please try again shortly.";
 
 // The message a thread was started from lives in the PARENT channel, not the
 // thread — ThreadChannel#fetchStarterMessage reads it from `parent` unless the
@@ -259,6 +261,83 @@ export async function handleMention(message, { appContext, botId }) {
   }
   for (const chunk of chunkForDiscord(content)) {
     await target.send(chunk).catch((e) => console.error('helper reply failed:', e.message));
+  }
+}
+
+function isDirectMessage(message) {
+  return Boolean(
+    message.channel?.isDMBased?.() || message.channel?.type === 'DM' || message.channel?.type === 1, // discord.js ChannelType.DM
+  );
+}
+
+function sameMessage(left, right) {
+  return (left.id && right.id && left.id === right.id) || left === right;
+}
+
+// DMs are one-user conversations. Ignore human messages from any other author
+// so a future Discord channel implementation cannot accidentally mix users.
+export function directMessageHistoryToTurns(fetched, currentUserId, botId) {
+  return threadHistoryToTurns(
+    fetched.filter((m) => m.author?.id === botId || m.author?.id === currentUserId),
+    botId,
+  );
+}
+
+// Handle a direct message without opening a thread. The DM channel itself is
+// the conversation boundary, and its history is restricted to the author.
+export async function handleDirectMessage(message, { appContext, botId }) {
+  const question = (message.content ?? '').trim();
+  if (!question) return;
+
+  let principal;
+  try {
+    principal = await resolvePrincipal(appContext.directory, message.author.id);
+  } catch (e) {
+    if (e instanceof DirectoryUnavailable) {
+      await message.reply(VERIFY_UNAVAILABLE).catch(() => {});
+      return;
+    }
+    throw e;
+  }
+  if (!authorize('linked', principal).ok) {
+    await message.reply(LINK_PROMPT).catch(() => {});
+    return;
+  }
+
+  let turns;
+  try {
+    const fetched = await message.channel.messages.fetch({ limit: HISTORY_LIMIT });
+    const ordered = [...fetched.values()].sort(
+      (a, b) => (a.createdTimestamp ?? 0) - (b.createdTimestamp ?? 0),
+    );
+    if (!ordered.some((candidate) => sameMessage(candidate, message))) ordered.push(message);
+    turns = directMessageHistoryToTurns(ordered, message.author.id, botId);
+  } catch (e) {
+    console.error('DM history fetch failed:', e.message);
+    await message.reply(DM_HISTORY_UNAVAILABLE).catch(() => {});
+    return;
+  }
+  if (!turns.length) return;
+
+  await message.channel.sendTyping().catch(() => {});
+  let content;
+  try {
+    ({ content } = await appContext.helperService.answer({ turns, principal }));
+  } catch (err) {
+    console.error('helper DM answer failed:', err.message);
+    await message.channel.send(LLM_UNAVAILABLE).catch(() => {});
+    return;
+  }
+  if (!content || !content.trim()) {
+    await message.channel
+      .send(EMPTY_ANSWER)
+      .catch((e) => console.error('helper reply failed:', e.message));
+    return;
+  }
+  for (const chunk of chunkForDiscord(content)) {
+    await message.channel
+      .send(chunk)
+      .catch((e) => console.error('helper reply failed:', e.message));
   }
 }
 
@@ -829,8 +908,12 @@ export function wireDiscordClient(client, { commands, appContext }) {
     try {
       if (message.author?.bot) return;
       const botId = client.user?.id;
-      if (!botId || !startsWithBotMention(message.content, botId)) return;
-      await handleMention(message, { appContext, botId });
+      if (!botId) return;
+      if (isDirectMessage(message)) {
+        await handleDirectMessage(message, { appContext, botId });
+      } else if (startsWithBotMention(message.content, botId)) {
+        await handleMention(message, { appContext, botId });
+      }
     } catch (err) {
       console.error('Unhandled mention error:', err);
     }
