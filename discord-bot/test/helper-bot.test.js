@@ -6,8 +6,8 @@ import {
   threadHistoryToTurns,
   chunkForDiscord,
   handleMention,
-  wireDiscordClient,
-} from '../src/adapters/discord.js';
+} from '../src/adapters/discord/mentions.js';
+import { wireDiscordClient } from '../src/adapters/discord/index.js';
 import { DirectoryUnavailable } from '../src/clients/directoryClient.js';
 
 const BOT = '999';

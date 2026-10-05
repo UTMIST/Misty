@@ -5,7 +5,7 @@ import {
   renderDocListResult,
   renderDocShowResult,
   renderDocRemoveResult,
-} from '../messages.js';
+} from '../messages/doc.js';
 
 // Re-exported for callers/tests that reference /doc's autocomplete budget. The
 // implementation now lives in the shared teamAutocomplete module.

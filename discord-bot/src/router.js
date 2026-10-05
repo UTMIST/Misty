@@ -1,7 +1,7 @@
 import { resolvePrincipal } from './auth/principal.js';
 import { authorize } from './auth/policy.js';
 import { DirectoryUnavailable } from './clients/directoryClient.js';
-import { authMessages } from './messages.js';
+import { authMessages } from './messages/auth.js';
 
 /**
  * Select the commands registered on the surface where an intent originated.

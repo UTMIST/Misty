@@ -1,5 +1,5 @@
 import { defineCommand } from '../defineCommand.js';
-import { renderSeedResult } from '../messages.js';
+import { renderSeedResult } from '../messages/people.js';
 
 export default defineCommand({
   name: 'seed',

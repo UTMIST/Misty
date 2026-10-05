@@ -17,7 +17,7 @@ import { createRecorder } from './meeting/recorder.js';
  *
  * context.js stays surface-agnostic (no discord.js import): the Discord
  * attachment poster consumed by meetingSurface is injected by the caller
- * (src/index.js, which already imports adapters/discord.js to wire the
+ * (src/index.js, which already imports adapters/discord/ to wire the
  * client) rather than imported here. If omitted, a no-op poster is used —
  * fine for tests/other surfaces, but production wiring must pass the real
  * one for /record to actually post meeting minutes.

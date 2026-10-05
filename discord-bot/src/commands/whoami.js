@@ -1,5 +1,5 @@
 import { defineCommand } from '../defineCommand.js';
-import { buildWhoamiEmbed } from '../messages.js';
+import { buildWhoamiEmbed } from '../messages/people.js';
 import { DirectoryUnavailable } from '../clients/directoryClient.js';
 
 export default defineCommand({
