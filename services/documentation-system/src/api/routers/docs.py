@@ -1,9 +1,11 @@
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict
 
 from contracts.directory import DirectoryClient, DirectoryUnavailable
+from contracts.fetcher import FetchError
 from contracts.storage import StorageAdapter
 from contracts.types import Doc, DocGrantInput, DocIngest, DocUpdate, IngestResult
 from contracts.visibility import ActorContext
@@ -13,6 +15,14 @@ from src.api.deps import get_directory, get_fetchers, get_storage
 from src.content import clamp_content, content_hash
 from src.fetch.registry import FetcherRegistry
 from src.ingest import BadReference, ingest_doc
+from src.config import get_settings
+from src.source_access import (
+    GOOGLE_ACCESS_ORIGIN,
+    GOOGLE_SOURCE_IDS,
+    SourceAccessUnavailable,
+    resolve_google_permissions,
+    source_grant_expiry,
+)
 
 router = APIRouter(prefix="/docs", tags=["docs"])
 
@@ -20,6 +30,25 @@ router = APIRouter(prefix="/docs", tags=["docs"])
 class TagBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     tag: str
+
+
+class SourceAccessRefreshResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempted: int
+    refreshed: int
+    failed: int
+
+
+def _source_access_due(doc: Doc, due_before: datetime) -> bool:
+    last_attempt = max(
+        (
+            value
+            for value in (doc.source_access_synced_at, doc.source_access_attempted_at)
+            if value is not None
+        ),
+        default=None,
+    )
+    return last_attempt is None or last_attempt <= due_before
 
 
 @router.post("", response_model=IngestResult)
@@ -34,7 +63,12 @@ def create_doc(
 ) -> IngestResult:
     try:
         result = ingest_doc(
-            payload, storage=storage, fetchers=fetchers, directory=directory, actor=actor
+            payload,
+            storage=storage,
+            fetchers=fetchers,
+            directory=directory,
+            actor=actor,
+            source_access_max_age_hours=get_settings().source_access_max_age_hours,
         )
     except BadReference as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -60,6 +94,49 @@ def list_docs(
         active_only=active_only,
         visibility=ctx,
     )
+
+
+@router.post("/source-access/refresh-due", response_model=SourceAccessRefreshResult)
+def refresh_due_source_access(
+    limit: int = Query(default=10, ge=1, le=100),
+    storage: StorageAdapter = Depends(get_storage),
+    fetchers: FetcherRegistry = Depends(get_fetchers),
+    directory: DirectoryClient = Depends(get_directory),
+    actor: str = Depends(get_actor),
+    _: AuthedKey = Depends(require_scope("docs:write")),
+) -> SourceAccessRefreshResult:
+    """Refresh a bounded batch; intended for the documented daily scheduler."""
+    settings = get_settings()
+    due_before = datetime.now(timezone.utc) - timedelta(
+        hours=settings.source_access_refresh_after_hours
+    )
+    due = [
+        doc
+        for doc in storage.list_docs(active_only=True)
+        if doc.source_id in GOOGLE_SOURCE_IDS and _source_access_due(doc, due_before)
+    ][:limit]
+    refreshed = 0
+    failed = 0
+    for doc in due:
+        try:
+            _refetch_doc_source(
+                doc,
+                storage=storage,
+                fetchers=fetchers,
+                directory=directory,
+                actor=actor,
+                source_access_max_age_hours=settings.source_access_max_age_hours,
+            )
+        except (FetchError, SourceAccessUnavailable):
+            storage.update_doc(
+                doc.id,
+                {"source_access_attempted_at": datetime.now(timezone.utc)},
+                actor=actor,
+            )
+            failed += 1
+        else:
+            refreshed += 1
+    return SourceAccessRefreshResult(attempted=len(due), refreshed=refreshed, failed=failed)
 
 
 @router.get("/{doc_id}", response_model=Doc)
@@ -168,23 +245,63 @@ def refetch(
     doc_id: UUID,
     storage: StorageAdapter = Depends(get_storage),
     fetchers: FetcherRegistry = Depends(get_fetchers),
+    directory: DirectoryClient = Depends(get_directory),
     actor: str = Depends(get_actor),
     wctx: ActorContext = Depends(write_context),
     _: AuthedKey = Depends(require_scope("docs:write")),
 ) -> Doc:
-    from datetime import datetime, timezone
-
-    from contracts.fetcher import FetchError
-
     get_visible_doc_or_404(doc_id, wctx, storage)
     doc = storage.get_doc(doc_id)
     if doc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="doc not found")
     try:
-        result = fetchers.fetch_for(doc.source_id, doc.url)
-    except FetchError as e:
+        return _refetch_doc_source(
+            doc,
+            storage=storage,
+            fetchers=fetchers,
+            directory=directory,
+            actor=actor,
+            source_access_max_age_hours=get_settings().source_access_max_age_hours,
+        )
+    except (FetchError, SourceAccessUnavailable) as e:
+        storage.update_doc(
+            doc.id,
+            {"source_access_attempted_at": datetime.now(timezone.utc)},
+            actor=actor,
+        )
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+
+
+def _refetch_doc_source(
+    doc: Doc,
+    *,
+    storage: StorageAdapter,
+    fetchers: FetcherRegistry,
+    directory: DirectoryClient,
+    actor: str,
+    source_access_max_age_hours: int,
+) -> Doc:
+    result = fetchers.fetch_for(doc.source_id, doc.url)
     now = datetime.now(timezone.utc)
+    if doc.source_id in GOOGLE_SOURCE_IDS:
+        if result.permissions is None:
+            raise SourceAccessUnavailable("connector omitted Google source ACL")
+        resolved = resolve_google_permissions(result.permissions, directory)
+        storage.replace_source_grants(
+            doc.id,
+            origin=GOOGLE_ACCESS_ORIGIN,
+            grants=resolved.grants,
+            synced_at=now,
+            expires_at=source_grant_expiry(now, source_access_max_age_hours),
+            actor=actor,
+        )
+        # Successful zero-grant reconciliation is a revocation. Keep prior
+        # bytes at rest but do not refresh them; visibility no longer derives
+        # from the source, and manual/owner access remains explicit.
+        if not resolved.grants:
+            refreshed = storage.get_doc(doc.id)
+            assert refreshed is not None
+            return refreshed
     # A content-less refetch (empty body: page deleted, paywalled, connector
     # regressed to title-only) deliberately leaves the existing doc_content
     # row AND the existing snapshot untouched rather than wiping them — stale
@@ -197,13 +314,13 @@ def refetch(
     if result.content:
         text, _truncated = clamp_content(result.content)
         storage.upsert_doc_content(
-            doc_id,
+            doc.id,
             content_text=text,
             content_hash=content_hash(text),
             fetched_at=now,
         )
-    return storage.update_doc(
-        doc_id,
+    updated = storage.update_doc(
+        doc.id,
         {
             "title": result.title or doc.title,
             "content_snapshot": result.content_snapshot or doc.content_snapshot,
@@ -211,6 +328,8 @@ def refetch(
         },
         actor=actor,
     )
+    assert updated is not None
+    return updated
 
 
 def _safe_label(lookup, entity_id):

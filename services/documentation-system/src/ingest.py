@@ -9,6 +9,13 @@ from contracts.storage import DuplicateActiveUrl, StorageAdapter
 from contracts.types import DocIngest, IngestResult
 from src.content import clamp_content, content_hash
 from src.fetch.registry import FetcherRegistry
+from src.source_access import (
+    GOOGLE_ACCESS_ORIGIN,
+    GOOGLE_SOURCE_IDS,
+    SourceAccessUnavailable,
+    resolve_google_permissions,
+    source_grant_expiry,
+)
 from src.url_norm import derive_source, normalize_url
 
 
@@ -26,7 +33,9 @@ def _apply_grants(storage, doc_id, grants, *, actor: str):
         storage.add_grant(doc_id, grantee_type=g.grantee_type, grantee_id=g.grantee_id, actor=actor)
 
 
-def _merge_into_existing(storage, existing, payload: DocIngest, *, actor: str) -> IngestResult:
+def _merge_into_existing(
+    storage, existing, payload: DocIngest, *, actor: str, warnings: list[str] | None = None
+) -> IngestResult:
     """Idempotent dedup path: fold this ingest's tags/grants into the already
     catalogued active doc and return it as created=False."""
     for tag in payload.tags:
@@ -36,8 +45,71 @@ def _merge_into_existing(storage, existing, payload: DocIngest, *, actor: str) -
     return IngestResult(
         doc=refreshed,
         created=False,
-        warnings=[f"already catalogued (added by {existing.created_by})"],
+        warnings=[f"already catalogued (added by {existing.created_by})", *(warnings or [])],
     )
+
+
+def _refresh_existing_source_access(
+    existing,
+    *,
+    storage: StorageAdapter,
+    fetchers: FetcherRegistry,
+    directory: DirectoryClient,
+    actor: str,
+    max_age_hours: int,
+) -> list[str]:
+    """A repeated ingest is also a source-ACL refresh for Google documents."""
+    if existing.source_id not in GOOGLE_SOURCE_IDS:
+        return []
+    warnings: list[str] = []
+    try:
+        result = fetchers.fetch_for(existing.source_id, existing.url)
+        if result.permissions is None:
+            raise SourceAccessUnavailable("connector omitted Google source ACL")
+        resolved = resolve_google_permissions(result.permissions, directory)
+    except (FetchError, SourceAccessUnavailable) as e:
+        storage.update_doc(
+            existing.id,
+            {"source_access_attempted_at": _now()},
+            actor=actor,
+        )
+        return [f"source access refresh failed ({e}); prior source grants retained"]
+
+    warnings.extend(result.warnings)
+    warnings.extend(resolved.warnings)
+    synced_at = _now()
+    storage.replace_source_grants(
+        existing.id,
+        origin=GOOGLE_ACCESS_ORIGIN,
+        grants=resolved.grants,
+        synced_at=synced_at,
+        expires_at=source_grant_expiry(synced_at, max_age_hours),
+        actor=actor,
+    )
+    if not resolved.grants:
+        warnings.append("source ACL has no mapped audience; fetched content was not stored")
+        return warnings
+
+    if result.content:
+        text, truncated = clamp_content(result.content)
+        if truncated:
+            warnings.append("content truncated to size cap; stored text is incomplete")
+        storage.upsert_doc_content(
+            existing.id,
+            content_text=text,
+            content_hash=content_hash(text),
+            fetched_at=synced_at,
+        )
+    storage.update_doc(
+        existing.id,
+        {
+            "title": result.title or existing.title,
+            "content_snapshot": result.content_snapshot or existing.content_snapshot,
+            "fetched_at": synced_at,
+        },
+        actor=actor,
+    )
+    return warnings
 
 
 def ingest_doc(
@@ -47,6 +119,7 @@ def ingest_doc(
     fetchers: FetcherRegistry,
     directory: DirectoryClient,
     actor: str,
+    source_access_max_age_hours: int = 48,
 ) -> IngestResult:
     warnings: list[str] = []
     url_normalized = normalize_url(payload.url)
@@ -59,7 +132,17 @@ def ingest_doc(
     # introduced).
     existing = storage.get_doc_by_normalized_url(url_normalized)
     if existing is not None and existing.active:
-        return _merge_into_existing(storage, existing, payload, actor=actor)
+        refresh_warnings = _refresh_existing_source_access(
+            existing,
+            storage=storage,
+            fetchers=fetchers,
+            directory=directory,
+            actor=actor,
+            max_age_hours=source_access_max_age_hours,
+        )
+        return _merge_into_existing(
+            storage, existing, payload, actor=actor, warnings=refresh_warnings
+        )
 
     # 2. Determine source — caller-supplied wins, else derive.
     if payload.source_id is not None:
@@ -76,16 +159,40 @@ def ingest_doc(
     snapshot = None
     content = None
     fetched_at = None
+    source_grants = None
+    source_access_synced_at = None
+    source_access_attempted_at = None
     if source is not None and source.content_fetch_enabled:
         try:
+            if source_id in GOOGLE_SOURCE_IDS:
+                source_access_attempted_at = _now()
             result = fetchers.fetch_for(source_id, payload.url)
-            title = payload.title or result.title
-            snapshot = result.content_snapshot
-            content = result.content
-            fetched_at = _now()
             warnings.extend(result.warnings)
+            if source_id in GOOGLE_SOURCE_IDS:
+                if result.permissions is None:
+                    raise SourceAccessUnavailable("connector omitted Google source ACL")
+                resolved = resolve_google_permissions(result.permissions, directory)
+                warnings.extend(resolved.warnings)
+                source_grants = resolved.grants
+                source_access_synced_at = _now()
+                if not source_grants:
+                    warnings.append(
+                        "source ACL has no mapped audience; fetched content was not stored"
+                    )
+                else:
+                    title = payload.title or result.title
+                    snapshot = result.content_snapshot
+                    content = result.content
+                    fetched_at = source_access_synced_at
+            else:
+                title = payload.title or result.title
+                snapshot = result.content_snapshot
+                content = result.content
+                fetched_at = _now()
         except FetchError as e:
             warnings.append(f"content fetch failed ({e}); title fell back to url")
+        except SourceAccessUnavailable as e:
+            warnings.append(f"source access sync failed ({e}); fetched content was not stored")
     elif source is not None and source.requires_auth:
         warnings.append(f"source '{source_id}' requires auth; no snapshot fetched")
     if title is None:
@@ -126,6 +233,21 @@ def ingest_doc(
             return _merge_into_existing(storage, existing, payload, actor=actor)
         raise
     _apply_grants(storage, doc.id, payload.grants, actor=actor)
+    if source_grants is not None and source_access_synced_at is not None:
+        storage.replace_source_grants(
+            doc.id,
+            origin=GOOGLE_ACCESS_ORIGIN,
+            grants=source_grants,
+            synced_at=source_access_synced_at,
+            expires_at=source_grant_expiry(source_access_synced_at, source_access_max_age_hours),
+            actor=actor,
+        )
+    elif source_access_attempted_at is not None:
+        storage.update_doc(
+            doc.id,
+            {"source_access_attempted_at": source_access_attempted_at},
+            actor=actor,
+        )
     # Truthiness, not `is not None`: an empty extraction is None per
     # FetchResult's contract, but a connector returning "" must not create a
     # doc_content row holding nothing.

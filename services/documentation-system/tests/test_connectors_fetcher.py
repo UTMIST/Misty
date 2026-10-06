@@ -33,6 +33,31 @@ def test_warnings_are_surfaced():
     assert result.warnings == ["first sheet only"]
 
 
+def test_source_permissions_are_validated_and_forwarded():
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "title": "Shared",
+                "content": "body",
+                "warnings": [],
+                "permissions": [
+                    {
+                        "permission_id": "p1",
+                        "principal_type": "group",
+                        "principal": "team@example.com",
+                        "role": "reader",
+                        "inherited_from": ["folder-1"],
+                    }
+                ],
+            },
+        )
+
+    result = _fetcher(handler).fetch("https://docs.google.com/document/d/abc/edit")
+    assert result.permissions[0].principal == "team@example.com"
+    assert result.permissions[0].inherited_from == ["folder-1"]
+
+
 def test_source_id_is_sent_in_the_request_body():
     seen = {}
 

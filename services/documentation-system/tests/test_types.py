@@ -60,10 +60,27 @@ def test_doc_grants_table_shape():
     from src.storage.schema import doc_grants
 
     cols = set(doc_grants.c.keys())
-    assert cols == {"id", "doc_id", "grantee_type", "grantee_id", "created_at", "created_by"}
+    assert cols == {
+        "id",
+        "doc_id",
+        "grantee_type",
+        "grantee_id",
+        "created_at",
+        "created_by",
+        "origin",
+        "source_permission_id",
+        "source_principal",
+        "source_role",
+        "source_inherited",
+        "source_expires_at",
+        "source_inherited_from",
+        "expires_at",
+    }
     constraint_names = {c.name for c in doc_grants.constraints if c.name}
     assert "ck_doc_grants_grantee_shape" in constraint_names
-    assert "uq_doc_grants_grantee" in constraint_names
+    index_names = {i.name for i in doc_grants.indexes}
+    assert "uq_doc_grants_manual_grantee" in index_names
+    assert "uq_doc_grants_source_permission" in index_names
 
 
 def test_doc_grant_input_org_rejects_id():

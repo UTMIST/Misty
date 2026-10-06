@@ -1,11 +1,12 @@
 import os
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, text
 
 from contracts.storage import DuplicateActiveUrl
-from contracts.types import DocIngest
+from contracts.types import DocIngest, SourceGrant
 from contracts.visibility import DENY, SEE_ALL, Actor
 from src.config import get_settings
 from src.ingest import ingest_doc
@@ -179,6 +180,47 @@ def test_org_grant_partial_unique_pg(adapter):
         adapter.add_grant(d.id, grantee_type="org", grantee_id=None, actor="t") is True
     )  # idempotent
     assert len(adapter.list_grants(d.id)) == 1
+
+
+def test_replace_source_grants_preserves_manual_and_revokes_old_source_rows_pg(adapter):
+    d = _mk(adapter, url="https://source-grants.com")
+    now = datetime.now(timezone.utc)
+    adapter.add_grant(d.id, grantee_type="person", grantee_id=_P1, actor="admin")
+    adapter.replace_source_grants(
+        d.id,
+        origin="google_drive",
+        grants=[
+            SourceGrant(
+                grantee_type="team",
+                grantee_id=_T1,
+                source_permission_id="permission-1",
+                source_principal="team@example.com",
+                source_role="reader",
+                source_inherited_from=["folder-1"],
+            )
+        ],
+        synced_at=now,
+        expires_at=now + timedelta(hours=48),
+        actor="sync",
+    )
+    ordinary_member = Actor(person_id=uuid4(), team_ids=frozenset({_T1}))
+    synced_member = Actor(
+        person_id=ordinary_member.person_id,
+        team_ids=frozenset({_T1}),
+        source_team_ids=frozenset({_T1}),
+    )
+    assert adapter.get_doc(d.id, visibility=ordinary_member) is None
+    assert adapter.get_doc(d.id, visibility=synced_member) is not None
+    adapter.replace_source_grants(
+        d.id,
+        origin="google_drive",
+        grants=[],
+        synced_at=now,
+        expires_at=now + timedelta(hours=48),
+        actor="sync",
+    )
+    grants = adapter.list_grants(d.id)
+    assert [(g.origin, g.grantee_type, g.grantee_id) for g in grants] == [("manual", "person", _P1)]
 
 
 def test_list_docs_batched_tag_hydration_matches_per_doc(adapter):

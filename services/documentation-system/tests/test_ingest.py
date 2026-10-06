@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
 from contracts.directory import DirectoryUnavailable
-from contracts.fetcher import FetchError, FetchResult
+from contracts.fetcher import FetchError, FetchResult, SourcePermission
 from contracts.types import DocIngest, Source
 from src.ingest import BadReference, ingest_doc
 from src.storage.in_memory import InMemoryStorageAdapter
@@ -45,8 +45,10 @@ class FakeFetchers:
 
 
 class FakeDirectory:
-    def __init__(self, team=None, person=None, unavailable=False):
+    def __init__(self, team=None, person=None, unavailable=False, people=None, groups=None):
         self._team, self._person, self._down = team, person, unavailable
+        self._people = people or {}
+        self._groups = groups or {}
 
     def get_team_label(self, team_id):
         if self._down:
@@ -57,6 +59,16 @@ class FakeDirectory:
         if self._down:
             raise DirectoryUnavailable("down")
         return self._person
+
+    def get_person_id_by_verified_email(self, email):
+        if self._down:
+            raise DirectoryUnavailable("down")
+        return self._people.get(email)
+
+    def get_team_id_by_synced_google_group(self, email):
+        if self._down:
+            raise DirectoryUnavailable("down")
+        return self._groups.get(email)
 
 
 @pytest.fixture
@@ -163,6 +175,114 @@ def test_ingest_auth_source_warns_no_snapshot(store):
     )
     assert res.doc.source_id == "gdrive"
     assert any("auth" in w for w in res.warnings)
+
+
+def _google_store():
+    sources = [
+        source.model_copy(update={"content_fetch_enabled": True})
+        if source.id == "gdrive"
+        else source
+        for source in _sources()
+    ]
+    return InMemoryStorageAdapter(seed_sources=sources)
+
+
+def test_google_ingest_stores_content_only_for_mapped_source_audience():
+    person_id = UUID("11111111-1111-1111-1111-111111111111")
+    store = _google_store()
+    result = ingest_doc(
+        DocIngest(url="https://drive.google.com/file/d/z"),
+        storage=store,
+        fetchers=FakeFetchers(
+            result=FetchResult(
+                title="Private",
+                content="secret",
+                content_snapshot="secret",
+                permissions=[
+                    SourcePermission(
+                        permission_id="p1",
+                        principal_type="user",
+                        principal="member@example.com",
+                        role="reader",
+                    )
+                ],
+            )
+        ),
+        directory=FakeDirectory(people={"member@example.com": person_id}),
+        actor="bot",
+    )
+
+    assert store.get_doc_content(result.doc.id) == "secret"
+    assert [(g.origin, g.grantee_id) for g in store.list_grants(result.doc.id)] == [
+        ("google_drive", person_id)
+    ]
+
+
+def test_google_reingest_revokes_source_grants_on_successful_empty_acl():
+    person_id = UUID("11111111-1111-1111-1111-111111111111")
+    store = _google_store()
+    payload = DocIngest(url="https://drive.google.com/file/d/z")
+    first = ingest_doc(
+        payload,
+        storage=store,
+        fetchers=FakeFetchers(
+            result=FetchResult(
+                title="Private",
+                content="secret",
+                permissions=[
+                    SourcePermission(
+                        permission_id="p1",
+                        principal_type="user",
+                        principal="member@example.com",
+                        role="reader",
+                    )
+                ],
+            )
+        ),
+        directory=FakeDirectory(people={"member@example.com": person_id}),
+        actor="bot",
+    )
+    second = ingest_doc(
+        payload,
+        storage=store,
+        fetchers=FakeFetchers(
+            result=FetchResult(title="Private", content="secret", permissions=[])
+        ),
+        directory=FakeDirectory(),
+        actor="bot",
+    )
+
+    assert second.doc.id == first.doc.id
+    assert store.list_grants(first.doc.id) == []
+    assert any("no mapped audience" in warning for warning in second.warnings)
+
+
+def test_google_ingest_unknown_email_creates_no_phantom_grant_or_content():
+    store = _google_store()
+    result = ingest_doc(
+        DocIngest(url="https://drive.google.com/file/d/z"),
+        storage=store,
+        fetchers=FakeFetchers(
+            result=FetchResult(
+                title="Private",
+                content="secret",
+                permissions=[
+                    SourcePermission(
+                        permission_id="p1",
+                        principal_type="user",
+                        principal="external@example.com",
+                        role="reader",
+                    )
+                ],
+            )
+        ),
+        directory=FakeDirectory(),
+        actor="bot",
+    )
+
+    assert store.list_grants(result.doc.id) == []
+    assert store.get_doc_content(result.doc.id) is None
+    assert result.doc.title == result.doc.url
 
 
 def test_ingest_bad_team_id_when_directory_up_raises(store):
