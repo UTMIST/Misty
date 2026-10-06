@@ -80,12 +80,13 @@ SQL, kept in lockstep by parity tests):
 
 1. they personally own it (`owning_person_id` matches), **or**
 2. they're an active member of the owning team (`owning_team_id` ∈ their team ids), **or**
-3. the doc carries a matching grant — `org` (everyone), `person` (that person), or
-   `team` (a team they're on).
+3. the doc carries a matching grant — manual `org` (everyone), `person` (that person), or
+   manual `team` (a team they're on); a source-derived `team` grant additionally requires
+   Team Tracking to confirm that person's managed Google Group membership is synchronized.
 
 Team membership is resolved live from the directory. **If the directory is unreachable,
 the actor's team set is treated as empty** — a partial fail-closed: personally-owned and
-`org`-granted docs still resolve, team-granted ones are withheld rather than leaked.
+manual `org`-granted docs still resolve, team-granted ones are withheld rather than leaked.
 
 **Invisible docs return `404`, not `403`**, on every route that takes a `{doc_id}` —
 including the write routes. Distinguishing the two would leak the existence of a doc the
@@ -111,6 +112,7 @@ lacking a read scope is `403`. Neither falls through to `SEE_ALL`.
 | `POST` | `/docs/{id}/grants` | `docs:write` | Grant visibility to a person / team / the org |
 | `DELETE` | `/docs/{id}/grants` | `docs:write` | Revoke a grant |
 | `POST` | `/docs/{id}/refetch` | `docs:write` | Re-run the content fetch |
+| `POST` | `/docs/source-access/refresh-due` | `docs:write` | Refresh due Google ACLs/content in a bounded batch |
 | `GET` | `/sources` | `docs:read` | List source kinds |
 | `GET` | `/sources/{id}` | `docs:read` | Get one source |
 
@@ -132,6 +134,8 @@ Every doc-returning endpoint responds with this object:
 | `owning_person_label` | string \| null | Cached label; may be null pending backfill |
 | `content_snapshot` | string \| null | Best-effort text snapshot |
 | `fetched_at` | datetime \| null | When the snapshot was last taken |
+| `source_access_synced_at` | datetime \| null | Last complete successful source ACL reconciliation |
+| `source_access_attempted_at` | datetime \| null | Last attempted source ACL refresh, successful or not |
 | `active` | bool | `false` = soft-deleted |
 | `tags` | string[] | Lowercased, trimmed |
 | `grants` | DocGrant[] | Who can see this doc beyond its owners — see below |
@@ -147,6 +151,14 @@ A **`DocGrant`**:
 | `grantee_label` | string \| null | Resolved from the directory at the API layer |
 | `created_at` | datetime | |
 | `created_by` | string | Attested actor |
+| `origin` | `"manual"` \| `"google_drive"` | Manual and source-derived grants coexist independently |
+| `source_permission_id` | string \| null | Opaque Drive permission id for source grants |
+| `source_principal` | string \| null | Normalized source email for provenance |
+| `source_role` | string \| null | Drive role observed at reconciliation |
+| `source_inherited` | bool | Whether Drive reports the permission as inherited |
+| `source_inherited_from` | string[] | Parent folder/shared-drive ids reported by Drive |
+| `source_expires_at` | datetime \| null | Expiration reported by Drive, when present |
+| `expires_at` | datetime \| null | Source grants fail closed after this time; manual grants do not expire |
 
 ---
 
@@ -212,11 +224,14 @@ those.
 
 ### Content fetch (best-effort)
 
-If the derived source has content fetching enabled (`web`, `github`), the service tries to
-fetch a title and snapshot at ingest. A fetch failure is **never** fatal: the doc is still
-created, `title` falls back to the caller's title or the URL, and a warning is appended.
-Sources that require auth (Google Drive/Docs/Sheets/Slides, Notion) are skipped with a
-warning; no snapshot is taken.
+If the source has content fetching enabled (`web`, `github`, and the Google sources), the
+service tries to fetch a title and snapshot at ingest. Google responses must also contain a
+complete ACL. User shares resolve only through primary or verified additional emails;
+group shares resolve only through Team Tracking's active, membership-synced managed-group
+mapping. Unknown/external emails, unmapped or legacy groups, domain shares, and link-wide
+(`anyone`) shares create no grant. A Google fetch with no mapped audience stores no fetched
+title or content. A fetch/ACL failure is non-fatal at ingest: the URL is catalogued with a
+warning and no source-derived access.
 
 ### Owner validation and degrade
 
@@ -315,6 +330,8 @@ Removing a tag that isn't present is a no-op. Returns the updated `Doc` (**200**
 
 Scope: `docs:write`. Makes a doc visible to a person, a team, or the whole org, beyond
 whoever owns it. **Idempotent** — re-granting the same grantee is a no-op, not an error.
+These endpoints manage only `origin="manual"` rows. A manual row may coexist with a
+source-derived row for the same grantee; removing it never revokes or alters source state.
 
 ```bash
 # Share with one team
@@ -351,7 +368,7 @@ and `{"grantee_type": "team"}` are both **422**.
 
 Scope: `docs:write`. Same request body as `POST`; the grantee is identified in the **body**,
 not the path (an `org` grant has no id to put there). Removing a grant that isn't present
-is a no-op. Returns the updated `Doc`.
+is a no-op. Only the matching manual grant is removed. Returns the updated `Doc`.
 
 Revoking never removes *ownership*-based visibility — an owner keeps access regardless of
 grants.
@@ -360,8 +377,10 @@ grants.
 
 ## `POST /docs/{id}/refetch` — refresh the snapshot
 
-Scope: `docs:write`. Re-runs the content fetch for an existing doc on demand (there is no
-scheduled/background refetch). On success, updates `title` (if the fetch returned one),
+Scope: `docs:write`. Re-runs the content fetch for an existing doc on demand. For Google
+sources it first resolves the complete returned ACL and atomically replaces only the
+`google_drive` grants. A successful empty resolution revokes all source-derived access and
+does not store newly fetched content. On a mapped result, it updates `title`,
 `content_snapshot`, and `fetched_at`, then returns the updated `Doc`.
 
 ### Status codes
@@ -370,11 +389,25 @@ scheduled/background refetch). On success, updates `title` (if the fetch returne
 |--------|---------|
 | **200 OK** | Refetched; returns the updated `Doc` |
 | **404 Not Found** | No such doc |
-| **502 Bad Gateway** | The fetch failed (`FetchError`) — includes the case where no fetcher is registered for the doc's source (auth-gated sources) |
+| **502 Bad Gateway** | Fetch failed, Google ACL was omitted/incomplete, or directory resolution was unavailable; prior source grants remain until their expiry |
 | **401 / 403** | Auth failure / missing scope |
 
 Note the contrast with ingest: at ingest a fetch failure degrades to a warning, but an
 explicit `refetch` surfaces the failure as **502** so the caller knows it didn't work.
+
+## `POST /docs/source-access/refresh-due` — scheduled reconciliation
+
+Scope: `docs:write`. Query parameter `limit` defaults to 10 and is constrained to 1–100.
+Selects active Google docs whose last complete ACL sync is older than
+`SOURCE_ACCESS_REFRESH_AFTER_HOURS` (24 by default), refreshes each independently, and
+returns `{ "attempted", "refreshed", "failed" }`. One failed document does not stop the
+batch. Failed rows record their attempt time, so they do not starve later rows during the
+same daily drain; run until `attempted` is less than `limit`.
+
+Source grants expire after `SOURCE_ACCESS_MAX_AGE_HOURS` (48 by default). A failed refresh
+does not erase a last-known-good grant immediately, but an extended connector, directory,
+or scheduler outage eventually makes it unusable. Manual grants and ownership remain
+independent and do not expire. `MAX_AGE` must be greater than `REFRESH_AFTER`.
 
 ---
 

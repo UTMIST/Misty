@@ -28,7 +28,12 @@ See `docs/ARCHITECTURE.md` for the full data flow.
 
 ## Dependency on connectors
 
-The Google sources (`gdocs`, `gsheets`, `gslides`, `gdrive`) fetch their content by calling the [connectors](../connectors/) service over HTTP (`POST /fetch`) rather than holding Google credentials themselves — see `src/fetch/connectors.py` and `src/fetch/registry.py`. Configure it with `CONNECTORS_BASE_URL` (default `http://localhost:8005`) and `CONNECTORS_API_KEY`.
+The Google sources (`gdocs`, `gsheets`, `gslides`, `gdrive`) fetch content and complete
+Drive ACL evidence from [connectors](../connectors/) over HTTP (`POST /fetch`) rather than
+holding Google credentials themselves. documentation-system resolves user emails only
+through verified directory identities and group emails only through Team Tracking mappings
+whose Google membership sync is healthy. Broad and unmapped principals produce no grant.
+Configure the dependency with `CONNECTORS_BASE_URL` and `CONNECTORS_API_KEY`.
 
 Connectors reachability at request time is soft for ingest but hard for refetch: a connectors outage during `POST /docs` is caught and turned into a per-doc warning (the doc is still catalogued, just without a content snapshot) — see the `FetchError` handling in `src/ingest.py`. During `POST /docs/{id}/refetch`, the same `FetchError` is instead surfaced as an HTTP 502 — see `src/api/routers/docs.py` — because refetch is an explicit user-initiated action rather than a batch ingest. It is also a soft dependency at *boot* in staging/production: `verify_production_secrets()` (`src/config.py`) logs a startup warning, not a boot refusal, if `CONNECTORS_API_KEY` is still the built-in dev default — this service still starts and catalogues docs, it just can't fetch Google-source content. See `docs/DEPLOYMENT.md` for the recommended (not required) deploy order (connectors before documentation-system, so Google fetches work from the start).
 
@@ -125,7 +130,10 @@ documentation-system/
 │       ├── 001_initial_schema.py   Creates docs, doc_tags, sources, api_keys tables
 │       ├── 002_seed_sources.py     Seeds the 8 built-in sources
 │       ├── 003_doc_grants.py       Adds the doc_grants table (visibility / on-behalf-of)
-│       └── 004_docs_url_unique_active.py   Partial unique index on url_normalized WHERE active (DB-level dedup)
+│       ├── 004_docs_url_unique_active.py   Partial unique index on active normalized URLs
+│       ├── 005_doc_content.py       Stores full extracted content + hash
+│       ├── 006_enable_google_content_fetch.py  Enables Google connector fetches
+│       └── 007_source_document_access.py  Source grant provenance, expiry, sync time
 │
 ├── tests/                      Test suite (59 fast + 7 Postgres, gated)
 │   ├── conftest.py              build_seed_sources() — shared seed matching migration 002
@@ -159,7 +167,7 @@ The service is built around three swappable Protocols, so no concrete dependency
 
 - **`StorageAdapter`** (`contracts/storage.py`) — persistence for docs, sources, and API keys. Two implementations: `InMemoryStorageAdapter` (tests) and `PostgresStorageAdapter` (production). Swapping to Postgres in Task 15 required zero changes to `src/ingest.py` or the routers.
 - **`Fetcher`** (`contracts/fetcher.py`) — `fetch(url) -> FetchResult`. `FetcherRegistry` maps a `source_id` to a concrete fetcher (`web.py`, `github.py`); unknown or auth-required sources simply skip fetching. The web fetcher applies SSRF egress protection (http/https scheme allowlist, public-address validation that blocks private/reserved/link-local/CGN/metadata IPs, per-hop redirect revalidation, pinned connections) and rejects a blocked or malformed URL as a `BlockedURLError` (a `FetchError` subclass). Fetch failures raise `FetchError`, which `ingest_doc` catches and turns into a warning — a doc is still created with the URL as its title.
-- **`DirectoryClient`** (`contracts/directory.py`) — `get_team_label` / `get_person_label`, backed by `HttpDirectoryClient` calling UTMIST's team-tracking service. When team-tracking is unreachable, `DirectoryUnavailable` is caught and ingest degrades: the id is stored, the label is left null with a warning, and a later read/update backfills the label once the directory is reachable again (see `_backfill_labels` in `src/api/routers/docs.py`).
+- **`DirectoryClient`** (`contracts/directory.py`) — resolves owner labels, verified email identities, active memberships, and only membership-synced Google Group mappings. Owner-label outages degrade; an outage during ACL reconciliation aborts the whole reconciliation so a partial result can never revoke or broaden access.
 
 ## Auth model
 
@@ -189,6 +197,7 @@ All endpoints require `X-API-Key` with the appropriate scope.
 | POST | `/docs/{id}/tags` | `docs:write` | Add a tag |
 | DELETE | `/docs/{id}/tags/{tag}` | `docs:write` | Remove a tag |
 | POST | `/docs/{id}/refetch` | `docs:write` | Re-run content fetch for an existing doc |
+| POST | `/docs/source-access/refresh-due` | `docs:write` | Refresh a bounded batch whose Google ACL is due |
 | GET | `/sources` | `docs:read` | List sources (`?active_only=false`) |
 | GET | `/sources/{id}` | `docs:read` | Get one source |
 
@@ -233,13 +242,15 @@ uv run ruff format --check .
 
 ## Status
 
-v1 covers: the docs + sources registry, idempotent ingest with DB-enforced dedup (partial unique index on active URLs), best-effort content fetching with SSRF egress protection and graceful degradation, team-tracking-backed ownership with label backfill, tag management, soft delete (`active` flag), Level 2 scoped API keys with an attested-actor audit trail, and both storage adapters — 59 passing fast tests (plus 7 Postgres integration tests behind `RUN_PG_TESTS`).
+v1 covers the docs + sources registry, DB-enforced dedup, source-ACL reconciliation with
+revocation and fail-closed expiry, best-effort content fetching with SSRF protection,
+team-tracking-backed ownership, tags, soft delete, scoped API keys, and both storage adapters.
 
 **Deferred (per design §3/§11 non-goals):**
 
 - Full-text / semantic search over `content_snapshot` — the snapshot is stored for future indexing but no search endpoint exists yet.
-- Scheduled/background refetching — `POST /docs/{id}/refetch` is on-demand only; no cron or queue re-fetches stale snapshots.
-- Additional fetchers — only `web` and `github` fetchers exist; Google Drive/Docs/Sheets/Slides, Notion, and YouTube are registered as sources but have no fetcher implementation yet (auth-gated sources skip fetching by design).
+- An in-process scheduler or queue — Railway (or another external scheduler) calls the bounded refresh endpoint daily.
+- Additional fetchers — Notion and YouTube remain registered sources without fetcher implementations.
 - Bulk import — ingest is one URL per request; no CSV/bulk endpoint.
 - Pagination — list endpoints return all matching rows, adequate for current catalog size.
 - Admin UI — no dashboard; catalog browsing goes through the API or a future thin client.

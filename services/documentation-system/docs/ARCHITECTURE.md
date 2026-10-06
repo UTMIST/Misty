@@ -142,8 +142,9 @@ changes. So a doc ingested during a directory outage heals itself on the next re
 
 ## Data model
 
-Five tables (`src/storage/schema.py`; `001` creates the first four, `002` seeds sources,
-`003` adds `doc_grants`, `004` hardens dedup):
+Six tables (`src/storage/schema.py`; `001` creates the first four, `002` seeds sources,
+`003` adds `doc_grants`, `004` hardens dedup, `005` adds `doc_content`, and `007` adds
+source-access provenance/expiry):
 
 ### `sources`
 
@@ -155,7 +156,8 @@ The registry of URL kinds. `id` is a slug primary key. Key columns: `label`,
 
 The catalog itself. Key columns: `url`, `url_normalized` (indexed dedup key), `title`,
 `source_id` (FK → `sources.id`, defaults `'web'`), `description`, the two
-`owning_*_id` / `owning_*_label` pairs, `content_snapshot`, `fetched_at`, and `active`
+`owning_*_id` / `owning_*_label` pairs, `content_snapshot`, `fetched_at`,
+`source_access_synced_at`, `source_access_attempted_at`, and `active`
 (the soft-delete flag). Indexed on `url_normalized`, both owner ids, and `source_id`.
 
 Migration `004` adds a **partial unique index** on `url_normalized WHERE active`, so
@@ -165,26 +167,55 @@ re-cataloguing the same URL later.
 
 ### `doc_grants`
 
-Who may see a doc, beyond its owners (migration `003`). One row per grant:
+Who may see a doc, beyond its owners (migrations `003` and `007`). One row per grant:
 `doc_id` (FK → `docs.id`, `ON DELETE CASCADE`), `grantee_type` (`person` / `team` /
-`org`), `grantee_id` (UUID, **null for `org`**), plus `created_at` / `created_by`.
+`org`), `grantee_id` (UUID, **null for `org`**), and `origin` (`manual` or
+`google_drive`). Source rows also retain permission id, normalized principal, role,
+inherited parent/shared-drive ids, source expiry, and effective expiry. Effective expiry is
+the earlier of Drive's permission expiration and the configured staleness deadline.
 
-Three constraints carry the invariants, and the third is the non-obvious one:
+Four constraints/indexes carry the grant invariants:
 
 - `ck_doc_grants_grantee_shape` — a CHECK enforcing that `org` grants have a null
   `grantee_id` while `person`/`team` grants have a non-null one. The same rule is
   validated in `contracts/types.py`, so a bad shape is a 422 long before it reaches the DB;
   the CHECK is the backstop.
-- `uq_doc_grants_grantee` — unique on (`doc_id`, `grantee_type`, `grantee_id`), which is
-  what makes `add_grant` idempotent.
-- `uq_doc_grants_org` — a *partial* unique index on `doc_id WHERE grantee_type = 'org'`.
+- `uq_doc_grants_manual_grantee` — partial uniqueness for manual person/team grants.
+- `uq_doc_grants_org` — a *partial* unique index on manual org grants.
   It exists because the constraint above **cannot** catch duplicate org grants: their
   `grantee_id` is NULL, and in SQL `NULL != NULL`, so two identical org rows don't collide.
   Without this index, "share with the org" twice would insert two rows.
+- `uq_doc_grants_source_permission` — preserves one resolved row per source permission and
+  grantee while allowing a manual row for that same grantee to coexist.
 
 Grantee ids are **not** foreign keys — the people and teams they point at live in
 team-tracking's database, which this service never touches directly. Labels are resolved
 over HTTP at the API layer and never stored on the grant.
+
+### Source ACL reconciliation
+
+Google connector responses carry content and a complete Drive permission list. The
+connector reads that list before any export/download. documentation-system then resolves
+`user` entries through primary or verified `email` identities and `group` entries only
+through Team Tracking's fail-closed, membership-synced Google Group lookup. It never
+infers Google Group membership from an ordinary Team Tracking membership.
+
+Unknown/external emails, unmapped/legacy groups, domain-wide shares, and `anyone` shares
+produce warnings but no grant. This deliberately means a broadly shared file can remain
+absent from the catalog's source-backed audience until an explicit supported mapping
+exists. Email verification identifies the UTMIST person; the permission returned by
+Google is the separate evidence that the Google principal is actually entitled.
+
+`replace_source_grants` is atomic per document and origin. A successful empty result is a
+revocation; a connector/directory failure keeps the last complete result. Source grants
+expire after the configured maximum age, so a prolonged refresh outage fails closed.
+Manual grants and ownership are independent rows/rules and are never silently created or
+deleted by source reconciliation.
+
+Visibility keeps two team sets in the actor context: ordinary active directory memberships
+for ownership/manual grants, and separately confirmed synchronized Google memberships for
+source-derived team grants. This prevents a newly added directory member from inheriting a
+Drive document before #237 has actually added them to the Google Group.
 
 ### `doc_tags`
 
@@ -206,10 +237,10 @@ Every table carries the audit quartet `created_at` / `updated_at` / `created_by`
 |----|-------|----------|:---:|:---:|
 | `web` | Web page | (none) | no | **yes** |
 | `github` | GitHub | `github.com` | no | **yes** |
-| `gdrive` | Google Drive | `drive.google.com` | yes | no |
-| `gdocs` | Google Docs | `docs.google.com/document` | yes | no |
-| `gsheets` | Google Sheets | `docs.google.com/spreadsheets` | yes | no |
-| `gslides` | Google Slides | `docs.google.com/presentation` | yes | no |
+| `gdrive` | Google Drive | `drive.google.com` | yes | **yes** |
+| `gdocs` | Google Docs | `docs.google.com/document` | yes | **yes** |
+| `gsheets` | Google Sheets | `docs.google.com/spreadsheets` | yes | **yes** |
+| `gslides` | Google Slides | `docs.google.com/presentation` | yes | **yes** |
 | `notion` | Notion | `notion.so`, `notion.site` | yes | no |
 | `youtube` | YouTube | `youtube.com`, `youtu.be` | no | no |
 
@@ -254,7 +285,7 @@ this is the file where a divergence becomes a silent data leak.
 |---|---|---|
 | `SEE_ALL` | a `docs:read:all`/`admin` key with no `X-On-Behalf-Of`; or *any* write key with no `X-On-Behalf-Of` | every doc |
 | `DENY` | a plain `docs:read` key with no `X-On-Behalf-Of` | **no docs at all** |
-| `Actor(person_id, team_ids)` | `X-On-Behalf-Of: <uuid>` present | that person's view |
+| `Actor(person_id, team_ids, source_team_ids)` | `X-On-Behalf-Of: <uuid>` present | that person's directory and confirmed Google-group view |
 
 `DENY` is the design's sharpest edge and it's deliberate: a bare `docs:read` key carries
 no identity, so it has no principled basis for seeing anything. Consumers are expected to
