@@ -14,6 +14,7 @@ const actingAsInput = document.getElementById('actingAs');
 const peopleDatalist = document.getElementById('people-list');
 const resetBtn = document.getElementById('reset-btn');
 const commandList = document.getElementById('command-list');
+const helperReplyBtn = document.getElementById('helper-reply-btn');
 const transcript = document.getElementById('transcript');
 const formStrip = document.getElementById('form-strip');
 
@@ -23,6 +24,7 @@ async function main() {
   renderSidebar();
   initTopStrip();
   refreshPeoplePicker();
+  wireHelperReplyButton();
   wireResetButton();
 }
 
@@ -89,7 +91,7 @@ function initTopStrip() {
     state.actingAs = person && person.discord_id ? person.discord_id : actingAsInput.value;
     localStorage.setItem('actingAs', state.actingAs);
     // Refresh any visible Run button.
-    const btn = formStrip.querySelector('button');
+    const btn = formStrip.querySelector('button[type="submit"]');
     if (btn) btn.disabled = !state.actingAs;
   });
 }
@@ -106,6 +108,15 @@ function refreshPeoplePicker() {
       peopleDatalist.appendChild(opt);
     }
   }
+}
+
+function wireHelperReplyButton() {
+  helperReplyBtn.addEventListener('click', () => {
+    state.selectedKey = 'helper-reply';
+    for (const b of commandList.querySelectorAll('button')) b.classList.remove('active');
+    helperReplyBtn.classList.add('active');
+    renderHelperReplyForm();
+  });
 }
 
 function wireResetButton() {
@@ -135,6 +146,7 @@ function selectCommand(key) {
   for (const b of commandList.querySelectorAll('button')) {
     b.classList.toggle('active', b.dataset.key === key);
   }
+  helperReplyBtn.classList.remove('active');
   renderForm(cmd);
 }
 
@@ -151,6 +163,7 @@ function renderForm(cmd) {
     form.appendChild(wrapper);
   }
   const button = document.createElement('button');
+  button.type = 'submit';
   button.textContent = 'Run';
   button.disabled = !state.actingAs;
   form.appendChild(button);
@@ -159,6 +172,75 @@ function renderForm(cmd) {
     submitForm(cmd, form);
   });
   formStrip.appendChild(form);
+}
+
+function renderHelperReplyForm() {
+  formStrip.innerHTML = `
+    <h3>↪ Reply to Misty</h3>
+    <p class="form-note">Simulates a Discord reply inside a Misty-created thread. Misty responds only when the reply ping is on; every message remains in the simulated thread context.</p>
+  `;
+  const form = document.createElement('form');
+  const input = document.createElement('textarea');
+  input.name = 'content';
+  input.required = true;
+  input.placeholder = 'Ask a follow-up…';
+  input.rows = 3;
+  form.appendChild(input);
+
+  const pingLabel = document.createElement('label');
+  pingLabel.className = 'reply-ping-toggle';
+  const ping = document.createElement('input');
+  ping.type = 'checkbox';
+  ping.checked = true;
+  pingLabel.append(ping, document.createTextNode(' Ping @Misty (reply ping ON)'));
+  form.appendChild(pingLabel);
+
+  const send = document.createElement('button');
+  send.type = 'submit';
+  send.textContent = 'Reply';
+  send.disabled = !state.actingAs;
+  form.appendChild(send);
+
+  const reset = document.createElement('button');
+  reset.type = 'button';
+  reset.textContent = 'Reset thread';
+  reset.addEventListener('click', resetHelperThread);
+  form.appendChild(reset);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const content = input.value.trim();
+    if (!content) return;
+    const replyPing = ping.checked;
+    appendYouText(content, true, replyPing);
+    input.value = '';
+    send.disabled = true;
+    try {
+      const res = await fetch('/api/helper/reply', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ content, actingAs: state.actingAs, replyPing }),
+      });
+      const payload = await res.json();
+      if (!res.ok) appendErrorMessage(`HTTP ${res.status}: ${payload.error || payload.content}`);
+      else if (payload.triggered !== false) appendBotMessage(payload);
+    } catch (err) {
+      appendErrorMessage(err.message);
+    } finally {
+      send.disabled = !state.actingAs;
+    }
+  });
+  formStrip.appendChild(form);
+}
+
+async function resetHelperThread() {
+  try {
+    const res = await fetch('/api/helper/thread', { method: 'DELETE' });
+    if (!res.ok) throw new Error(`reset failed: HTTP ${res.status}`);
+    appendBotMessage({ content: '🧹 Simulated helper thread reset.', ephemeral: true });
+  } catch (e) {
+    appendErrorMessage(e.message);
+  }
 }
 
 function renderInput(o) {
@@ -235,6 +317,20 @@ function appendYouMessage(cmd, options) {
     .join(' ');
   const el = messageElement({ author: 'You', avatar: 'Y', klass: 'you' });
   el.querySelector('.body').textContent = `/${cmd.displayName} ${optsStr}`.trim();
+  transcript.appendChild(el);
+  scrollToBottom();
+}
+
+function appendYouText(content, isReply = false, replyPing = true) {
+  const el = messageElement({ author: 'You', avatar: 'Y', klass: 'you' });
+  const body = el.querySelector('.body');
+  if (isReply) {
+    const context = document.createElement('div');
+    context.className = 'reply-context';
+    context.textContent = `↪ Replying to Misty · reply ping ${replyPing ? 'ON' : 'OFF'}`;
+    body.appendChild(context);
+  }
+  body.appendChild(document.createTextNode(content));
   transcript.appendChild(el);
   scrollToBottom();
 }

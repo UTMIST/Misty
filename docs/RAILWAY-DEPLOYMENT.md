@@ -286,6 +286,13 @@ not a documentation-system indexing pipeline.
 both services reject any other shape at boot, deliberately, so a malformed
 variable fails the deploy rather than silently disabling auth.
 
+Before deploying the Discord bot, enable **Message Content Intent** for both the
+staging and production Discord applications in Developer Portal → **Bot** →
+**Privileged Gateway Intents**. The bot requests it at startup so members can
+use helper threads with full recent-message context, including messages that did
+not mention Misty. Without the portal toggle, Discord rejects the gateway
+connection or omits that content.
+
 ## 5. Register Discord slash commands
 The bot has to tell Discord which slash commands it supports. **This happens
 automatically on every deploy**: `discord-bot/railway.json` sets

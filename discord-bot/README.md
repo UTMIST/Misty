@@ -101,6 +101,11 @@ cd discord-bot
 npm start                                # or: npm run dev for both surfaces
 ```
 
+Before starting Discord mode, enable **Message Content Intent** under Discord
+Developer Portal → your application → **Bot** → **Privileged Gateway Intents**.
+The bot requests this intent so it can include the full recent thread history in
+helper requests, including messages that did not mention Misty.
+
 Wait for `Logged in as <bot name>` in terminal 2, then use the slash commands
 in whichever Discord server you invited the bot to.
 
@@ -196,6 +201,13 @@ and skips them.
 - `/team roster team:<slug> [as_of:<YYYY-MM-DD>]` (linked) — show a team's current roster.
 - `/my-teams` (linked) — list your active memberships.
 - `/doc <add|list|show|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
+
+- `@Misty <question>` (linked) — opens a helper thread and answers using the
+  thread's recent history. In a thread Misty created, replying directly to one of
+  Misty's messages continues the conversation when the reply ping is enabled.
+  Ping-off replies, replies to other users, replies in regular channels, and replies
+  in threads Misty did not create do not trigger the helper. A typed leading
+  `@Misty` remains an independent trigger, including inside a Discord reply.
 
 - `/record start [name:<meeting name>]` (**linked**) — joins your current voice channel and starts
   recording the meeting (one recording at a time **per guild** — sessions are
@@ -356,6 +368,12 @@ Click **Reset DB** in the top strip to re-clone from your main DB whenever you
 want a clean slate — no restart required. The default personas are re-seeded
 after every reset.
 
+Choose **Reply to Misty** under **Helper thread** to simulate a Discord reply. Toggle
+**Ping @Misty** to test both reply-ping settings: Misty answers only when it is on,
+while ping-off messages remain part of the simulated thread history. The playground
+sends that history with every triggered follow-up. **Reset thread** clears only this
+helper transcript; **Reset DB** also clears it.
+
 ### Picker only shows *linked* people
 
 The "Acting as" datalist only surfaces people whose Discord identifier is
@@ -451,6 +469,7 @@ local `.env`.
 | `src/messages.js` | Pure reply-string rendering. |
 | `src/commands/*.js` | Thin discord.js interaction handlers + registry. |
 | `src/index.js` | Client setup + interaction routing. |
+| `src/helperFlow.js` | Shared helper-bot authorization and answer handling used by Discord and the web playground. |
 | `src/registerCommands.js` | Slash-command registration (stable → global; beta → testing guild only). Runs as Railway's `preDeployCommand` on every deploy; `npm run register` runs it locally. |
 | `src/defineCommand.js` | Neutral, surface-agnostic command factory. |
 | `src/adapters/discord.js` | The ONLY module that imports from discord.js — turns interactions into intents. |
