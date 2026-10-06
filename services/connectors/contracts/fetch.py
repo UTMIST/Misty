@@ -1,4 +1,19 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+
+class SourcePermission(BaseModel):
+    """One effective Google Drive permission returned with fetched content."""
+
+    permission_id: str = Field(min_length=1)
+    principal_type: Literal["user", "group", "domain", "anyone"]
+    principal: str | None = None
+    role: str = Field(min_length=1)
+    inherited: bool = False
+    inherited_from: list[str] = []
+    allow_file_discovery: bool | None = None
+    expiration_time: str | None = None
 
 
 class FetchRequest(BaseModel):
@@ -13,3 +28,6 @@ class FetchResponse(BaseModel):
     title: str | None = None
     content: str | None = None
     warnings: list[str] = []
+    # None means this source has no ACL contract. Google sources always return
+    # a complete list (possibly empty); callers must not treat None as public.
+    permissions: list[SourcePermission] | None = None

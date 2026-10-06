@@ -13,6 +13,7 @@ import threading
 from src.sources.base import (
     SourceNotConfigured,
     SourceNotFound,
+    SourcePermission,
     SourceResult,
     SourceUnsupported,
     SourceUnavailable,
@@ -72,6 +73,65 @@ EXTRACTORS: dict[str, Extractor] = {
 
 # Uploaded (non-Google-native) text files have real bytes to download.
 _MEDIA_EXTRACTOR = DriveExportExtractor(export_mime=None)
+
+_PERMISSION_FIELDS = (
+    "nextPageToken,permissions(id,type,emailAddress,domain,role,allowFileDiscovery,deleted,"
+    "expirationTime,"
+    "permissionDetails(inherited,inheritedFrom))"
+)
+
+
+def _read_permissions(drive, file_id: str) -> list[SourcePermission]:
+    """Read the complete effective ACL before any document content is extracted."""
+    permissions: list[SourcePermission] = []
+    page_token = None
+    while True:
+        response = execute(
+            drive.permissions().list(
+                fileId=file_id,
+                supportsAllDrives=True,
+                fields=_PERMISSION_FIELDS,
+                pageToken=page_token,
+            )
+        )
+        for raw in (response or {}).get("permissions", []):
+            if raw.get("deleted"):
+                continue
+            principal_type = raw.get("type")
+            permission_id = raw.get("id")
+            role = raw.get("role")
+            if principal_type not in {"user", "group", "domain", "anyone"}:
+                continue
+            if not permission_id or not role:
+                raise SourceUnavailable("google returned malformed permission metadata")
+            principal = (
+                raw.get("emailAddress")
+                if principal_type in {"user", "group"}
+                else raw.get("domain")
+                if principal_type == "domain"
+                else None
+            )
+            inherited_from = tuple(
+                detail["inheritedFrom"]
+                for detail in raw.get("permissionDetails", [])
+                if detail.get("inherited") and detail.get("inheritedFrom")
+            )
+            inherited = any(detail.get("inherited") for detail in raw.get("permissionDetails", []))
+            permissions.append(
+                SourcePermission(
+                    permission_id=permission_id,
+                    principal_type=principal_type,
+                    principal=principal,
+                    role=role,
+                    inherited=inherited,
+                    inherited_from=inherited_from,
+                    allow_file_discovery=raw.get("allowFileDiscovery"),
+                    expiration_time=raw.get("expirationTime"),
+                )
+            )
+        page_token = (response or {}).get("nextPageToken")
+        if not page_token:
+            return permissions
 
 
 def required_scopes() -> tuple[str, ...]:
@@ -212,6 +272,11 @@ class GoogleSource:
         name = (meta or {}).get("name")
         mime = (meta or {}).get("mimeType") or ""
 
+        # ACL completeness is an authorization prerequisite. Read it before
+        # the extractor downloads/exports any content so broad connector
+        # credentials alone never make a content fetch acceptable.
+        permissions = _read_permissions(services["drive"], file_id)
+
         extractor = EXTRACTORS.get(mime)
         if extractor is None:
             if not mime.startswith("text/"):
@@ -236,4 +301,5 @@ class GoogleSource:
             title=name,
             content=extracted.text[: self._max_content_chars],
             warnings=list(extracted.warnings),
+            permissions=permissions,
         )
