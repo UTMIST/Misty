@@ -43,13 +43,9 @@ def _key(client, name, scopes):
 def test_unconfigured_channel_is_empty(client):
     resp = client.get(URL, headers=AUTH)
     assert resp.status_code == 200
-    assert resp.json() == {
-        "guild_id": "111",
-        "channel_id": "222",
-        "team_ids": [],
-        "updated_at": None,
-        "updated_by": None,
-    }
+    body = resp.json()
+    assert body.pop("version")
+    assert body == {"guild_id": "111", "channel_id": "222", "team_ids": [], "updated_by": None}
 
 
 def test_replace_multiple_teams_then_read(client):
@@ -60,7 +56,7 @@ def test_replace_multiple_teams_then_read(client):
 
     got = client.get(URL, headers=AUTH).json()
     assert sorted(got["team_ids"]) == sorted([a, b])
-    assert got["updated_at"] is not None
+    assert got["version"] == put.json()["version"]
     # Other channels are unaffected.
     assert client.get("/channels/111/333/teams", headers=AUTH).json()["team_ids"] == []
 
@@ -78,7 +74,9 @@ def test_replace_with_empty_list_clears(client):
     resp = client.put(URL, json={"team_ids": []}, headers=AUTH)
     assert resp.status_code == 200
     assert resp.json()["team_ids"] == []
-    assert resp.json()["updated_at"] is None
+    assert (
+        resp.json()["version"] == client.get("/channels/1/1/teams", headers=AUTH).json()["version"]
+    )
 
 
 def test_delete_clears_and_is_idempotent(client):
@@ -95,7 +93,7 @@ def test_retired_team_is_dropped_and_bumps_version(client):
     client.patch(f"/teams/{a}", json={"active": False}, headers=AUTH)
     after = client.get(URL, headers=AUTH).json()
     assert after["team_ids"] == [b]
-    assert after["updated_at"] > before["updated_at"]
+    assert after["version"] != before["version"]
 
 
 def test_retired_team_rejected_on_put(client):

@@ -753,18 +753,20 @@ Scopes: `channels:read` for GET, `channels:write` for PUT/DELETE.
   "guild_id": "111111111111111111",
   "channel_id": "222222222222222222",
   "team_ids": ["660e8400-e29b-41d4-a716-446655440001"],
-  "updated_at": "2026-10-03T19:00:00Z",
-  "updated_by": "discord-bot"
+  "updated_by": "discord-bot",
+  "version": "edad6e056c0095ff"
 }
 ```
 
-- `team_ids` lists **active** teams only. Retiring a team (`PATCH /teams/{id}` with `active: false`) removes it from every channel immediately, without a write here.
-- `updated_at` is a cache version: the latest of when the channel was configured and when any referenced team (retired ones included) was last updated. If it differs from the value you cached, refetch. `null` when unconfigured.
+- `team_ids` lists **active** teams only, sorted. Retiring a team (`PATCH /teams/{id}` with `active: false`) removes it from every channel immediately, without a write here.
+- `version` is a fingerprint of `team_ids` (a truncated SHA-256 of the sorted ids). It changes exactly when the channel's effective access changes, including a retirement, and is not derived from timestamps, so the order concurrent writes commit in cannot hide a change. Use it as a cache key; if it differs from the value you cached, drop what you cached. An unconfigured channel and one configured with no teams share the same version, because both grant nothing.
 - `updated_by` is the key that last configured the channel. `null` when unconfigured.
+
+Concurrent PUTs and DELETEs on the same channel are serialized: the last one to commit wins outright, never a mix of two requests.
 
 ### GET /channels/{guild_id}/{channel_id}/teams
 
-Read a channel's teams. Always 200. An unconfigured channel returns `team_ids: []` with `updated_at` and `updated_by` null, so there is no 404 to special-case.
+Read a channel's teams. Always 200. An unconfigured channel returns `team_ids: []` with `updated_by` null, so there is no 404 to special-case.
 
 ```bash
 curl -sS "http://localhost:8000/channels/111111111111111111/222222222222222222/teams" \

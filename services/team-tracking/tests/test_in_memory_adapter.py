@@ -675,11 +675,44 @@ def test_channel_teams_replace_retire_clear(adapter):
     adapter.update_team(a.id, TeamUpdate(active=False), actor="t")
     after = adapter.get_channel_teams("1", "2")
     assert after.team_ids == [b.id]
-    assert after.updated_at > set_.updated_at
+    assert after.version != set_.version
 
     adapter.clear_channel_teams("1", "2")
     assert adapter.get_channel_teams("1", "2").team_ids == []
     adapter.clear_channel_teams("1", "2")
+
+
+def test_channel_version_survives_out_of_order_retirement(adapter, monkeypatch):
+    """Retiring B stamps an *earlier* timestamp than a later edit to A (the
+    retire captured its time first but committed last). A timestamp-based
+    version would stay put and hide the revocation; the content version can't."""
+    import src.storage.in_memory as mod
+
+    a = adapter.create_team(TeamCreate(slug="a", label="A"), actor="t")
+    b = adapter.create_team(TeamCreate(slug="b", label="B"), actor="t")
+    adapter.replace_channel_teams("1", "2", [a.id, b.id], actor="bot")
+    t1, t2 = b.updated_at + timedelta(seconds=1), b.updated_at + timedelta(seconds=2)
+
+    monkeypatch.setattr(mod, "_now", lambda: t2)
+    adapter.update_team(a.id, TeamUpdate(label="A2"), actor="t")
+    cached = adapter.get_channel_teams("1", "2")
+
+    monkeypatch.setattr(mod, "_now", lambda: t1)
+    adapter.update_team(b.id, TeamUpdate(active=False), actor="t")
+    fresh = adapter.get_channel_teams("1", "2")
+
+    assert fresh.team_ids == [a.id]
+    assert fresh.version != cached.version
+
+
+def test_channel_version_is_order_independent_content_hash():
+    from contracts.types import ChannelTeams
+
+    x, y = uuid4(), uuid4()
+    make = lambda ids: ChannelTeams(guild_id="1", channel_id="2", team_ids=ids)  # noqa: E731
+    assert make([x, y]).version == make([y, x]).version
+    assert make([x]).version != make([x, y]).version
+    assert make([]).version != make([x]).version
 
 
 def test_channel_teams_rejects_inactive_and_keeps_config(adapter):

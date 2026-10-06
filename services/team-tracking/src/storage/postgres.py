@@ -533,15 +533,16 @@ class PostgresStorageAdapter:
     # --- Channel team access ---
 
     @staticmethod
+    def _lock_channel(conn, guild_id: str, channel_id: str) -> None:
+        """Serialize writers to one channel until commit. Row locks can't do this:
+        an unconfigured channel has no rows to lock. A hashtext collision only
+        over-serializes two unrelated channels, never under-serializes."""
+        conn.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"{guild_id}:{channel_id}"))))
+
+    @staticmethod
     def _read_channel_teams(conn, guild_id: str, channel_id: str) -> ChannelTeams:
         rows = conn.execute(
-            select(
-                channel_team_access.c.created_at,
-                channel_team_access.c.created_by,
-                teams.c.id,
-                teams.c.active,
-                teams.c.updated_at,
-            )
+            select(channel_team_access.c.created_by, teams.c.id, teams.c.active)
             .select_from(
                 channel_team_access.join(teams, channel_team_access.c.team_id == teams.c.id)
             )
@@ -556,7 +557,6 @@ class PostgresStorageAdapter:
             guild_id=guild_id,
             channel_id=channel_id,
             team_ids=sorted(r.id for r in rows if r.active),
-            updated_at=max(max(r.created_at, r.updated_at) for r in rows),
             updated_by=rows[0].created_by,
         )
 
@@ -568,6 +568,7 @@ class PostgresStorageAdapter:
         self, guild_id: str, channel_id: str, team_ids: list[UUID], *, actor: str
     ) -> ChannelTeams:
         with self._engine.begin() as conn:
+            self._lock_channel(conn, guild_id, channel_id)
             if team_ids:
                 # FOR SHARE blocks a concurrent retire until this transaction commits.
                 active = conn.execute(
@@ -600,6 +601,7 @@ class PostgresStorageAdapter:
 
     def clear_channel_teams(self, guild_id: str, channel_id: str) -> None:
         with self._engine.begin() as conn:
+            self._lock_channel(conn, guild_id, channel_id)
             conn.execute(
                 delete(channel_team_access).where(
                     channel_team_access.c.guild_id == guild_id,

@@ -180,7 +180,12 @@ Two unique constraints: a partial index named `uq_person_identifiers_person_prov
 | `created_at` | timestamptz NOT NULL | |
 | `created_by` | text NOT NULL | Attested key name of whoever last configured the channel |
 
-The teams whose documents may inform answers in a channel (consumed by the bot and by retrieval). One row per `(guild, channel, team)`; the composite PK doubles as the lookup index. A replace deletes and reinserts the channel's rows in one transaction, so there is no `updated_*` pair. Retired teams stay referenced but are filtered out on read, which is what makes retirement take effect without touching this table. The API's `updated_at` is derived (latest of the rows' `created_at` and the referenced teams' `updated_at`) so consumers can detect both kinds of change. No row means no access.
+The teams whose documents may inform answers in a channel (consumed by the bot and by retrieval). One row per `(guild, channel, team)`; the composite PK doubles as the lookup index. A replace deletes and reinserts the channel's rows in one transaction, so there is no `updated_*` pair. Retired teams stay referenced but are filtered out on read, which is what makes retirement take effect without touching this table. No row means no access.
+
+Two trade-offs worth knowing:
+
+- **Writers serialize on an advisory lock, not a row lock.** Replace and clear take `pg_advisory_xact_lock(hashtext(guild_id || ':' || channel_id))` first. A row lock can't work here: an unconfigured channel has no rows, so two concurrent first-time PUTs would both delete nothing, both insert, and commit the union of two requests. A hash collision between two channels only makes them wait on each other; it can never let two writers to one channel through together.
+- **The API's `version` is a content hash of the active `team_ids`, not a timestamp.** It's a `computed_field` on `ChannelTeams`, so both adapters get it without computing it. A timestamp-based version (e.g. the latest of the rows' and teams' `updated_at`) looks equivalent but isn't: `update_team` stamps its time before it commits, so a retirement that started first and committed last carries an older timestamp than an edit that has already been read, and the revocation goes unnoticed. A hash of what's actually granted can't be fooled by commit order.
 
 ### Convention: named exec seats
 

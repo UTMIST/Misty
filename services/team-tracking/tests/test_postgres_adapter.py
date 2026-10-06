@@ -1,3 +1,4 @@
+import threading
 from datetime import date
 from uuid import uuid4
 
@@ -555,11 +556,55 @@ def test_pg_channel_teams_replace_retire_clear(adapter):
     adapter.update_team(a.id, TeamUpdate(active=False), actor="t")
     after = adapter.get_channel_teams("1", "2")
     assert after.team_ids == [b.id]
-    assert after.updated_at > set_.updated_at
+    assert after.version != set_.version
 
     adapter.clear_channel_teams("1", "2")
     assert adapter.get_channel_teams("1", "2").team_ids == []
     adapter.clear_channel_teams("1", "2")
+
+
+def _race(n, fn):
+    """Run fn(i) on n threads released together; re-raise the first error."""
+    barrier = threading.Barrier(n)
+    errors = []
+
+    def run(i):
+        barrier.wait()
+        try:
+            fn(i)
+        except Exception as e:  # noqa: BLE001 — surfaced below
+            errors.append(e)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if errors:
+        raise errors[0]
+
+
+@pytest.mark.parametrize("attempt", range(5))
+def test_pg_concurrent_disjoint_replaces_never_union(adapter, attempt):
+    ts = [adapter.create_team(TeamCreate(slug=f"t{i}", label="T"), actor="t") for i in range(8)]
+    _race(8, lambda i: adapter.replace_channel_teams("1", "2", [ts[i].id], actor="bot"))
+    assert len(adapter.get_channel_teams("1", "2").team_ids) == 1
+
+
+@pytest.mark.parametrize("attempt", range(5))
+def test_pg_concurrent_overlapping_replaces_and_clears(adapter, attempt):
+    a, b, c = (adapter.create_team(TeamCreate(slug=s, label="T"), actor="t") for s in "abc")
+    sets = [[a.id, b.id], [b.id, c.id]]
+
+    def op(i):
+        if i % 3 == 2:
+            adapter.clear_channel_teams("1", "2")
+        else:
+            adapter.replace_channel_teams("1", "2", sets[i % 2], actor="bot")
+
+    _race(9, op)
+    final = adapter.get_channel_teams("1", "2").team_ids
+    assert final in ([], sorted(sets[0]), sorted(sets[1]))
 
 
 def test_pg_channel_teams_rejects_inactive_and_keeps_config(adapter):

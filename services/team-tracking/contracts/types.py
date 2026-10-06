@@ -1,9 +1,10 @@
+import hashlib
 import re
 from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, computed_field, field_validator
 
 
 AccessLevel = Literal["member", "admin", "superuser"]
@@ -176,17 +177,21 @@ class ChannelTeams(BaseModel):
     """Teams whose documents may inform answers in a Discord channel.
 
     An unconfigured channel has `team_ids == []` and no document access.
-    `updated_at` changes whenever the configuration or any referenced team
-    (including one since retired) changes, so consumers can use it as a
-    cache version.
     """
 
     model_config = ConfigDict(extra="forbid")
     guild_id: str
     channel_id: str
-    team_ids: list[UUID]  # active teams only
-    updated_at: datetime | None = None
+    team_ids: list[UUID]  # active teams only, sorted
     updated_by: str | None = None
+
+    @computed_field
+    @property
+    def version(self) -> str:
+        """Fingerprint of the effective access. Derived from content, not
+        timestamps, so it changes exactly when `team_ids` does regardless of the
+        order concurrent writes commit in."""
+        return hashlib.sha256(",".join(sorted(map(str, self.team_ids))).encode()).hexdigest()[:16]
 
 
 class ChannelTeamsReplace(BaseModel):
