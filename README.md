@@ -25,8 +25,10 @@ UTMIST is a student org with rotating leadership and mixed technical fluency. Ev
 - **`/record`** — record the voice channel you're in and get meeting minutes back (subcommands: `start`, `status`, `stop`). When the first human enters an empty voice channel, the bot sends them a direct message prompting them to run `/record start`. Recording ends on `/record stop` **or automatically once everyone leaves the voice channel** (with a 4h backstop). On stop, the bot posts a branded `meeting-minutes.pdf` (LLM-generated title, summary, decisions, action items, full transcript) into the channel, @-mentioning whoever started the recording. Status reports Misty's current voice channel, starts are refused while a recording is already active in the server, and stops must come from the recorded voice channel unless it's already empty (the escape hatch for a runaway recording); refused actions explain the active channel and auto-stop behavior. Audio is never returned or persisted — it streams straight to AWS as transcription input and is never written to disk. `start` requires you to be linked; `status`/`stop` are public so a directory outage can't strand a running recording.
 - **Misty helper threads** — start a question with `@Misty`; Misty opens a thread and
   answers with its recent history as context. Inside a thread Misty created, reply
-  directly to one of Misty's messages to continue without another mention (the reply
-  ping may be off). Replies to people or outside Misty-created threads are ignored.
+  directly to one of Misty's messages with the reply ping on to continue without
+  typing another mention. Ping-off replies, replies to people, and replies outside
+  Misty-created threads are ignored. A typed leading `@Misty` remains an independent
+  trigger.
 - **`/help`** — list the commands you can use, or show details for one. Public.
 - **`/bug`** — where to report a bug (GitHub issue link and optional infrastructure contact). Public.
 

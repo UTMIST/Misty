@@ -126,12 +126,27 @@ function fakeMessage({
   reference = null,
   referencedMessage = null,
   referenceThrows = false,
+  mentionedUserIds = [],
+  replyPing = false,
 }) {
+  const mentionedUsers = new Map(mentionedUserIds.map((id) => [id, { id }]));
+  if (replyPing && referencedMessage?.author?.id) {
+    mentionedUsers.set(referencedMessage.author.id, referencedMessage.author);
+  }
   const message = {
     content,
     author: { id: authorId, bot: false, username: authorName },
     channel,
     reference,
+    mentions: {
+      users: mentionedUsers,
+      has: (id, options = {}) => {
+        if (options.ignoreDirect) {
+          return replyPing && referencedMessage?.author?.id === id;
+        }
+        return mentionedUsers.has(id);
+      },
+    },
     referenceFetches: 0,
     reply: async (c) => {
       (channel.replies ??= []).push(c);
@@ -412,24 +427,57 @@ function ctxThrowingPlainError() {
   };
 }
 
-test('isReplyToBotInOwnedThread requires a bot reply in a Misty-owned thread', async () => {
+test('isReplyToBotInOwnedThread requires a pinged bot reply in a Misty-owned thread', async () => {
   const ownedThread = fakeChannel({ isThread: true, ownerId: BOT_ID });
+  const normalMessage = fakeMessage({ content: 'not a reply', channel: ownedThread });
+  assert.equal(await isReplyToBotInOwnedThread(normalMessage, BOT_ID), false);
+  assert.equal(normalMessage.referenceFetches, 0);
+
   const botReply = fakeMessage({
     content: 'follow up',
     channel: ownedThread,
     reference: { messageId: 'm1' },
     referencedMessage: { author: { id: BOT_ID } },
+    replyPing: true,
   });
   assert.equal(await isReplyToBotInOwnedThread(botReply, BOT_ID), true);
   assert.equal(botReply.referenceFetches, 1);
+
+  const pingOffReply = fakeMessage({
+    content: 'follow up',
+    channel: ownedThread,
+    reference: { messageId: 'm1' },
+    referencedMessage: { author: { id: BOT_ID } },
+  });
+  assert.equal(await isReplyToBotInOwnedThread(pingOffReply, BOT_ID), false);
+  assert.equal(pingOffReply.referenceFetches, 0, 'rejects a ping-off reply before fetching');
+
+  const pingOffWithTypedMention = fakeMessage({
+    content: `what about <@${BOT_ID}> here?`,
+    channel: ownedThread,
+    reference: { messageId: 'm1' },
+    referencedMessage: { author: { id: BOT_ID } },
+    mentionedUserIds: [BOT_ID],
+  });
+  assert.equal(await isReplyToBotInOwnedThread(pingOffWithTypedMention, BOT_ID), false);
+  assert.equal(pingOffWithTypedMention.referenceFetches, 0);
 
   const humanReply = fakeMessage({
     content: 'follow up',
     channel: ownedThread,
     reference: { messageId: 'm2' },
     referencedMessage: { author: { id: '2' } },
+    replyPing: true,
   });
   assert.equal(await isReplyToBotInOwnedThread(humanReply, BOT_ID), false);
+
+  const pingOffHumanReply = fakeMessage({
+    content: 'follow up',
+    channel: ownedThread,
+    reference: { messageId: 'm2' },
+    referencedMessage: { author: { id: '2' } },
+  });
+  assert.equal(await isReplyToBotInOwnedThread(pingOffHumanReply, BOT_ID), false);
 
   const otherThread = fakeChannel({ isThread: true, ownerId: 'someone-else' });
   const outsideOwnedThread = fakeMessage({
@@ -437,6 +485,7 @@ test('isReplyToBotInOwnedThread requires a bot reply in a Misty-owned thread', a
     channel: otherThread,
     reference: { messageId: 'm3' },
     referencedMessage: { author: { id: BOT_ID } },
+    replyPing: true,
   });
   assert.equal(await isReplyToBotInOwnedThread(outsideOwnedThread, BOT_ID), false);
   assert.equal(outsideOwnedThread.referenceFetches, 0, 'rejects before fetching the reference');
@@ -447,12 +496,13 @@ test('isReplyToBotInOwnedThread requires a bot reply in a Misty-owned thread', a
     channel: regularChannel,
     reference: { messageId: 'm4' },
     referencedMessage: { author: { id: BOT_ID } },
+    replyPing: true,
   });
   assert.equal(await isReplyToBotInOwnedThread(outsideThread, BOT_ID), false);
   assert.equal(outsideThread.referenceFetches, 0);
 });
 
-test('messageCreate listener answers a ping-free Misty reply with full thread context', async () => {
+test('messageCreate listener answers a pinged Misty reply with full thread context', async () => {
   const handlers = {};
   let seen;
   const answer = async ({ turns }) => {
@@ -462,14 +512,15 @@ test('messageCreate listener answers a ping-free Misty reply with full thread co
   const history = [
     { author: { id: '1', username: 'alexx' }, content: `<@${BOT_ID}> original question` },
     { author: { id: BOT_ID, username: 'misty' }, content: 'original answer' },
-    { author: { id: '1', username: 'alexx' }, content: 'ping-free follow up' },
+    { author: { id: '1', username: 'alexx' }, content: 'pinged follow up' },
   ];
   const thread = fakeChannel({ isThread: true, ownerId: BOT_ID, history });
   const message = fakeMessage({
-    content: 'ping-free follow up',
+    content: 'pinged follow up',
     channel: thread,
     reference: { messageId: 'answer-1' },
     referencedMessage: { author: { id: BOT_ID } },
+    replyPing: true,
   });
   const client = {
     user: { id: BOT_ID },
@@ -484,8 +535,35 @@ test('messageCreate listener answers a ping-free Misty reply with full thread co
   assert.deepEqual(thread.sent, ['reply']);
   assert.deepEqual(
     seen.map((turn) => turn.text),
-    ['original question', 'original answer', 'ping-free follow up'],
+    ['original question', 'original answer', 'pinged follow up'],
   );
+});
+
+test('messageCreate listener ignores a Misty reply when its reply ping is off', async () => {
+  const handlers = {};
+  let answers = 0;
+  const thread = fakeChannel({ isThread: true, ownerId: BOT_ID });
+  const message = fakeMessage({
+    content: 'ping-off follow up',
+    channel: thread,
+    reference: { messageId: 'answer-1' },
+    referencedMessage: { author: { id: BOT_ID } },
+  });
+  const client = {
+    user: { id: BOT_ID },
+    on: (evt, fn) => {
+      handlers[evt] = fn;
+    },
+  };
+  wireDiscordClient(client, {
+    commands: new Map(),
+    appContext: ctx({ answer: async () => (answers += 1) }),
+  });
+
+  await handlers.messageCreate(message);
+  assert.equal(answers, 0);
+  assert.equal(message.referenceFetches, 0);
+  assert.deepEqual(thread.sent, []);
 });
 
 test('messageCreate listener ignores replies to other users in a Misty thread', async () => {
@@ -554,6 +632,35 @@ test('messageCreate listener: dispatches a real leading-mention message to handl
   await handlers.messageCreate(message);
 
   assert.deepEqual(thread.sent, ['the answer']);
+});
+
+test('messageCreate listener: a leading mention still triggers in a ping-off Discord reply', async () => {
+  const handlers = {};
+  const client = {
+    user: { id: BOT_ID },
+    on: (evt, fn) => {
+      handlers[evt] = fn;
+    },
+  };
+  wireDiscordClient(client, { commands: new Map(), appContext: ctx() });
+
+  const history = [
+    { author: { id: BOT_ID, username: 'misty' }, content: 'earlier answer' },
+    { author: { id: '1', username: 'alexx' }, content: `<@${BOT_ID}> follow up` },
+  ];
+  const thread = fakeChannel({ isThread: true, ownerId: BOT_ID, history });
+  const message = fakeMessage({
+    content: `<@${BOT_ID}> follow up`,
+    channel: thread,
+    reference: { messageId: 'answer-1' },
+    referencedMessage: { author: { id: BOT_ID } },
+    mentionedUserIds: [BOT_ID],
+  });
+
+  await handlers.messageCreate(message);
+
+  assert.deepEqual(thread.sent, ['the answer']);
+  assert.equal(message.referenceFetches, 0, 'leading mention bypasses reply-trigger detection');
 });
 
 test('messageCreate listener: swallows a throw from handleMention', async () => {

@@ -23,7 +23,7 @@ async function main() {
   const enableWeb = process.env.ENABLE_WEB === 'true';
 
   if (enableDiscord) {
-    // MessageContent is required for ping-free replies inside helper threads.
+    // MessageContent is required to pass full helper-thread history to the LLM.
     // Discord always exposes content for direct mentions, but otherwise sends
     // an empty string unless this privileged intent is enabled both here and in
     // the application's Developer Portal settings.

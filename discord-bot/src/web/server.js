@@ -71,9 +71,10 @@ export async function buildServer({ commands, appContext, onReset }) {
   // Simulate the Discord path where a member replies to Misty's latest message
   // inside a Misty-created thread. The transcript is deliberately in-memory:
   // the real Discord adapter re-fetches the thread on every turn, while this
-  // local-only surface has no Discord channel to fetch from.
+  // local-only surface has no Discord channel to fetch from. Ping-off replies
+  // stay in the transcript but do not invoke the helper.
   server.post('/api/helper/reply', async (req, reply) => {
-    const { content, actingAs } = req.body ?? {};
+    const { content, actingAs, replyPing } = req.body ?? {};
     if (typeof actingAs !== 'string' || actingAs.trim() === '') {
       reply.code(400);
       return { error: 'actingAs is required' };
@@ -82,16 +83,26 @@ export async function buildServer({ commands, appContext, onReset }) {
       reply.code(400);
       return { error: 'content is required' };
     }
-
-    const caller = await resolveHelperCaller(appContext, actingAs);
-    if (!caller.ok) return { content: caller.content, ephemeral: true };
+    if (typeof replyPing !== 'boolean') {
+      reply.code(400);
+      return { error: 'replyPing must be a boolean' };
+    }
 
     const userTurn = {
       role: 'user',
       text: content.trim(),
       authorId: actingAs,
-      authorName: caller.principal.person.display_name,
+      authorName: `Discord user ${actingAs}`,
     };
+    if (!replyPing) {
+      helperTurns.push(userTurn);
+      return { triggered: false };
+    }
+
+    const caller = await resolveHelperCaller(appContext, actingAs);
+    if (!caller.ok) return { content: caller.content, ephemeral: true };
+
+    userTurn.authorName = caller.principal.person.display_name;
     const turns = [...helperTurns, userTurn];
     const answer = await answerHelperTurns(appContext, turns, caller.principal);
     helperTurns.push(userTurn, { role: 'assistant', text: answer });

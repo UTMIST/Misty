@@ -435,6 +435,20 @@ body {
   resize: vertical;
 }
 
+.form-strip .reply-ping-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  color: var(--header-secondary);
+  font-size: 13px;
+}
+
+.form-strip .reply-ping-toggle input {
+  width: auto;
+  margin: 0;
+}
+
 .form-strip button {
   margin-top: 16px;
   padding: 10px 20px;

@@ -112,14 +112,22 @@ export function stripLeadingMention(content, botId) {
   return trimmed;
 }
 
-// A ping-free reply is a helper request only inside a thread Misty owns and
-// only when the referenced message was authored by Misty. `message.reference`
-// is the trigger signal; the reply ping is deliberately irrelevant because a
-// user may disable it. Fetching the message also avoids trusting reference
-// metadata that does not carry an author.
+// A reply is a helper request only when its reply ping mentions Misty, it is
+// inside a thread Misty owns, and the referenced message was authored by
+// Misty. Fetching the message avoids trusting reference metadata that does not
+// carry an author.
 export async function isReplyToBotInOwnedThread(message, botId) {
   if (!message.reference || !message.channel?.isThread?.()) return false;
   if (message.channel.ownerId !== botId) return false;
+  if (
+    !message.mentions?.has?.(botId, {
+      ignoreDirect: true,
+      ignoreRoles: true,
+      ignoreEveryone: true,
+    })
+  ) {
+    return false;
+  }
 
   try {
     const referenced = await message.fetchReference();
@@ -205,9 +213,10 @@ async function prependStarterMessage(thread, ordered) {
   ordered.unshift(starter);
 }
 
-// Handle a helper request: either a leading mention or a reply to Misty in a
-// Misty-owned thread. Linked-only. In a channel it opens a thread; in a thread
-// it replays the full recent history, including the starter message, as memory.
+// Handle a helper request: either a leading mention or a reply that pings Misty
+// in a Misty-owned thread. Linked-only. In a channel it opens a thread; in a
+// thread it replays the full recent history, including the starter message, as
+// memory.
 // Never throws to discord.js.
 export async function handleMention(message, { appContext, botId }) {
   const question = stripLeadingMention(message.content, botId);

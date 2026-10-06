@@ -177,7 +177,7 @@ function renderForm(cmd) {
 function renderHelperReplyForm() {
   formStrip.innerHTML = `
     <h3>↪ Reply to Misty</h3>
-    <p class="form-note">Simulates a ping-free reply inside a Misty-created thread. Earlier messages in this simulated thread are sent as context.</p>
+    <p class="form-note">Simulates a Discord reply inside a Misty-created thread. Misty responds only when the reply ping is on; every message remains in the simulated thread context.</p>
   `;
   const form = document.createElement('form');
   const input = document.createElement('textarea');
@@ -186,6 +186,14 @@ function renderHelperReplyForm() {
   input.placeholder = 'Ask a follow-up…';
   input.rows = 3;
   form.appendChild(input);
+
+  const pingLabel = document.createElement('label');
+  pingLabel.className = 'reply-ping-toggle';
+  const ping = document.createElement('input');
+  ping.type = 'checkbox';
+  ping.checked = true;
+  pingLabel.append(ping, document.createTextNode(' Ping @Misty (reply ping ON)'));
+  form.appendChild(pingLabel);
 
   const send = document.createElement('button');
   send.type = 'submit';
@@ -203,18 +211,19 @@ function renderHelperReplyForm() {
     e.preventDefault();
     const content = input.value.trim();
     if (!content) return;
-    appendYouText(content, true);
+    const replyPing = ping.checked;
+    appendYouText(content, true, replyPing);
     input.value = '';
     send.disabled = true;
     try {
       const res = await fetch('/api/helper/reply', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ content, actingAs: state.actingAs }),
+        body: JSON.stringify({ content, actingAs: state.actingAs, replyPing }),
       });
       const payload = await res.json();
       if (!res.ok) appendErrorMessage(`HTTP ${res.status}: ${payload.error || payload.content}`);
-      else appendBotMessage(payload);
+      else if (payload.triggered !== false) appendBotMessage(payload);
     } catch (err) {
       appendErrorMessage(err.message);
     } finally {
@@ -312,13 +321,13 @@ function appendYouMessage(cmd, options) {
   scrollToBottom();
 }
 
-function appendYouText(content, isReply = false) {
+function appendYouText(content, isReply = false, replyPing = true) {
   const el = messageElement({ author: 'You', avatar: 'Y', klass: 'you' });
   const body = el.querySelector('.body');
   if (isReply) {
     const context = document.createElement('div');
     context.className = 'reply-context';
-    context.textContent = '↪ Replying to Misty';
+    context.textContent = `↪ Replying to Misty · reply ping ${replyPing ? 'ON' : 'OFF'}`;
     body.appendChild(context);
   }
   body.appendChild(document.createTextNode(content));

@@ -103,9 +103,8 @@ npm start                                # or: npm run dev for both surfaces
 
 Before starting Discord mode, enable **Message Content Intent** under Discord
 Developer Portal → your application → **Bot** → **Privileged Gateway Intents**.
-The bot requests this intent so a reply to Misty with the reply ping disabled still
-contains the member's text. Discord will accept direct mentions without it, but
-ping-free helper replies arrive with empty content and cannot be answered.
+The bot requests this intent so it can include the full recent thread history in
+helper requests, including messages that did not mention Misty.
 
 Wait for `Logged in as <bot name>` in terminal 2, then use the slash commands
 in whichever Discord server you invited the bot to.
@@ -205,9 +204,10 @@ and skips them.
 
 - `@Misty <question>` (linked) — opens a helper thread and answers using the
   thread's recent history. In a thread Misty created, replying directly to one of
-  Misty's messages continues the conversation without another mention, even when
-  the reply ping is disabled. Replies to other users, replies in regular channels,
-  and replies in threads Misty did not create do not trigger the helper.
+  Misty's messages continues the conversation when the reply ping is enabled.
+  Ping-off replies, replies to other users, replies in regular channels, and replies
+  in threads Misty did not create do not trigger the helper. A typed leading
+  `@Misty` remains an independent trigger, including inside a Discord reply.
 
 - `/record start [name:<meeting name>]` (**linked**) — joins your current voice channel and starts
   recording the meeting (one recording at a time **per guild** — sessions are
@@ -368,10 +368,11 @@ Click **Reset DB** in the top strip to re-clone from your main DB whenever you
 want a clean slate — no restart required. The default personas are re-seeded
 after every reset.
 
-Choose **Reply to Misty** under **Helper thread** to simulate a ping-free Discord
-reply. The playground keeps that simulated thread in memory and sends its earlier
-turns with every follow-up. **Reset thread** clears only this helper transcript;
-**Reset DB** also clears it.
+Choose **Reply to Misty** under **Helper thread** to simulate a Discord reply. Toggle
+**Ping @Misty** to test both reply-ping settings: Misty answers only when it is on,
+while ping-off messages remain part of the simulated thread history. The playground
+sends that history with every triggered follow-up. **Reset thread** clears only this
+helper transcript; **Reset DB** also clears it.
 
 ### Picker only shows *linked* people
 

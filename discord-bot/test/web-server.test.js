@@ -142,7 +142,7 @@ test('helper reply playground replays its full in-memory thread context', async 
     const first = await server.inject({
       method: 'POST',
       url: '/api/helper/reply',
-      payload: { content: 'first question', actingAs: '1' },
+      payload: { content: 'first question', actingAs: '1', replyPing: true },
     });
     assert.equal(first.statusCode, 200);
     assert.equal(first.json().content, 'answer 1');
@@ -150,7 +150,7 @@ test('helper reply playground replays its full in-memory thread context', async 
     const second = await server.inject({
       method: 'POST',
       url: '/api/helper/reply',
-      payload: { content: 'follow up', actingAs: '2' },
+      payload: { content: 'follow up', actingAs: '2', replyPing: true },
     });
     assert.equal(second.statusCode, 200);
     assert.deepEqual(seen[1], [
@@ -169,11 +169,54 @@ test('helper reply playground replays its full in-memory thread context', async 
     await server.inject({
       method: 'POST',
       url: '/api/helper/reply',
-      payload: { content: 'fresh thread', actingAs: '1' },
+      payload: { content: 'fresh thread', actingAs: '1', replyPing: true },
     });
     assert.deepEqual(
       seen[2].map((turn) => turn.text),
       ['fresh thread'],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test('helper reply playground keeps ping-off replies as context without answering', async () => {
+  const seen = [];
+  const server = await buildServer({
+    commands: new Map(),
+    appContext: {
+      directory: {
+        getPersonByDiscordId: async (id) => ({ id: `p-${id}`, display_name: `Person ${id}` }),
+      },
+      helperService: {
+        answer: async ({ turns }) => {
+          seen.push(turns.map((turn) => ({ ...turn })));
+          return { content: 'answer' };
+        },
+      },
+    },
+  });
+  await server.ready();
+  try {
+    const pingOff = await server.inject({
+      method: 'POST',
+      url: '/api/helper/reply',
+      payload: { content: 'silent context', actingAs: '2', replyPing: false },
+    });
+    assert.equal(pingOff.statusCode, 200);
+    assert.deepEqual(pingOff.json(), { triggered: false });
+    assert.equal(seen.length, 0);
+
+    const pingOn = await server.inject({
+      method: 'POST',
+      url: '/api/helper/reply',
+      payload: { content: 'answer this', actingAs: '1', replyPing: true },
+    });
+    assert.equal(pingOn.statusCode, 200);
+    assert.equal(pingOn.json().content, 'answer');
+    assert.deepEqual(
+      seen[0].map((turn) => turn.text),
+      ['silent context', 'answer this'],
     );
   } finally {
     await server.close();
@@ -194,7 +237,7 @@ test('helper reply playground requires a linked caller before invoking the helpe
     const response = await server.inject({
       method: 'POST',
       url: '/api/helper/reply',
-      payload: { content: 'hello', actingAs: '404' },
+      payload: { content: 'hello', actingAs: '404', replyPing: true },
     });
     assert.equal(response.statusCode, 200);
     assert.match(response.json().content, /link/i);
