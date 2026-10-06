@@ -200,7 +200,7 @@ and skips them.
 - `/team remove user:<@mention> team:<slug>` (admin) — soft-end a membership as of today.
 - `/team roster team:<slug> [as_of:<YYYY-MM-DD>]` (linked) — show a team's current roster.
 - `/my-teams` (linked) — list your active memberships.
-- `/doc <add|list|show|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
+- `/doc <add|list|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
 
 - `@Misty <question>` (linked) — opens a helper thread and answers using the
   thread's recent history. In a thread Misty created, replying directly to one of

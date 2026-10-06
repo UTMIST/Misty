@@ -15,7 +15,6 @@ import {
   renderMyTeamsResult,
   renderDocAddResult,
   renderDocListResult,
-  renderDocShowResult,
   renderDocRemoveResult,
   renderAddEmailResult,
   renderVerifyEmailResult,
@@ -377,38 +376,31 @@ test('renderDocAddResult TEAM_NOT_FOUND', () => {
   assert.match(renderDocAddResult({ outcome: 'TEAM_NOT_FOUND' }).content, /no team/i);
 });
 
-test('renderDocListResult LISTED is public and lists titles+ids', () => {
+test('renderDocListResult LISTED is public and lists titles+links, not ids', () => {
   const r = renderDocListResult({
     outcome: 'LISTED',
-    docs: [{ title: 'Onboarding', id: 'd1', source_id: 'gdocs' }],
+    docs: [{ title: 'Onboarding', id: 'd1', url: 'https://x.com', source_id: 'gdocs' }],
   });
   assert.equal(r.ephemeral, false);
   assert.match(r.content, /Onboarding/);
-  assert.match(r.content, /d1/);
+  assert.match(r.content, /<https:\/\/x\.com>/);
+  assert.doesNotMatch(r.content, /d1/);
+});
+
+test('renderDocListResult shows ids only when isAdmin is set', () => {
+  const docs = [{ title: 'Onboarding', id: 'd1', url: 'https://x.com', source_id: 'gdocs' }];
+  const shown = renderDocListResult({ outcome: 'LISTED', docs }, { isAdmin: true });
+  assert.match(shown.content, /`d1`/);
+  assert.match(shown.content, /<https:\/\/x\.com>/);
+  assert.doesNotMatch(renderDocListResult({ outcome: 'LISTED', docs }).content, /d1/);
+  assert.doesNotMatch(
+    renderDocListResult({ outcome: 'LISTED', docs }, { isAdmin: false }).content,
+    /d1/,
+  );
 });
 
 test('renderDocListResult LISTED empty', () => {
   assert.match(renderDocListResult({ outcome: 'LISTED', docs: [] }).content, /no docs/i);
-});
-
-test('renderDocShowResult SHOWN includes url and id', () => {
-  const r = renderDocShowResult({
-    outcome: 'SHOWN',
-    doc: {
-      title: 'Onboarding',
-      url: 'https://x.com',
-      id: 'd1',
-      source_id: 'gdocs',
-      tags: ['onboarding'],
-      owning_team_label: 'ML',
-    },
-  });
-  assert.match(r.content, /https:\/\/x\.com/);
-  assert.match(r.content, /ML/);
-});
-
-test('renderDocShowResult NOT_FOUND', () => {
-  assert.match(renderDocShowResult({ outcome: 'NOT_FOUND' }).content, /no doc/i);
 });
 
 test('renderDocRemoveResult REMOVED is ephemeral', () => {
@@ -418,12 +410,7 @@ test('renderDocRemoveResult REMOVED is ephemeral', () => {
 });
 
 test('doc renderers map DOC_DOWN', () => {
-  for (const fn of [
-    renderDocAddResult,
-    renderDocListResult,
-    renderDocShowResult,
-    renderDocRemoveResult,
-  ]) {
+  for (const fn of [renderDocAddResult, renderDocListResult, renderDocRemoveResult]) {
     assert.match(fn({ outcome: 'DOC_DOWN' }).content, /unavailable/i);
   }
 });

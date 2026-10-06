@@ -122,11 +122,6 @@ test('listDocs resolves team slug to id and returns LISTED', async () => {
   assert.equal(res.docs.length, 1);
 });
 
-test('showDoc returns NOT_FOUND when null', async () => {
-  const svc = createDocService({ directory: {}, docClient: { getDoc: async () => null } });
-  assert.equal((await svc.showDoc({ id: 'd1' })).outcome, 'NOT_FOUND');
-});
-
 test('removeDoc returns REMOVED with doc', async () => {
   const svc = createDocService({
     directory: {},
@@ -151,23 +146,6 @@ test('listDocs threads onBehalfOf to the doc client', async () => {
   const res = await svc.listDocs({ onBehalfOf: 'p1' });
   assert.equal(res.outcome, 'LISTED');
   assert.equal(received.onBehalfOf, 'p1');
-});
-
-test('showDoc threads onBehalfOf to the doc client', async () => {
-  let received;
-  const svc = createDocService({
-    directory: {},
-    docClient: {
-      getDoc: async (id, opts) => {
-        received = { id, opts };
-        return { id };
-      },
-    },
-  });
-  const res = await svc.showDoc({ id: 'd1', onBehalfOf: 'p1' });
-  assert.equal(res.outcome, 'SHOWN');
-  assert.equal(received.id, 'd1');
-  assert.equal(received.opts.onBehalfOf, 'p1');
 });
 
 test('addDoc sets owningPersonId from the caller (visible to the adder)', async () => {
