@@ -6,6 +6,7 @@ PostgresStorageAdapter use core-style expressions against these tables.
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     Date,
     DateTime,
@@ -169,4 +170,26 @@ channel_team_access = Table(
     Column("team_id", UUID(as_uuid=True), ForeignKey("teams.id"), primary_key=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("created_by", Text, nullable=False),
+)
+
+# Each team's managed Google Group and its last sync outcome. Google is the
+# authority for who is actually in the group; this row records the mapping
+# and whether the last reconcile converged.
+team_google_groups = Table(
+    "team_google_groups",
+    metadata,
+    Column("team_id", UUID(as_uuid=True), ForeignKey("teams.id"), primary_key=True),
+    Column("group_email", Text, nullable=False),
+    Column("group_name", Text, nullable=True),
+    Column("status", Text, nullable=False),
+    Column("last_error", Text, nullable=True),
+    Column("last_synced_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("created_by", Text, nullable=False),
+    Column("updated_by", Text, nullable=False),
+    CheckConstraint(
+        "status IN ('synced', 'needs_external_members', 'failed')",
+        name="ck_team_google_groups_status",
+    ),
 )

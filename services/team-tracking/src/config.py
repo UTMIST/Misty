@@ -27,6 +27,25 @@ class Settings(BaseSettings):
     # .get_secret_value() on it.
     api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
     tt_env: Literal["local", "staging", "production"] = "local"
+    # Managed Google Groups (Cloud Identity). All five empty = sync disabled;
+    # a partial set refuses to boot (see verify_production_secrets). The OAuth
+    # grant is a user refresh token for the group-owning account, not a
+    # service account — see docs/DEPLOYMENT.md.
+    google_groups_customer_id: str = ""
+    google_groups_domain: str = ""
+    google_oauth_client_id: str = ""
+    google_oauth_client_secret: SecretStr = SecretStr("")
+    google_oauth_refresh_token: SecretStr = SecretStr("")
+
+    def google_groups_fields(self) -> dict[str, bool]:
+        """Env var name -> whether it is set."""
+        return {
+            "GOOGLE_GROUPS_CUSTOMER_ID": bool(self.google_groups_customer_id),
+            "GOOGLE_GROUPS_DOMAIN": bool(self.google_groups_domain),
+            "GOOGLE_OAUTH_CLIENT_ID": bool(self.google_oauth_client_id),
+            "GOOGLE_OAUTH_CLIENT_SECRET": bool(self.google_oauth_client_secret.get_secret_value()),
+            "GOOGLE_OAUTH_REFRESH_TOKEN": bool(self.google_oauth_refresh_token.get_secret_value()),
+        }
 
 
 @lru_cache(maxsize=1)
@@ -44,6 +63,10 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
     request.
     """
     settings = settings or get_settings()
+    google = settings.google_groups_fields()
+    if any(google.values()) and not all(google.values()):
+        missing = ", ".join(k for k, v in google.items() if not v)
+        raise RuntimeError(f"Google Groups is partially configured; also set: {missing}")
     if settings.tt_env == "local":
         return
     insecure: list[str] = []

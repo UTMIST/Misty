@@ -408,6 +408,53 @@ curl -sS -X PATCH "http://localhost:8000/teams/660e8400-e29b-41d4-a716-446655440
 
 ---
 
+## Team Google Groups
+
+When Google Groups is configured (see [DEPLOYMENT.md](DEPLOYMENT.md#managed-google-groups)), every team gets a managed group at `<slug>@<GOOGLE_GROUPS_DOMAIN>`, and team-tracking keeps its members equal to the team's current membership. Consumers use the mapping to share Drive documents with a team, or to map a group address back to a team.
+
+Syncing happens after the response, never inside it: `POST`/`PATCH /teams`, `POST`/`PATCH /memberships`, `POST /memberships/{id}/end`, `POST /people/{id}/emails`, and a `PATCH /people/{id}` that changes `active` or `primary_email` each sync the affected teams. Those endpoints' responses and status codes are unchanged, and a Google failure never fails them; it is recorded on the mapping instead. Who belongs in a group, and how retries work, is in [ARCHITECTURE.md](ARCHITECTURE.md#managed-google-groups).
+
+**`TeamGoogleGroup` shape:**
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `team_id` | UUID | |
+| `group_email` | string | The group's address. Fixed once `group_name` is set. |
+| `group_name` | string \| null | Cloud Identity resource (`groups/{id}`); `null` until creation succeeds |
+| `status` | string | `synced`, `needs_external_members`, or `failed` |
+| `last_error` | string \| null | Why the last sync did not converge |
+| `last_synced_at` | datetime \| null | Last time a sync fully converged |
+| `created_at`, `updated_at`, `created_by`, `updated_by` | | `updated_by` is the key whose write triggered the last sync |
+
+`status` meanings:
+
+- `synced`: Google matches Team Tracking as of `last_synced_at`.
+- `needs_external_members`: the group exists but refuses addresses outside the managed domain. A group owner must enable **Allow external members** in Google Groups, then call the sync endpoint below. Internal addresses and removals were still applied.
+- `failed`: the group could not be created or read. `last_error` says why. Retry with the sync endpoint.
+
+A team with no row has never been synced, either because Google Groups is unconfigured or because no write or backfill has touched the team yet.
+
+### GET /teams/google-groups
+
+Every team's mapping (including retired teams, whose groups are kept but emptied). **Scope:** `teams:read`.
+
+### GET /teams/{team_id}/google-group
+
+One team's mapping. **Scope:** `teams:read`. **Errors:** 404 if the team has no mapping.
+
+### POST /teams/{team_id}/google-group/sync
+
+Create the group if it is missing, reconcile its members now, and return the resulting mapping. Safe to repeat. **Scope:** `teams:write`.
+
+**Errors:** 404 if the team does not exist. 409 if the team is retired and never had a group. 503 if Google Groups is not configured. A Google failure is still a 200, with `status: "failed"` in the body.
+
+```bash
+curl -sS -X POST "http://localhost:8000/teams/660e8400-e29b-41d4-a716-446655440001/google-group/sync" \
+  -H "X-API-Key: dev-api-key-change-me"
+```
+
+---
+
 ## Role kinds
 
 Role kinds are the controlled vocabulary for the seniority axis of team roles. The four seed values are `executive`, `director`, `lead`, and `member`. Role kinds are read-only through the API (no create/update endpoints). Both endpoints require scope `role_kinds:read`.

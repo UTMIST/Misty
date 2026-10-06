@@ -104,6 +104,7 @@ Set these per environment (staging vs production) per service.
 | `EMAIL_BACKEND` | — | — | `resend` (or `gmail`) — **not** `fake` |
 | `EMAIL_FROM` | — | — | `UTMIST <noreply@utmist.ca>` |
 | `RESEND_API_KEY` | — | — | from Resend |
+| `GOOGLE_GROUPS_CUSTOMER_ID`, `GOOGLE_GROUPS_DOMAIN`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` | optional, all-or-nothing; enables managed team Google Groups, plus a daily `team-tracking-groups sync` cron — see [team-tracking DEPLOYMENT.md](../services/team-tracking/docs/DEPLOYMENT.md#managed-google-groups) | — | — |
 
 > **documentation-system boots fine without `CONNECTORS_API_KEY`.** Unlike
 > `API_KEY`/`DIRECTORY_API_KEY`, `verify_production_secrets()` only logs a

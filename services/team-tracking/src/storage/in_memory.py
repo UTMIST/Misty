@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 from contracts.types import (
     ApiKey,
     ChannelTeams,
+    GoogleGroupStatus,
     Person,
     PersonCreate,
     PersonIdentifier,
@@ -14,6 +15,7 @@ from contracts.types import (
     RoleKind,
     Team,
     TeamCreate,
+    TeamGoogleGroup,
     TeamMembership,
     TeamMembershipCreate,
     TeamMembershipUpdate,
@@ -71,6 +73,7 @@ class InMemoryStorageAdapter:
         self._identifiers: dict[UUID, PersonIdentifier] = {}
         # (guild_id, channel_id) -> (team_ids, created_by)
         self._channel_teams: dict[tuple[str, str], tuple[list[UUID], str]] = {}
+        self._google_groups: dict[UUID, TeamGoogleGroup] = {}
 
     # --- People ---
 
@@ -541,3 +544,41 @@ class InMemoryStorageAdapter:
 
     def clear_channel_teams(self, guild_id: str, channel_id: str) -> None:
         self._channel_teams.pop((guild_id, channel_id), None)
+
+    # --- Team Google Groups ---
+
+    def get_team_google_group(self, team_id: UUID) -> TeamGoogleGroup | None:
+        return self._google_groups.get(team_id)
+
+    def list_team_google_groups(self) -> list[TeamGoogleGroup]:
+        return list(self._google_groups.values())
+
+    def put_team_google_group(
+        self,
+        team_id: UUID,
+        *,
+        group_email: str,
+        group_name: str | None,
+        status: GoogleGroupStatus,
+        last_error: str | None,
+        last_synced_at: datetime | None,
+        actor: str,
+    ) -> TeamGoogleGroup:
+        if team_id not in self._teams:
+            raise ValueError("team_id not found")
+        now = _now()
+        existing = self._google_groups.get(team_id)
+        row = TeamGoogleGroup(
+            team_id=team_id,
+            group_email=group_email,
+            group_name=group_name,
+            status=status,
+            last_error=last_error,
+            last_synced_at=last_synced_at,
+            created_at=existing.created_at if existing else now,
+            created_by=existing.created_by if existing else actor,
+            updated_at=now,
+            updated_by=actor,
+        )
+        self._google_groups[team_id] = row
+        return row

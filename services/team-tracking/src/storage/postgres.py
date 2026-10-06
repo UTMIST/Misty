@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from contracts.types import (
     ApiKey,
     ChannelTeams,
+    GoogleGroupStatus,
     Person,
     PersonCreate,
     PersonIdentifier,
@@ -19,6 +20,7 @@ from contracts.types import (
     RoleKind,
     Team,
     TeamCreate,
+    TeamGoogleGroup,
     TeamMembership,
     TeamMembershipCreate,
     TeamMembershipUpdate,
@@ -32,6 +34,7 @@ from src.storage.schema import (
     person_identifiers,
     providers,
     role_kinds,
+    team_google_groups,
     team_memberships,
     teams,
 )
@@ -608,6 +611,52 @@ class PostgresStorageAdapter:
                     channel_team_access.c.channel_id == channel_id,
                 )
             )
+
+    # --- Team Google Groups ---
+
+    def get_team_google_group(self, team_id: UUID) -> TeamGoogleGroup | None:
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                select(team_google_groups).where(team_google_groups.c.team_id == team_id)
+            ).one_or_none()
+        return TeamGoogleGroup(**row._mapping) if row else None
+
+    def list_team_google_groups(self) -> list[TeamGoogleGroup]:
+        with self._engine.connect() as conn:
+            rows = conn.execute(select(team_google_groups)).all()
+        return [TeamGoogleGroup(**r._mapping) for r in rows]
+
+    def put_team_google_group(
+        self,
+        team_id: UUID,
+        *,
+        group_email: str,
+        group_name: str | None,
+        status: GoogleGroupStatus,
+        last_error: str | None,
+        last_synced_at: datetime | None,
+        actor: str,
+    ) -> TeamGoogleGroup:
+        values = {
+            "group_email": group_email,
+            "group_name": group_name,
+            "status": status,
+            "last_error": last_error,
+            "last_synced_at": last_synced_at,
+            "updated_at": _now(),
+            "updated_by": actor,
+        }
+        stmt = pg_insert(team_google_groups).values(team_id=team_id, created_by=actor, **values)
+        try:
+            with self._engine.begin() as conn:
+                row = conn.execute(
+                    stmt.on_conflict_do_update(
+                        index_elements=[team_google_groups.c.team_id], set_=values
+                    ).returning(team_google_groups)
+                ).one()
+        except IntegrityError as e:
+            raise ValueError("team_id not found") from e
+        return TeamGoogleGroup(**row._mapping)
 
     def add_person_email(self, person_id: UUID, email: str, *, actor: str) -> PersonIdentifier:
         addr = _norm_email(email)

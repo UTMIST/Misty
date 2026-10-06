@@ -206,6 +206,24 @@ class ChannelTeamsReplace(BaseModel):
         return v
 
 
+GoogleGroupStatus = Literal["synced", "needs_external_members", "failed"]
+
+
+class TeamGoogleGroup(DirectoryBase):
+    """A team's managed Google Group and the outcome of its last sync.
+
+    `group_name` is the Cloud Identity resource (`groups/{id}`); it is None
+    until creation succeeds, and `group_email` is fixed once it is set.
+    """
+
+    team_id: UUID
+    group_email: str
+    group_name: str | None = None
+    status: GoogleGroupStatus
+    last_error: str | None = None
+    last_synced_at: datetime | None = None
+
+
 class ApiKey(DirectoryBase):
     """A named, scoped API key. `key_hash` is never returned by public APIs
     (only exists on writes back to storage); consumers get to see the plaintext

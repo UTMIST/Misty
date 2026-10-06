@@ -55,7 +55,7 @@ Violating any of these is a bug even if tests pass.
 - **Change `src/storage/schema.py` first** — the SQLAlchemy Core tables are the schema source of truth.
 - **`down_revision` points at the current head**, and `downgrade()` must actually reverse `upgrade()`. Verify the round trip: `upgrade head` → `downgrade -1` → `upgrade head`.
 - **New columns on existing tables are nullable or have a `server_default`**, mirrored in the Pydantic model and both adapters.
-- Current heads: team-tracking **007**, documentation-system **006**, verification **001**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
+- Current heads: team-tracking **009**, documentation-system **006**, verification **001**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
 
 ### Configuration
 
@@ -105,7 +105,7 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 
 ## Gotchas that will cost you an hour
 
-- **`uv --project` is mandatory for the key CLIs.** Both `services/team-tracking` and `services/documentation-system` declare a top-level `src` package with a console script at `src.cli:main`. In the shared workspace venv they collide, so a bare `team-tracking-keys …` can resolve documentation-system's CLI and mint a `doc_`-envelope key that team-tracking rejects. Always `uv --project services/<service> run <service>-keys …`, and verify the token's prefix.
+- **`uv --project` is mandatory for the key CLIs.** Both `services/team-tracking` and `services/documentation-system` declare a top-level `src` package with a console script at `src.cli:main`. In the shared workspace venv they collide, so a bare `team-tracking-keys …` can resolve documentation-system's CLI and mint a `doc_`-envelope key that team-tracking rejects. Always `uv --project services/<service> run <service>-keys …`, and verify the token's prefix. The same applies to every other team-tracking console script (`team-tracking-seed`, `team-tracking-groups`).
 - **documentation-system and verification both bind host port 5434.** They cannot run locally at the same time. Remap one (`-p 5435:5432`) and update its `DATABASE_URL`. If Alembic reports an unknown revision, you're almost certainly pointed at the other service's database.
 - **documentation-system's Swagger is at `/swagger`, not `/docs`** — `/docs` is a real docs-resource router on that service.
 - **`npm run dev:web` occupies port 8001 and 5433**, and needs Docker. Stop documentation-system first.

@@ -38,7 +38,7 @@ docker compose up -d postgres
 # 2. Install dependencies (including dev tools)
 uv sync --extra dev
 
-# 3. Apply database migrations (creates all 8 tables + seeds)
+# 3. Apply database migrations (creates all 9 tables + seeds)
 uv run alembic upgrade head
 
 # 4. Start the API server
@@ -110,7 +110,8 @@ team-tracking/
 ├── contracts/              The domain boundary — no framework imports
 │   ├── types.py            Pydantic models (Person, Team, RoleKind, TeamMembership,
 │   │                       Provider, PersonIdentifier, ApiKey) + Create/Update DTOs
-│   └── storage.py          StorageAdapter Protocol — the interface the API depends on
+│   ├── storage.py          StorageAdapter Protocol — the interface the API depends on
+│   └── groups.py           GroupProvider Protocol — managed Google Groups
 │
 ├── src/
 │   ├── api/                FastAPI application
@@ -122,12 +123,16 @@ team-tracking/
 │   │                       people, teams, role_kinds, memberships, providers, identifiers, channels
 │   │
 │   ├── storage/            StorageAdapter implementations
-│   │   ├── schema.py       SQLAlchemy Core table definitions (8 tables)
+│   │   ├── schema.py       SQLAlchemy Core table definitions (9 tables)
 │   │   ├── in_memory.py    InMemoryStorageAdapter — used in tests + prototyping
 │   │   └── postgres.py     PostgresStorageAdapter — used in production
 │   │
+│   ├── providers/
+│   │   └── google_groups.py  GoogleGroupsProvider — Cloud Identity Groups API
+│   ├── google_groups.py    sync_team(): reconcile a team's Google Group with its members
+│   ├── groups_cli.py       team-tracking-groups CLI (backfill / scheduled sync)
 │   ├── cli.py              team-tracking-keys CLI (issue / list / revoke API keys)
-│   └── config.py           Settings (DATABASE_URL, API_KEY) loaded from environment
+│   └── config.py           Settings (DATABASE_URL, API_KEY, GOOGLE_*) loaded from environment
 │
 ├── migrations/             Alembic migrations
 │   ├── env.py
@@ -139,12 +144,13 @@ team-tracking/
 │       ├── 005_person_access_level.py    people.access_level column
 │       ├── 006_email_provider_multivalued.py  multi-valued email identifiers
 │       ├── 007_membership_no_overlap.py membership temporal-overlap EXCLUDE constraint
-│       └── 008_channel_team_access.py   channel_team_access (Discord channel → teams)
+│       ├── 008_channel_team_access.py   channel_team_access (Discord channel → teams)
+│       └── 009_team_google_groups.py    team_google_groups (team → managed Google Group)
 │
 ├── tests/                  Two-mode test suite (see Testing below)
 │
 ├── docs/
-│   ├── API.md              Consumer-facing endpoint reference (all 29 endpoints)
+│   ├── API.md              Consumer-facing endpoint reference (all 32 endpoints)
 │   ├── ARCHITECTURE.md     Contributor orientation: boundaries, adapters, auth, data model
 │   ├── CONTRIBUTING.md     Task walkthroughs: add an endpoint, adapter method, migration, tests
 │   └── DEPLOYMENT.md       Ops reference: security posture, key management CLI, audit log
@@ -154,8 +160,8 @@ team-tracking/
                             self-host. See docs/RAILWAY-DEPLOYMENT.md for the live path.
 ```
 
-**Eight tables:** `people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `providers`, `person_identifiers`, `channel_team_access`.
-**Eight routers, 29 endpoints.** **Eight migrations (001–008);** the latest, 008, adds `channel_team_access`.
+**Nine tables:** `people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `providers`, `person_identifiers`, `channel_team_access`, `team_google_groups`.
+**Eight routers, 32 endpoints.** **Nine migrations (001–009);** the latest, 009, adds `team_google_groups`.
 
 **Dependency direction:** `contracts/` imports nothing from `src/`. The API layer imports only from `contracts/` and `src/config`. The storage layer imports `contracts/` for types and defines its own schema. Nothing imports from `src/storage/` except `src/api/deps.py` (the single wiring point). This is the **Protocol boundary** — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -179,6 +185,9 @@ Every endpoint requires an `X-API-Key`. The actor stamped into `created_by`/`upd
 | GET | `/teams/by-slug/{slug}` | `teams:read` | Get team by slug |
 | GET | `/teams/{id}` | `teams:read` | Get team by UUID |
 | PATCH | `/teams/{id}` | `teams:write` | Update a team |
+| GET | `/teams/google-groups` | `teams:read` | Every team's managed Google Group and sync status |
+| GET | `/teams/{id}/google-group` | `teams:read` | One team's Google Group mapping |
+| POST | `/teams/{id}/google-group/sync` | `teams:write` | Create/reconcile the team's Google Group now |
 | GET | `/role_kinds` | `role_kinds:read` | List role kinds |
 | GET | `/role_kinds/{id}` | `role_kinds:read` | Get one role kind |
 | GET | `/providers` | `providers:read` | List identity providers |
@@ -238,7 +247,7 @@ See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for task walkthroughs.
 
 ## Where to find things
 
-- [docs/API.md](docs/API.md) — consumer-facing endpoint reference (all 29 endpoints, scopes, errors, curl)
+- [docs/API.md](docs/API.md) — consumer-facing endpoint reference (all 32 endpoints, scopes, errors, curl)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — contributor orientation: Protocol boundary, adapters, temporal memberships, Level-2 auth, data model
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — task walkthroughs for adding endpoints, adapter methods, migrations
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — ops reference: security posture, key management CLI, audit log
@@ -247,7 +256,7 @@ Machine-readable OpenAPI schema: `GET /openapi.json`. Interactive Swagger UI: `G
 
 ## Status
 
-Eight tables (`people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `providers`, `person_identifiers`, `channel_team_access`), 29 endpoints across 8 routers, two storage adapters, migrations 001–008 (latest: 008, channel team access). Level-2 auth (DB-issued scoped argon2 keys + attested actor + audit log) is merged, as is the `person_identifiers`/providers identity-mapping feature.
+Nine tables (`people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `providers`, `person_identifiers`, `channel_team_access`, `team_google_groups`), 32 endpoints across 8 routers, two storage adapters, migrations 001–009 (latest: 009, team Google Groups). Level-2 auth (DB-issued scoped argon2 keys + attested actor + audit log) is merged, as is the `person_identifiers`/providers identity-mapping feature.
 
 **Not implemented (by design):**
 

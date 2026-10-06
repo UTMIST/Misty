@@ -616,3 +616,39 @@ def test_pg_channel_teams_rejects_inactive_and_keeps_config(adapter):
         with pytest.raises(ValueError, match="unknown_or_inactive_team"):
             adapter.replace_channel_teams("1", "2", [a.id, bad], actor="bot")
     assert adapter.get_channel_teams("1", "2").team_ids == [a.id]
+
+
+def test_pg_team_google_group_upsert(adapter):
+    team = adapter.create_team(TeamCreate(slug="a", label="A"), actor="t")
+    assert adapter.get_team_google_group(team.id) is None
+    first = adapter.put_team_google_group(
+        team.id,
+        group_email="a@x.ca",
+        group_name=None,
+        status="failed",
+        last_error="boom",
+        last_synced_at=None,
+        actor="first",
+    )
+    second = adapter.put_team_google_group(
+        team.id,
+        group_email="a@x.ca",
+        group_name="groups/1",
+        status="synced",
+        last_error=None,
+        last_synced_at=first.updated_at,
+        actor="second",
+    )
+    assert (second.created_by, second.updated_by) == ("first", "second")
+    assert second.group_name == "groups/1" and second.last_error is None
+    assert adapter.list_team_google_groups() == [second]
+    with pytest.raises(ValueError, match="team_id not found"):
+        adapter.put_team_google_group(
+            uuid4(),
+            group_email="b@x.ca",
+            group_name=None,
+            status="failed",
+            last_error=None,
+            last_synced_at=None,
+            actor="t",
+        )
