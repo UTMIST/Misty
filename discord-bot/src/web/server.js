@@ -3,6 +3,7 @@ import fastifyStatic from '@fastify/static';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dispatch } from '../router.js';
+import { answerHelperTurns, resolveHelperCaller } from '../helperFlow.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -14,6 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  */
 export async function buildServer({ commands, appContext, onReset }) {
   const server = Fastify({ logger: false });
+  let helperTurns = [];
 
   await server.register(fastifyStatic, {
     root: path.join(__dirname, 'public'),
@@ -62,6 +64,42 @@ export async function buildServer({ commands, appContext, onReset }) {
       return { error: 'reset not available' };
     }
     await onReset();
+    helperTurns = [];
+    return { ok: true };
+  });
+
+  // Simulate the Discord path where a member replies to Misty's latest message
+  // inside a Misty-created thread. The transcript is deliberately in-memory:
+  // the real Discord adapter re-fetches the thread on every turn, while this
+  // local-only surface has no Discord channel to fetch from.
+  server.post('/api/helper/reply', async (req, reply) => {
+    const { content, actingAs } = req.body ?? {};
+    if (typeof actingAs !== 'string' || actingAs.trim() === '') {
+      reply.code(400);
+      return { error: 'actingAs is required' };
+    }
+    if (typeof content !== 'string' || content.trim() === '') {
+      reply.code(400);
+      return { error: 'content is required' };
+    }
+
+    const caller = await resolveHelperCaller(appContext, actingAs);
+    if (!caller.ok) return { content: caller.content, ephemeral: true };
+
+    const userTurn = {
+      role: 'user',
+      text: content.trim(),
+      authorId: actingAs,
+      authorName: caller.principal.person.display_name,
+    };
+    const turns = [...helperTurns, userTurn];
+    const answer = await answerHelperTurns(appContext, turns, caller.principal);
+    helperTurns.push(userTurn, { role: 'assistant', text: answer });
+    return { content: answer, ephemeral: false };
+  });
+
+  server.delete('/api/helper/thread', async () => {
+    helperTurns = [];
     return { ok: true };
   });
 

@@ -122,6 +122,88 @@ describe('web server', () => {
   });
 });
 
+test('helper reply playground replays its full in-memory thread context', async () => {
+  const seen = [];
+  const directory = {
+    getPersonByDiscordId: async (id) => ({ id: `p-${id}`, display_name: `Person ${id}` }),
+  };
+  const helperService = {
+    answer: async ({ turns }) => {
+      seen.push(turns.map((turn) => ({ ...turn })));
+      return { content: `answer ${seen.length}` };
+    },
+  };
+  const server = await buildServer({
+    commands: new Map(),
+    appContext: { directory, helperService },
+  });
+  await server.ready();
+  try {
+    const first = await server.inject({
+      method: 'POST',
+      url: '/api/helper/reply',
+      payload: { content: 'first question', actingAs: '1' },
+    });
+    assert.equal(first.statusCode, 200);
+    assert.equal(first.json().content, 'answer 1');
+
+    const second = await server.inject({
+      method: 'POST',
+      url: '/api/helper/reply',
+      payload: { content: 'follow up', actingAs: '2' },
+    });
+    assert.equal(second.statusCode, 200);
+    assert.deepEqual(seen[1], [
+      {
+        role: 'user',
+        text: 'first question',
+        authorId: '1',
+        authorName: 'Person 1',
+      },
+      { role: 'assistant', text: 'answer 1' },
+      { role: 'user', text: 'follow up', authorId: '2', authorName: 'Person 2' },
+    ]);
+
+    const reset = await server.inject({ method: 'DELETE', url: '/api/helper/thread' });
+    assert.equal(reset.statusCode, 200);
+    await server.inject({
+      method: 'POST',
+      url: '/api/helper/reply',
+      payload: { content: 'fresh thread', actingAs: '1' },
+    });
+    assert.deepEqual(
+      seen[2].map((turn) => turn.text),
+      ['fresh thread'],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test('helper reply playground requires a linked caller before invoking the helper', async () => {
+  let calls = 0;
+  const server = await buildServer({
+    commands: new Map(),
+    appContext: {
+      directory: { getPersonByDiscordId: async () => null },
+      helperService: { answer: async () => (calls += 1) },
+    },
+  });
+  await server.ready();
+  try {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/api/helper/reply',
+      payload: { content: 'hello', actingAs: '404' },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.match(response.json().content, /link/i);
+    assert.equal(calls, 0);
+  } finally {
+    await server.close();
+  }
+});
+
 test('GET /api/people returns array with discord_id resolved', async () => {
   const directory = {
     listPeople: async () => [

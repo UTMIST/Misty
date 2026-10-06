@@ -4,6 +4,7 @@ import { authMessages } from '../messages.js';
 import { resolvePrincipal } from '../auth/principal.js';
 import { authorize } from '../auth/policy.js';
 import { DirectoryUnavailable } from '../directoryClient.js';
+import { answerHelperTurns, resolveHelperCaller } from '../helperFlow.js';
 
 // The ONLY module (aside from src/index.js and src/registerCommands.js) that
 // imports from discord.js. Everything else — router, commands, services —
@@ -111,6 +112,24 @@ export function stripLeadingMention(content, botId) {
   return trimmed;
 }
 
+// A ping-free reply is a helper request only inside a thread Misty owns and
+// only when the referenced message was authored by Misty. `message.reference`
+// is the trigger signal; the reply ping is deliberately irrelevant because a
+// user may disable it. Fetching the message also avoids trusting reference
+// metadata that does not carry an author.
+export async function isReplyToBotInOwnedThread(message, botId) {
+  if (!message.reference || !message.channel?.isThread?.()) return false;
+  if (message.channel.ownerId !== botId) return false;
+
+  try {
+    const referenced = await message.fetchReference();
+    return referenced?.author?.id === botId;
+  } catch (e) {
+    console.error('referenced message fetch failed:', e.message);
+    return false;
+  }
+}
+
 // Nickname when the member is resolved, else the global/user name — the label a
 // human would recognize, and the fallback when the directory can't identify them.
 function authorLabel(message) {
@@ -158,13 +177,6 @@ export function chunkForDiscord(text) {
 }
 
 const HISTORY_LIMIT = 100; // Discord's messages.fetch maximum; no pagination
-const LINK_PROMPT =
-  'You need to link your account first. Run `/link` to identify yourself, then try again.';
-const VERIFY_UNAVAILABLE =
-  "I can't verify you right now — the directory is unavailable. Please try again shortly.";
-const LLM_UNAVAILABLE =
-  "I'm having trouble reaching the assistant right now — please try again shortly.";
-const EMPTY_ANSWER = "I couldn't come up with an answer that time — please try rephrasing.";
 const THREAD_UNAVAILABLE =
   "I couldn't open a thread for that — please try again. (I may be missing the 'Create Public Threads' or 'Read Message History' permission.)";
 
@@ -193,25 +205,17 @@ async function prependStarterMessage(thread, ordered) {
   ordered.unshift(starter);
 }
 
-// Handle a message that starts with the bot's mention. Linked-only. In a
-// channel it opens a thread; in a thread it replays the thread's history —
-// including the starter message — as memory. Never throws to discord.js.
+// Handle a helper request: either a leading mention or a reply to Misty in a
+// Misty-owned thread. Linked-only. In a channel it opens a thread; in a thread
+// it replays the full recent history, including the starter message, as memory.
+// Never throws to discord.js.
 export async function handleMention(message, { appContext, botId }) {
   const question = stripLeadingMention(message.content, botId);
   if (!question) return; // bare ping, nothing to answer
 
-  let principal;
-  try {
-    principal = await resolvePrincipal(appContext.directory, message.author.id);
-  } catch (e) {
-    if (e instanceof DirectoryUnavailable) {
-      await message.reply(VERIFY_UNAVAILABLE).catch(() => {});
-      return;
-    }
-    throw e;
-  }
-  if (!authorize('linked', principal).ok) {
-    await message.reply(LINK_PROMPT).catch(() => {});
+  const caller = await resolveHelperCaller(appContext, message.author.id);
+  if (!caller.ok) {
+    await message.reply(caller.content).catch(() => {});
     return;
   }
 
@@ -245,18 +249,7 @@ export async function handleMention(message, { appContext, botId }) {
   if (!turns.length) return;
 
   await target.sendTyping().catch(() => {});
-  let content;
-  try {
-    ({ content } = await appContext.helperService.answer({ turns, principal }));
-  } catch (err) {
-    console.error('helper answer failed:', err.message);
-    await target.send(LLM_UNAVAILABLE).catch(() => {});
-    return;
-  }
-  if (!content || !content.trim()) {
-    await target.send(EMPTY_ANSWER).catch((e) => console.error('helper reply failed:', e.message));
-    return;
-  }
+  const content = await answerHelperTurns(appContext, turns, caller.principal);
   for (const chunk of chunkForDiscord(content)) {
     await target.send(chunk).catch((e) => console.error('helper reply failed:', e.message));
   }
@@ -829,10 +822,12 @@ export function wireDiscordClient(client, { commands, appContext }) {
     try {
       if (message.author?.bot) return;
       const botId = client.user?.id;
-      if (!botId || !startsWithBotMention(message.content, botId)) return;
+      if (!botId) return;
+      const isMention = startsWithBotMention(message.content, botId);
+      if (!isMention && !(await isReplyToBotInOwnedThread(message, botId))) return;
       await handleMention(message, { appContext, botId });
     } catch (err) {
-      console.error('Unhandled mention error:', err);
+      console.error('Unhandled helper message error:', err);
     }
   });
 
