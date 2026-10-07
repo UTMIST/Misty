@@ -196,6 +196,54 @@ def test_list_docs_batched_tag_hydration_matches_per_doc(adapter):
     assert listed[d3.id].tags == []
 
 
+def test_pg_list_docs_has_content_selects_exactly_the_contentless(adapter):
+    """Postgres parity for the in-memory has_content partition: the correlated
+    EXISTS must agree with the in-memory row-presence check, or backfill
+    discovery finds a different set in prod than the fast suite proves."""
+    with_text = _mk(adapter, url="https://has.com")
+    without_text = _mk(adapter, url="https://missing.com")
+    adapter.upsert_doc_content(with_text.id, content_text="body", content_hash="h", fetched_at=None)
+    assert [d.id for d in adapter.list_docs(has_content=False)] == [without_text.id]
+    assert [d.id for d in adapter.list_docs(has_content=True)] == [with_text.id]
+
+
+def test_pg_list_docs_has_content_none_does_not_filter(adapter):
+    with_text = _mk(adapter, url="https://has.com")
+    without_text = _mk(adapter, url="https://missing.com")
+    adapter.upsert_doc_content(with_text.id, content_text="body", content_hash="h", fetched_at=None)
+    assert {d.id for d in adapter.list_docs()} == {with_text.id, without_text.id}
+
+
+def test_pg_list_docs_has_content_keys_on_content_row_not_snapshot(adapter):
+    """A content_snapshot with no doc_content row must still read as
+    contentless — same rule the in-memory adapter enforces."""
+    doc = _mk(adapter, url="https://snapshot-only.com")
+    adapter.update_doc(doc.id, {"content_snapshot": "preview"}, actor="t")
+    listed = adapter.list_docs(has_content=False)
+    assert [d.id for d in listed] == [doc.id]
+    assert listed[0].content_snapshot == "preview"
+
+
+def test_pg_list_docs_has_content_composes_with_visibility(adapter):
+    """The EXISTS clause is ANDed with the visibility clause, so the filter
+    cannot be used to enumerate docs the actor cannot see."""
+    mine = _mk(adapter, url="https://mine.com")
+    _mk(adapter, url="https://not-mine.com")
+    adapter.add_grant(mine.id, grantee_type="person", grantee_id=_P1, actor="t")
+    actor = Actor(person_id=_P1, team_ids=frozenset())
+    assert [d.id for d in adapter.list_docs(has_content=False, visibility=actor)] == [mine.id]
+    assert adapter.list_docs(has_content=False, visibility=DENY) == []
+    assert len(adapter.list_docs(has_content=False, visibility=SEE_ALL)) == 2
+
+
+def test_pg_list_docs_has_content_composes_with_other_filters(adapter):
+    _mk(adapter, url="https://untagged.com")
+    tagged = _mk(adapter, url="https://tagged.com", tags=["x"])
+    assert [d.id for d in adapter.list_docs(has_content=False, tag="x")] == [tagged.id]
+    adapter.upsert_doc_content(tagged.id, content_text="body", content_hash="h", fetched_at=None)
+    assert adapter.list_docs(has_content=False, tag="x") == []
+
+
 def test_pg_upsert_doc_content_round_trips(adapter):
     doc = _mk(adapter)
     adapter.upsert_doc_content(

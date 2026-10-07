@@ -4,7 +4,7 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 
-from contracts.fetcher import FetchResult
+from contracts.fetcher import FetchError, FetchResult
 from contracts.types import Source
 from src.api.app import create_app
 from src.api.deps import get_directory, get_fetchers, get_storage
@@ -176,6 +176,66 @@ def test_add_and_remove_tag(client):
     assert "new" in client.get(f"/docs/{doc_id}", headers=AUTH).json()["tags"]
     assert client.request("DELETE", f"/docs/{doc_id}/tags/new", headers=AUTH).status_code == 200
     assert "new" not in client.get(f"/docs/{doc_id}", headers=AUTH).json()["tags"]
+
+
+def test_list_has_content_false_finds_doc_whose_ingest_fetch_failed(client_and_store):
+    """The end-to-end discovery case from #159: a fetch that fails at ingest
+    leaves a catalogued doc with no content row and only a warning, and
+    `has_content=false` is what makes that doc findable afterwards."""
+    client, store = client_and_store
+
+    class _FailingFetchers:
+        def fetch_for(self, source_id, url):
+            raise FetchError("connectors unreachable")
+
+    client.app.dependency_overrides[get_fetchers] = lambda: _FailingFetchers()
+    created = client.post("/docs", json={"url": "https://x.com/broken"}, headers=AUTH)
+    assert created.status_code == 201
+    assert any("content fetch failed" in w for w in created.json()["warnings"])
+    broken_id = created.json()["doc"]["id"]
+
+    # A second doc whose fetch succeeds must NOT appear in the contentless set.
+    client.app.dependency_overrides[get_fetchers] = lambda: FakeFetchers()
+    ok_id = client.post("/docs", json={"url": "https://x.com/fine"}, headers=AUTH).json()["doc"][
+        "id"
+    ]
+    assert store.get_doc_content(UUID(ok_id)) == "full fetched body"
+
+    listed = client.get("/docs?has_content=false", headers=AUTH)
+    assert listed.status_code == 200
+    assert [d["id"] for d in listed.json()] == [broken_id]
+
+
+def test_list_has_content_true_excludes_the_contentless(client):
+    client_ = client
+
+    class _FailingFetchers:
+        def fetch_for(self, source_id, url):
+            raise FetchError("down")
+
+    client_.app.dependency_overrides[get_fetchers] = lambda: _FailingFetchers()
+    client_.post("/docs", json={"url": "https://x.com/broken"}, headers=AUTH)
+    client_.app.dependency_overrides[get_fetchers] = lambda: FakeFetchers()
+    ok_id = client_.post("/docs", json={"url": "https://x.com/fine"}, headers=AUTH).json()["doc"][
+        "id"
+    ]
+    assert [d["id"] for d in client_.get("/docs?has_content=true", headers=AUTH).json()] == [ok_id]
+
+
+def test_list_without_has_content_returns_both(client):
+    class _FailingFetchers:
+        def fetch_for(self, source_id, url):
+            raise FetchError("down")
+
+    client.app.dependency_overrides[get_fetchers] = lambda: _FailingFetchers()
+    client.post("/docs", json={"url": "https://x.com/broken"}, headers=AUTH)
+    client.app.dependency_overrides[get_fetchers] = lambda: FakeFetchers()
+    client.post("/docs", json={"url": "https://x.com/fine"}, headers=AUTH)
+    assert len(client.get("/docs", headers=AUTH).json()) == 2
+
+
+def test_list_has_content_rejects_non_boolean(client):
+    assert client.get("/docs?has_content=maybe", headers=AUTH).status_code == 422
 
 
 def test_refetch_persists_full_content(client_and_store):

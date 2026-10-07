@@ -183,7 +183,7 @@ All endpoints require `X-API-Key` with the appropriate scope.
 | Method | Path | Scope | Description |
 |--------|------|-------|-------------|
 | POST | `/docs` | `docs:write` | Ingest a URL (idempotent; 200 if already catalogued, 201 if new) |
-| GET | `/docs` | `docs:read` | List docs (`?owning_team_id=&owning_person_id=&source_id=&tag=&active_only=true`) |
+| GET | `/docs` | `docs:read` | List docs (`?owning_team_id=&owning_person_id=&source_id=&tag=&has_content=&active_only=true`) |
 | GET | `/docs/{id}` | `docs:read` | Get one doc (backfills owner labels if previously unresolved) |
 | PATCH | `/docs/{id}` | `docs:write` | Update a doc (title, description, owner ids, active flag) |
 | POST | `/docs/{id}/tags` | `docs:write` | Add a tag |
