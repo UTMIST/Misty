@@ -11,9 +11,6 @@ export default defineCommand({
   name: 'helper-limits',
   description: 'View or change the helper request allowance (admins only)',
   auth: 'admin',
-  async handler() {
-    return null;
-  },
   subcommands: [
     {
       name: 'show',
@@ -43,17 +40,19 @@ export default defineCommand({
         },
       ],
       async handler({ options, ctx }) {
-        if (options.max_requests === undefined && options.window_seconds === undefined) {
+        const maxRequests = options.max_requests;
+        const windowSeconds = options.window_seconds;
+        const hasMaxRequests = maxRequests !== null && maxRequests !== undefined;
+        const hasWindowSeconds = windowSeconds !== null && windowSeconds !== undefined;
+        if (!hasMaxRequests && !hasWindowSeconds) {
           return {
             content: 'Provide max_requests, window_seconds, or both.',
             ephemeral: true,
           };
         }
         const updates = {};
-        if (options.max_requests !== undefined) updates.maxRequests = Number(options.max_requests);
-        if (options.window_seconds !== undefined) {
-          updates.windowSeconds = Number(options.window_seconds);
-        }
+        if (hasMaxRequests) updates.maxRequests = Number(maxRequests);
+        if (hasWindowSeconds) updates.windowSeconds = Number(windowSeconds);
         try {
           return renderLimits(ctx.helperRequestLimiter.updateLimits(updates));
         } catch (error) {
@@ -65,4 +64,9 @@ export default defineCommand({
       },
     },
   ],
+  async handler(intent) {
+    const sub = this.subcommands.find((s) => s.name === intent.subcommand);
+    if (!sub) return { content: 'Something went wrong. Please try again.', ephemeral: true };
+    return sub.handler(intent);
+  },
 });

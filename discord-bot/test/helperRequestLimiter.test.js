@@ -77,3 +77,20 @@ test('runtime limit updates preserve usage and apply the new window to active us
   time = 20000;
   assert.equal(limiter.tryConsume('a').allowed, true);
 });
+
+test('runtime updates expire users using the old window before installing new limits', () => {
+  let time = 0;
+  const limiter = createHelperRequestLimiter({
+    maxRequests: 1,
+    windowSeconds: 10,
+    now: () => time,
+  });
+  limiter.tryConsume('expired');
+  time = 5000;
+  limiter.tryConsume('active');
+  time = 10001;
+  limiter.updateLimits({ maxRequests: 2, windowSeconds: 20 });
+  assert.equal(limiter.tryConsume('expired').allowed, true);
+  assert.equal(limiter.tryConsume('active').allowed, true);
+  assert.equal(limiter.tryConsume('active').allowed, false);
+});

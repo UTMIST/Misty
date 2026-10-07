@@ -23,6 +23,12 @@ export function createHelperRequestLimiter({
   const users = new Map();
   let limits = { maxRequests, windowSeconds };
 
+  function expire(time, durationSeconds) {
+    for (const [id, usage] of users) {
+      if (time >= usage.startedAt + durationSeconds * 1000) users.delete(id);
+    }
+  }
+
   function validate(next) {
     if (!Number.isSafeInteger(next.maxRequests) || next.maxRequests <= 0) {
       throw new Error('maxRequests must be a positive safe integer');
@@ -41,6 +47,10 @@ export function createHelperRequestLimiter({
       return { ...limits };
     },
     updateLimits(updates) {
+      const time = now();
+      // Apply the old window when expiring usage so a runtime update does not
+      // discard active users or retain usage that was already expired.
+      expire(time, limits.windowSeconds);
       const next = { ...limits, ...updates };
       validate(next);
       limits = next;
@@ -52,9 +62,7 @@ export function createHelperRequestLimiter({
       }
       const time = now();
       // Lazy cleanup bounds retained state to users active in the last window.
-      for (const [id, usage] of users) {
-        if (time >= usage.startedAt + limits.windowSeconds * 1000) users.delete(id);
-      }
+      expire(time, limits.windowSeconds);
       const usage = users.get(discordUserId) ?? { requests: 0, startedAt: time };
       if (usage.requests >= limits.maxRequests) {
         const resetsAt = usage.startedAt + limits.windowSeconds * 1000;
