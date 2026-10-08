@@ -80,15 +80,21 @@ Other modes: `npm run dev:web:plain` (web only, no scratch stack), `npm run dev:
 
 4. **Write tests** in `test/commands.test.js` (or a new file) using `node --test`. Test the handler directly with a fake context — that's the payoff of surface-neutral commands. Cover the auth policy too: a `linked` command called with no principal must be denied by the router.
 
-5. **Register with Discord** when you're ready:
+5. **Register with Discord.** For your local test bot:
 
    ```bash
    npm run register                 # local, using your .env
-   npm run register:staging         # via railway run
-   npm run register:production
    ```
 
-   Registration is a separate, manual step — merging does **not** register commands.
+   For the deployed bots you don't do anything: `railway.json` runs
+   `node src/registerCommands.js` as the `preDeployCommand`, so merging to
+   `staging` registers the staging bot and merging to `main` registers
+   production. A registration failure fails the deploy, though a failure
+   after the global overwrite leaves Discord's global set already changed —
+   the runbook covers recovery. The manual `npm run register:staging` /
+   `register:production` scripts still exist for re-registering *without* a
+   deploy — see
+   [RAILWAY-DEPLOYMENT.md §5](../../docs/RAILWAY-DEPLOYMENT.md#5-register-discord-slash-commands).
 
 6. **Update the README's command list** and the root [`README.md`](../../README.md)'s "What you can do with it" section. Both enumerate the live commands, and a new command that isn't listed is invisible to users.
 
@@ -135,7 +141,7 @@ CI runs `node-test` (`npm ci` + `npm test`) plus a Docker build with a boot smok
 - **`DIRECTORY_API_KEY` must be issued against main (port 8000), not the playground.** A key issued against the scratch DB dies when that DB is wiped, and the symptom is "directory is temporarily unavailable". Verify with `curl http://localhost:8000/api-keys/self -H "X-API-Key: <key>"`.
 - **Mint directory keys with `uv --project services/team-tracking run team-tracking-keys …`.** A bare invocation can resolve documentation-system's CLI and mint a `doc_`-prefixed key that team-tracking rejects. The token must start with `tt_`.
 - **The bot needs ten env vars to boot** — `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DIRECTORY_BASE_URL`, `DIRECTORY_API_KEY`, `DOC_BASE_URL`, `DOC_API_KEY`, `LLM_BASE_URL`, `LLM_API_KEY`, `VERIFICATION_BASE_URL`, `VERIFICATION_API_KEY`. `MEETING_*` is genuinely optional.
-- **Registering commands is manual and separate from deploying.** A merged command that was never registered doesn't exist to users.
+- **Registering commands happens in the pre-deploy step, not at boot.** `railway.json`'s `preDeployCommand` runs `registerCommands.js` before the new process starts, so a deploy that fails there never starts the new process (Discord's global set may still have been overwritten — [RAILWAY-DEPLOYMENT.md §5](../../docs/RAILWAY-DEPLOYMENT.md#5-register-discord-slash-commands) covers recovery). Don't add a `rest.put(...)` to `index.js` to "make sure" — that would re-register on every restart. And don't tell a release note to run `register:production` by hand; the deploy already did.
 - **Beta commands only appear in the testing guild.** If a `beta: true` command isn't showing up, check `DISCORD_GUILD_ID`.
 
 ## Checklist before you push

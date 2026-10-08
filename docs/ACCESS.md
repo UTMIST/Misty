@@ -80,7 +80,9 @@ you'll get a token you fully control:
 1. [Discord Developer Portal](https://discord.com/developers/applications) →
    **New Application**.
 2. **Bot** → copy the token into `DISCORD_TOKEN`. **General Information** → copy
-   the Application ID into `DISCORD_CLIENT_ID`.
+   the Application ID into `DISCORD_CLIENT_ID`. On the **Bot** page, also enable
+   **Message Content Intent** under **Privileged Gateway Intents** so helper requests
+   can include the full recent thread history, including messages without mentions.
 3. Invite it to a server you own (OAuth2 → URL Generator → `bot` +
    `applications.commands`).
 4. Set `DISCORD_GUILD_ID` to that server so beta commands register instantly

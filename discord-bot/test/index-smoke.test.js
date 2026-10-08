@@ -33,3 +33,13 @@ test('every factory index.js calls is imported or declared', () => {
   const missing = [...called].filter((name) => !available.has(name));
   assert.deepEqual(missing, [], `index.js calls undeclared: ${missing.join(', ')}`);
 });
+
+test('Discord client requests Message Content for full helper-thread history', () => {
+  const src = readFileSync(fileURLToPath(new URL('../src/index.js', import.meta.url)), 'utf8');
+
+  assert.match(
+    src,
+    /GatewayIntentBits\.MessageContent/,
+    'unmentioned history arrives with empty content without this privileged intent',
+  );
+});
