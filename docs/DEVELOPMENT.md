@@ -281,9 +281,11 @@ The bot is the only thing that talks to `verification` and `meeting`, and
 `documentation-system` the only thing that talks to `connectors`. **Two things
 call `llm`:** `meeting` (for minutes at `/stop`) and the bot itself — `LLM_BASE_URL`
 and `LLM_API_KEY` are hard-required boot vars, and `helperService` calls `/chat`
-on the @-mention path (`src/context.js`, `src/adapters/discord/mentions.js`). All
-six backends are built the same way on purpose — learning one gives you ~80% of
-the others. The core conventions (the `contracts/` Protocol boundary, swappable storage
+when a member @-mentions Misty or sends a ping-on reply to Misty in a
+Misty-created thread
+(`src/context.js`, `src/adapters/discord/mentions.js`). All six backends are
+built the same way on purpose — learning one gives you ~80% of the others. The
+core conventions (the `contracts/` Protocol boundary, swappable storage
 adapters, scoped API-key auth, attested actor, Alembic migrations) are listed in
 the [root README → Working conventions](../README.md#working-conventions) and
 explained in [`ARCHITECTURE.md`](ARCHITECTURE.md).

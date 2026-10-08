@@ -1,6 +1,4 @@
-import { resolvePrincipal } from '../../auth/principal.js';
-import { authorize } from '../../auth/policy.js';
-import { DirectoryUnavailable } from '../../clients/directoryClient.js';
+import { answerHelperTurns, resolveHelperCaller } from '../../helperFlow.js';
 
 const DISCORD_MAX_MESSAGE = 2000;
 
@@ -15,6 +13,32 @@ export function stripLeadingMention(content, botId) {
     if (trimmed.startsWith(tag)) return trimmed.slice(tag.length).trimStart();
   }
   return trimmed;
+}
+
+// A reply is a helper request only when its reply ping mentions Misty, it is
+// inside a thread Misty owns, and the referenced message was authored by
+// Misty. Fetching the message avoids trusting reference metadata that does not
+// carry an author.
+export async function isReplyToBotInOwnedThread(message, botId) {
+  if (!message.reference || !message.channel?.isThread?.()) return false;
+  if (message.channel.ownerId !== botId) return false;
+  if (
+    !message.mentions?.has?.(botId, {
+      ignoreDirect: true,
+      ignoreRoles: true,
+      ignoreEveryone: true,
+    })
+  ) {
+    return false;
+  }
+
+  try {
+    const referenced = await message.fetchReference();
+    return referenced?.author?.id === botId;
+  } catch (e) {
+    console.error('referenced message fetch failed:', e.message);
+    return false;
+  }
 }
 
 // Nickname when the member is resolved, else the global/user name — the label a
@@ -64,13 +88,6 @@ export function chunkForDiscord(text) {
 }
 
 const HISTORY_LIMIT = 100; // Discord's messages.fetch maximum; no pagination
-const LINK_PROMPT =
-  'You need to link your account first. Run `/link` to identify yourself, then try again.';
-const VERIFY_UNAVAILABLE =
-  "I can't verify you right now — the directory is unavailable. Please try again shortly.";
-const LLM_UNAVAILABLE =
-  "I'm having trouble reaching the assistant right now — please try again shortly.";
-const EMPTY_ANSWER = "I couldn't come up with an answer that time — please try rephrasing.";
 const THREAD_UNAVAILABLE =
   "I couldn't open a thread for that — please try again. (I may be missing the 'Create Public Threads' or 'Read Message History' permission.)";
 
@@ -99,25 +116,18 @@ async function prependStarterMessage(thread, ordered) {
   ordered.unshift(starter);
 }
 
-// Handle a message that starts with the bot's mention. Linked-only. In a
-// channel it opens a thread; in a thread it replays the thread's history —
-// including the starter message — as memory. Never throws to discord.js.
+// Handle a helper request: either a leading mention or a reply that pings Misty
+// in a Misty-owned thread. Linked-only. In a channel it opens a thread; in a
+// thread it replays the full recent history, including the starter message, as
+// memory.
+// Never throws to discord.js.
 export async function handleMention(message, { appContext, botId }) {
   const question = stripLeadingMention(message.content, botId);
   if (!question) return; // bare ping, nothing to answer
 
-  let principal;
-  try {
-    principal = await resolvePrincipal(appContext.directory, message.author.id);
-  } catch (e) {
-    if (e instanceof DirectoryUnavailable) {
-      await message.reply(VERIFY_UNAVAILABLE).catch(() => {});
-      return;
-    }
-    throw e;
-  }
-  if (!authorize('linked', principal).ok) {
-    await message.reply(LINK_PROMPT).catch(() => {});
+  const caller = await resolveHelperCaller(appContext, message.author.id);
+  if (!caller.ok) {
+    await message.reply(caller.content).catch(() => {});
     return;
   }
 
@@ -151,18 +161,7 @@ export async function handleMention(message, { appContext, botId }) {
   if (!turns.length) return;
 
   await target.sendTyping().catch(() => {});
-  let content;
-  try {
-    ({ content } = await appContext.helperService.answer({ turns, principal }));
-  } catch (err) {
-    console.error('helper answer failed:', err.message);
-    await target.send(LLM_UNAVAILABLE).catch(() => {});
-    return;
-  }
-  if (!content || !content.trim()) {
-    await target.send(EMPTY_ANSWER).catch((e) => console.error('helper reply failed:', e.message));
-    return;
-  }
+  const content = await answerHelperTurns(appContext, turns, caller.principal);
   for (const chunk of chunkForDiscord(content)) {
     await target.send(chunk).catch((e) => console.error('helper reply failed:', e.message));
   }

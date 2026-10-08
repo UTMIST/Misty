@@ -7,7 +7,7 @@ import {
   resolveEphemeral,
   safeReply,
 } from './interactions.js';
-import { startsWithBotMention, handleMention } from './mentions.js';
+import { startsWithBotMention, isReplyToBotInOwnedThread, handleMention } from './mentions.js';
 import { handleRecordInteraction } from './recording.js';
 import { createAutoStop, createMeetingPrompt } from './voice.js';
 
@@ -78,10 +78,12 @@ export function wireDiscordClient(client, { commands, appContext }) {
     try {
       if (message.author?.bot) return;
       const botId = client.user?.id;
-      if (!botId || !startsWithBotMention(message.content, botId)) return;
+      if (!botId) return;
+      const isMention = startsWithBotMention(message.content, botId);
+      if (!isMention && !(await isReplyToBotInOwnedThread(message, botId))) return;
       await handleMention(message, { appContext, botId });
     } catch (err) {
-      console.error('Unhandled mention error:', err);
+      console.error('Unhandled helper message error:', err);
     }
   });
 
