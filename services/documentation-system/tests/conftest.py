@@ -53,14 +53,23 @@ def _clear_settings_cache(_no_dotenv):
     deps._directory_client.cache_clear()
 
 
-# (id, label, url_patterns, requires_auth, has_api, content_fetch_enabled) — matches migration 002.
+# (id, label, url_patterns, requires_auth, has_api, content_fetch_enabled)
+#
+# The sources table as the CURRENT migration head leaves it: seeded by 002,
+# then 006 flipped content_fetch_enabled to true for the four Google sources
+# (they fetch via the connectors service). Keep this in step with the
+# migrations — an in-memory seed that lags them makes the fast suite exercise
+# a different ingest branch than production takes (the "requires auth; no
+# snapshot fetched" path instead of a real fetch), so a test can pass against
+# behavior that does not exist. `notion` and `youtube` remain false: no
+# fetcher is registered for either.
 _SEED = [
     ("web", "Web page", [], False, False, True),
     ("github", "GitHub", ["github.com"], False, True, True),
-    ("gdrive", "Google Drive", ["drive.google.com"], True, True, False),
-    ("gdocs", "Google Docs", ["docs.google.com/document"], True, True, False),
-    ("gsheets", "Google Sheets", ["docs.google.com/spreadsheets"], True, True, False),
-    ("gslides", "Google Slides", ["docs.google.com/presentation"], True, True, False),
+    ("gdrive", "Google Drive", ["drive.google.com"], True, True, True),
+    ("gdocs", "Google Docs", ["docs.google.com/document"], True, True, True),
+    ("gsheets", "Google Sheets", ["docs.google.com/spreadsheets"], True, True, True),
+    ("gslides", "Google Slides", ["docs.google.com/presentation"], True, True, True),
     ("notion", "Notion", ["notion.so", "notion.site"], True, True, False),
     ("youtube", "YouTube", ["youtube.com", "youtu.be"], False, True, False),
 ]
