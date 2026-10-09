@@ -178,6 +178,35 @@ def test_add_and_remove_tag(client):
     assert "new" not in client.get(f"/docs/{doc_id}", headers=AUTH).json()["tags"]
 
 
+def test_duplicate_ingest_surfaces_the_content_gap_without_fetching(client_and_store):
+    """The contract consumers actually see: re-POSTing a URL whose fetch failed
+    returns 200 / created=false, warns that content is missing, and makes no
+    second fetch attempt."""
+    client, store = client_and_store
+
+    class _FailingFetchers:
+        def __init__(self):
+            self.calls = 0
+
+        def fetch_for(self, source_id, url):
+            self.calls += 1
+            raise FetchError("connectors unreachable")
+
+    fetchers = _FailingFetchers()
+    client.app.dependency_overrides[get_fetchers] = lambda: fetchers
+    first = client.post("/docs", json={"url": "https://x.com/dup"}, headers=AUTH)
+    assert first.status_code == 201
+    assert fetchers.calls == 1
+
+    second = client.post("/docs", json={"url": "https://x.com/dup"}, headers=AUTH)
+    assert second.status_code == 200
+    assert second.json()["created"] is False
+    warnings = second.json()["warnings"]
+    assert any("no content is stored" in w for w in warnings)
+    assert fetchers.calls == 1  # dedup made no fetch
+    assert store.get_doc_content(UUID(second.json()["doc"]["id"])) is None
+
+
 def test_list_has_content_false_finds_doc_whose_ingest_fetch_failed(client_and_store):
     """The end-to-end discovery case from #159: a fetch that fails at ingest
     leaves a catalogued doc with no content row and only a warning, and

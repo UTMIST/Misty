@@ -28,16 +28,31 @@ def _apply_grants(storage, doc_id, grants, *, actor: str):
 
 def _merge_into_existing(storage, existing, payload: DocIngest, *, actor: str) -> IngestResult:
     """Idempotent dedup path: fold this ingest's tags/grants into the already
-    catalogued active doc and return it as created=False."""
+    catalogued active doc and return it as created=False.
+
+    Deliberately does NOT fetch, even when the existing doc has no stored
+    content (#159). Dedup stays a cheap, network-free merge so POST /docs keeps
+    predictable latency, and content repair belongs to the one path that owns
+    it: POST /docs/{id}/refetch, driven in bulk by the doc-backfill CLI. A
+    second repair path here would mean a second copy of refetch's "an empty
+    fetch must not wipe stored text" guards.
+
+    It does report the gap rather than hiding it, but states the fact and not
+    the remedy: warnings are part of the HTTP contract and every consumer
+    renders them verbatim (the Discord bot prints them to whoever ran
+    /doc add), so naming an operator CLI here would couple the API to tooling
+    and address an audience that may not be able to act on it. Discovery of
+    these docs is GET /docs?has_content=false; the repair is documented in
+    docs/DEPLOYMENT.md.
+    """
     for tag in payload.tags:
         storage.add_tag(existing.id, tag)
     _apply_grants(storage, existing.id, payload.grants, actor=actor)
     refreshed = storage.get_doc(existing.id)
-    return IngestResult(
-        doc=refreshed,
-        created=False,
-        warnings=[f"already catalogued (added by {existing.created_by})"],
-    )
+    warnings = [f"already catalogued (added by {existing.created_by})"]
+    if storage.get_doc_content_meta(existing.id) is None:
+        warnings.append("no content is stored for this doc")
+    return IngestResult(doc=refreshed, created=False, warnings=warnings)
 
 
 def ingest_doc(

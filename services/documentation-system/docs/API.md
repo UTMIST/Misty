@@ -210,13 +210,32 @@ merged onto the existing doc, and `warnings` contains a note like
 (title, owners, etc.) are **not** applied on an idempotent hit — use `PATCH` to change
 those.
 
+**An idempotent hit never fetches.** Even when the existing doc has no stored content —
+the case a fetch would repair — dedup stays a cheap, network-free merge, so `POST /docs`
+keeps predictable latency however many times a URL is re-submitted. Content repair is
+`POST /docs/{id}/refetch`'s job; the `doc-backfill` CLI drives it in bulk over every
+contentless doc (see [`DEPLOYMENT.md`](DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli)).
+Keeping one repair path also keeps one copy of refetch's rule that an empty fetch must not
+wipe stored text.
+
+The gap is still reported: when the existing doc has no stored content, `warnings` also
+contains `no content is stored for this doc`. That states the fact and not the remedy on
+purpose — warnings are part of this contract and consumers render them verbatim, so the
+API does not name operator tooling. To find these docs, use
+[`GET /docs?has_content=false`](#get-docs--list--filter).
+
 ### Content fetch (best-effort)
 
-If the derived source has content fetching enabled (`web`, `github`), the service tries to
-fetch a title and snapshot at ingest. A fetch failure is **never** fatal: the doc is still
-created, `title` falls back to the caller's title or the URL, and a warning is appended.
-Sources that require auth (Google Drive/Docs/Sheets/Slides, Notion) are skipped with a
-warning; no snapshot is taken.
+If the derived source has content fetching enabled (`web`, `github`, and the four Google
+sources), the service tries to fetch a title, snapshot and full content at ingest. A fetch
+failure is **never** fatal: the doc is still created, `title` falls back to the caller's
+title or the URL, and a warning is appended.
+
+`web` and `github` fetch in-process; the Google sources (`gdrive`, `gdocs`, `gsheets`,
+`gslides`) fetch via the [connectors](../../connectors/) service, which holds the Google
+credentials — migration `006` enabled them. `notion` and `youtube` have no fetcher and
+`content_fetch_enabled: false`, so they are catalogued without content and are skipped
+with a warning (`notion`, which requires auth) or silently (`youtube`).
 
 ### Owner validation and degrade
 
@@ -418,8 +437,9 @@ A **source** describes a kind of URL and how the catalog treats it:
 | `active` | bool | |
 
 The eight seeded sources: `web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`,
-`notion`, `youtube`. Only `web` and `github` currently have a fetcher and
-`content_fetch_enabled: true`.
+`notion`, `youtube`. All but `notion` and `youtube` have a fetcher and
+`content_fetch_enabled: true` — migration `006` enabled the four Google sources, which
+fetch through the connectors service.
 
 ## `GET /sources/{id}` — get one source
 

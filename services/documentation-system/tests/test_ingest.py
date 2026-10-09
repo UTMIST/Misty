@@ -44,6 +44,19 @@ class FakeFetchers:
         return self._result
 
 
+class CountingFetchers:
+    """Records how many fetches were attempted, so a test can assert that the
+    dedup path performs none."""
+
+    def __init__(self, result=None):
+        self._result = result
+        self.calls = 0
+
+    def fetch_for(self, source_id, url):
+        self.calls += 1
+        return self._result
+
+
 class FakeDirectory:
     def __init__(self, team=None, person=None, unavailable=False):
         self._team, self._person, self._down = team, person, unavailable
@@ -98,6 +111,53 @@ def test_ingest_dedup_returns_existing_and_merges_tags(store):
     assert second.created is False
     assert second.doc.id == first.doc.id
     assert set(second.doc.tags) == {"one", "two"}
+
+
+def test_duplicate_ingest_does_not_fetch(store):
+    """#159's settled decision: dedup is a cheap, network-free merge. A second
+    ingest of the same URL must not re-run the fetch, even though this doc has
+    no stored content and a fetch is exactly what would repair it. Repair is
+    POST /docs/{id}/refetch's job, driven in bulk by doc-backfill."""
+    f = CountingFetchers(result=FetchResult(title="X"))  # title only, no content
+    args = dict(storage=store, fetchers=f, directory=FakeDirectory(), actor="bot")
+    ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    assert f.calls == 1
+    ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    assert f.calls == 1  # unchanged: the dedup path made no fetch
+
+
+def test_duplicate_ingest_warns_when_content_is_missing(store):
+    """The gap is reported rather than hidden, so a caller holding this exact
+    doc learns it is contentless."""
+    f = CountingFetchers(result=FetchResult(title="X"))
+    args = dict(storage=store, fetchers=f, directory=FakeDirectory(), actor="bot")
+    ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    second = ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    assert second.created is False
+    assert any("no content is stored" in w for w in second.warnings)
+
+
+def test_duplicate_ingest_warning_names_the_fact_not_the_remedy(store):
+    """Warnings are part of the HTTP contract and consumers render them
+    verbatim, so the API must not advertise an operator CLI to an audience
+    that may not be able to run it."""
+    f = CountingFetchers(result=FetchResult(title="X"))
+    args = dict(storage=store, fetchers=f, directory=FakeDirectory(), actor="bot")
+    ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    second = ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    joined = " ".join(second.warnings)
+    assert "backfill" not in joined and "refetch" not in joined
+
+
+def test_duplicate_ingest_does_not_warn_when_content_exists(store):
+    """Only a genuine gap warrants the warning — a doc that already has text
+    must not be flagged as contentless."""
+    f = CountingFetchers(result=FetchResult(title="X", content="body", content_snapshot="body"))
+    args = dict(storage=store, fetchers=f, directory=FakeDirectory(), actor="bot")
+    first = ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    assert store.get_doc_content(first.doc.id) == "body"
+    second = ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    assert not any("no content is stored" in w for w in second.warnings)
 
 
 def test_reingest_after_soft_remove_does_not_proliferate_active_docs(store):
