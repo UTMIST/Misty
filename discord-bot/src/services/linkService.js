@@ -1,4 +1,4 @@
-import { AlreadyLinked, DirectoryUnavailable } from './directoryClient.js';
+import { AlreadyLinked, DirectoryUnavailable } from '../clients/directoryClient.js';
 import {
   VerificationUnavailable,
   RateLimited,
@@ -6,7 +6,7 @@ import {
   TooManyAttempts,
   InvalidCode,
   NoPendingCode,
-} from './verificationClient.js';
+} from '../clients/verificationClient.js';
 
 // /link establishes identity — must be user-invoked, never LLM-invoked.
 export const llmSafe = false;

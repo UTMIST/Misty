@@ -1,5 +1,5 @@
 import { defineCommand } from '../defineCommand.js';
-import { renderAddEmailResult } from '../messages.js';
+import { renderAddEmailResult } from '../messages/email.js';
 
 export default defineCommand({
   name: 'add-email',

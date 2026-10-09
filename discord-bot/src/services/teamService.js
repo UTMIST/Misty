@@ -3,7 +3,7 @@ import {
   TeamNotFound,
   MembershipInvalid,
   DirectoryUnavailable,
-} from './directoryClient.js';
+} from '../clients/directoryClient.js';
 
 export const llmSafe = true;
 

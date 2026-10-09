@@ -1,5 +1,5 @@
 import { defineCommand } from '../defineCommand.js';
-import { renderLinkResult } from '../messages.js';
+import { renderLinkResult } from '../messages/link.js';
 
 export default defineCommand({
   name: 'link',

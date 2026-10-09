@@ -7,12 +7,14 @@ import {
   interactionToAutocompleteIntent,
   payloadToDiscordReply,
   resolveEphemeral,
-  wireDiscordClient,
+} from '../src/adapters/discord/interactions.js';
+import { wireDiscordClient } from '../src/adapters/discord/index.js';
+import {
   createAutoStop,
   createMeetingPrompt,
   AUTO_STOP_GRACE_MS,
-} from '../src/adapters/discord.js';
-import { DirectoryUnavailable } from '../src/directoryClient.js';
+} from '../src/adapters/discord/voice.js';
+import { DirectoryUnavailable } from '../src/clients/directoryClient.js';
 import record from '../src/commands/record.js';
 import { createMeetingSurface } from '../src/meeting/meetingSurface.js';
 

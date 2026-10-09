@@ -1,13 +1,13 @@
-import { createDirectoryClient } from './directoryClient.js';
-import { createDocClient } from './docClient.js';
-import { createVerificationClient } from './verificationClient.js';
-import { createLinkService } from './linkService.js';
-import { createEmailService } from './emailService.js';
-import { createSeedService } from './seedService.js';
-import { createTeamService } from './teamService.js';
-import { createDocService } from './docService.js';
-import { createLlmClient } from './llmClient.js';
-import { createHelperService } from './helperService.js';
+import { createDirectoryClient } from './clients/directoryClient.js';
+import { createDocClient } from './clients/docClient.js';
+import { createVerificationClient } from './clients/verificationClient.js';
+import { createLinkService } from './services/linkService.js';
+import { createEmailService } from './services/emailService.js';
+import { createSeedService } from './services/seedService.js';
+import { createTeamService } from './services/teamService.js';
+import { createDocService } from './services/docService.js';
+import { createLlmClient } from './clients/llmClient.js';
+import { createHelperService } from './services/helperService.js';
 import { createMeetingClient } from './meeting/meetingClient.js';
 import { createMeetingSurface } from './meeting/meetingSurface.js';
 import { createRecorder } from './meeting/recorder.js';
@@ -17,7 +17,7 @@ import { createRecorder } from './meeting/recorder.js';
  *
  * context.js stays surface-agnostic (no discord.js import): the Discord
  * attachment poster consumed by meetingSurface is injected by the caller
- * (src/index.js, which already imports adapters/discord.js to wire the
+ * (src/index.js, which already imports adapters/discord/ to wire the
  * client) rather than imported here. If omitted, a no-op poster is used —
  * fine for tests/other surfaces, but production wiring must pass the real
  * one for /record to actually post meeting minutes.

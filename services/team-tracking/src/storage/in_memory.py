@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 
 from contracts.types import (
     ApiKey,
+    ChannelTeams,
     Person,
     PersonCreate,
     PersonIdentifier,
@@ -68,6 +69,8 @@ class InMemoryStorageAdapter:
         self._api_key_hashes: dict[UUID, str] = {}
         self._providers: dict[str, Provider] = {pr.id: pr for pr in (seed_providers or [])}
         self._identifiers: dict[UUID, PersonIdentifier] = {}
+        # (guild_id, channel_id) -> (team_ids, created_by)
+        self._channel_teams: dict[tuple[str, str], tuple[list[UUID], str]] = {}
 
     # --- People ---
 
@@ -508,3 +511,33 @@ class InMemoryStorageAdapter:
         )
         self._identifiers[pi.id] = pi
         return pi
+
+    # --- Channel team access ---
+
+    def get_channel_teams(self, guild_id: str, channel_id: str) -> ChannelTeams:
+        entry = self._channel_teams.get((guild_id, channel_id))
+        if entry is None:
+            return ChannelTeams(guild_id=guild_id, channel_id=channel_id, team_ids=[])
+        team_ids, created_by = entry
+        return ChannelTeams(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            team_ids=sorted(t for t in team_ids if self._teams[t].active),
+            updated_by=created_by,
+        )
+
+    def replace_channel_teams(
+        self, guild_id: str, channel_id: str, team_ids: list[UUID], *, actor: str
+    ) -> ChannelTeams:
+        for t in team_ids:
+            team = self._teams.get(t)
+            if team is None or not team.active:
+                raise ValueError("unknown_or_inactive_team")
+        if team_ids:
+            self._channel_teams[(guild_id, channel_id)] = (list(team_ids), actor)
+        else:
+            self._channel_teams.pop((guild_id, channel_id), None)
+        return self.get_channel_teams(guild_id, channel_id)
+
+    def clear_channel_teams(self, guild_id: str, channel_id: str) -> None:
+        self._channel_teams.pop((guild_id, channel_id), None)

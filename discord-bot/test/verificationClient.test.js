@@ -8,7 +8,7 @@ import {
   TooManyAttempts,
   InvalidCode,
   NoPendingCode,
-} from '../src/verificationClient.js';
+} from '../src/clients/verificationClient.js';
 
 function fakeFetch(responses) {
   const calls = [];

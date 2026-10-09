@@ -185,7 +185,7 @@ and skips them.
 - `/link email:<your UTMIST email>` (public) — starts linking your Discord account
   to your directory record. Your email must already be in the directory (execs seed
   members). It emails a one-time code to that address; run `/verify-code` with the
-  code to finish linking. Backed by the verification service via `src/linkService.js`.
+  code to finish linking. Backed by the verification service via `src/services/linkService.js`.
 - `/verify-code code:<6-digit>` (public) — confirms the code emailed by `/link` and
   completes the link.
 - `/whoami` (linked) — shows which directory record you're linked to. Requires you
@@ -461,18 +461,26 @@ local `.env`.
 |---|---|
 | `src/config.js` | Load + validate env. |
 | `src/context.js` | Wire application services once. |
-| `src/directoryClient.js` | The only module that knows the team-tracking HTTP shape. |
-| `src/linkService.js` | Orchestrates `/link` + `/verify-code` — email one-time-code verification via the verification service. |
+| `src/clients/*.js` | Backend HTTP clients and shared request handling. |
+| `src/services/*.js` | Application orchestration over injected clients. |
+| `src/meeting/*.js` | Recording client, session orchestration, and voice recorder. |
+| `src/clients/directoryClient.js` | The only module that knows the team-tracking HTTP shape. |
+| `src/services/linkService.js` | Orchestrates `/link` + `/verify-code` — email one-time-code verification via the verification service. |
 | `src/auth/principal.js` | Authentication: Discord id → Principal. |
 | `src/auth/policy.js` | Authorization: policy + principal → allow/deny. |
 | `src/router.js` | Policy Enforcement Point: authN → authZ → dispatch. |
-| `src/messages.js` | Pure reply-string rendering. |
-| `src/commands/*.js` | Thin discord.js interaction handlers + registry. |
+| `src/messages/*.js` | Pure reply rendering grouped by feature; shared fallback strings in `common.js`. |
+| `src/commands/*.js` | Surface-neutral command handlers + registry. |
 | `src/index.js` | Client setup + interaction routing. |
 | `src/helperFlow.js` | Shared helper-bot authorization and answer handling used by Discord and the web playground. |
 | `src/registerCommands.js` | Slash-command registration (stable → global; beta → testing guild only). Runs as Railway's `preDeployCommand` on every deploy; `npm run register` runs it locally. |
 | `src/defineCommand.js` | Neutral, surface-agnostic command factory. |
-| `src/adapters/discord.js` | The ONLY module that imports from discord.js — turns interactions into intents. |
+| `src/adapters/discord/index.js` | Discord event wiring; dispatches to the router or dedicated recording handler. |
+| `src/adapters/discord/interactions.js` | Convert interactions to neutral intents and deliver replies. |
+| `src/adapters/discord/mentions.js` | Mention and reply helper with thread history. |
+| `src/adapters/discord/recording.js` | Dedicated `/record` interaction path and its authorization. |
+| `src/adapters/discord/voice.js` | Voice occupancy, meeting prompts, and recording auto-stop. |
+| `src/adapters/discord/meetingPosts.js` | Meeting notifications and minutes attachments. |
 | `scripts/dev-web.js` | Orchestrator: ephemeral scratch DB + scratch team-tracking + web server. |
 | `scripts/lib/snapshotDb.js` | Pipes `pg_dump` from main into `psql` on scratch, under `set -e -o pipefail`. |
 | `scripts/lib/spawnTeamTracking.js` | Spawns a scratch uvicorn subprocess; polls `/openapi.json` for readiness. |
@@ -481,6 +489,11 @@ local `.env`.
 | `src/web/server.js` | Fastify web playground (see "Web playground" above). |
 | `src/web/public/mentions.js` | Client-side `<@id>` → user pill rendering. |
 | `src/startupGuard.js` | Refuses web-mode boot if the directory key lacks `dev:spoof`. |
+
+`discord.js` imports belong in the Discord adapter modules and the startup and
+registration entrypoints. Commands, reply renderers, and application services
+remain surface-neutral. Import the module that owns a function directly;
+`adapters/discord/index.js` wires events rather than re-exporting its siblings.
 
 ## Testing
 

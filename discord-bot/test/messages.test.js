@@ -1,11 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { authMessages } from '../src/messages/auth.js';
+import { renderLinkResult, renderVerifyCodeResult } from '../src/messages/link.js';
+import { renderSeedResult, buildWhoamiEmbed } from '../src/messages/people.js';
 import {
-  authMessages,
-  renderLinkResult,
-  renderVerifyCodeResult,
-  renderSeedResult,
-  buildWhoamiEmbed,
   renderCreateTeamResult,
   renderListTeamsResult,
   renderRenameTeamResult,
@@ -13,12 +11,13 @@ import {
   renderRemoveMemberResult,
   renderRosterResult,
   renderMyTeamsResult,
+} from '../src/messages/team.js';
+import {
   renderDocAddResult,
   renderDocListResult,
   renderDocRemoveResult,
-  renderAddEmailResult,
-  renderVerifyEmailResult,
-} from '../src/messages.js';
+} from '../src/messages/doc.js';
+import { renderAddEmailResult, renderVerifyEmailResult } from '../src/messages/email.js';
 
 test('authMessages.unavailable returns ReplyPayload', () => {
   const p = authMessages.unavailable();

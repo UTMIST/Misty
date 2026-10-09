@@ -118,7 +118,8 @@ def clean_db(engine: Engine) -> Iterator[Engine]:
     with engine.begin() as conn:
         conn.execute(
             text(
-                "TRUNCATE person_identifiers, team_memberships, teams, people, api_keys "
+                "TRUNCATE channel_team_access, person_identifiers, team_memberships, teams, "
+                "people, api_keys "
                 "RESTART IDENTITY CASCADE"
             )
         )
