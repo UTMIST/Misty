@@ -7,7 +7,7 @@ import seed from '../src/commands/seed.js';
 import teamCmd from '../src/commands/team.js';
 import myTeamsCmd from '../src/commands/my-teams.js';
 import { commands, partitionCommands } from '../src/commands/index.js';
-import { DirectoryUnavailable } from '../src/directoryClient.js';
+import { DirectoryUnavailable } from '../src/clients/directoryClient.js';
 import { buildDiscordData } from '../src/registerCommands.js';
 import { defineCommand } from '../src/defineCommand.js';
 

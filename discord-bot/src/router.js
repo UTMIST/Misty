@@ -1,6 +1,6 @@
 import { resolvePrincipal } from './auth/principal.js';
 import { authorize } from './auth/policy.js';
-import { DirectoryUnavailable } from './directoryClient.js';
+import { DirectoryUnavailable } from './clients/directoryClient.js';
 import { authMessages } from './messages.js';
 
 /**

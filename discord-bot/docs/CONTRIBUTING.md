@@ -11,7 +11,7 @@ The bot is the platform's only consumer-facing surface. It's Node 20+ with `disc
 - **`commands/index.js` is the single source of truth for the command set.** It's consumed by both the router (dispatch) and `registerCommands.js` (Discord registration). Adding a command is one import plus one map entry.
 - **Auth policies fail closed.** `public` / `linked` / `admin` / `superuser`, evaluated in `auth/policy.js`. An unknown policy denies.
 - **Replies default to ephemeral.** Bot replies carry personal directory and team information. `ephemeral: false` is an explicit, deliberate choice.
-- **Service clients degrade, they don't crash.** Every backend call goes through a client (`directoryClient.js`, `docClient.js`, …) that normalizes failures. A directory outage produces "temporarily unavailable", not a stack trace in a channel.
+- **Service clients degrade, they don't crash.** Every backend call goes through a client (`clients/directoryClient.js`, `clients/docClient.js`, …) that normalizes failures. A directory outage produces "temporarily unavailable", not a stack trace in a channel.
 - **The bot hard-fails at boot on missing config.** `src/config.js` lists ten required env vars and exits with `Missing required env vars: …`. That's deliberate — see `startupGuard.js`.
 
 ## Local setup
@@ -100,7 +100,10 @@ Other modes: `npm run dev:web:plain` (web only, no scratch stack), `npm run dev:
 
 ## Walkthrough: call a new backend service
 
-1. **Add a client** at `src/<name>Client.js`, built on `httpClient.js`. Follow `verificationClient.js` — it's the simplest.
+1. **Add a client** at `src/clients/<name>Client.js`, built on `src/clients/httpClient.js`. Follow `src/clients/verificationClient.js` — it's the simplest.
+   Application orchestration belongs in `src/services/`; wire clients and
+   services in `src/context.js`. The recording client stays in `src/meeting/`
+   alongside its session and recorder code.
 2. **Normalize failures.** Export a named error (`DirectoryUnavailable` is the model) so callers can distinguish "the service said no" from "the service is down". A raw fetch rejection reaching a handler produces an ugly user-facing failure.
 3. **Add its config** to `src/config.js`. Decide whether it's **required** (hard-fails at boot, like `DIRECTORY_*`) or **optional** (degrades, like `MEETING_*`). Optional is right when the platform is still usable without it — `/record` reporting "not configured" is better than the bot refusing to start.
 4. **Add the vars to `.env.example`** with working local defaults where possible.

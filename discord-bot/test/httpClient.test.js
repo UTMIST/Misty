@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHttpClient } from '../src/httpClient.js';
+import { createHttpClient } from '../src/clients/httpClient.js';
 
 class TypeA extends Error {}
 class TypeB extends Error {}

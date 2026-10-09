@@ -1,6 +1,6 @@
 import { defineCommand } from '../defineCommand.js';
 import { buildWhoamiEmbed } from '../messages.js';
-import { DirectoryUnavailable } from '../directoryClient.js';
+import { DirectoryUnavailable } from '../clients/directoryClient.js';
 
 export default defineCommand({
   name: 'whoami',
