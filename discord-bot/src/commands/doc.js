@@ -1,10 +1,7 @@
 import { defineCommand } from '../defineCommand.js';
 import { myTeamsAutocomplete as teamAutocomplete } from './teamAutocomplete.js';
-import {
-  renderDocAddResult,
-  renderDocListResult,
-  renderDocRemoveResult,
-} from '../messages/doc.js';
+import { renderDocAddResult, renderDocListResult, renderDocRemoveResult } from '../messages/doc.js';
+import { ACCESS_RANK, rankOf } from '../auth/policy.js';
 
 // Re-exported for callers/tests that reference /doc's autocomplete budget. The
 // implementation now lives in the shared teamAutocomplete module.
