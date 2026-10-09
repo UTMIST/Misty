@@ -1,6 +1,6 @@
 import { defineCommand } from '../defineCommand.js';
 import { authorize } from '../auth/policy.js';
-import { buildCommandDetailEmbed, buildHelpEmbed, helpMessages } from '../messages.js';
+import { buildCommandDetailEmbed, buildHelpEmbed, helpMessages } from '../messages/help.js';
 
 /**
  * Reduce a command's declarative authorization rule to a policy that can be

@@ -283,7 +283,7 @@ call `llm`:** `meeting` (for minutes at `/stop`) and the bot itself — `LLM_BAS
 and `LLM_API_KEY` are hard-required boot vars, and `helperService` calls `/chat`
 when a member @-mentions Misty or sends a ping-on reply to Misty in a
 Misty-created thread
-(`src/context.js`, `src/adapters/discord.js`). All six backends are
+(`src/context.js`, `src/adapters/discord/mentions.js`). All six backends are
 built the same way on purpose — learning one gives you ~80% of the others. The
 core conventions (the `contracts/` Protocol boundary, swappable storage
 adapters, scoped API-key auth, attested actor, Alembic migrations) are listed in

@@ -10,6 +10,7 @@ The bot is the platform's only consumer-facing surface. It's Node 20+ with `disc
 - **`router.js` is the single Policy Enforcement Point.** Authenticate → authorize → dispatch, in one place. **Handlers never re-implement auth.** If you find yourself checking `access_level` inside a handler, use the declarative `auth` field instead.
 - **`commands/index.js` is the single source of truth for the command set.** It's consumed by both the router (dispatch) and `registerCommands.js` (Discord registration). Adding a command is one import plus one map entry.
 - **Auth policies fail closed.** `public` / `linked` / `admin` / `superuser`, evaluated in `auth/policy.js`. An unknown policy denies.
+- **Reply rendering lives in `src/messages/`, grouped by feature.** Commands import their renderers directly (for example, `messages/team.js`); keep them pure and surface-neutral. Discord interaction conversion, mentions, recording, and voice events live in `src/adapters/discord/` — see the [README architecture map](../README.md#architecture).
 - **Replies default to ephemeral.** Bot replies carry personal directory and team information. `ephemeral: false` is an explicit, deliberate choice.
 - **Service clients degrade, they don't crash.** Every backend call goes through a client (`clients/directoryClient.js`, `clients/docClient.js`, …) that normalizes failures. A directory outage produces "temporarily unavailable", not a stack trace in a channel.
 - **The bot hard-fails at boot on missing config.** `src/config.js` lists ten required env vars and exits with `Missing required env vars: …`. That's deliberate — see `startupGuard.js`.
@@ -70,6 +71,7 @@ Other modes: `npm run dev:web:plain` (web only, no scratch stack), `npm run dev:
    | `discordHandle` | The caller's Discord handle |
 
    - `defineCommand` validates the definition and throws on nonsense at import time — an option can't set both `choices` and `autocomplete`, a subcommand can't lack a handler.
+   - Put reply formatting in the matching `src/messages/<feature>.js` module.
    - **Never import `discord.js` here.** If your handler needs something only Discord provides, that's a signal it belongs in an adapter, not a command.
    - Set `beta: true` while iterating — beta commands register **only** to the testing guild and never reach production servers.
    - `identifyCaller: true` gives a `public` command a best-effort identity lookup without making auth mandatory (`/help` uses this to list only the commands you can run).

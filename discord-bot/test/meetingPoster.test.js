@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeAttachmentPoster } from '../src/adapters/discord.js';
+import { makeAttachmentPoster } from '../src/adapters/discord/meetingPosts.js';
 
 function fakeChannel({ sendImpl } = {}) {
   const calls = [];
