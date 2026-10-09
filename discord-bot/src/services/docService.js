@@ -57,17 +57,6 @@ export function createDocService({ docClient, directory }) {
     }
   }
 
-  async function showDoc({ id, onBehalfOf } = {}) {
-    try {
-      const doc = await docClient.getDoc(id, { onBehalfOf });
-      if (!doc) return { outcome: 'NOT_FOUND' };
-      return { outcome: 'SHOWN', doc };
-    } catch (e) {
-      if (e instanceof DocUnavailable) return { outcome: 'DOC_DOWN' };
-      throw e;
-    }
-  }
-
   async function removeDoc({ id }) {
     try {
       const doc = await docClient.deactivateDoc(id);
@@ -79,5 +68,5 @@ export function createDocService({ docClient, directory }) {
     }
   }
 
-  return { addDoc, listDocs, showDoc, removeDoc };
+  return { addDoc, listDocs, removeDoc };
 }

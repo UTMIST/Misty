@@ -48,6 +48,7 @@ def list_docs(
     owning_person_id: UUID | None = None,
     source_id: str | None = None,
     tag: str | None = None,
+    has_content: bool | None = None,
     active_only: bool = True,
     storage: StorageAdapter = Depends(get_storage),
     ctx: ActorContext = Depends(read_context),
@@ -57,6 +58,7 @@ def list_docs(
         owning_person_id=owning_person_id,
         source_id=source_id,
         tag=tag.strip().lower() if tag is not None else None,
+        has_content=has_content,
         active_only=active_only,
         visibility=ctx,
     )

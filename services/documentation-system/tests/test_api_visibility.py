@@ -106,6 +106,33 @@ def test_read_all_key_sees_everything(ctx):
     assert len(client.get("/docs", headers=reader).json()) == 1
 
 
+def test_has_content_filter_stays_actor_scoped(ctx):
+    """#159's discovery filter must narrow the actor-scoped listing, never
+    widen it. If `has_content=false` escaped visibility it would become a way
+    to enumerate the whole catalog with a plain docs:read key."""
+    client, adapter, mk_key = ctx
+    granted = client.post("/docs", json={"url": "https://granted"}, headers=ADMIN).json()["doc"][
+        "id"
+    ]
+    client.post("/docs", json={"url": "https://hidden"}, headers=ADMIN)
+    client.post(
+        f"/docs/{granted}/grants",
+        json={"grantee_type": "person", "grantee_id": P1},
+        headers=ADMIN,
+    )
+    # This module's FakeFetchers returns no `content`, so BOTH docs are
+    # contentless — the grant is the only thing separating them.
+    assert len(client.get("/docs?has_content=false", headers=ADMIN).json()) == 2
+
+    reader = mk_key(["docs:read", "act-as-user"])
+    obo = {**reader, "X-On-Behalf-Of": P1}
+    listed = client.get("/docs?has_content=false", headers=obo).json()
+    assert [d["url"] for d in listed] == ["https://granted"]
+
+    # No actor at all: a plain docs:read key sees nothing, filter or no filter.
+    assert client.get("/docs?has_content=false", headers=mk_key(["docs:read"])).json() == []
+
+
 def test_grant_endpoints_add_and_remove(ctx):
     client, adapter, mk_key = ctx
     doc_id = client.post("/docs", json={"url": "https://d"}, headers=ADMIN).json()["doc"]["id"]

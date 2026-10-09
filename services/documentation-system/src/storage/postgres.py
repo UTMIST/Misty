@@ -235,6 +235,7 @@ class PostgresStorageAdapter:
         owning_person_id=None,
         source_id=None,
         tag=None,
+        has_content=None,
         active_only=True,
         visibility: ActorContext = SEE_ALL,
     ) -> list[Doc]:
@@ -248,6 +249,11 @@ class PostgresStorageAdapter:
             conditions.append(docs.c.owning_person_id == owning_person_id)
         if source_id is not None:
             conditions.append(docs.c.source_id == source_id)
+        if has_content is not None:
+            row_exists = (
+                select(doc_content.c.doc_id).where(doc_content.c.doc_id == docs.c.id).exists()
+            )
+            conditions.append(row_exists if has_content else ~row_exists)
         clause = self._visibility_clause(visibility)
         if clause is not None:
             conditions.append(clause)

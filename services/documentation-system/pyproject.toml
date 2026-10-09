@@ -38,6 +38,7 @@ platform-auth = { workspace = true }
 
 [project.scripts]
 doc-keys = "src.cli:main"
+doc-backfill = "src.backfill:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

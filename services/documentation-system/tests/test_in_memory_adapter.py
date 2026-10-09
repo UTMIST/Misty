@@ -175,6 +175,60 @@ def test_list_docs_visibility():
     assert len(a.list_docs(visibility=SEE_ALL)) == 2
 
 
+def test_list_docs_has_content_selects_exactly_the_contentless(store):
+    """has_content partitions the catalog on doc_content row presence. The
+    discovery query for content backfill must return every contentless doc and
+    no doc that already has text — an over-broad answer refetches content the
+    catalog already holds, an under-broad one silently leaves gaps."""
+    with_text = _mk(store, url="https://has.com")
+    without_text = _mk(store, url="https://missing.com")
+    store.upsert_doc_content(with_text.id, content_text="body", content_hash="h", fetched_at=None)
+    assert [d.id for d in store.list_docs(has_content=False)] == [without_text.id]
+    assert [d.id for d in store.list_docs(has_content=True)] == [with_text.id]
+
+
+def test_list_docs_has_content_none_does_not_filter(store):
+    """The default must stay a no-op so every existing caller is unaffected."""
+    with_text = _mk(store, url="https://has.com")
+    without_text = _mk(store, url="https://missing.com")
+    store.upsert_doc_content(with_text.id, content_text="body", content_hash="h", fetched_at=None)
+    assert {d.id for d in store.list_docs()} == {with_text.id, without_text.id}
+
+
+def test_list_docs_has_content_keys_on_content_row_not_snapshot(store):
+    """A doc can carry a content_snapshot while having no doc_content row — an
+    older record predating content storage, or a fetcher that yielded only a
+    preview. Such a doc still needs backfilling, so the filter must key on the
+    content row and not be fooled by the snapshot."""
+    doc = _mk(store, url="https://snapshot-only.com")
+    store.update_doc(doc.id, {"content_snapshot": "preview"}, actor="t")
+    listed = store.list_docs(has_content=False)
+    assert [d.id for d in listed] == [doc.id]
+    assert listed[0].content_snapshot == "preview"
+
+
+def test_list_docs_has_content_composes_with_visibility():
+    """The discovery filter narrows the actor-scoped listing rather than
+    escaping it: a contentless doc the actor cannot see must stay hidden, or
+    the filter becomes a way to enumerate the catalog."""
+    a = InMemoryStorageAdapter()
+    mine = _mk_vis(a, url="https://mine", owner_p=P1)
+    _mk_vis(a, url="https://not-mine")
+    actor = Actor(person_id=P1, team_ids=frozenset())
+    assert [d.id for d in a.list_docs(has_content=False, visibility=actor)] == [mine.id]
+    assert a.list_docs(has_content=False, visibility=DENY) == []
+    assert len(a.list_docs(has_content=False, visibility=SEE_ALL)) == 2
+
+
+def test_list_docs_has_content_composes_with_other_filters(store):
+    """has_content is an AND alongside the existing filters, not a reset."""
+    _mk(store, url="https://untagged.com")
+    tagged = _mk(store, url="https://tagged.com", tags=["x"])
+    assert [d.id for d in store.list_docs(has_content=False, tag="x")] == [tagged.id]
+    store.upsert_doc_content(tagged.id, content_text="body", content_hash="h", fetched_at=None)
+    assert store.list_docs(has_content=False, tag="x") == []
+
+
 def test_upsert_doc_content_round_trips(store):
     doc = _mk(store)
     store.upsert_doc_content(

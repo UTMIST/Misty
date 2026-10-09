@@ -114,6 +114,7 @@ class InMemoryStorageAdapter:
         owning_person_id=None,
         source_id=None,
         tag=None,
+        has_content=None,
         active_only=True,
         visibility: ActorContext = SEE_ALL,
     ) -> list[Doc]:
@@ -128,6 +129,8 @@ class InMemoryStorageAdapter:
             if source_id is not None and doc.source_id != source_id:
                 continue
             if tag is not None and tag not in self._tags.get(doc.id, set()):
+                continue
+            if has_content is not None and (doc.id in self._content) != has_content:
                 continue
             if not self._visible(doc, visibility):
                 continue

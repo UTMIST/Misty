@@ -210,13 +210,32 @@ merged onto the existing doc, and `warnings` contains a note like
 (title, owners, etc.) are **not** applied on an idempotent hit — use `PATCH` to change
 those.
 
+**An idempotent hit never fetches.** Even when the existing doc has no stored content —
+the case a fetch would repair — dedup stays a cheap, network-free merge, so `POST /docs`
+keeps predictable latency however many times a URL is re-submitted. Content repair is
+`POST /docs/{id}/refetch`'s job; the `doc-backfill` CLI drives it in bulk over every
+contentless doc (see [`DEPLOYMENT.md`](DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli)).
+Keeping one repair path also keeps one copy of refetch's rule that an empty fetch must not
+wipe stored text.
+
+The gap is still reported: when the existing doc has no stored content, `warnings` also
+contains `no content is stored for this doc`. That states the fact and not the remedy on
+purpose — warnings are part of this contract and consumers render them verbatim, so the
+API does not name operator tooling. To find these docs, use
+[`GET /docs?has_content=false`](#get-docs--list--filter).
+
 ### Content fetch (best-effort)
 
-If the derived source has content fetching enabled (`web`, `github`), the service tries to
-fetch a title and snapshot at ingest. A fetch failure is **never** fatal: the doc is still
-created, `title` falls back to the caller's title or the URL, and a warning is appended.
-Sources that require auth (Google Drive/Docs/Sheets/Slides, Notion) are skipped with a
-warning; no snapshot is taken.
+If the derived source has content fetching enabled (`web`, `github`, and the four Google
+sources), the service tries to fetch a title, snapshot and full content at ingest. A fetch
+failure is **never** fatal: the doc is still created, `title` falls back to the caller's
+title or the URL, and a warning is appended.
+
+`web` and `github` fetch in-process; the Google sources (`gdrive`, `gdocs`, `gsheets`,
+`gslides`) fetch via the [connectors](../../connectors/) service, which holds the Google
+credentials — migration `006` enabled them. `notion` and `youtube` have no fetcher and
+`content_fetch_enabled: false`, so they are catalogued without content and are skipped
+with a warning (`notion`, which requires auth) or silently (`youtube`).
 
 ### Owner validation and degrade
 
@@ -241,10 +260,32 @@ List docs. Scope: `docs:read`. All filters are optional query params and combine
 | `owning_person_id` | UUID | — | Only docs owned by this person |
 | `source_id` | string | — | Only docs of this source kind |
 | `tag` | string | — | Only docs carrying this tag (matched case-insensitively) |
+| `has_content` | bool | — | `false` returns only docs with no stored content; `true` only docs with it |
 | `active_only` | bool | `true` | When `true`, hides soft-deleted docs |
 
 Returns a JSON array of `Doc` objects in a deterministic order. There is no pagination —
 the full matching set is returned (adequate for the current catalog size).
+
+### `has_content` — finding docs that need a content backfill
+
+`has_content=false` is the discovery query for documents whose content is missing: a doc
+whose source fetch failed at ingest is still catalogued, but gets no stored content and
+only a warning on the ingest response (see
+[`POST /docs`](#post-docs--ingest)), and older records predate content storage
+entirely. Omitting the param filters nothing, so existing callers are unaffected.
+
+Two things it deliberately does **not** key on:
+
+- **`content_snapshot`.** The snapshot is a bounded preview on the `Doc` itself; stored
+  content is a separate row. A doc can show a snapshot and still be contentless, and it
+  still needs backfilling, so it is still returned by `has_content=false`.
+- **The text being non-empty.** Empty content is never stored in the first place — both
+  ingest and `refetch` skip the write when a fetch yields no text — so presence of the
+  row is equivalent to presence of real content.
+
+This filter needs no scope of its own: it narrows the same actor-scoped listing every
+other filter narrows, so a caller can only ever discover contentless docs it was already
+permitted to see.
 
 **Visibility is applied on top of these filters**, so the result is what the *actor* may
 see AND matches the filters. A plain `docs:read` key with no `X-On-Behalf-Of` gets an
@@ -396,8 +437,9 @@ A **source** describes a kind of URL and how the catalog treats it:
 | `active` | bool | |
 
 The eight seeded sources: `web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`,
-`notion`, `youtube`. Only `web` and `github` currently have a fetcher and
-`content_fetch_enabled: true`.
+`notion`, `youtube`. All but `notion` and `youtube` have a fetcher and
+`content_fetch_enabled: true` — migration `006` enabled the four Google sources, which
+fetch through the connectors service.
 
 ## `GET /sources/{id}` — get one source
 

@@ -81,6 +81,18 @@ uv run doc-keys revoke <api_key_id>
 
 Scopes: `docs:{read,write}`, `admin` (wildcard). See the auth model section below for how attested actors and audit fields work.
 
+A doc whose source fetch failed at ingest is catalogued without content (the failure is only a warning). Find and repair those with the `doc-backfill` CLI, which talks to this service over HTTP — so it needs a scoped key, not `DATABASE_URL`:
+
+```bash
+# What is missing, without fetching anything
+DOCS_API_KEY=doc_<prefix>_<secret> uv run doc-backfill --dry-run
+
+# Repair it; exits non-zero if any doc still fails
+DOCS_API_KEY=doc_<prefix>_<secret> uv run doc-backfill
+```
+
+Sources with `content_fetch_enabled=false` (`notion`, `youtube`) can never have content, so they are reported as skipped rather than failed. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli).
+
 **Ports:** this service runs on **8001** (team-tracking uses 8000) and its Postgres container is exposed on **5434** — both chosen to avoid colliding with team-tracking's defaults when running both services locally.
 
 ## Folder tour
@@ -117,7 +129,8 @@ documentation-system/
 │   ├── ingest.py               ingest_doc(): normalize, dedup, source, fetch, own, persist
 │   ├── url_norm.py             URL normalization + source derivation from patterns
 │   ├── config.py               Settings (DATABASE_URL, API_KEY, DIRECTORY_*)
-│   └── cli.py                  doc-keys CLI (issue/list/revoke)
+│   ├── cli.py                  doc-keys CLI (issue/list/revoke)
+│   └── backfill.py             doc-backfill CLI — repairs docs missing content
 │
 ├── migrations/                 Alembic migrations
 │   ├── env.py
@@ -183,7 +196,7 @@ All endpoints require `X-API-Key` with the appropriate scope.
 | Method | Path | Scope | Description |
 |--------|------|-------|-------------|
 | POST | `/docs` | `docs:write` | Ingest a URL (idempotent; 200 if already catalogued, 201 if new) |
-| GET | `/docs` | `docs:read` | List docs (`?owning_team_id=&owning_person_id=&source_id=&tag=&active_only=true`) |
+| GET | `/docs` | `docs:read` | List docs (`?owning_team_id=&owning_person_id=&source_id=&tag=&has_content=&active_only=true`) |
 | GET | `/docs/{id}` | `docs:read` | Get one doc (backfills owner labels if previously unresolved) |
 | PATCH | `/docs/{id}` | `docs:write` | Update a doc (title, description, owner ids, active flag) |
 | POST | `/docs/{id}/tags` | `docs:write` | Add a tag |
