@@ -12,6 +12,7 @@ def create_app() -> FastAPI:
 
     from src.api.routers import (
         api_keys,
+        channels,
         identifiers,
         memberships,
         people,
@@ -43,6 +44,7 @@ def create_app() -> FastAPI:
     app.include_router(memberships.router)
     app.include_router(providers.router)
     app.include_router(identifiers.router)
+    app.include_router(channels.router)
     app.include_router(api_keys.router)
     return app
 
