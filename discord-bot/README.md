@@ -20,7 +20,7 @@ Two modes, one shared foundation. Pick which mode you need:
 
 - **Discord surface** — the bot connects to Discord and users invoke slash
   commands in your test server. Needs a Discord app + token.
-- **Web playground** — a browser-based Discord-lookalike that hits the same
+- **Web playground** — a Misty-branded browser workspace that hits the same
   handlers without going through Discord. No Discord token required. Isolated
   ephemeral scratch DB. This is the recommended dev loop.
 
@@ -327,7 +327,7 @@ parallel to team-tracking's scoped-key auth.
 ## Web playground (local dev)
 
 For iterating on commands without going through Discord, the bot ships a
-Discord-shaped web playground. It runs against an **ephemeral scratch copy** of
+Misty-branded web playground. It runs against an **ephemeral scratch copy** of
 your local team-tracking DB — commands you run in the playground never touch
 your working directory data.
 
@@ -361,14 +361,28 @@ That boots an orchestrator (`scripts/dev-web.js`) which:
 ### Using the playground
 
 Open `http://127.0.0.1:3001`, paste one of the three Dev IDs above into
-"Acting as" (or pick from the datalist), click a command in the sidebar, fill
-the form, and run. Replies stream into the transcript above.
+"Acting as" (or pick from the datalist). Choose a quick-start task or browse
+commands under Conversations, Your account, Teams & people, Documents,
+Meetings, Administration, and Help & support. Search matches command names, descriptions,
+and categories. New uncategorized commands remain available under Other commands.
 
-Click **Reset DB** in the top strip to re-clone from your main DB whenever you
-want a clean slate — no restart required. The default personas are re-seeded
+Forms share labeled controls, help text, and Required/Optional indicators.
+Leaving an optional select at **Use default** preserves the command’s server
+default; selecting **No** explicitly sends false. Permission badges describe
+the command policy; the server still authorizes every request. Run a command
+to see its reply in **Activity**. Pending requests disable repeat submission.
+
+The layout adapts to narrow screens and supports keyboard navigation. On phones,
+**Commands** opens the category menu; selecting a command closes it.
+**Clear activity** only clears the visible replies; it does not reset Misty’s
+thread context. UTMIST’s existing astronaut logo and cobalt accent are reused
+locally, with no external font, icon, or image requests.
+
+Click **Reset DB** beside the identity picker to re-clone from your main DB
+whenever you want a clean slate — no restart required. The default personas are re-seeded
 after every reset.
 
-Choose **Reply to Misty** under **Helper thread** to simulate a Discord reply. Toggle
+Choose **Reply to Misty** under **Conversations** to simulate a Discord reply. Toggle
 **Ping @Misty** to test both reply-ping settings: Misty answers only when it is on,
 while ping-off messages remain part of the simulated thread history. The playground
 sends that history with every triggered follow-up. **Reset thread** clears only this
@@ -487,6 +501,8 @@ local `.env`.
 | `scripts/lib/issueDevSpoofKey.js` | Runs `team-tracking-keys issue --scopes ... dev:spoof` against scratch. |
 | `scripts/lib/seedDefaultPersonas.js` | Idempotently seeds Dev Superuser/Admin/Member into scratch. |
 | `src/web/server.js` | Fastify web playground (see "Web playground" above). |
+| `src/web/public/catalog.js` | Presentation labels, categories, search, and option serialization; command definitions stay in the registry. |
+| `src/web/public/utmist-logo.png` | Unmodified copy of the meeting service’s UTMIST brand asset, served within the bot image. |
 | `src/web/public/mentions.js` | Client-side `<@id>` → user pill rendering. |
 | `src/startupGuard.js` | Refuses web-mode boot if the directory key lacks `dev:spoof`. |
 

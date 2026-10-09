@@ -1,33 +1,153 @@
 <!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>UTMIST bot playground</title>
-  <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-  <div class="top-strip">
-    <span class="spoof-badge">Spoof mode · ephemeral DB</span>
-    <label>Acting as:
-      <input id="actingAs" list="people-list" placeholder="Type or pick a Discord ID" autocomplete="off">
-    </label>
-    <datalist id="people-list"></datalist>
-    <button id="reset-btn">Reset DB</button>
-  </div>
-  <div class="main">
-    <aside class="sidebar">
-      <h2>Commands</h2>
-      <div id="command-list"></div>
-      <h2>Helper thread</h2>
-      <button id="helper-reply-btn">↪ Reply to Misty</button>
-    </aside>
-    <section class="chat">
-      <div class="transcript" id="transcript"></div>
-      <div class="form-strip" id="form-strip">
-        <em>Select a command from the sidebar.</em>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#002fcb" />
+    <title>Misty · UTMIST playground</title>
+    <link rel="icon" href="/utmist-logo.png" type="image/png" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">Skip to workspace</a>
+    <aside class="sidebar" aria-label="Workspace navigation">
+      <a class="brand" href="/" aria-label="Misty home">
+        <img src="/utmist-logo.png" width="42" height="42" alt="" />
+        <span>Misty<span class="brand-caption">Your UTMIST companion.</span></span>
+      </a>
+      <button
+        id="nav-toggle"
+        class="button button-secondary"
+        type="button"
+        aria-expanded="false"
+        aria-controls="command-list"
+      >
+        Commands
+      </button>
+      <div class="sidebar-tools">
+        <label class="sr-only" for="command-search">Search commands</label>
+        <div class="search-box">
+          <span aria-hidden="true">⌕</span
+          ><input
+            id="command-search"
+            type="search"
+            placeholder="Find a command…"
+            autocomplete="off"
+          />
+        </div>
+        <button class="nav-button home-button active" id="home-btn" aria-current="page">
+          <span aria-hidden="true">⌂</span> Overview
+        </button>
       </div>
-    </section>
-  </div>
-  <script type="module" src="/app.js"></script>
-</body>
+      <nav id="command-list" aria-label="Commands"><p class="nav-note">Loading commands…</p></nav>
+      <div class="sidebar-footer">
+        <img class="utmist-mark" src="/utmist-logo.png" width="31" height="34" alt="UTMIST" />
+        <div><strong>Made for UTMIST</strong><span>Your community, connected.</span></div>
+      </div>
+    </aside>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="location">
+          <span>Workspace</span><span aria-hidden="true">/</span><strong>Playground</strong>
+        </div>
+        <span class="environment"><span aria-hidden="true"></span> Local playground</span>
+      </header>
+      <main id="workspace" tabindex="-1">
+        <div class="workspace-inner">
+          <section class="identity-bar" aria-label="Acting identity">
+            <div class="identity-avatar" id="identity-avatar" aria-hidden="true">?</div>
+            <div class="identity-field">
+              <label for="actingAs">Acting as</label>
+              <input
+                id="actingAs"
+                class="control"
+                list="people-list"
+                placeholder="Choose a person or enter a Discord ID"
+                autocomplete="off"
+                aria-describedby="identity-hint"
+              />
+              <datalist id="people-list"></datalist>
+              <span id="identity-hint" class="field-hint"
+                >Choose an identity to run a command.</span
+              >
+            </div>
+            <button id="reset-btn" class="button button-quiet" type="button">Reset DB</button>
+          </section>
+
+          <div id="load-error" class="notice notice-error" role="alert" hidden>
+            <span></span
+            ><button id="retry-btn" class="button button-secondary" type="button">Try again</button>
+          </div>
+
+          <section id="welcome" aria-labelledby="welcome-title">
+            <div class="welcome-copy">
+              <span class="eyebrow">YOUR UTMIST SIDEKICK</span>
+              <h1 id="welcome-title">A little help from <span>Misty.</span></h1>
+              <p>
+                People, teams, and documents. Find what you need,<br class="desktop-break" />
+                take care of the details, and get back to the good stuff.
+              </p>
+            </div>
+            <div class="welcome-art" aria-hidden="true">
+              <span class="orbit orbit-one"></span><span class="orbit orbit-two"></span
+              ><img src="/utmist-logo.png" width="150" height="164" alt="" /><span
+                class="spark spark-one"
+                >✦</span
+              ><span class="spark spark-two">✧</span><span class="art-label">Here to help.</span>
+            </div>
+          </section>
+
+          <section id="quick-start" aria-labelledby="quick-start-title">
+            <div class="section-heading">
+              <h2 id="quick-start-title">A good place to start</h2>
+              <span>Pick a task. Make it happen.</span>
+            </div>
+            <div id="quick-actions" class="quick-actions"></div>
+          </section>
+
+          <section
+            id="form-strip"
+            class="command-card"
+            aria-labelledby="command-title"
+            hidden
+          ></section>
+
+          <section class="activity-card" aria-labelledby="activity-title">
+            <div class="section-heading">
+              <div class="activity-heading">
+                <h2 id="activity-title">Activity</h2>
+                <span class="count" id="activity-count">0</span>
+              </div>
+              <button id="clear-btn" class="text-button" type="button" disabled>
+                Clear activity
+              </button>
+            </div>
+            <div id="activity-empty" class="activity-empty">
+              <span class="empty-icon" aria-hidden="true">✦</span>
+              <h3>A fresh start.</h3>
+              <p>Run a command or reply to Misty.<br />Your conversation will appear here.</p>
+            </div>
+            <div
+              class="transcript"
+              id="transcript"
+              role="log"
+              aria-label="Command activity"
+              aria-live="polite"
+              aria-relevant="additions"
+              tabindex="0"
+            ></div>
+            <p id="request-status" class="request-status" role="status"></p>
+          </section>
+          <footer class="workspace-footer">
+            <span>Misty, by UTMIST</span><span>Local tools. Familiar commands.</span>
+          </footer>
+        </div>
+      </main>
+    </div>
+    <noscript
+      ><p class="notice notice-error">Enable JavaScript to use the Misty playground.</p></noscript
+    >
+    <script type="module" src="/app.js"></script>
+  </body>
 </html>
