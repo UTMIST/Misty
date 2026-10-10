@@ -8,15 +8,31 @@ Connect
 -------
 ``ws://.../meetings/{session_id}/stream?key=<consumer-key>&guild_id=<guild-id>``
 
-- ``key`` (query param, preferred): the consumer's API key (same key used for
+- ``key`` (query param): the consumer's API key (same key used for
   ``X-API-Key`` on the HTTP endpoints). Validated against the key store before
   the socket is accepted; on failure the connection is closed during the
   handshake (HTTP-level reject).
+  Prefer first-frame auth below to keep credentials out of URL logs.
 - If ``key`` is omitted from the query string, the server instead accepts the
   socket and waits for exactly one text frame of the form ``{"key": "..."}``
   as the very first message. If that message is missing, malformed, or the
   key fails validation, the socket is closed immediately with WS close code
   ``1008`` (policy violation) before any audio is processed.
+  The first frame may opt into service-to-bot events with
+  ``{"key": "...", "subtitle_events": true}``. ``subtitle_events`` is an
+  optional JSON boolean in this application handshake (default false), not a
+  URL parameter or HTTP header. It is read only from the first auth frame,
+  before audio/control; sending it later does not subscribe. After authentication:
+  ``session.ready`` confirms the capability; ``subtitles.chunk`` carries
+  session_id, sequence (1-based per session), speaker_id, display_name,
+  start_ms and text. Only finalized results are published. A single bounded
+  FIFO/sender assigns sequence and sends in order, NOT speech-time order.
+  ``subtitles.complete`` follows the tail with last_sequence and status
+  (complete/incomplete), independently of PDF generation. ``subtitles.error``
+  carries a fixed code and disables captions without stopping audio.
+  No opt-in means no outgoing events. There is no reconnect/replay guarantee.
+  Opt-in does not authenticate a client: no ready or subtitle event is sent
+  until the key has passed the same authentication and scope checks below.
 - ``guild_id`` (query param, optional): passed straight through to
   ``SessionRegistry.create``. If omitted, ``session_id`` is used as the
   guild_id (explicit fallback -- this task does not implement sourcing
@@ -95,6 +111,7 @@ from platform_auth import ADMIN_SCOPE, parse_prefix, verify_key
 
 from src.api.auth import require_scope
 from src.api.deps import get_key_store
+from src.api.subtitles import SubtitleSender
 from src.api.wiring import get_session_registry
 from src.config import get_settings
 from src.contracts import StopRequest, StopResponse, TranscriptView
@@ -255,6 +272,7 @@ async def stream_meeting(
         await websocket.close(code=1008)
         return
 
+    subtitle_events = False
     if key is not None:
         # Auth-at-handshake path: reject before accept() so a bad key never
         # gets a full WS connection.
@@ -271,6 +289,7 @@ async def stream_meeting(
             payload = json.loads(first)
             if isinstance(payload, dict):
                 resolved_key = payload.get("key")
+                subtitle_events = payload.get("subtitle_events") is True
         except WebSocketDisconnect:
             return
         except Exception:  # noqa: BLE001 - any failure to get a valid text key
@@ -292,6 +311,12 @@ async def stream_meeting(
         await websocket.close(code=1008)
         return
     display_names: dict[str, str] = {}
+    sender = None
+    if subtitle_events:
+        sender = SubtitleSender(websocket, session_id)
+        session.set_subtitle_sink(sender.enqueue)
+        sender.enqueue({"type": "session.ready", "subtitle_events": True})
+        sender.start()
 
     close_code: int | None = None
 
@@ -319,7 +344,12 @@ async def stream_meeting(
                     session.mark_audio_complete()
                 elif isinstance(control, dict) and "speaker_id" in control:
                     speaker_id = control["speaker_id"]
-                    display_names[speaker_id] = control.get("display_name", speaker_id)
+                    display_name = control.get("display_name", speaker_id)
+                    if not isinstance(speaker_id, str) or not isinstance(display_name, str):
+                        continue
+                    display_names[speaker_id] = display_name
+                    if subtitle_events:
+                        session.update_speaker_name(speaker_id, display_name)
                 continue
 
             data = message.get("bytes")
@@ -351,6 +381,9 @@ async def stream_meeting(
     except WebSocketDisconnect as e:
         close_code = e.code
     finally:
+        if sender is not None:
+            session.set_subtitle_sink(None)
+            await sender.close()
         # If the consumer already called POST /stop, sessions.py's stop() has
         # deregistered the session -- registry.get returns None and we skip.
         if registry.get(session_id) is not None:

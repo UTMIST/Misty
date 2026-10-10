@@ -22,7 +22,7 @@ function meetingFilenamePart(name) {
     .trim();
 }
 
-function meetingTimestamp(startedAt) {
+export function meetingTimestamp(startedAt) {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Toronto',
     year: 'numeric',

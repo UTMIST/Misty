@@ -292,6 +292,52 @@ class MeetingSession:
         # repro instead of reading a log.
         self._drops: dict[str, int] = {}
         self._cap_hit_logged = False
+        self._subtitle_sink = None
+        self._subtitles_complete = False
+
+    def set_subtitle_sink(self, sink) -> None:
+        """Attach an optional nonblocking observer before the first audio frame."""
+        self._subtitle_sink = sink
+
+    def update_speaker_name(self, speaker_id: str, display_name: str) -> None:
+        with self._lock:
+            buf = self._speakers.get(speaker_id)
+            if buf is not None:
+                buf.display_name = display_name
+
+    def _emit_subtitle(self, event: dict) -> None:
+        if self._subtitle_sink is None:
+            return
+        try:
+            self._subtitle_sink(event)
+        except Exception:  # noqa: BLE001 -- captions must never break recording
+            _logger.warning("session %s: subtitle observer failed", self.session_id)
+
+    def _publish_final(self, speaker_id: str, words: list[dict]) -> None:
+        # The real stream invokes this on the event loop; no I/O or await here.
+        if self._subtitles_complete:
+            return
+        with self._lock:
+            buf = self._speakers.get(speaker_id)
+            if buf is None:
+                return
+            display_name, anchors = buf.snapshot()
+        for segment in words_to_segments(display_name, buf._map(words, anchors)):
+            self._emit_subtitle(
+                {
+                    "type": "subtitles.chunk",
+                    "speaker_id": speaker_id,
+                    "display_name": display_name,
+                    "start_ms": segment.start_ms,
+                    "text": segment.text,
+                }
+            )
+
+    def _finish_subtitles(self, status: str) -> None:
+        if self._subtitles_complete:
+            return
+        self._subtitles_complete = True
+        self._emit_subtitle({"type": "subtitles.complete", "status": status})
 
     def feed(self, speaker_id: str, display_name: str, opus_frame_bytes: bytes, ts_ms: int) -> None:
         # Finalization has started (or finished): anything arriving now could
@@ -327,6 +373,8 @@ class MeetingSession:
             buf = self._speakers.get(speaker_id)
             if buf is None:
                 stream = self._deps["make_transcription_stream"]()
+                if self._subtitle_sink is not None:
+                    stream.set_final_callback(lambda words: self._publish_final(speaker_id, words))
                 stream.start(self._loop)
                 decoder = self._deps["audio"].make_decoder()
                 buf = _SpeakerBuffer(display_name, stream, decoder)
@@ -458,6 +506,13 @@ class MeetingSession:
                 segments.extend(words_to_segments(display_name, words))
             segments.sort(key=lambda s: s.start_ms)
 
+            incomplete = any(isinstance(words, BaseException) for words in per_speaker) or any(
+                getattr(buf.stream, "incomplete", False) for buf, _, _ in snapshot
+            )
+            # Final callbacks have run before aclose returns. Enqueue completion
+            # behind them, before the independent (and slower) report pipeline.
+            self._finish_subtitles("incomplete" if incomplete else "complete")
+
             transcript_text = assemble_transcript(segments)
             # Fix #2: report_builder is sync and does a blocking LLM HTTP call
             # (up to request_timeout_s, default 60s) plus PDF rendering. Offload
@@ -498,6 +553,7 @@ class MeetingSession:
         if self._finalized:
             return
         self._finalized = True
+        self._finish_subtitles("incomplete")
         # Report here rather than in stop(): discard() is the ABRUPT path (the
         # bot died, the socket dropped), which is exactly when knowing what was
         # discarded matters most -- and it was the one path that never reported.

@@ -404,8 +404,35 @@ test('/record start proceeds for a LINKED caller in a voice channel', async () =
 
   assert.ok(startArgs, 'a linked caller should reach meetingSurface.start');
   assert.equal(startArgs.voiceChannel, voiceChannel);
+  assert.equal(startArgs.subtitles, true);
   const edit = calls.find((c) => c.method === 'editReply');
   assert.match(edit.payload.content, /recording/i);
+});
+
+test('/record start passes an explicit subtitles:false through to the meeting', async () => {
+  let startArgs;
+  const appContext = {
+    directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) },
+    meetingSurface: {
+      start: (args) => {
+        startArgs = args;
+        return { status: 'recording' };
+      },
+    },
+  };
+  const client = fakeClient();
+  wireDiscordClient(client, { commands: recordCommands, appContext });
+  const interaction = fakeRecordInteraction({
+    subcommand: 'start',
+    voiceChannel: { id: 'vc1' },
+    calls: [],
+  });
+  interaction.options.getBoolean = (name) => {
+    assert.equal(name, 'subtitles');
+    return false;
+  };
+  await client.emit(interaction);
+  assert.equal(startArgs.subtitles, false);
 });
 
 test('/record start fails closed (no start) when the directory is unavailable', async () => {

@@ -180,6 +180,7 @@ export async function handleRecordInteraction(interaction, appContext, recordCom
         // started the recording, even when auto-stop ends it.
         requesterId: interaction.user.id,
         name: interaction.options.getString?.('name') ?? null,
+        subtitles: interaction.options.getBoolean?.('subtitles') ?? true,
       });
     } catch (e) {
       console.error('meetingSurface.start failed:', e.message);

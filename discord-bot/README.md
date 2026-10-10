@@ -209,8 +209,8 @@ and skips them.
   in threads Misty did not create do not trigger the helper. A typed leading
   `@Misty` remains an independent trigger, including inside a Discord reply.
 
-- `/record start [name:<meeting name>]` (**linked**) — joins your current voice channel and starts
-  recording the meeting (one recording at a time **per guild** — sessions are
+- `/record start [name:<meeting name>] [subtitles:<true|false>]` (**linked**) — joins your current voice channel and starts
+  recording the meeting (one recording at a time **per Discord server** — sessions are
   keyed by `guildId`). `/record status` (**public**) — shows elapsed recording
   time and the voice channel Misty is in; when idle, it explains which voice
   channel Misty will join when recording starts. `/record stop` (**public**) —
@@ -221,7 +221,8 @@ and skips them.
   summary, decisions, action items, and full transcript back into the text channel,
   @-mentioning whoever started the recording. Recording also stops
   **automatically** once everyone leaves the voice channel (after a short grace
-  period), with a 4h hard backstop. Starting while a recording is already
+  period). The service stops accepting audio after 4h; this cap does not itself
+  trigger stop or PDF generation. Starting while a recording is already
   active in the guild, or stopping from outside the recorded channel, is
   refused with the active channel and auto-stop guidance — except stopping
   from outside is still allowed once that channel is empty of humans, the
@@ -229,6 +230,18 @@ and skips them.
   service persists nothing: it streams audio straight to AWS and never writes
   audio or transcript to disk. The posted PDF does contain the full
   transcript, and that lives in Discord like any other attachment.
+
+  Subtitles default to **on**: finalized text is posted in two-second batches
+  to a new thread in the launch channel. Launching from a thread creates a
+  sibling thread in its parent channel. On completion, Misty flushes the tail,
+  posts an ended marker, and archives that meeting's subtitle thread, leaving
+  its messages available to Discord search. Names/timestamps identify speakers;
+  partial text is never posted or revised in place. Missing permissions or
+  subtitle delivery failures produce one notice while recording/PDF continue.
+  Late AWS results can appear out of speech order across batches; earlier
+  messages are not edited to reorder them.
+  See [live subtitles](../docs/MEETING-RECORDING.md#live-subtitles) for ordering,
+  permissions, latency, and incomplete-history behavior.
 
   When the first human enters an empty voice channel, the bot @-mentions them
   via direct message and prompts them to run `/record start`.
@@ -258,6 +271,14 @@ which owns Opus decoding, transcription (AWS Transcribe), and minutes
 generation, and returns the resulting PDF for the bot to post. See
 [`docs/MEETING-RECORDING.md`](../docs/MEETING-RECORDING.md) for the full
 architecture.
+
+After the WebSocket opens, the bot's **first JSON message** contains both
+authentication and subtitle opt-in:
+`{"key":"<consumer-key>","subtitle_events":true}`. There is no separate
+subtitle handshake. The service validates the key and scope before sending
+`session.ready` or subtitle events. With subtitles disabled, that first message
+contains only `key`. See the
+[handshake contract](../services/meeting/docs/API.md#handshake).
 
 The bot itself needs only:
 

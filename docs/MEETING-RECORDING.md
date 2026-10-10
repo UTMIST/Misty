@@ -6,7 +6,105 @@ Feature owner: Misty #92. Related: [platform ARCHITECTURE](ARCHITECTURE.md), [`s
 
 ## What it does
 
-A **linked** member (identity resolved via the directory — see "Authorization" below) runs `/record start` in a Discord voice channel, optionally supplying a name up to 100 characters. Before a recording is active, the first human to enter an empty voice channel receives a direct message prompting them to start one. The bot joins, and as people talk it streams their audio to the `meeting` service, which transcribes each speaker live into a rolling transcript. Recording ends on `/record stop` **or automatically when everyone leaves the voice channel** (the bot ends the meeting once no non-bot member remains). On stop the service turns the transcript into minutes (via the `llm` service), renders a PDF, and hands it back; the bot posts the **PDF** to the text channel, @-mentioning whoever started the recording. A supplied name becomes the PDF title and is sanitized into the attachment filename as `<name>_<YYYY-MM-DD_HHMM>.pdf` in America/Toronto; unnamed recordings use `meeting_<YYYY-MM-DD_HHMM>.pdf`, based on the meeting start time. Nothing is persisted — the transcript lives in memory for the meeting and is discarded after the report is returned.
+A **linked** member (identity resolved via the directory — see "Authorization" below) runs `/record start` in a Discord voice channel, optionally supplying a name up to 100 characters and `subtitles:false` to disable live subtitles (default on). Before a recording is active, the first human to enter an empty voice channel receives a direct message prompting them to start one. The bot joins, and as people talk it streams their audio to the `meeting` service, which transcribes each speaker live into a rolling transcript. Recording ends on `/record stop` **or automatically when everyone leaves the voice channel** (the bot ends the meeting once no non-bot member remains). On stop the service turns the transcript into minutes (via the `llm` service), renders a PDF, and hands it back; the bot posts the **PDF** to the text channel, @-mentioning whoever started the recording. A supplied name becomes the PDF title and is sanitized into the attachment filename as `<name>_<YYYY-MM-DD_HHMM>.pdf` in America/Toronto; unnamed recordings use `meeting_<YYYY-MM-DD_HHMM>.pdf`, based on the meeting start time. The service retains no transcript after cleanup; the PDF and subtitle-thread messages remain in Discord.
+
+## Live subtitles
+
+Misty creates a new subtitle thread in the text channel where `/record start`
+was launched, after recording starts and the service confirms subtitle support.
+If launched inside a thread, it creates a **sibling** in that thread's parent
+text channel. The ephemeral command reply cannot serve as the starter, so Misty
+posts a normal public starter message. Each meeting owns its newly created
+subtitle thread; ending one meeting never archives the launch thread or another
+meeting's thread.
+
+Only finalized text is published. Finalized chunks are batched every two seconds
+from the first waiting chunk (additional chunks do not reset the timer), sorted
+within that batch by speech start time, labeled with speaker names and elapsed
+timestamps, and split to fit Discord's message limit. Mentions are suppressed.
+Published chunks are not edited. The two-second window adds batching delay
+**after** AWS finalization; AWS has no fixed maximum finalization delay here.
+Long continuous speech can delay finalized text. The segmentation thresholds
+are formatting rules, not latency promises.
+
+One WS carries all speakers' audio up and subtitle events down for a meeting.
+Two Discord servers recording concurrently use **two separate connections**.
+Per-session sequence numbers preserve delivery order; they do not guarantee
+speech order across speakers. Earlier speech can finalize after a later batch
+was posted. Sequence numbers detect gaps/duplicates; they provide no replay.
+See the [wire contract](../services/meeting/docs/API.md#optional-messages-the-server-sends)
+and [ordering rationale](../services/meeting/docs/ARCHITECTURE.md#finalized-subtitle-delivery).
+
+**Out-of-order edge case:** Alice speaks at `00:10`, then Bob at `00:12`, but
+Bob's AWS result finalizes first. If Bob's chunk is posted before Alice's
+result arrives, Alice's `[00:10]` line appears in a later message below Bob's
+`[00:12]` line. Sorting applies only within each two-second batch; Misty does
+not edit earlier messages to insert late chunks. This is an accepted limitation
+of the current live subtitles. The HTTP transcript instead re-sorts all
+available segments by speech start time on every read, and the final PDF's
+transcript uses that chronological ordering too. Event sequence numbers still
+increase normally in this case; it is not a delivery gap or lost text.
+
+On manual stop, empty-channel auto-stop, or voice-loss finalization, Misty keeps
+accepting that session's tail chunks, flushes them, posts an ended marker, and
+archives its subtitle thread. This happens independently of minutes/PDF
+generation. A dropped WS has no subtitle replay: received history is marked
+incomplete while the normal HTTP salvage path still attempts the PDF. A new
+meeting may start while the old one finishes; their caption and archive state
+remain separate. The 4h audio cap does not itself finalize a meeting.
+
+Misty needs permission to view the parent channel, send a starter message,
+create public threads, and send messages in threads. As the creator it can
+archive its own thread without Manage Threads. Members retain normal Discord
+permissions: the creator or a member with Manage Threads can archive/change
+auto-archive settings, and sending in an unlocked archived thread can reopen
+it. Misty archives without locking or deleting, so retained history remains
+available to **Discord search**. No LLM query/retrieval feature is added.
+
+Thread setup failure, an unsupported service (no ready event within five
+seconds after recording starts), or subtitle delivery failure produces one
+notice and leaves recording/minutes running. The bot buffers at most 256 KiB
+of incoming subtitle events across waiting and queued batches, serializes
+Discord sends, bounds individual operations at five seconds, and waits at most
+30 seconds for subtitle drain/cleanup at stop. Archive and notification are
+best-effort during Discord outages; a timed-out network request may still
+complete remotely. See [Discord's thread rules](https://docs.discord.com/developers/topics/threads)
+for platform permission and automatic-archive behavior.
+
+### Subtitle message example
+
+In a thread named `Subtitles — Planning`, a single message authored by **Misty**
+can contain a two-second batch like this (speaker labels appear in bold):
+
+```text
+[00:12] Alice: We should launch on Friday
+[00:13] Bob: I can prepare the release notes
+```
+
+The actual Discord message content uses this Markdown:
+
+```markdown
+[00:12] **Alice:** We should launch on Friday
+[00:13] **Bob:** I can prepare the release notes
+```
+
+The timestamps show elapsed meeting time, not Discord's message-post time:
+`start_ms: 12000` becomes `[00:12]`. Timestamps at one hour or later use
+`[HH:MM:SS]`. Each line represents one finalized chunk; a batch may contain
+several chunks from the same speaker or from different speakers. Misty remains
+the message author; speaker names label the text. Session IDs, speaker IDs, and
+sequence numbers are not shown, and transcript text cannot trigger mentions.
+
+After the final chunks, Misty posts a separate `Subtitles ended.` message and
+archives the thread. If delivery or finalization was incomplete, the marker is
+`Subtitles ended — history may be incomplete.` instead.
+
+The service messages behind these lines are documented field by field in the
+[live subtitle event contract](../services/meeting/docs/API.md#optional-messages-the-server-sends).
+The bot sends `subtitle_events` together with `key` in its
+[first JSON authentication message](../services/meeting/docs/API.md#handshake),
+before audio or speaker controls. There is no separate subtitle handshake;
+the service validates authentication and scope before sending any events.
 
 ## The boundary, and the one constraint that forces it
 
