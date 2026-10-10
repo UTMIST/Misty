@@ -12,7 +12,7 @@
     "pr": {
       "deploy": {
         "healthcheckPath": "/health/live",
-        "preDeployCommand": "node -e \"console.log('Skipping Discord registration in Railway PR environment.')\""
+        "preDeployCommand": "node scripts/pr-predeploy.js"
       }
     }
   }

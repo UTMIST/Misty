@@ -12,15 +12,8 @@ const BACKEND_ORDER = [
 ];
 // Settled Railway statuses. SUCCESS/SLEEPING can still own a process; a
 // stopped deployment additionally needs Railway's termination confirmation.
-const FINISHED = new Set([
-  'SUCCESS',
-  'SLEEPING',
-  'FAILED',
-  'CRASHED',
-  'REMOVED',
-  'SKIPPED',
-  'NEEDS_APPROVAL',
-]);
+const FINISHED = new Set(['SUCCESS', 'SLEEPING', 'FAILED', 'CRASHED', 'REMOVED', 'SKIPPED']);
+const RUNNABLE = new Set(['SUCCESS', 'SLEEPING', 'CRASHED']);
 const STOPPED_INSTANCES = new Set(['CRASHED', 'EXITED', 'REMOVED', 'SKIPPED', 'STOPPED']);
 
 export const PROJECT_TOKEN_QUERY = `query PreviewProjectToken {
@@ -37,6 +30,8 @@ export const PROJECT_QUERY = `query PreviewProject($id: String!) {
   }
 }`;
 
+// activeDeployments is [Deployment!]! in Railway's schema; a service that has
+// never deployed returns []. GraphQL errors are rejected by railwayApi.
 export const ENVIRONMENT_QUERY = `query PreviewEnvironment($id: String!) {
   environment(id: $id) {
     id name isEphemeral
@@ -66,6 +61,14 @@ const DEPLOY = `mutation DeployPreview($environmentId: String!, $serviceId: Stri
 
 function nodes(connection) {
   return connection.edges.map(({ node }) => node);
+}
+
+function requireApproved(deployment, label) {
+  if (deployment?.status === 'NEEDS_APPROVAL') {
+    throw new Error(
+      `${label} has a deployment awaiting approval (NEEDS_APPROVAL); approve or cancel it before switching.`,
+    );
+  }
 }
 
 export function validatePullRequest(pr) {
@@ -125,12 +128,16 @@ export function validateEnvironment(environment, expectedServices) {
     if (service.source?.repo !== REPOSITORY) {
       throw new Error(`${service.serviceName} must have ${REPOSITORY} as its source repository.`);
     }
-    if (service.latestDeployment?.status === 'NEEDS_APPROVAL') {
-      throw new Error(
-        `${service.serviceName} has a deployment awaiting approval; approve or cancel it before switching.`,
-      );
-    }
-    if (service.latestDeployment && !FINISHED.has(service.latestDeployment.status)) {
+    requireApproved(service.latestDeployment, service.serviceName);
+    // The stop phase can finish an operator's removal of the bot. Backend
+    // removals must still settle before we replace any services.
+    const stoppingBot =
+      service.serviceName === 'discord-bot' && service.latestDeployment?.status === 'REMOVING';
+    if (
+      service.latestDeployment &&
+      !FINISHED.has(service.latestDeployment.status) &&
+      !stoppingBot
+    ) {
       throw new Error(
         `${service.serviceName} has an unfinished deployment; wait before switching.`,
       );
@@ -176,10 +183,13 @@ async function waitFor(api, id, stopped, { sleep, now, timeoutMs, log, allowSlee
     if (stopped) {
       if (deployment.status === 'REMOVED' && deployment.deploymentStopped === true)
         return deployment.status;
+      // Railway defines deploymentStopped as all instances having stopped,
+      // including superseded deployments, not just explicit stop requests.
       // Removal and instance shutdown are separate signals. REMOVED may
       // precede deploymentStopped; keep polling until both confirm shutdown.
       // Any status (including CRASHED/FAILED) can lag an accepted stop request.
     } else {
+      requireApproved(deployment, `Deployment ${id}`);
       if (deployment.status === 'SUCCESS' || (allowSleeping && deployment.status === 'SLEEPING'))
         return deployment.status;
       if (FINISHED.has(deployment.status)) {
@@ -217,7 +227,10 @@ async function readBotDeployments(api, environmentId, bot, previouslyObserved) {
   // has already made them disappear from the history or active deployment list.
   for (const instance of [previouslyObserved, bot]) {
     for (const observed of instance.activeDeployments) observedGateways.add(observed.id);
-    if (['SUCCESS', 'SLEEPING', 'CRASHED', 'REMOVING'].includes(instance.latestDeployment?.status))
+    if (
+      RUNNABLE.has(instance.latestDeployment?.status) ||
+      instance.latestDeployment?.status === 'REMOVING'
+    )
       observedGateways.add(instance.latestDeployment.id);
     for (const observed of [...instance.activeDeployments, instance.latestDeployment].filter(
       Boolean,
@@ -229,10 +242,8 @@ async function readBotDeployments(api, environmentId, bot, previouslyObserved) {
     }
   }
   for (const deployment of history.values()) {
-    if (
-      (!FINISHED.has(deployment.status) && deployment.status !== 'REMOVING') ||
-      deployment.status === 'NEEDS_APPROVAL'
-    ) {
+    requireApproved(deployment, `Bot deployment ${deployment.id}`);
+    if (!FINISHED.has(deployment.status) && deployment.status !== 'REMOVING') {
       throw new Error(
         `Bot deployment ${deployment.id} is ${deployment.status}; resolve it before switching.`,
       );
@@ -241,13 +252,19 @@ async function readBotDeployments(api, environmentId, bot, previouslyObserved) {
   // A false stop flag on an old failed/skipped/removed build is not evidence
   // of a gateway. Keep only runnable/removing deployments, gateways observed
   // during this switch, and historical deployments with nonterminal instances.
-  return [...history.values()].filter(
-    (deployment) =>
-      ['SUCCESS', 'SLEEPING', 'CRASHED', 'REMOVING'].includes(deployment.status) ||
-      (deployment.deploymentStopped !== true &&
-        (observedGateways.has(deployment.id) ||
-          deployment.instances?.some((instance) => !STOPPED_INSTANCES.has(instance.status)))),
-  );
+  // Confirmed-stopped history needs no further removal. A current gateway is
+  // different: even if between instances, it can still restart or wake.
+  return [...history.values()].filter((deployment) => {
+    if (deployment.deploymentStopped === true) {
+      return observedGateways.has(deployment.id) && RUNNABLE.has(deployment.status);
+    }
+    return (
+      RUNNABLE.has(deployment.status) ||
+      deployment.status === 'REMOVING' ||
+      observedGateways.has(deployment.id) ||
+      deployment.instances?.some((instance) => !STOPPED_INSTANCES.has(instance.status))
+    );
+  });
 }
 
 // The caller supplies CLI/API access so the deployment sequence is tested

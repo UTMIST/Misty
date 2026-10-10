@@ -126,6 +126,10 @@ npm run preview -- 123 --plan
 npm run preview -- 123
 ```
 
+The required `api --variables --compact --allow-errors` options are present in
+[CLI 5.28.0](https://github.com/railwayapp/cli/blob/v5.28.0/src/commands/api.rs).
+Actions pins 5.49.6 for reproducible runs.
+
 Misty's project is the default; no project ID or environment export is needed.
 For another installation, see the selector override in the
 [bot configuration table](../discord-bot/README.md).
@@ -161,6 +165,10 @@ instances. Historical failed, skipped, or removed records without live
 instances are ignored even if their stop flag is stale. A newer failed build
 cannot hide an older live or draining gateway. The selector waits until Railway
 confirms shutdown of that set before restarting any backend.
+Historical records already confirmed stopped, including crashes, need no new
+removal. A current crash between restarts is still removed to prevent it from
+restarting during the switch. An operator-initiated bot removal in `REMOVING`
+passes preflight and is allowed to drain; backend removals must settle first.
 It deploys each configured backend from the selected commit, accepts `SUCCESS`
 or `SLEEPING` for backends, and deploys the bot last. The bot must reach
 `SUCCESS`; sleeping is not sufficient for its gateway. Its pre-deploy step registers
@@ -188,7 +196,7 @@ still waiting its turn aborts the sequence before it can be overwritten.
   reconnect to staging or silently fall back to an older PR.
 - A timeout or interrupted CLI may leave a Railway build running. Inspect and
   wait for or cancel that deployment before retrying; the command refuses to
-  switch while deployments are unfinished.
+  switch while builds are unfinished.
 - Existing sleeping deployments do not block selection. A deployment awaiting
   approval must be approved or cancelled first. While switching, the CLI logs
   status changes. New deployments fail on failed terminal states; backend
@@ -215,6 +223,10 @@ registration. Local development and the exact names `staging` and `production`
 retain their existing behavior. Only `dev` with the configured literal
 environment ID can use the preview credentials. All other Railway environments
 keep Discord disabled regardless of copied enable flags or credentials.
+The environment guard applies to Discord only: `ENABLE_WEB=true` still starts
+the existing playground with its required backend configuration and `dev:spoof`
+scope check. In that case, liveness starts only after the web server starts;
+a failed playground boot cannot leave a healthy idle process behind.
 
 Disabled Discord returns **503** from `/health/ready`. This includes automatic
 PR copies and misspellings such as `prod` or `Production`: they must not appear
@@ -228,10 +240,11 @@ For automatic PR copies, `railway.json` uses an
 [`environments.pr` override](https://docs.railway.com/config-as-code/reference#pr-environment-overrides)
 to check `/health/live`, which returns 200 for a running idle process with
 `discord: disabled`. Railway selects that override for ephemeral deployments;
-it sets the liveness path and replaces registration with an explicit Node no-op
-that logs the skip and exits successfully. This does not depend on empty-array
-clearing semantics. Directly running the registration CLI in any unknown
-environment, including a PR copy, exits nonzero with an environment error. Runtime mode
+it sets the liveness path and replaces registration with the no-op script
+`node scripts/pr-predeploy.js`, which logs the skip and exits successfully.
+No shell quoting or empty-array clearing is required. Directly running the
+registration CLI in any unknown environment, including a PR copy, exits nonzero
+with an environment error. Runtime mode
 still comes from the same environment check, and persistent environments keep
 their registration step and `/health/ready`. This
 avoids failed-deployment notifications for intentional PR no-ops while an
@@ -249,7 +262,8 @@ Offline tests cover environment ownership, copied credentials and flags,
 registration suppression, PR liveness and unavailable persistent readiness,
 the stop-before-deploy sequence, stale history exclusion, paginated shutdown
 tracking behind failed builds, crash loops, scoped-token target selection,
-source compatibility and service inventory, sleeping
+already-stopped crashes, manual removal, first deployment, playground boot and
+its scope guard, source compatibility and service inventory, sleeping
 backends, CLI diagnostics, argument validation, confirmation races, cold builds,
 polling backoff, timeouts, competing deployments,
 and production/staging exclusion. A live recording round trip is still required

@@ -226,6 +226,18 @@ test('plan or declined confirmation performs no mutation', async () => {
   assert.deepEqual(mutations(calls), []);
 });
 
+test('the first selection deploys successfully with empty active lists and no deployment history', async () => {
+  const { options, environment, botHistory, runningBots, calls } = fixture();
+  for (const { node } of environment.serviceInstances.edges) {
+    node.latestDeployment = null;
+    node.activeDeployments = [];
+  }
+  botHistory.length = 0;
+  runningBots.clear();
+  assert.equal((await switchPreview(options)).changed, true);
+  assert.ok(mutations(calls).every(({ query }) => query.includes('DeployPreview')));
+});
+
 test('a dev-scoped project token switches without enumerating project environments', async () => {
   const { options, calls } = fixture();
   const result = await switchPreview({
@@ -430,6 +442,39 @@ test('stale failed, skipped, and removed history with no live instances never en
   assert.ok(stale.every((deployment) => !deployment.deploymentStopped));
 });
 
+test('confirmed-stopped historical crashes are neither removed nor polled on subsequent switches', async () => {
+  const { options, botHistory, calls } = fixture();
+  botHistory.push({
+    id: 'stopped-historical-crash',
+    status: 'CRASHED',
+    deploymentStopped: true,
+    instances: [{ status: 'CRASHED' }],
+  });
+  assert.equal((await switchPreview(options)).changed, true);
+  assert.ok(calls.every(({ variables }) => variables.id !== 'stopped-historical-crash'));
+});
+
+test('a current crash between restarts is still removed even when all instances are stopped', async () => {
+  const { options, environment, botHistory, calls } = fixture();
+  environment.serviceInstances.edges[0].node.latestDeployment.status = 'CRASHED';
+  environment.serviceInstances.edges[0].node.activeDeployments = [];
+  botHistory[0].deploymentStopped = true;
+  botHistory[0].instances = [{ status: 'CRASHED' }];
+  assert.equal((await switchPreview(options)).changed, true);
+  assert.match(mutations(calls)[0].query, /StopPreview/);
+  assert.equal(mutations(calls)[0].variables.id, 'discord-bot-old');
+});
+
+test('an operator-initiated bot removal passes preflight and drains before any backend deploys', async () => {
+  const { options, environment, calls } = fixture({ removedLagReads: 2 });
+  const bot = environment.serviceInstances.edges[0].node;
+  bot.latestDeployment.status = 'REMOVING';
+  bot.activeDeployments = [];
+  assert.equal((await switchPreview(options)).changed, true);
+  assert.equal(options.now(), 6000);
+  assert.ok(mutations(calls).every(({ query }) => query.includes('DeployPreview')));
+});
+
 test('a failed latest build with a stale stop flag is ignored while the older gateway is stopped', async () => {
   const { options, botHistory, environment, calls } = fixture();
   const failed = { id: 'failed-build', status: 'FAILED', deploymentStopped: false, instances: [] };
@@ -605,7 +650,7 @@ for (const status of ['CRASHED', 'FAILED', 'SKIPPED', 'NEEDS_APPROVAL']) {
   });
 }
 
-for (const status of ['CRASHED', 'FAILED', 'SKIPPED', 'NEEDS_APPROVAL', 'REMOVED']) {
+for (const status of ['CRASHED', 'FAILED', 'SKIPPED', 'REMOVED']) {
   test(`new deployment stops promptly on ${status} instead of waiting for success`, async () => {
     const { options, calls } = fixture({ failService: 'team-tracking', failureStatus: status });
     await assert.rejects(switchPreview(options), new RegExp(`${status}.*switch did not finish`));
@@ -613,6 +658,15 @@ for (const status of ['CRASHED', 'FAILED', 'SKIPPED', 'NEEDS_APPROVAL', 'REMOVED
     assert.equal(mutations(calls).length, 2, 'only the first backend can start');
   });
 }
+
+test('a new deployment awaiting approval fails promptly with the shared approval diagnostic', async () => {
+  const { options, calls } = fixture({
+    failService: 'team-tracking',
+    failureStatus: 'NEEDS_APPROVAL',
+  });
+  await assert.rejects(switchPreview(options), /NEEDS_APPROVAL.*approve or cancel/);
+  assert.equal(mutations(calls).length, 2);
+});
 
 test('a competing deployment stops the switch before the bot can start', async () => {
   const { options, calls } = fixture({ otherDeployment: true });
@@ -686,6 +740,12 @@ test('wrong target, missing volume, automatic deploys, and in-flight deploys are
   assert.throws(
     () => validateEnvironment(environment, previewServices(source)),
     /approve or cancel/,
+  );
+  environment.serviceInstances.edges[0].node.latestDeployment.status = 'REMOVED';
+  environment.serviceInstances.edges[1].node.latestDeployment.status = 'REMOVING';
+  assert.throws(
+    () => validateEnvironment(environment, previewServices(source)),
+    /meeting has an unfinished deployment/,
   );
 });
 

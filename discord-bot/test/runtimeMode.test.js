@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
@@ -95,16 +95,94 @@ test('direct registration in idle environments fails before config validation or
   }
   const config = JSON.parse(await readFile(new URL('../railway.json', import.meta.url), 'utf8'));
   assert.equal(config.deploy.preDeployCommand, 'node src/registerCommands.js');
-  const { stdout } = await promisify(execFile)(
-    '/bin/sh',
-    ['-c', config.environments.pr.deploy.preDeployCommand],
-    {
-      cwd: fileURLToPath(new URL('..', import.meta.url)),
-      env: { PATH: process.env.PATH, RAILWAY_ENVIRONMENT_NAME: 'pr-123' },
-      timeout: 10_000,
-    },
-  );
+  const [command, ...args] = config.environments.pr.deploy.preDeployCommand.split(' ');
+  assert.equal(command, 'node');
+  const { stdout } = await promisify(execFile)(process.execPath, args, {
+    cwd: fileURLToPath(new URL('..', import.meta.url)),
+    env: { PATH: process.env.PATH, RAILWAY_ENVIRONMENT_NAME: 'pr-123' },
+    timeout: 10_000,
+  });
   assert.match(stdout, /Skipping Discord registration/);
+});
+
+function idleWebProcess(enableDiscord, scopes = ['dev:spoof']) {
+  // Exercise the real entrypoint and web server. Never allow gateway login or
+  // a real backend request, including if startup regresses.
+  const code = `
+    import { Client } from 'discord.js';
+    Client.prototype.login = async () => { throw new Error('Unexpected gateway login'); };
+    globalThis.fetch = async (url) => {
+      if (url !== 'http://directory.test/api-keys/self') throw new Error('Unexpected backend request');
+      return new Response(JSON.stringify({ scopes: ${JSON.stringify(scopes)} }));
+    };
+    await import('./src/index.js');
+  `;
+  return {
+    args: ['--input-type=module', '-e', code],
+    options: {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      env: {
+        PATH: process.env.PATH,
+        PORT: '0',
+        WEB_PORT: '0',
+        RAILWAY_ENVIRONMENT_ID: 'copy',
+        RAILWAY_ENVIRONMENT_NAME: 'pr-123',
+        ENABLE_DISCORD: enableDiscord,
+        ENABLE_WEB: 'true',
+        DISCORD_TOKEN: 'unused-test-token',
+        DISCORD_CLIENT_ID: 'unused-test-id',
+        ...Object.fromEntries(
+          ['DIRECTORY', 'DOC', 'LLM', 'VERIFICATION'].flatMap((service) => [
+            [`${service}_BASE_URL`, `http://${service.toLowerCase()}.test`],
+            [`${service}_API_KEY`, 'unused-test-key'],
+          ]),
+        ),
+      },
+    },
+  };
+}
+
+for (const enableDiscord of ['false', 'true']) {
+  test(`an idle Railway environment starts its requested playground with ENABLE_DISCORD=${enableDiscord}`, async () => {
+    const { args, options } = idleWebProcess(enableDiscord);
+    const child = spawn(process.execPath, args, options);
+    const closed = new Promise((resolve) => child.once('close', resolve));
+    let stdout = '';
+    let stderr = '';
+    let timer;
+    try {
+      await new Promise((resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Web startup timed out: ${stdout}\n${stderr}`)),
+          10_000,
+        );
+        child.stdout.on('data', (data) => {
+          stdout += data;
+          if (stdout.includes('Web playground:')) resolve();
+        });
+        child.stderr.on('data', (data) => {
+          stderr += data;
+        });
+        child.once('error', reject);
+        child.once('exit', (code) =>
+          reject(new Error(`Boot exited ${code}: ${stdout}\n${stderr}`)),
+        );
+      });
+      assert.equal(stderr, '');
+    } finally {
+      clearTimeout(timer);
+      child.kill();
+      await closed;
+    }
+  });
+}
+
+test('the idle playground still refuses a directory key without dev:spoof', async () => {
+  const { args, options } = idleWebProcess('false', []);
+  await assert.rejects(
+    promisify(execFile)(process.execPath, args, { ...options, timeout: 10_000 }),
+    (error) => error.code === 2 && /dev:spoof/.test(error.stderr),
+  );
 });
 
 test('preview boot refuses to connect without a volume', async () => {

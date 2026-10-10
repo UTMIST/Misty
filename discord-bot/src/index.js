@@ -9,15 +9,15 @@ import { runtimeMode } from './runtimeMode.js';
 
 async function main() {
   const mode = runtimeMode();
-  if (mode === 'idle') {
+  const enableDiscord = mode !== 'idle' && process.env.ENABLE_DISCORD !== 'false';
+  const enableWeb = process.env.ENABLE_WEB === 'true';
+  if (mode === 'idle' && !enableWeb) {
     await startHealthServer(null, process.env.PORT || 3002);
     console.log(
       'Discord disabled in this Railway environment. Liveness is available; gateway readiness remains unavailable.',
     );
     return;
   }
-  const enableDiscord = process.env.ENABLE_DISCORD !== 'false';
-  const enableWeb = process.env.ENABLE_WEB === 'true';
   if (mode === 'preview') {
     // This PR adds the singleton-volume requirement to dev only. Applying it
     // to existing staging/production needs a coordinated infrastructure change;
@@ -71,6 +71,9 @@ async function main() {
     const { startWebServer } = await import('./web/server.js');
     const port = Number(process.env.WEB_PORT || 3001);
     await startWebServer({ commands, appContext, port });
+    // Unknown Railway environments disable the gateway only. Expose liveness
+    // after the requested playground and its dev:spoof guard have started.
+    if (mode === 'idle') await startHealthServer(null, process.env.PORT || 3002);
   }
 
   if (!enableDiscord && !enableWeb) {
