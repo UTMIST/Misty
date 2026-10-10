@@ -73,9 +73,11 @@ SELECT name, default_version, installed_version
 FROM pg_available_extensions WHERE name = 'vector';
 ```
 
-The migration role must be able to enable that extension. Local databases already
-using Postgres 16 can retain their Compose volume when switching to the pgvector
-image; recreate the container with `docker compose up -d postgres` before migrating.
+The migration role must be able to enable that extension, or an administrator must
+enable it before migration. The migration role does not need to own a preinstalled
+extension. Local databases already using Postgres 16 can retain their Compose volume
+when switching to the pgvector image; recreate the container with
+`docker compose up -d postgres` before migrating.
 No new application environment variable or embedding credential is needed for storage.
 
 ## Migrations (Alembic)
@@ -103,11 +105,12 @@ Migration history:
   and adds generated keyword metadata with a GIN index. Vector scans remain exact;
   see the [storage contract and index decision](ARCHITECTURE.md#doc_chunks).
 
-Downgrading `007` removes the chunk table/index and the service-managed `vector`
-extension, preserving catalog records and full content. It deliberately omits
-`CASCADE` when dropping the extension: unrelated vector dependencies cause the
-transaction to roll back. Re-upgrading restores an empty chunk table; index contents
-must be rebuilt later through #175's indexing flow. This migration does not call `/embed`.
+Downgrading `007` removes the chunk table/index, preserving catalog records and full
+content. The database-level `vector` extension remains installed, even if `007`
+enabled it: it may belong to another role or support unrelated tables. Extension
+removal is an administrator's separate decision after checking all dependencies.
+Re-upgrading restores an empty chunk table; index contents must be rebuilt later
+through #175's indexing flow. This migration does not call `/embed`.
 
 > **`004` is a data migration, not just a schema one.** It first collapses any
 > pre-existing duplicate active rows for the same `url_normalized` (keeping the

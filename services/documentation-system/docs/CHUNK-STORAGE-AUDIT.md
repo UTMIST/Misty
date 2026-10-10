@@ -17,7 +17,7 @@ Paths below are relative to this service unless marked as repository-root files.
 | `src/storage/chunks.py` | Shares batch validation between adapters so malformed sets fail before persistence. |
 | `src/storage/in_memory.py` | Implements the new Protocol methods for offline consumers and tests. |
 | `src/storage/postgres.py` | Implements transactional replacement with a parent-row lock and authorized reads. |
-| `migrations/versions/007_doc_chunks.py` | Enables the extension and creates/reverses the schema on existing databases. |
+| `migrations/versions/007_doc_chunks.py` | Enables the extension and creates/reverses the chunk schema while preserving the database-level extension on rollback. |
 | `pyproject.toml` | Adds the SQLAlchemy pgvector integration dependency. |
 | Repository-root `uv.lock` | Locks pgvector and its NumPy dependency for supported Python versions. |
 | `docker-compose.yml` | Supplies the database extension in local Postgres. |
@@ -25,7 +25,7 @@ Paths below are relative to this service unless marked as repository-root files.
 | `tests/chunk_storage_cases.py` | Shares behavioral assertions across both adapter suites. |
 | `tests/test_in_memory_adapter.py` | Runs those assertions against the in-memory implementation. |
 | `tests/test_postgres_adapter.py` | Runs parity assertions plus database-access ordering, rollback, and concurrent replacement checks. |
-| `tests/test_migration_007.py` | Verifies upgrade/downgrade, preserved catalog/content, vector width, SQL constraints, keyword metadata, and cascade behavior. |
+| `tests/test_migration_007.py` | Verifies upgrade/downgrade with separate extension/schema owners, preserved catalog/content and unrelated vector data, vector width, SQL constraints, keyword metadata, and cascade behavior. |
 | `README.md` | Updates the storage overview, file map, and local test prerequisites. |
 | `docs/ARCHITECTURE.md` | Records the implemented storage semantics and links them to the existing exact-scan decision. |
 | `docs/DEPLOYMENT.md` | Documents extension availability, the new migration, and downgrade consequences. |
@@ -45,6 +45,10 @@ Verified locally on 2026-10-09 using an isolated disposable
 - Fresh `alembic upgrade head` from an empty database.
 - The full documentation-system pytest suite with `RUN_PG_TESTS=1`, including
   `head -> 006 -> head` and upgrading when the extension is already enabled.
+  The separate-owner regression first reproduced `must be owner of extension vector`
+  on the original downgrade, then passed with the fix. It verifies that rollback
+  preserves the extension's owner and unrelated vector data, and that re-upgrade
+  succeeds for the unprivileged migration role.
 - Imported `src`, `contracts`, and `tests` were pinned to this checkout before
   collection, and their loaded module paths were verified afterward.
 - `uv run ruff check .` and `uv run ruff format --check .`.

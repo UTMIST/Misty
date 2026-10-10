@@ -64,6 +64,5 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_doc_chunks_search_vector", table_name="doc_chunks")
     op.drop_table("doc_chunks")
-    # This service owns its database and this extension. No CASCADE: unrelated
-    # vector dependencies must cause rollback rather than silently lose data.
-    op.execute(sa.text("DROP EXTENSION IF EXISTS vector"))
+    # Retain this database-level prerequisite: it may predate the migration,
+    # belong to another role, or support tables outside this service's schema.

@@ -1,6 +1,7 @@
 """Real pgvector schema, database constraints, and reversible upgrade coverage."""
 
 import os
+from uuid import uuid4
 
 import pytest
 from alembic import command
@@ -45,9 +46,6 @@ def test_migration_007_round_trip_preserves_existing_catalog_and_content(engine)
             content_hash=chunk.source_content_hash,
             fetched_at=None,
         )
-        # A provider may have already enabled vector. Upgrade must accept it.
-        with engine.begin() as conn:
-            conn.execute(text("CREATE EXTENSION vector"))
         command.upgrade(cfg, "head")
         assert adapter.get_doc_content(doc.id) == chunk.chunk_text
         adapter.replace_doc_chunks(doc.id, [chunk])
@@ -60,7 +58,7 @@ def test_migration_007_round_trip_preserves_existing_catalog_and_content(engine)
                 conn.execute(
                     text("SELECT extname FROM pg_extension WHERE extname = 'vector'")
                 ).scalar_one_or_none()
-                is None
+                == "vector"
             )
         assert adapter.get_doc_content(doc.id) == chunk.chunk_text
 
@@ -72,6 +70,60 @@ def test_migration_007_round_trip_preserves_existing_catalog_and_content(engine)
         if doc is not None:
             with engine.begin() as conn:
                 conn.execute(delete(docs).where(docs.c.id == doc.id))
+
+
+def test_migration_007_preserves_vector_owned_by_another_role(engine, monkeypatch):
+    # Use a disposable database so its extension and schema can have different
+    # owners without changing the main test database's privileges or objects.
+    name = f"migration_007_{uuid4().hex}"
+    admin_engine = create_engine(engine.url.set(database=name))
+    migration_url = engine.url.set(database=name, username=name, password="migration_test_only")
+    migration_engine = create_engine(migration_url)
+    cfg = _alembic_cfg()
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as admin:
+        admin.execute(text(f"CREATE ROLE {name} LOGIN PASSWORD 'migration_test_only'"))
+        try:
+            admin.execute(text(f"CREATE DATABASE {name} OWNER {name}"))
+            with admin_engine.begin() as conn:
+                conn.execute(text("CREATE EXTENSION vector"))
+                conn.execute(text("CREATE TABLE external_vectors (embedding vector(3))"))
+                conn.execute(text("INSERT INTO external_vectors VALUES ('[1,2,3]')"))
+                extension_owner = conn.execute(
+                    text("SELECT extowner FROM pg_extension WHERE extname = 'vector'")
+                ).scalar_one()
+
+            monkeypatch.setenv("DATABASE_URL", migration_url.render_as_string(hide_password=False))
+            get_settings.cache_clear()
+            with migration_engine.connect() as conn:
+                role = conn.execute(
+                    text("SELECT oid, rolsuper FROM pg_roles WHERE rolname = current_user")
+                ).one()
+                assert role.oid != extension_owner
+                assert role.rolsuper is False
+
+            command.upgrade(cfg, "head")
+            assert "doc_chunks" in inspect(migration_engine).get_table_names()
+            command.downgrade(cfg, "006")
+            assert "doc_chunks" not in inspect(migration_engine).get_table_names()
+            with admin_engine.connect() as conn:
+                assert (
+                    conn.execute(
+                        text("SELECT extowner FROM pg_extension WHERE extname = 'vector'")
+                    ).scalar_one()
+                    == extension_owner
+                )
+                assert (
+                    conn.execute(text("SELECT embedding::text FROM external_vectors")).scalar_one()
+                    == "[1,2,3]"
+                )
+            command.upgrade(cfg, "head")
+            assert "doc_chunks" in inspect(migration_engine).get_table_names()
+        finally:
+            get_settings.cache_clear()
+            migration_engine.dispose()
+            admin_engine.dispose()
+            admin.execute(text(f"DROP DATABASE IF EXISTS {name}"))
+            admin.execute(text(f"DROP ROLE {name}"))
 
 
 def test_migration_007_vector_keyword_storage_and_cascade(engine):

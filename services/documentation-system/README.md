@@ -222,6 +222,9 @@ RUN_PG_TESTS=1 uv run pytest -q
 
 `tests/test_postgres_adapter.py` runs the same behavioral assertions against a live Postgres instance. Chunk assertions are shared with the in-memory suite through `tests/chunk_storage_cases.py`; migration tests also verify pgvector constraints and reversibility. Use the supplied pgvector-enabled container. Tests ignore `.env`: export `DATABASE_URL` if your database differs from the local default on port 5434.
 
+The extension-ownership regression creates and removes a temporary database and
+role. Run it with the supplied container's superuser credentials, as CI does.
+
 Lint before committing:
 
 ```bash
