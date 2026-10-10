@@ -10,8 +10,9 @@ The bot is the platform's only consumer-facing surface. It's Node 20+ with `disc
 - **`router.js` is the single Policy Enforcement Point.** Authenticate → authorize → dispatch, in one place. **Handlers never re-implement auth.** If you find yourself checking `access_level` inside a handler, use the declarative `auth` field instead.
 - **`commands/index.js` is the single source of truth for the command set.** It's consumed by both the router (dispatch) and `registerCommands.js` (Discord registration). Adding a command is one import plus one map entry.
 - **Auth policies fail closed.** `public` / `linked` / `admin` / `superuser`, evaluated in `auth/policy.js`. An unknown policy denies.
+- **Reply rendering lives in `src/messages/`, grouped by feature.** Commands import their renderers directly (for example, `messages/team.js`); keep them pure and surface-neutral. Discord interaction conversion, mentions, recording, and voice events live in `src/adapters/discord/` — see the [README architecture map](../README.md#architecture).
 - **Replies default to ephemeral.** Bot replies carry personal directory and team information. `ephemeral: false` is an explicit, deliberate choice.
-- **Service clients degrade, they don't crash.** Every backend call goes through a client (`directoryClient.js`, `docClient.js`, …) that normalizes failures. A directory outage produces "temporarily unavailable", not a stack trace in a channel.
+- **Service clients degrade, they don't crash.** Every backend call goes through a client (`clients/directoryClient.js`, `clients/docClient.js`, …) that normalizes failures. A directory outage produces "temporarily unavailable", not a stack trace in a channel.
 - **The bot hard-fails at boot on missing config.** `src/config.js` lists ten required env vars and exits with `Missing required env vars: …`. That's deliberate — see `startupGuard.js`.
 
 ## Local setup
@@ -32,6 +33,13 @@ Open `http://127.0.0.1:3001`, paste `100000000000000000` into "Acting as", pick 
 > ⚠️ Port **8001** is also `documentation-system`'s API port. Stop the catalog before running `npm run dev:web`.
 
 `/record` has **no playground equivalent** — voice capture needs the real Discord surface (`npm start`).
+
+For deployed PR recording tests, use the persistent
+[`dev` preview slot](../../docs/pr-previews.md). Its gateway and voice
+handlers run the selected PR directly. Railway PR copies skip Discord
+registration through an explicit no-op PR pre-deploy command, skip gateway
+login, and use a liveness health check. Direct registration in an unknown
+environment fails; never bypass the runtime environment guard to test a PR.
 
 Other modes: `npm run dev:web:plain` (web only, no scratch stack), `npm run dev:discord` (Discord only), `npm run dev` (both).
 
@@ -70,6 +78,7 @@ Other modes: `npm run dev:web:plain` (web only, no scratch stack), `npm run dev:
    | `discordHandle` | The caller's Discord handle |
 
    - `defineCommand` validates the definition and throws on nonsense at import time — an option can't set both `choices` and `autocomplete`, a subcommand can't lack a handler.
+   - Put reply formatting in the matching `src/messages/<feature>.js` module.
    - **Never import `discord.js` here.** If your handler needs something only Discord provides, that's a signal it belongs in an adapter, not a command.
    - Set `beta: true` while iterating — beta commands register **only** to the testing guild and never reach production servers.
    - `identifyCaller: true` gives a `public` command a best-effort identity lookup without making auth mandatory (`/help` uses this to list only the commands you can run).
@@ -100,7 +109,10 @@ Other modes: `npm run dev:web:plain` (web only, no scratch stack), `npm run dev:
 
 ## Walkthrough: call a new backend service
 
-1. **Add a client** at `src/<name>Client.js`, built on `httpClient.js`. Follow `verificationClient.js` — it's the simplest.
+1. **Add a client** at `src/clients/<name>Client.js`, built on `src/clients/httpClient.js`. Follow `src/clients/verificationClient.js` — it's the simplest.
+   Application orchestration belongs in `src/services/`; wire clients and
+   services in `src/context.js`. The recording client stays in `src/meeting/`
+   alongside its session and recorder code.
 2. **Normalize failures.** Export a named error (`DirectoryUnavailable` is the model) so callers can distinguish "the service said no" from "the service is down". A raw fetch rejection reaching a handler produces an ugly user-facing failure.
 3. **Add its config** to `src/config.js`. Decide whether it's **required** (hard-fails at boot, like `DIRECTORY_*`) or **optional** (degrades, like `MEETING_*`). Optional is right when the platform is still usable without it — `/record` reporting "not configured" is better than the bot refusing to start.
 4. **Add the vars to `.env.example`** with working local defaults where possible.

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createDocClient, DocUnavailable, DocBadReference } from '../src/docClient.js';
+import { createDocClient, DocUnavailable, DocBadReference } from '../src/clients/docClient.js';
 
 function fakeFetch(responder) {
   return async (url, options) => responder(url, options);

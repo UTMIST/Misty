@@ -1,5 +1,5 @@
-import { DocUnavailable, DocBadReference } from './docClient.js';
-import { DirectoryUnavailable } from './directoryClient.js';
+import { DocUnavailable, DocBadReference } from '../clients/docClient.js';
+import { DirectoryUnavailable } from '../clients/directoryClient.js';
 
 export const llmSafe = true;
 

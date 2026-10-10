@@ -1,5 +1,5 @@
-import { PersonExists, DirectoryUnavailable } from './directoryClient.js';
-import { rankOf } from './auth/policy.js';
+import { PersonExists, DirectoryUnavailable } from '../clients/directoryClient.js';
+import { rankOf } from '../auth/policy.js';
 
 export const llmSafe = true;
 

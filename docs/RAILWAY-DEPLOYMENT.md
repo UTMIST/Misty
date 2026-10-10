@@ -19,6 +19,12 @@ Railway + Neon dashboards / CLIs.
 All seven are **private** — no public domains. They reach each other over
 Railway's internal network as `<service>.railway.internal:<PORT>`.
 
+For the optional persistent `dev` environment used to test one PR at a
+time with a dedicated Discord bot, see [PR previews](pr-previews.md). That
+runbook covers the dev application's variables, database isolation, singleton
+bot volume, and selection command. The existing staging and production
+deployment flow is unchanged.
+
 ## Prerequisites
 - A Railway account + the `railway` CLI (`railway login`).
 - A Neon account.
@@ -286,6 +292,13 @@ not a documentation-system indexing pipeline.
 `CONSUMER_KEYS` and redeploy. `CONSUMER_KEYS` must stay a JSON **array** —
 both services reject any other shape at boot, deliberately, so a malformed
 variable fails the deploy rather than silently disabling auth.
+
+Before deploying the Discord bot, enable **Message Content Intent** for both the
+staging and production Discord applications in Developer Portal → **Bot** →
+**Privileged Gateway Intents**. The bot requests it at startup so members can
+use helper threads with full recent-message context, including messages that did
+not mention Misty. Without the portal toggle, Discord rejects the gateway
+connection or omits that content.
 
 ## 5. Register Discord slash commands
 The bot has to tell Discord which slash commands it supports. **This happens

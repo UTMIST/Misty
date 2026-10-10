@@ -7,8 +7,8 @@ Implements #68 under helper-bot epic #81, following the threaded helper from
 ## Boundary and accounting
 
 `context.js` constructs one `helperRequestLimiter` for the application context.
-`adapters/discord.js` calls its synchronous `tryConsume(message.author.id)` after
-linked-user authorization and before creating/fetching a thread or invoking
+`adapters/discord/mentions.js` calls its synchronous `tryConsume(message.author.id)`
+after linked-user authorization and before creating/fetching a thread or invoking
 `helperService.answer`. A denied request sends a friendly slowdown reply and
 never reaches `llmClient.chat`. Reserving before the next await prevents
 concurrent mentions from sharing the last available slot.
@@ -17,9 +17,9 @@ concurrent mentions from sharing the last available slot.
   directory person IDs, guilds, channels, thread IDs, and authors replayed from
   history do not choose the account. One user shares an allowance across all
   servers/threads served by this process; other users have independent counters.
-- One admitted, nonempty, linked-user mention consumes one request immediately.
-  New threads and follow-up mentions count alike. Historical turns and reply
-  chunks do not count separately.
+- One admitted, nonempty, linked-user helper request consumes one request
+  immediately. Leading mentions and replies that ping Misty in its own threads
+  share the allowance. Historical turns and reply chunks do not count separately.
 - Reservations are not refunded: failed thread creation/history fetch, empty
   history, LLM errors/timeouts/empty answers, and failed Discord replies still
   consume the slot. This deliberately conservative rule prevents retry storms
@@ -70,10 +70,10 @@ npm run format:check
 `test/helper-bot.test.js` exercises the Discord request path through the real
 helper service with a fake LLM client: an exhausted user never makes the next
 LLM call, while another Discord ID still succeeds. It also covers existing
-threads, concurrent mentions, authorization/non-question exclusions, and failed
-attempts. `test/helperRequestLimiter.test.js` checks independent windows, exact
-expiry, non-extending denials, defaults, runtime updates that preserve usage,
-reset-on-new-instance, and invalid inputs using an injected clock.
+threads, reply-triggered requests, concurrent mentions, authorization/non-question
+exclusions, and failed attempts. `test/helperRequestLimiter.test.js` checks
+independent windows, exact expiry, non-extending denials, defaults, runtime updates
+that preserve usage, reset-on-new-instance, and invalid inputs using an injected clock.
 `test/helper-limits-command.test.js` checks the admin runtime control surface.
 `test/config.test.js` checks startup validation and application-context wiring.
 No live Discord connection or paid provider call is needed.

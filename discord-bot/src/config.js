@@ -1,3 +1,4 @@
+import { discordEnvironment } from './runtimeMode.js';
 import {
   DEFAULT_HELPER_USER_MAX_REQUESTS,
   DEFAULT_HELPER_USER_WINDOW_SECONDS,
@@ -26,6 +27,7 @@ const REQUIRED = [
 ];
 
 export function loadConfig(env = process.env) {
+  env = discordEnvironment(env);
   const missing = REQUIRED.filter((k) => !env[k]);
   if (missing.length > 0) {
     throw new Error(`Missing required env vars: ${missing.join(', ')}`);

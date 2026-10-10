@@ -157,3 +157,16 @@ Index(
     unique=True,
     postgresql_where=text("provider <> 'email'"),
 )
+
+# Teams whose documents may inform answers in a Discord channel. Current state,
+# like person_identifiers: a replace deletes the old rows. The composite PK
+# also serves the (guild_id, channel_id) lookup.
+channel_team_access = Table(
+    "channel_team_access",
+    metadata,
+    Column("guild_id", Text, primary_key=True),
+    Column("channel_id", Text, primary_key=True),
+    Column("team_id", UUID(as_uuid=True), ForeignKey("teams.id"), primary_key=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("created_by", Text, nullable=False),
+)

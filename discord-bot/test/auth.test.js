@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolvePrincipal } from '../src/auth/principal.js';
 import { authorize, rankOf, ACCESS_RANK } from '../src/auth/policy.js';
-import { DirectoryUnavailable } from '../src/directoryClient.js';
+import { DirectoryUnavailable } from '../src/clients/directoryClient.js';
 
 test('resolvePrincipal returns { person } when linked', async () => {
   const person = { id: 'p1', display_name: 'Alex' };
