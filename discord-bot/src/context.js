@@ -8,6 +8,7 @@ import { createTeamService } from './services/teamService.js';
 import { createDocService } from './services/docService.js';
 import { createLlmClient } from './clients/llmClient.js';
 import { createHelperService } from './services/helperService.js';
+import { createHelperRequestLimiter } from './helperRequestLimiter.js';
 import { createMeetingClient } from './meeting/meetingClient.js';
 import { createMeetingSurface } from './meeting/meetingSurface.js';
 import { createRecorder } from './meeting/recorder.js';
@@ -50,6 +51,10 @@ export function createAppContext(config, { poster, notify } = {}) {
     apiKey: config.llmApiKey,
   });
   const helperService = createHelperService({ llmClient, directory });
+  const helperRequestLimiter = createHelperRequestLimiter({
+    maxRequests: config.helperUserMaxRequests,
+    windowSeconds: config.helperUserWindowSeconds,
+  });
 
   let meetingSurface;
   if (config.meetingBaseUrl) {
@@ -86,6 +91,7 @@ export function createAppContext(config, { poster, notify } = {}) {
     docService,
     llmClient,
     helperService,
+    helperRequestLimiter,
     meetingSurface,
     discordGuildId: config.discordGuildId ?? null,
     infrastructureDiscordUsername: config.infrastructureDiscordUsername,
