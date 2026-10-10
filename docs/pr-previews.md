@@ -81,10 +81,12 @@ minutes have arrived. The workflow uses the same selector as the terminal and
 serializes its runs without cancelling an active switch.
 
 One-time Actions setup: create a GitHub environment named `dev`, restrict its
-deployment branches to `staging`, and add its `RAILWAY_TOKEN` secret using a
+deployment branches to `staging`, and add its `RAILWAY_DEV_TOKEN` secret using a
 Railway project token scoped to Misty's **`dev` environment only**. Do not use
-an account token or a production/staging token. The workflow reads the selector
-from `staging`; it never checks out or executes the selected PR on the runner.
+an account token or a production/staging token. A repository Actions secret
+with the same name also works. The workflow passes it to the Railway CLI as
+`RAILWAY_TOKEN`. The workflow reads the selector from `staging`; it never checks
+out or executes the selected PR on the runner.
 Railway builds that PR's commit with the preview's existing service credentials.
 
 GitHub only exposes manual workflows after they exist on the default branch;

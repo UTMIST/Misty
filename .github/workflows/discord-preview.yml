@@ -59,11 +59,11 @@ jobs:
       - name: Switch dev to the selected PR
         env:
           GH_TOKEN: ${{ github.token }}
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_DEV_TOKEN }}
           PREVIEW_PR: ${{ inputs.pr }}
         run: |
           if [[ -z "$RAILWAY_TOKEN" ]]; then
-            echo "::error::Set RAILWAY_TOKEN on the GitHub dev environment."
+            echo "::error::Set RAILWAY_DEV_TOKEN on the GitHub dev environment."
             exit 1
           fi
           node discord-bot/scripts/preview.js "$PREVIEW_PR" --recordings-stopped
