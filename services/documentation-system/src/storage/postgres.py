@@ -7,9 +7,18 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from contracts.storage import DuplicateActiveUrl
-from contracts.types import ApiKey, Doc, DocContentMeta, DocGrant, Source
+from contracts.types import ApiKey, Doc, DocChunk, DocContentMeta, DocGrant, Source
 from contracts.visibility import Actor, ActorContext, DENY, SEE_ALL
-from src.storage.schema import api_keys, doc_content, doc_grants, doc_tags, docs, sources
+from src.storage.chunks import validate_doc_chunks
+from src.storage.schema import (
+    api_keys,
+    doc_chunks,
+    doc_content,
+    doc_grants,
+    doc_tags,
+    docs,
+    sources,
+)
 
 
 def _now() -> datetime:
@@ -412,6 +421,39 @@ class PostgresStorageAdapter:
             if row is None:
                 return None
             return DocContentMeta(content_hash=row.content_hash, fetched_at=row.fetched_at)
+
+    def replace_doc_chunks(self, doc_id: UUID, chunks: list[DocChunk]) -> bool:
+        validated = validate_doc_chunks(chunks)
+        with self._engine.begin() as conn:
+            # Lock the parent even when no chunks exist yet. Concurrent writers
+            # serialize here before deleting/inserting, so sets cannot mix.
+            existing = conn.execute(
+                select(docs.c.id).where(docs.c.id == doc_id).with_for_update()
+            ).scalar_one_or_none()
+            if existing is None:
+                return False
+            conn.execute(delete(doc_chunks).where(doc_chunks.c.doc_id == doc_id))
+            if validated:
+                conn.execute(
+                    insert(doc_chunks),
+                    [{"doc_id": doc_id, **chunk.model_dump()} for chunk in validated],
+                )
+        return True
+
+    def list_doc_chunks(
+        self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL
+    ) -> list[DocChunk]:
+        stmt = (
+            select(*(doc_chunks.c[name] for name in DocChunk.model_fields))
+            .select_from(doc_chunks.join(docs, docs.c.id == doc_chunks.c.doc_id))
+            .where(doc_chunks.c.doc_id == doc_id)
+            .order_by(doc_chunks.c.ordinal)
+        )
+        clause = self._visibility_clause(visibility)
+        if clause is not None:
+            stmt = stmt.where(clause)
+        with self._engine.connect() as conn:
+            return [DocChunk(**row) for row in conn.execute(stmt).mappings()]
 
     # --- Sources ---
 

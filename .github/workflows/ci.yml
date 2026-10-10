@@ -180,7 +180,7 @@ jobs:
       contents: read
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:0.8.2-pg16
         env:
           POSTGRES_USER: docs
           POSTGRES_PASSWORD: dev_password

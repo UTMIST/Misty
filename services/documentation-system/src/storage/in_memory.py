@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from contracts.types import ApiKey, Doc, DocContentMeta, DocGrant, Source
+from contracts.types import ApiKey, Doc, DocChunk, DocContentMeta, DocGrant, Source
 from contracts.visibility import ActorContext, SEE_ALL, doc_visible
+from src.storage.chunks import validate_doc_chunks
 
 
 def _now() -> datetime:
@@ -25,6 +26,7 @@ class InMemoryStorageAdapter:
         self._grants: dict[UUID, list[tuple[str, UUID | None, datetime, str]]] = {}
         # doc_id -> (content_text, content_hash, fetched_at)
         self._content: dict[UUID, tuple[str, str, datetime | None]] = {}
+        self._chunks: dict[UUID, list[DocChunk]] = {}
 
     def _hydrate(self, doc: Doc) -> Doc:
         data = doc.model_dump()
@@ -214,6 +216,21 @@ class InMemoryStorageAdapter:
             return None
         _text, content_hash, fetched_at = entry
         return DocContentMeta(content_hash=content_hash, fetched_at=fetched_at)
+
+    def replace_doc_chunks(self, doc_id: UUID, chunks: list[DocChunk]) -> bool:
+        validated = validate_doc_chunks(chunks)
+        if doc_id not in self._docs:
+            return False
+        self._chunks[doc_id] = validated
+        return True
+
+    def list_doc_chunks(
+        self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL
+    ) -> list[DocChunk]:
+        doc = self._docs.get(doc_id)
+        if doc is None or not self._visible(doc, visibility):
+            return []
+        return [chunk.model_copy(deep=True) for chunk in self._chunks.get(doc_id, [])]
 
     # --- Sources ---
 

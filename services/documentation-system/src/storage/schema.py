@@ -1,19 +1,22 @@
 """SQLAlchemy Core Table definitions for the documentation-system schema."""
 
+from pgvector.sqlalchemy import VECTOR
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Computed,
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     MetaData,
     Table,
     Text,
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR, UUID
 
 metadata = MetaData()
 
@@ -119,6 +122,39 @@ doc_content = Table(
     Column("content_hash", Text, nullable=False),
     Column("fetched_at", DateTime(timezone=True), nullable=True),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+)
+
+doc_chunks = Table(
+    "doc_chunks",
+    metadata,
+    Column(
+        "doc_id", UUID(as_uuid=True), ForeignKey("docs.id", ondelete="CASCADE"), primary_key=True
+    ),
+    Column("ordinal", Integer, primary_key=True),
+    Column("chunk_text", Text, nullable=False),
+    Column("start_offset", Integer, nullable=False),
+    Column("end_offset", Integer, nullable=False),
+    Column("source_content_hash", Text, nullable=False),
+    Column("embedding", VECTOR(1536), nullable=False),
+    Column("embedding_model", Text, nullable=False),
+    Column("dimensions", Integer, nullable=False),
+    Column(
+        "search_vector",
+        TSVECTOR,
+        Computed("to_tsvector('simple'::regconfig, chunk_text)", persisted=True),
+        nullable=False,
+    ),
+    CheckConstraint("ordinal >= 0", name="ck_doc_chunks_ordinal"),
+    CheckConstraint(
+        "start_offset >= 0 AND end_offset > start_offset "
+        "AND char_length(chunk_text) = end_offset - start_offset",
+        name="ck_doc_chunks_offsets",
+    ),
+    CheckConstraint("source_content_hash ~ '^[0-9a-f]{64}$'", name="ck_doc_chunks_content_hash"),
+    CheckConstraint("embedding_model ~ '[^[:space:]]'", name="ck_doc_chunks_model"),
+    CheckConstraint("dimensions = 1536", name="ck_doc_chunks_dimensions"),
+    # Exact vector scans initially (#208); the PK serves per-document reads.
+    Index("ix_doc_chunks_search_vector", "search_vector", postgresql_using="gin"),
 )
 
 api_keys = Table(

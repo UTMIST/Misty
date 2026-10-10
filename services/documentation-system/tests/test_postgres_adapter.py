@@ -1,8 +1,10 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 
 from contracts.storage import DuplicateActiveUrl
 from contracts.types import DocIngest
@@ -10,10 +12,60 @@ from contracts.visibility import DENY, SEE_ALL, Actor
 from src.config import get_settings
 from src.ingest import ingest_doc
 from src.storage.postgres import PostgresStorageAdapter
+from tests.chunk_storage_cases import ChunkStorageCases, make_chunk, make_doc
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_PG_TESTS") != "1", reason="set RUN_PG_TESTS=1 to run Postgres tests"
 )
+
+
+class TestDocChunks(ChunkStorageCases):
+    pass
+
+
+def test_chunk_validation_precedes_database_access(adapter, monkeypatch):
+    def unexpected_connection():
+        pytest.fail("invalid chunks must fail before opening a database connection")
+
+    monkeypatch.setattr(adapter._engine, "begin", unexpected_connection)
+    with pytest.raises(ValueError):
+        adapter.replace_doc_chunks(uuid4(), [make_chunk(2)])
+
+
+def test_chunk_insert_failure_rolls_back_replacement(adapter):
+    doc = make_doc(adapter)
+    original = [make_chunk()]
+    adapter.replace_doc_chunks(doc.id, original)
+
+    def fail_insert(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO doc_chunks"):
+            raise RuntimeError("simulated insert failure")
+
+    event.listen(adapter._engine, "before_cursor_execute", fail_insert)
+    try:
+        with pytest.raises(RuntimeError, match="simulated insert failure"):
+            adapter.replace_doc_chunks(doc.id, [make_chunk(text="replacement")])
+    finally:
+        event.remove(adapter._engine, "before_cursor_execute", fail_insert)
+    assert adapter.list_doc_chunks(doc.id) == original
+
+
+@pytest.mark.parametrize("already_indexed", [False, True])
+def test_concurrent_chunk_replacements_never_mix_sets(adapter, already_indexed):
+    doc = make_doc(adapter)
+    if already_indexed:
+        adapter.replace_doc_chunks(doc.id, [make_chunk()])
+    sets = [[make_chunk(0), make_chunk(1)], [make_chunk(text="replacement")]]
+    barrier = Barrier(2)
+
+    def replace(chunks):
+        barrier.wait(timeout=5)
+        return adapter.replace_doc_chunks(doc.id, chunks)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(replace, chunks) for chunks in sets]
+        assert all(future.result(timeout=10) for future in futures)
+    assert adapter.list_doc_chunks(doc.id) in sets
 
 
 @pytest.fixture
