@@ -11,7 +11,15 @@ const PR = {
   isCrossRepository: false,
 };
 
-function fixture({ failService, stuckStop = false, otherDeployment = false } = {}) {
+function fixture({
+  failService,
+  failureStatus = 'FAILED',
+  initialStatus = 'SUCCESS',
+  firstStopStatus = 'REMOVING',
+  stopResult,
+  stuckStop = false,
+  otherDeployment = false,
+} = {}) {
   const names = [
     'discord-bot',
     'meeting',
@@ -24,8 +32,8 @@ function fixture({ failService, stuckStop = false, otherDeployment = false } = {
     serviceId: name,
     serviceName: name,
     source: { repo: 'UTMIST/Misty' },
-    latestDeployment: { id: `${name}-old`, status: 'SUCCESS' },
-    activeDeployments: [{ id: `${name}-old`, status: 'SUCCESS' }],
+    latestDeployment: { id: `${name}-old`, status: initialStatus },
+    activeDeployments: [{ id: `${name}-old`, status: initialStatus }],
   }));
   const environment = {
     id: 'dev',
@@ -41,12 +49,13 @@ function fixture({ failService, stuckStop = false, otherDeployment = false } = {
     environments: connection([{ id: 'dev', name: 'dev', isEphemeral: false }]),
   };
   const calls = [];
+  const logs = [];
   let stopRequested = false;
   let stopReads = 0;
   let clock = 0;
   const api = async (query, variables) => {
     calls.push({ query, variables });
-    if (query.includes('query PreviewProject')) return { project };
+    if (query.includes('query PreviewProject')) return { project: structuredClone(project) };
     if (query.includes('query PreviewEnvironment')) {
       if (
         otherDeployment &&
@@ -55,7 +64,7 @@ function fixture({ failService, stuckStop = false, otherDeployment = false } = {
         instances.find((s) => s.serviceId === 'team-tracking').latestDeployment.id =
           'another-deploy';
       }
-      return { environment };
+      return { environment: structuredClone(environment) };
     }
     if (query.includes('mutation StopPreview')) {
       assert.equal(variables.id, 'discord-bot-old');
@@ -67,8 +76,11 @@ function fixture({ failService, stuckStop = false, otherDeployment = false } = {
         assert.equal(stopRequested, true);
         stopReads += 1;
         if (stuckStop || stopReads === 1) {
-          return { deployment: { id: variables.id, status: 'REMOVING', deploymentStopped: false } };
+          return {
+            deployment: { id: variables.id, status: firstStopStatus, deploymentStopped: false },
+          };
         }
+        if (stopResult) return { deployment: { id: variables.id, ...stopResult } };
         const bot = instances.find((s) => s.serviceId === 'discord-bot');
         bot.activeDeployments = [];
         bot.latestDeployment.status = 'REMOVED';
@@ -76,12 +88,17 @@ function fixture({ failService, stuckStop = false, otherDeployment = false } = {
       }
       const service = instances.find((s) => s.latestDeployment.id === variables.id);
       assert.ok(service);
-      service.latestDeployment.status = service.serviceId === failService ? 'FAILED' : 'SUCCESS';
+      service.latestDeployment.status =
+        service.serviceId === failService ? failureStatus : 'SUCCESS';
       service.activeDeployments = [service.latestDeployment];
       return { deployment: { ...service.latestDeployment, deploymentStopped: false } };
     }
     if (query.includes('mutation DeployPreview')) {
-      assert.equal(stopReads >= 2, true, 'must wait until the previous bot has actually stopped');
+      assert.equal(
+        instances.find((s) => s.serviceId === 'discord-bot').activeDeployments.length,
+        0,
+        'must wait until the previous bot has actually stopped',
+      );
       assert.equal(variables.environmentId, 'dev');
       assert.equal(variables.commitSha, PR.headRefOid);
       const service = instances.find((s) => s.serviceId === variables.serviceId);
@@ -94,12 +111,13 @@ function fixture({ failService, stuckStop = false, otherDeployment = false } = {
     environment,
     project,
     calls,
+    logs,
     options: {
       projectId: 'project',
       pr: PR,
       api,
       confirm: async () => true,
-      log: () => {},
+      log: (message) => logs.push(message),
       now: () => clock,
       sleep: async (ms) => {
         clock += ms;
@@ -145,6 +163,35 @@ test('a deployment changed during confirmation is not stopped or overwritten', a
   assert.deepEqual(mutations(calls), []);
 });
 
+test('a bot removed during confirmation is not removed a second time', async () => {
+  const { options, environment, calls } = fixture();
+  const result = await switchPreview({
+    ...options,
+    confirm: async () => {
+      const bot = environment.serviceInstances.edges[0].node;
+      bot.activeDeployments = [];
+      bot.latestDeployment.status = 'REMOVED';
+      return true;
+    },
+  });
+  assert.equal(result.changed, true);
+  assert.equal(mutations(calls).length, 6);
+  assert.ok(mutations(calls).every(({ query }) => query.includes('DeployPreview')));
+});
+
+test('sleeping services do not block a switch and sleeping bot removal is confirmed', async () => {
+  const { options } = fixture({ initialStatus: 'SLEEPING', firstStopStatus: 'SLEEPING' });
+  const result = await switchPreview(options);
+  assert.equal(result.changed, true);
+  assert.equal(options.now(), 3000);
+});
+
+test('a successful old deployment can take a poll to begin removal', async () => {
+  const { options } = fixture({ firstStopStatus: 'SUCCESS' });
+  assert.equal((await switchPreview(options)).changed, true);
+  assert.equal(options.now(), 3000);
+});
+
 test('backend failure leaves bot disconnected and stops the deployment sequence', async () => {
   const { options, calls } = fixture({ failService: 'meeting' });
   await assert.rejects(switchPreview(options), /FAILED/);
@@ -155,10 +202,32 @@ test('backend failure leaves bot disconnected and stops the deployment sequence'
 });
 
 test('unconfirmed old-process termination prevents every new deployment', async () => {
-  const { options, calls } = fixture({ stuckStop: true });
-  await assert.rejects(switchPreview(options), /Timed out/);
+  const { options, calls, logs } = fixture({ stuckStop: true });
+  await assert.rejects(switchPreview(options), /Timed out.*REMOVING.*deploymentStopped: false/);
   assert.equal(mutations(calls).length, 1);
+  assert.ok(logs.some((message) => /REMOVING.*deploymentStopped: false/.test(message)));
 });
+
+for (const status of ['CRASHED', 'FAILED', 'SKIPPED', 'NEEDS_APPROVAL', 'REMOVED']) {
+  test(`stop fails promptly on ${status} without confirmed termination`, async () => {
+    const { options, calls } = fixture({ stopResult: { status, deploymentStopped: false } });
+    await assert.rejects(
+      switchPreview(options),
+      new RegExp(`${status}.*Termination was not confirmed`),
+    );
+    assert.equal(options.now(), 3000, 'must fail on the terminal status, not the overall timeout');
+    assert.equal(mutations(calls).length, 1, 'must not start a new deployment');
+  });
+}
+
+for (const status of ['CRASHED', 'FAILED', 'SKIPPED', 'NEEDS_APPROVAL', 'REMOVED', 'SLEEPING']) {
+  test(`new deployment stops promptly on ${status} instead of waiting for success`, async () => {
+    const { options, calls } = fixture({ failService: 'team-tracking', failureStatus: status });
+    await assert.rejects(switchPreview(options), new RegExp(`${status}.*switch did not finish`));
+    assert.equal(options.now(), 3000);
+    assert.equal(mutations(calls).length, 2, 'only the first backend can start');
+  });
+}
 
 test('a competing deployment stops the switch before the bot can start', async () => {
   const { options, calls } = fixture({ otherDeployment: true });
@@ -194,6 +263,8 @@ test('wrong target, missing volume, automatic deploys, and in-flight deploys are
   const { environment } = fixture();
   environment.serviceInstances.edges[0].node.latestDeployment.status = 'BUILDING';
   assert.throws(() => validateEnvironment(environment), /unfinished deployment/);
+  environment.serviceInstances.edges[0].node.latestDeployment.status = 'NEEDS_APPROVAL';
+  assert.throws(() => validateEnvironment(environment), /approve or cancel/);
 });
 
 test('a preview environment configured as the PR base is refused before changes', async () => {

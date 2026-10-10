@@ -1,7 +1,6 @@
 // Railway copies ordinary variables into PR environments. Only the persistent
 // preview environment's exact ID may use the dev application's credentials.
-export function runtimeMode(env = process.env, args = process.argv.slice(2)) {
-  if (args.includes('--preview-idle')) return 'idle';
+export function runtimeMode(env = process.env) {
   if (!env.RAILWAY_ENVIRONMENT_ID && !env.RAILWAY_ENVIRONMENT_NAME) return 'normal';
   if (['production', 'staging'].includes(env.RAILWAY_ENVIRONMENT_NAME)) return 'normal';
   if (env.RAILWAY_ENVIRONMENT_NAME === 'dev') {
@@ -20,7 +19,7 @@ export function runtimeMode(env = process.env, args = process.argv.slice(2)) {
 }
 
 export function discordEnvironment(env = process.env) {
-  if (runtimeMode(env, []) !== 'preview') return env;
+  if (runtimeMode(env) !== 'preview') return env;
   const missing = ['DISCORD_TOKEN_DEV', 'DISCORD_CLIENT_ID_DEV', 'DISCORD_GUILD_ID_DEV'].filter(
     (key) => !env[key],
   );

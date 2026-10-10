@@ -7,13 +7,5 @@
     "preDeployTimeoutSeconds": 120,
     "healthcheckPath": "/health/ready",
     "restartPolicyType": "ON_FAILURE"
-  },
-  "environments": {
-    "pr": {
-      "deploy": {
-        "startCommand": "node src/index.js --preview-idle",
-        "preDeployCommand": "node src/registerCommands.js --preview-idle"
-      }
-    }
   }
 }

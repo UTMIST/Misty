@@ -139,6 +139,14 @@ not provide an atomic transaction across all backend deployments.
 - A timeout or interrupted CLI may leave a Railway build running. Inspect and
   wait for or cancel that deployment before retrying; the command refuses to
   switch while deployments are unfinished.
+- Existing sleeping deployments do not block selection. A deployment awaiting
+  approval must be approved or cancelled first. While switching, the CLI logs
+  status changes and stops immediately on failed terminal states. A removed
+  bot without confirmed termination also stops the switch before any new
+  deployment; inspect it in Railway before retrying. Newly deployed services
+  must reach `SUCCESS`, including a connected gateway for the bot.
+- CLI failures include their installation, login, access, or GraphQL error
+  details. Address the reported cause before rerunning the command.
 - Database contents persist across PR selections. The command does not reset
   databases or reverse migrations. Before switching between incompatible
   schemas, provision fresh development branches and update the preview URLs
@@ -149,11 +157,19 @@ not provide an atomic transaction across all backend deployments.
 
 ## Automatic Railway PR environments
 
-The bot's `railway.json` uses Railway's special `environments.pr` overrides to
-start an idle health listener and skip command registration. Runtime guards also
-leave unknown Railway environments idle, regardless of copied enable flags or
-credentials. This avoids depending on an undocumented PR-name regex. Local
-development, `staging`, and `production` retain their existing behavior.
+One runtime environment check controls both gateway startup and command
+registration. Local development and the exact names `staging` and `production`
+retain their existing behavior. Only `dev` with the configured literal
+environment ID can use the preview credentials. All other Railway environments
+keep Discord disabled regardless of copied enable flags or credentials.
+
+Disabled Discord returns **503** from `/health/ready`. This includes automatic
+PR copies and misspellings such as `prod` or `Production`: they must not appear
+healthy while disconnected. Railway's documented
+[runtime variables](https://docs.railway.com/variables/reference) do not expose
+whether the environment is ephemeral, so the bot does not infer a healthy idle
+mode from a PR-name pattern. There is no idle CLI flag or `environments.pr`
+override. The persistent `dev` slot is the supported path for Discord previews.
 
 This is only a bot safeguard. Before enabling full-stack automatic PR
 environments, separately arrange isolated database branches: copied Neon URLs
@@ -164,7 +180,8 @@ would otherwise let preview migrations alter the base database. The persistent
 
 Run `npm test`, `npm run lint`, and `npm run format:check` in `discord-bot`.
 Offline tests cover environment ownership, copied credentials and flags,
-registration suppression, idle readiness, the stop-before-deploy sequence,
-failed backends, timeouts, competing deployments, and production/staging
+registration suppression, unavailable idle readiness, the stop-before-deploy
+sequence, sleeping and terminal deployment states, CLI diagnostics, confirmation
+races, failed backends, timeouts, competing deployments, and production/staging
 exclusion. A live recording round trip is still required after provisioning;
 the automated suite never logs in to Discord or calls paid providers.

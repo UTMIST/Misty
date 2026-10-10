@@ -8,7 +8,17 @@ const SERVICE_ORDER = [
   'meeting',
   'discord-bot',
 ];
-const FINISHED = new Set(['SUCCESS', 'FAILED', 'CRASHED', 'REMOVED', 'SKIPPED']);
+// Settled Railway statuses. SUCCESS/SLEEPING can still own a process; a
+// stopped deployment additionally needs Railway's termination confirmation.
+const FINISHED = new Set([
+  'SUCCESS',
+  'SLEEPING',
+  'FAILED',
+  'CRASHED',
+  'REMOVED',
+  'SKIPPED',
+  'NEEDS_APPROVAL',
+]);
 
 export const PROJECT_QUERY = `query PreviewProject($id: String!) {
   project(id: $id) {
@@ -73,6 +83,11 @@ export function validateEnvironment(environment) {
     if (service.source?.repo !== REPOSITORY) {
       throw new Error(`${service.serviceName} must have ${REPOSITORY} as its source repository.`);
     }
+    if (service.latestDeployment?.status === 'NEEDS_APPROVAL') {
+      throw new Error(
+        `${service.serviceName} has a deployment awaiting approval; approve or cancel it before switching.`,
+      );
+    }
     if (service.latestDeployment && !FINISHED.has(service.latestDeployment.status)) {
       throw new Error(
         `${service.serviceName} has an unfinished deployment; wait before switching.`,
@@ -92,17 +107,32 @@ export function validateEnvironment(environment) {
   );
 }
 
-async function waitFor(api, id, stopped, { sleep, now, timeoutMs }) {
+async function waitFor(api, id, stopped, { sleep, now, timeoutMs, log }) {
   const deadline = now() + timeoutMs;
+  let lastState;
   while (now() < deadline) {
     const { deployment } = await api(DEPLOYMENT_QUERY, { id });
+    const state = `${deployment.status}${stopped ? ` (deploymentStopped: ${deployment.deploymentStopped})` : ''}`;
+    if (state !== lastState) {
+      log(`Deployment ${id}: ${state}.`);
+      lastState = state;
+    }
     if (stopped) {
-      if (deployment.status === 'REMOVED' && deployment.deploymentStopped) return;
+      if (deployment.status === 'REMOVED' && deployment.deploymentStopped === true) return;
+      // SUCCESS/SLEEPING can briefly persist after Railway accepts removal.
+      // Other settled states cannot confirm the requested safe shutdown.
+      if (
+        FINISHED.has(deployment.status) &&
+        deployment.status !== 'SUCCESS' &&
+        deployment.status !== 'SLEEPING'
+      ) {
+        throw new Error(
+          `Deployment ${id}: ${state}. Termination was not confirmed; inspect it before retrying. No new deployments were started.`,
+        );
+      }
     } else {
       if (deployment.status === 'SUCCESS') return;
-      if (
-        ['FAILED', 'CRASHED', 'REMOVED', 'SKIPPED', 'NEEDS_APPROVAL'].includes(deployment.status)
-      ) {
+      if (FINISHED.has(deployment.status)) {
         throw new Error(
           `Deployment ${id}: ${deployment.status}. The preview switch did not finish.`,
         );
@@ -110,7 +140,9 @@ async function waitFor(api, id, stopped, { sleep, now, timeoutMs }) {
     }
     await sleep(3000);
   }
-  throw new Error(`Timed out waiting for deployment ${id}. Inspect it before retrying.`);
+  throw new Error(
+    `Timed out waiting for deployment ${id}: ${lastState}. Inspect it before retrying.`,
+  );
 }
 
 // The caller supplies CLI/API access so the deployment sequence is tested
@@ -135,7 +167,6 @@ export async function switchPreview({
   }
   const { environment } = await api(ENVIRONMENT_QUERY, { id: target.id });
   const services = validateEnvironment(environment);
-  const bot = services.find((service) => service.serviceName === 'discord-bot');
   const before = services.map((service) => [service.serviceId, service.latestDeployment?.id]);
   const plan = `PR #${pr.number} at ${pr.headRefOid}\nEnvironment: dev (${target.id})\nServices: ${services.map((service) => service.serviceName).join(', ')}`;
   log(plan);
@@ -153,7 +184,8 @@ export async function switchPreview({
 
   // Stop the bot before any backend migration or meeting-service restart. Wait
   // for actual removal, not merely a successful request to remove it.
-  const waitOptions = { sleep, now, timeoutMs };
+  const bot = refreshed.find((service) => service.serviceName === 'discord-bot');
+  const waitOptions = { sleep, now, timeoutMs, log };
   for (const deployment of bot.activeDeployments) {
     log(`Disconnecting previous preview (${deployment.id})…`);
     const removed = await api(REMOVE, { id: deployment.id });

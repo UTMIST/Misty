@@ -18,7 +18,7 @@ For real Discord and recording tests against a PR, the optional persistent
 `dev` preview slot runs one selected PR using the same dev bot identity.
 Use `npm run preview -- <pr>` or GitHub Actions → **Preview Discord PR** after
 the [one-time setup](../docs/pr-previews.md). Automatic Railway PR copies keep
-Discord disabled and skip command registration.
+Discord disabled, skip command registration, and report unavailable readiness.
 
 Preview-only configuration (leave unset locally and on staging/production):
 

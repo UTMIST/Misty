@@ -3,7 +3,10 @@ import Fastify from 'fastify';
 export function buildHealthServer(client, { idle = false } = {}) {
   const server = Fastify({ logger: false });
   server.get('/health/ready', async (_request, reply) => {
-    if (idle) return { status: 'ok', discord: 'disabled' };
+    if (idle) {
+      reply.code(503);
+      return { status: 'unrecognized Railway environment', discord: 'disabled' };
+    }
     if (!client.isReady()) {
       reply.code(503);
       return { status: 'discord bot unavailable' };
