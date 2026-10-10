@@ -6,6 +6,13 @@ import pytest
 from contracts.types import Source
 from contracts.visibility import DENY, SEE_ALL, Actor
 from src.storage.in_memory import InMemoryStorageAdapter
+from tests.chunk_storage_cases import ChunkStorageCases
+
+
+class TestDocChunks(ChunkStorageCases):
+    @pytest.fixture
+    def adapter(self, store):
+        return store
 
 
 def _sources():

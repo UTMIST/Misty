@@ -28,7 +28,7 @@ or routers. New contributors can be productive without standing up infrastructur
 
 | Protocol | File | Responsibility |
 |----------|------|----------------|
-| `StorageAdapter` | `contracts/storage.py` | Persist/query docs, tags, sources, API keys |
+| `StorageAdapter` | `contracts/storage.py` | Persist/query docs, content, embedded chunks, tags, sources, API keys |
 | `Fetcher` | `contracts/fetcher.py` | `fetch(url) -> FetchResult` (title + snapshot) |
 | `DirectoryClient` | `contracts/directory.py` | Resolve team/person ids to labels |
 
@@ -142,8 +142,8 @@ changes. So a doc ingested during a directory outage heals itself on the next re
 
 ## Data model
 
-Five tables (`src/storage/schema.py`; `001` creates the first four, `002` seeds sources,
-`003` adds `doc_grants`, `004` hardens dedup):
+Tables are defined in `src/storage/schema.py`; their migration history is listed in
+[`DEPLOYMENT.md`](DEPLOYMENT.md#migrations-alembic).
 
 ### `sources`
 
@@ -197,8 +197,52 @@ Auth store. Columns: `name` (unique), `prefix` (unique, the lookup key), `key_ha
 (Argon2), `scopes` (text array), `active`, `revoked_at`, `last_used_at`. The plaintext key
 is never stored.
 
-Every table carries the audit quartet `created_at` / `updated_at` / `created_by` /
-`updated_by`.
+Docs, sources, and API keys carry the audit quartet `created_at` / `updated_at` /
+`created_by` / `updated_by`. Derived content and chunks follow document identity
+and content provenance.
+
+### `doc_content`
+
+Full extracted text lives in a separate 1:1 row keyed to `docs.id`, with a SHA-256
+`content_hash`, `fetched_at`, and `updated_at` (migration `005`). Missing content
+has no row. Both content reads and metadata reads enforce document visibility.
+
+### `doc_chunks`
+
+Migration `007` enables pgvector and adds embedded chunks keyed by `(doc_id, ordinal)`.
+The document FK cascades on hard deletion. Each row stores `chunk_text`, half-open
+`start_offset` / `end_offset` **Unicode code-point** indices into the source text,
+`source_content_hash`, `embedding vector(1536)`, `embedding_model`, and `dimensions`.
+The source hash uses `src/content.py`'s SHA-256 convention; it identifies the text
+version whose offsets were embedded, even if `doc_content` is later replaced.
+
+The initial profile from #173 is `text-embedding-3-small`, 1536 dimensions. Store
+the resolved `/embed` response model, not the `openai-embed-3-small` config alias.
+`DocChunk` in `contracts/types.py` validates the width, finite float32 values,
+nonblank text/model, hash, and offset span. Both adapters round vectors to float32
+so their returned values agree. A dimension change needs a schema migration;
+model compatibility across documents and re-embedding remain #209's responsibility.
+
+`replace_doc_chunks(doc_id, chunks)` validates a complete set before storage access:
+ordinals are exactly `0..n-1`, with one model and source hash per set. Input order
+does not matter. Replacement is atomic and idempotent; `[]` clears the set and an
+unknown doc returns `False`. Postgres locks the parent doc before deleting/inserting,
+including the first write, so concurrent replacements cannot interleave chunk sets.
+The in-memory adapter validates before replacing its dict entry. Both reject invalid
+sets with `ValueError` and preserve the previous set on failure.
+
+`list_doc_chunks` returns detached values in ordinal order and applies the same
+visibility predicate as `get_doc_content`. Missing, invisible, and unindexed docs
+all return `[]`. Like content reads, it does not filter the document's `active` flag.
+These methods record supplied provenance; they do not compare it to current content
+or trigger indexing. #175 owns retirement, replacement triggers, and retry policy;
+#176 must apply active/authorization predicates before ranking.
+
+`search_vector` is a stored generated `tsvector` from the same `chunk_text`, with a
+GIN index. It uses the explicit `simple` text-search configuration to preserve names
+and acronyms without stemming or stop-word removal. Future keyword queries must use
+that same configuration. There is no keyword or vector retrieval endpoint yet.
+See [Index type](#index-type) for why vectors initially use exact scans.
 
 ### Seeded sources
 
@@ -379,7 +423,7 @@ relevance problems appear that hybrid cannot address.
 
 ### Index type
 
-`vector(N)` with **no ANN index (exact scan) to start.** At a few thousand chunks an exact
+`vector(1536)` with **no ANN index (exact scan) to start.** At a few thousand chunks an exact
 nearest-neighbor scan provides a simple 100%-recall baseline for #178. Introduce an **HNSW**
 index (pgvector >= 0.5) only once the corpus crosses roughly 10k chunks and exact scans start
 to cost materially. This applies to the vector branch only; the keyword branch uses the GIN

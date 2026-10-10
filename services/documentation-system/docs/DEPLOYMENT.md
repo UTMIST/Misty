@@ -15,9 +15,10 @@ about the service in a real (staging / production) environment.
 
 ## What this service depends on
 
-- **Postgres 16.** Managed via Neon in staging/production (see the runbook);
-  a Postgres 16 container locally. Schema uses `gen_random_uuid()`, standard
-  in modern Postgres core.
+- **Postgres 16 with pgvector.** Managed via Neon in staging/production (see
+  [Postgres](#postgres)); local development and CI use
+  `pgvector/pgvector:0.8.2-pg16`. Installing the Python `pgvector` dependency
+  alone does not install the database extension.
 - **A reachable team-tracking directory** — the source of truth for owners.
   See the directory-dependency section below; the service *runs* without it
   but ownership validation degrades.
@@ -64,13 +65,26 @@ the runbook) to enable Google-source content.
 - **Staging / production:** Neon manages this. Each environment points at its
   own branch of the `documentation-system` Neon project. See the runbook.
 
+Migration `007` runs `CREATE EXTENSION IF NOT EXISTS vector` in this service's
+database. Before rollout, check the target Neon branch's available extensions:
+
+```sql
+SELECT name, default_version, installed_version
+FROM pg_available_extensions WHERE name = 'vector';
+```
+
+The migration role must be able to enable that extension. Local databases already
+using Postgres 16 can retain their Compose volume when switching to the pgvector
+image; recreate the container with `docker compose up -d postgres` before migrating.
+No new application environment variable or embedding credential is needed for storage.
+
 ## Migrations (Alembic)
 
 Schema is managed by Alembic (`migrations/`). Alembic reads the same
 `DATABASE_URL` the app uses — `migrations/env.py` pulls it from
 `src.config.get_settings()`, one source of truth.
 
-Four migrations ship today:
+Migration history:
 
 - **`001_initial_schema`** — creates `sources`, `docs`, `doc_tags`, `api_keys`
   and their indexes.
@@ -82,6 +96,18 @@ Four migrations ship today:
   constraint can't because `grantee_id` is NULL there).
 - **`004_docs_url_unique_active`** — enforces the dedup invariant at the DB level
   with a partial unique index on `url_normalized WHERE active`.
+- **`005_doc_content`** — stores full extracted text and content hashes separately
+  from catalog snapshots.
+- **`006_enable_google_content_fetch`** — enables fetching for the Google sources.
+- **`007_doc_chunks`** — enables pgvector, creates 1536-dimensional chunk storage,
+  and adds generated keyword metadata with a GIN index. Vector scans remain exact;
+  see the [storage contract and index decision](ARCHITECTURE.md#doc_chunks).
+
+Downgrading `007` removes the chunk table/index and the service-managed `vector`
+extension, preserving catalog records and full content. It deliberately omits
+`CASCADE` when dropping the extension: unrelated vector dependencies cause the
+transaction to roll back. Re-upgrading restores an empty chunk table; index contents
+must be rebuilt later through #175's indexing flow. This migration does not call `/embed`.
 
 > **`004` is a data migration, not just a schema one.** It first collapses any
 > pre-existing duplicate active rows for the same `url_normalized` (keeping the

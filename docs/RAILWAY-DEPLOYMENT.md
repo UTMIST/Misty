@@ -61,6 +61,11 @@ from main). Copy the six connection strings (3 projects × 2 branches). Use the
 
 `llm`, `meeting`, and `connectors` have no database — nothing to provision for them here.
 
+The documentation-system database also requires the `vector` extension for chunk
+storage. Its pre-deploy migration enables it; verify availability and the migration
+role's permissions on the target Neon branch as described in the service's
+[Postgres prerequisites](../services/documentation-system/docs/DEPLOYMENT.md#postgres).
+
 ## 2. Railway: project, environments, services
 1. Create a Railway project; it starts with a `production` environment — add a
    `staging` environment too.
