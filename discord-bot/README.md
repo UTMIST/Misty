@@ -497,6 +497,7 @@ local `.env`.
 | File | Responsibility |
 |---|---|
 | `src/config.js` | Load + validate env. |
+| `src/runtimeMode.js` | Shared Railway environment ownership and dev credential selection for startup, configuration, and command registration. |
 | `src/context.js` | Wire application services once. |
 | `src/clients/*.js` | Backend HTTP clients and shared request handling. |
 | `src/services/*.js` | Application orchestration over injected clients. |
@@ -510,7 +511,7 @@ local `.env`.
 | `src/commands/*.js` | Surface-neutral command handlers + registry. |
 | `src/index.js` | Client setup + interaction routing. |
 | `src/helperFlow.js` | Shared helper-bot authorization and answer handling used by Discord and the web playground. |
-| `src/registerCommands.js` | Slash-command registration (stable → global; beta → testing guild only). Runs as Railway's `preDeployCommand` on every deploy; `npm run register` runs it locally. |
+| `src/registerCommands.js` | Slash-command registration (stable → global; beta → testing guild only). Runs as Railway's persistent-environment `preDeployCommand`; ephemeral PR copies use the [preview override](../docs/pr-previews.md#automatic-railway-pr-environments). `npm run register` runs it locally. |
 | `src/defineCommand.js` | Neutral, surface-agnostic command factory. |
 | `src/adapters/discord/index.js` | Discord event wiring; dispatches to the router or dedicated recording handler. |
 | `src/adapters/discord/interactions.js` | Convert interactions to neutral intents and deliver replies. |
@@ -519,6 +520,9 @@ local `.env`.
 | `src/adapters/discord/voice.js` | Voice occupancy, meeting prompts, and recording auto-stop. |
 | `src/adapters/discord/meetingPosts.js` | Meeting notifications and minutes attachments. |
 | `scripts/dev-web.js` | Orchestrator: ephemeral scratch DB + scratch team-tracking + web server. |
+| `scripts/preview.js` | Compose the preview selector with CLI access and operator confirmation. |
+| `scripts/lib/previewCli.js` | Parse selector options and adapt GitHub/Railway CLI output to metadata, with command and API error handling. |
+| `scripts/lib/preview.js` | Validate and sequence preview deployments through injected API, clock, and confirmation functions; independent of bot runtime and backend internals. |
 | `scripts/lib/snapshotDb.js` | Pipes `pg_dump` from main into `psql` on scratch, under `set -e -o pipefail`. |
 | `scripts/lib/spawnTeamTracking.js` | Spawns a scratch uvicorn subprocess; polls `/openapi.json` for readiness. |
 | `scripts/lib/issueDevSpoofKey.js` | Runs `team-tracking-keys issue --scopes ... dev:spoof` against scratch. |

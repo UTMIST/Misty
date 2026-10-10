@@ -188,12 +188,19 @@ not provide an atomic transaction across all backend deployments. Each service
 must retain its pre-switch deployment ID until selected; afterward, its ID must
 match the deployment started by this switch. A competing deployment of a backend
 still waiting its turn aborts the sequence before it can be overwritten.
+After each backend is deployed, its status must remain `SUCCESS` or `SLEEPING`
+at every subsequent deployment step and at final verification. Existing failed
+backends can still be replaced by the switch. These checks observe Railway's
+deployment status; the bot's readiness endpoint checks its gateway connection.
 
 ## Failure and recovery
 
-- A backend deployment failure leaves the bot disconnected. Inspect the named
-  deployment, fix the cause, and rerun the selection command. It does not
-  reconnect to staging or silently fall back to an older PR.
+- A backend failure detected before bot deployment leaves the bot disconnected.
+  If a backend fails while the bot is starting, final verification reports the
+  failed switch, but the bot may already be connected. Inspect the named
+  deployment and the dev bot, fix the cause, and rerun the selection command.
+  To disconnect the bot, remove its deployment in `dev`. The selector does not
+  roll back deployments, reconnect to staging, or fall back to an older PR.
 - A timeout or interrupted CLI may leave a Railway build running. Inspect and
   wait for or cancel that deployment before retrying; the command refuses to
   switch while builds are unfinished.
@@ -264,7 +271,8 @@ the stop-before-deploy sequence, stale history exclusion, paginated shutdown
 tracking behind failed builds, crash loops, scoped-token target selection,
 already-stopped crashes, manual removal, first deployment, playground boot and
 its scope guard, source compatibility and service inventory, sleeping
-backends, CLI diagnostics, argument validation, confirmation races, cold builds,
+backends, backend failures after initial success, CLI diagnostics, argument
+validation, confirmation races, cold builds,
 polling backoff, timeouts, competing deployments,
 and production/staging exclusion. A live recording round trip is still required
 after provisioning; the automated suite never logs in to Discord or calls paid

@@ -634,6 +634,64 @@ test('backend failure leaves bot disconnected and stops the deployment sequence'
   );
 });
 
+for (const status of ['CRASHED', 'REMOVED']) {
+  for (const completedService of ['llm', 'meeting', 'discord-bot']) {
+    test(`a backend becoming ${status} during ${completedService} deployment fails the switch`, async () => {
+      const { options, environment, calls } = fixture();
+      const backend = environment.serviceInstances.edges.find(
+        ({ node }) => node.serviceName === 'team-tracking',
+      ).node;
+      await assert.rejects(
+        switchPreview({
+          ...options,
+          api: async (query, variables) => {
+            const result = await options.api(query, variables);
+            if (
+              query.includes('query PreviewDeployment') &&
+              variables.id === `${completedService}-new`
+            ) {
+              backend.latestDeployment.status = status;
+              backend.activeDeployments = [];
+            }
+            return result;
+          },
+        }),
+        new RegExp(`team-tracking.*team-tracking-new.*${status}.*switch did not finish`),
+      );
+      assert.equal(mutations(calls).at(-1).variables.serviceId, completedService);
+    });
+  }
+}
+
+test('unhealthy backends can still be replaced before their first successful deployment', async () => {
+  const { options, environment } = fixture();
+  for (const { node } of environment.serviceInstances.edges) {
+    if (node.serviceName === 'discord-bot') continue;
+    node.latestDeployment.status = 'CRASHED';
+    node.activeDeployments = [];
+  }
+  assert.equal((await switchPreview(options)).changed, true);
+});
+
+test('a backend going to sleep after success remains valid through final verification', async () => {
+  const { options, environment } = fixture();
+  const backend = environment.serviceInstances.edges.find(
+    ({ node }) => node.serviceName === 'team-tracking',
+  ).node;
+  const result = await switchPreview({
+    ...options,
+    api: async (query, variables) => {
+      const result = await options.api(query, variables);
+      if (query.includes('query PreviewDeployment') && variables.id === 'llm-new') {
+        backend.latestDeployment.status = 'SLEEPING';
+        backend.activeDeployments = [];
+      }
+      return result;
+    },
+  });
+  assert.equal(result.changed, true);
+});
+
 test('unconfirmed old-process termination prevents every new deployment', async () => {
   const { options, calls, logs } = fixture({ stuckStop: true });
   await assert.rejects(switchPreview(options), /Timed out.*REMOVING.*deploymentStopped: false/);

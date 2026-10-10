@@ -163,6 +163,19 @@ export function validateEnvironment(environment, expectedServices) {
   );
 }
 
+function validateDeployedBackends(services, deployedBackends) {
+  for (const service of services) {
+    if (
+      deployedBackends.has(service.serviceId) &&
+      !['SUCCESS', 'SLEEPING'].includes(service.latestDeployment.status)
+    ) {
+      throw new Error(
+        `${service.serviceName} deployment ${service.latestDeployment.id}: ${service.latestDeployment.status}. The preview switch did not finish. Inspect dev before retrying.`,
+      );
+    }
+  }
+}
+
 async function waitFor(api, id, stopped, { sleep, now, timeoutMs, log, allowSleeping = false }) {
   const deadline = now() + timeoutMs;
   let lastState = 'not observed before the deadline';
@@ -364,6 +377,9 @@ export async function switchPreview({
   }
 
   const expectedDeployments = new Map(before);
+  // Existing failed backends may be repaired by this switch. Once replaced,
+  // they must remain healthy while the remaining services deploy.
+  const deployedBackends = new Set();
   for (const service of services) {
     // Refuse to proceed if another operator/deployment has replaced a service
     // while this switch was in progress. A volume additionally makes the bot
@@ -384,6 +400,7 @@ export async function switchPreview({
         throw new Error('Another deployment changed dev during the switch. Stopping here.');
       }
     }
+    validateDeployedBackends(instances, deployedBackends);
     log(`Deploying ${service.serviceName}…`);
     const result = await api(DEPLOY, {
       environmentId: targetId,
@@ -397,6 +414,7 @@ export async function switchPreview({
       allowSleeping: service.serviceName !== 'discord-bot',
     });
     expectedDeployments.set(service.serviceId, id);
+    if (service.serviceName !== 'discord-bot') deployedBackends.add(service.serviceId);
     log(`${service.serviceName}: ${status.toLowerCase()} (${id}).`);
   }
   const final = await readServices();
@@ -412,5 +430,6 @@ export async function switchPreview({
   ) {
     throw new Error('Another deployment changed the preview before verification completed.');
   }
+  validateDeployedBackends(final, deployedBackends);
   return { changed: true, environmentId: targetId, commitSha: pr.headRefOid };
 }
