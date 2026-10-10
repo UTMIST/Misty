@@ -125,8 +125,21 @@ test('Railway data is returned only when present and error-free', async () => {
     })),
     { project: { id: 'project' } },
   );
-  await assert.rejects(
-    railwayApi('query', {}, async () => ({ stdout: '{}' })),
-    { message: 'Railway API returned no data.' },
-  );
+  for (const stdout of ['{}', 'null', '{"data":null}', '{"data":{}}']) {
+    await assert.rejects(
+      railwayApi('query', {}, async () => ({ stdout })),
+      { message: 'Railway API returned no data.' },
+    );
+  }
+});
+
+test('null resources identify the missing field and requested ID', async () => {
+  for (const field of ['project', 'environment', 'deployment', 'deployments', 'projectToken']) {
+    await assert.rejects(
+      railwayApi('query', { id: 'missing-id' }, async () => ({
+        stdout: JSON.stringify({ data: { [field]: null } }),
+      })),
+      new RegExp(`no ${field} for missing-id.*deleted or access changed`),
+    );
+  }
 });

@@ -105,6 +105,11 @@ with the same name also works. The workflow passes it to the Railway CLI as
 `RAILWAY_TOKEN`. The workflow reads the selector from `staging`; it never checks
 out or executes the selected PR on the runner.
 Railway builds that PR's commit with the preview's existing service credentials.
+With `RAILWAY_TOKEN`, the selector resolves the token's project and environment
+through Railway's [project-token query](https://docs.railway.com/integrations/api#using-a-project-token),
+checks the project's PR-base ID, and reads only that environment. It does not
+enumerate other environments. A token for another project or an environment
+other than persistent `dev` fails before any deployment changes.
 
 GitHub only exposes manual workflows after they exist on the default branch;
 see [GitHub's workflow-dispatch documentation](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).
@@ -122,8 +127,8 @@ npm run preview -- 123
 ```
 
 Misty's project is the default; no project ID or environment export is needed.
-For another installation, `MISTY_PREVIEW_PROJECT_ID` overrides the default and
-`--project <id>` overrides both.
+For another installation, see the selector override in the
+[bot configuration table](../discord-bot/README.md).
 
 Each new deployment has a 45-minute wait budget. For a slower cold build, use
 `--timeout-minutes 60` (a positive whole number, applied per deployment). Old bot
@@ -149,11 +154,13 @@ automatically and run after the known backend dependencies, before the bot.
 If a new backend must start earlier, update the ordering preference in
 `discord-bot/scripts/lib/preview.js`.
 
-The selector scans the bot's full paginated deployment history, including
-removed deployments whose instances may still be draining, and retains IDs
-observed before confirmation. A newer failed build cannot hide an older live
-gateway. It removes every deployment that can still run and waits until Railway
-confirms termination before restarting any backend.
+The selector scans the bot's paginated deployment history and retains gateway
+IDs observed before confirmation. The shutdown set includes runnable/removing
+deployments, observed gateways, and historical records with nonterminal
+instances. Historical failed, skipped, or removed records without live
+instances are ignored even if their stop flag is stale. A newer failed build
+cannot hide an older live or draining gateway. The selector waits until Railway
+confirms shutdown of that set before restarting any backend.
 It deploys each configured backend from the selected commit, accepts `SUCCESS`
 or `SLEEPING` for backends, and deploys the bot last. The bot must reach
 `SUCCESS`; sleeping is not sufficient for its gateway. Its pre-deploy step registers
@@ -169,7 +176,10 @@ slot. Select another open PR when ready.
 Run one selector at a time, including terminal runs while an Actions run is
 active. The command checks for unfinished or competing
 deployments, and the bot volume prevents overlapping gateway owners. It does
-not provide an atomic transaction across all backend deployments.
+not provide an atomic transaction across all backend deployments. Each service
+must retain its pre-switch deployment ID until selected; afterward, its ID must
+match the deployment started by this switch. A competing deployment of a backend
+still waiting its turn aborts the sequence before it can be overwritten.
 
 ## Failure and recovery
 
@@ -187,7 +197,9 @@ not provide an atomic transaction across all backend deployments.
   until both `REMOVED` and `deploymentStopped: true` are observed, or the stop
   deadline expires. It starts no new deployment before confirmation.
 - CLI failures include their installation, login, access, or GraphQL error
-  details. Address the reported cause before rerunning the command.
+  details. A missing API resource identifies its field and requested ID;
+  disappearance is not treated as confirmed shutdown. Address the reported
+  cause before rerunning the command.
 - Database contents persist across PR selections. The command does not reset
   databases or reverse migrations. Before switching between incompatible
   schemas, provision fresh development branches and update the preview URLs
@@ -216,9 +228,10 @@ For automatic PR copies, `railway.json` uses an
 [`environments.pr` override](https://docs.railway.com/config-as-code/reference#pr-environment-overrides)
 to check `/health/live`, which returns 200 for a running idle process with
 `discord: disabled`. Railway selects that override for ephemeral deployments;
-it sets the liveness path and clears the pre-deploy command so no registration
-is attempted. Directly running the registration CLI in any unknown environment,
-including a PR copy, exits nonzero with an environment error. Runtime mode
+it sets the liveness path and replaces registration with an explicit Node no-op
+that logs the skip and exits successfully. This does not depend on empty-array
+clearing semantics. Directly running the registration CLI in any unknown
+environment, including a PR copy, exits nonzero with an environment error. Runtime mode
 still comes from the same environment check, and persistent environments keep
 their registration step and `/health/ready`. This
 avoids failed-deployment notifications for intentional PR no-ops while an
@@ -234,8 +247,9 @@ would otherwise let preview migrations alter the base database. The persistent
 Run `npm test`, `npm run lint`, and `npm run format:check` in `discord-bot`.
 Offline tests cover environment ownership, copied credentials and flags,
 registration suppression, PR liveness and unavailable persistent readiness,
-the stop-before-deploy sequence, paginated shutdown tracking behind failed
-builds, crash loops, source compatibility and service inventory, sleeping
+the stop-before-deploy sequence, stale history exclusion, paginated shutdown
+tracking behind failed builds, crash loops, scoped-token target selection,
+source compatibility and service inventory, sleeping
 backends, CLI diagnostics, argument validation, confirmation races, cold builds,
 polling backoff, timeouts, competing deployments,
 and production/staging exclusion. A live recording round trip is still required

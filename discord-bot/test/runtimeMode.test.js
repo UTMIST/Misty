@@ -94,12 +94,17 @@ test('direct registration in idle environments fails before config validation or
     );
   }
   const config = JSON.parse(await readFile(new URL('../railway.json', import.meta.url), 'utf8'));
-  assert.deepEqual(
-    config.environments.pr.deploy.preDeployCommand,
-    [],
-    'ephemeral PR deployments explicitly omit registration',
-  );
   assert.equal(config.deploy.preDeployCommand, 'node src/registerCommands.js');
+  const { stdout } = await promisify(execFile)(
+    '/bin/sh',
+    ['-c', config.environments.pr.deploy.preDeployCommand],
+    {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      env: { PATH: process.env.PATH, RAILWAY_ENVIRONMENT_NAME: 'pr-123' },
+      timeout: 10_000,
+    },
+  );
+  assert.match(stdout, /Skipping Discord registration/);
 });
 
 test('preview boot refuses to connect without a volume', async () => {

@@ -6,6 +6,7 @@ import {
   validateEnvironment,
   validatePullRequest,
 } from '../scripts/lib/preview.js';
+import { railwayApi } from '../scripts/lib/previewCli.js';
 
 const connection = (values) => ({ edges: values.map((node) => ({ node })) });
 const PR = {
@@ -70,6 +71,7 @@ function fixture({
   const calls = [];
   const logs = [];
   const botHistory = [{ id: 'discord-bot-old', status: initialStatus, deploymentStopped: false }];
+  const runningBots = new Set(['discord-bot-old']);
   const stopRequested = new Set();
   const stopReads = new Map();
   const sleeps = [];
@@ -78,6 +80,15 @@ function fixture({
   const api = async (query, variables) => {
     calls.push({ query, variables });
     const instances = environment.serviceInstances.edges.map(({ node }) => node);
+    if (query.includes('query PreviewProjectToken')) {
+      return {
+        projectToken: {
+          projectId: project.id,
+          environmentId: environment.id,
+          project: { baseEnvironmentId: project.baseEnvironmentId },
+        },
+      };
+    }
     if (query.includes('query PreviewProject')) return { project: structuredClone(project) };
     if (query.includes('query PreviewEnvironment')) {
       if (
@@ -139,9 +150,10 @@ function fixture({
         if (bot.latestDeployment?.id === old.id) bot.latestDeployment.status = 'REMOVED';
         old.status = 'REMOVED';
         old.deploymentStopped = true;
+        runningBots.delete(old.id);
         return { deployment: { id: variables.id, status: 'REMOVED', deploymentStopped: true } };
       }
-      const service = instances.find((s) => s.latestDeployment.id === variables.id);
+      const service = instances.find((s) => s.latestDeployment?.id === variables.id);
       assert.ok(service);
       if (service.serviceId === 'meeting' && clock - buildStartedAt < buildDelayMs) {
         return { deployment: { ...service.latestDeployment, deploymentStopped: false } };
@@ -152,10 +164,7 @@ function fixture({
       return { deployment: { ...service.latestDeployment, deploymentStopped: false } };
     }
     if (query.includes('mutation DeployPreview')) {
-      assert.ok(
-        botHistory.every((deployment) => deployment.deploymentStopped === true),
-        'must wait until the previous bot has actually stopped',
-      );
+      assert.equal(runningBots.size, 0, 'must wait until the previous bot has actually stopped');
       assert.equal(variables.environmentId, 'dev');
       assert.equal(variables.commitSha, PR.headRefOid);
       const service = instances.find((s) => s.serviceId === variables.serviceId);
@@ -172,6 +181,7 @@ function fixture({
     calls,
     logs,
     botHistory,
+    runningBots,
     sleeps,
     options: {
       projectId: 'project',
@@ -215,6 +225,65 @@ test('plan or declined confirmation performs no mutation', async () => {
   assert.equal(result.changed, false);
   assert.deepEqual(mutations(calls), []);
 });
+
+test('a dev-scoped project token switches without enumerating project environments', async () => {
+  const { options, calls } = fixture();
+  const result = await switchPreview({
+    ...options,
+    projectToken: true,
+    api: (query, variables) => {
+      assert.doesNotMatch(query, /query PreviewProject\(/);
+      assert.doesNotMatch(query, /environments\s*\{/);
+      if (query.includes('query PreviewEnvironment')) assert.equal(variables.id, 'dev');
+      return options.api(query, variables);
+    },
+  });
+  assert.equal(result.changed, true);
+  assert.match(calls[0].query, /PreviewProjectToken/);
+});
+
+test('project tokens for another project, a non-dev environment, or the PR base fail preflight', async () => {
+  for (const mismatch of ['project', 'environment', 'base', 'ephemeral']) {
+    const { options, project, environment, calls } = fixture();
+    if (mismatch === 'project') project.id = 'other-project';
+    if (mismatch === 'environment') environment.name = 'staging';
+    if (mismatch === 'base') project.baseEnvironmentId = 'dev';
+    if (mismatch === 'ephemeral') environment.isEphemeral = true;
+    await assert.rejects(
+      switchPreview({ ...options, projectToken: true }),
+      /RAILWAY_TOKEN|persistent dev environment/,
+    );
+    assert.deepEqual(mutations(calls), []);
+  }
+});
+
+for (const [field, operation] of [
+  ['project', 'PreviewProject('],
+  ['projectToken', 'PreviewProjectToken'],
+  ['environment', 'PreviewEnvironment'],
+  ['deployments', 'PreviewBotDeployments'],
+  ['deployment', 'PreviewDeployment'],
+]) {
+  test(`a null ${field} stops the selector with an API diagnostic before any new deployment`, async () => {
+    const { options, calls } = fixture();
+    await assert.rejects(
+      switchPreview({
+        ...options,
+        projectToken: field === 'projectToken',
+        api: (query, variables) =>
+          railwayApi(query, variables, async () => ({
+            stdout: JSON.stringify({
+              data: query.includes(operation)
+                ? { [field]: null }
+                : await options.api(query, variables),
+            }),
+          })),
+      }),
+      new RegExp(`Railway API returned no ${field}.*deleted or access changed`),
+    );
+    assert.ok(mutations(calls).every(({ query }) => query.includes('StopPreview')));
+  });
+}
 
 test('branches without preview support fail before any Railway read or mutation', async () => {
   const { source, options, calls } = fixture();
@@ -333,6 +402,7 @@ test('history finds an older draining gateway hidden by a failed head and an emp
   });
   const failed = { id: 'failed-build', status: 'FAILED', deploymentStopped: true };
   botHistory[0].status = 'REMOVED';
+  botHistory[0].instances = [{ status: 'REMOVING' }];
   botHistory.unshift(failed);
   const bot = environment.serviceInstances.edges[0].node;
   bot.latestDeployment = { ...failed };
@@ -340,6 +410,33 @@ test('history finds an older draining gateway hidden by a failed head and an emp
   assert.equal((await switchPreview(options)).changed, true);
   assert.equal(options.now(), 6000);
   assert.ok(mutations(calls).every(({ query }) => query.includes('DeployPreview')));
+});
+
+test('stale failed, skipped, and removed history with no live instances never enters the stop set', async () => {
+  const { options, botHistory, calls } = fixture();
+  const stale = ['FAILED', 'SKIPPED', 'REMOVED'].flatMap((status) =>
+    [[], [{ status: 'STOPPED' }], [{ status: 'REMOVED' }], [{ status: 'CRASHED' }]].map(
+      (instances, index) => ({
+        id: `stale-${status}-${index}`,
+        status,
+        deploymentStopped: false,
+        instances,
+      }),
+    ),
+  );
+  botHistory.push(...stale);
+  assert.equal((await switchPreview(options)).changed, true);
+  assert.ok(calls.every(({ variables }) => !variables.id?.startsWith('stale-')));
+  assert.ok(stale.every((deployment) => !deployment.deploymentStopped));
+});
+
+test('a failed latest build with a stale stop flag is ignored while the older gateway is stopped', async () => {
+  const { options, botHistory, environment, calls } = fixture();
+  const failed = { id: 'failed-build', status: 'FAILED', deploymentStopped: false, instances: [] };
+  botHistory.unshift(failed);
+  environment.serviceInstances.edges[0].node.latestDeployment = { ...failed };
+  assert.equal((await switchPreview(options)).changed, true);
+  assert.ok(calls.every(({ variables }) => variables.id !== failed.id));
 });
 
 test('IDs observed before confirmation remain tracked if removal hides them from history', async () => {
@@ -369,11 +466,34 @@ test('IDs observed before confirmation remain tracked if removal hides them from
 });
 
 test('all prior gateway deployments share the stop deadline', async () => {
-  const { options, botHistory, calls } = fixture({ removedLagReads: 2 });
-  botHistory.push({ id: 'older-gateway', status: 'REMOVED', deploymentStopped: false });
+  const { options, botHistory, runningBots, calls } = fixture({ removedLagReads: 2 });
+  botHistory.push({
+    id: 'older-gateway',
+    status: 'REMOVED',
+    deploymentStopped: false,
+    instances: [{ status: 'REMOVING' }],
+  });
+  runningBots.add('older-gateway');
   await assert.rejects(switchPreview(options), /Timed out/);
   assert.equal(options.now(), options.stopTimeoutMs);
   assert.equal(mutations(calls).length, 1);
+});
+
+test('a removal that exhausts the stop budget fails clearly without polling or deploying', async () => {
+  const { options, calls } = fixture();
+  await assert.rejects(
+    switchPreview({
+      ...options,
+      api: async (query, variables) => {
+        const result = await options.api(query, variables);
+        if (query.includes('mutation StopPreview')) await options.sleep(options.stopTimeoutMs + 1);
+        return result;
+      },
+    }),
+    { message: 'Timed out confirming previous bot shutdown. No new deployments were started.' },
+  );
+  assert.equal(mutations(calls).length, 1);
+  assert.ok(calls.every(({ query }) => !query.includes('query PreviewDeployment')));
 });
 
 test('an unfinished bot deployment in history fails before any removal', async () => {
@@ -502,6 +622,35 @@ test('a competing deployment stops the switch before the bot can start', async (
     false,
   );
 });
+
+for (const initialDeployment of ['existing', 'none']) {
+  test(`a competing deployment of a pending backend (${initialDeployment}) is never overwritten`, async () => {
+    const { options, calls, environment } = fixture();
+    const meeting = environment.serviceInstances.edges.find(
+      ({ node }) => node.serviceId === 'meeting',
+    ).node;
+    if (initialDeployment === 'none') meeting.latestDeployment = null;
+    await assert.rejects(
+      switchPreview({
+        ...options,
+        api: async (query, variables) => {
+          const result = await options.api(query, variables);
+          if (query.includes('query PreviewDeployment') && variables.id === 'team-tracking-new') {
+            meeting.latestDeployment = { id: 'another-operators-meeting', status: 'SUCCESS' };
+          }
+          return result;
+        },
+      }),
+      /Another deployment changed dev/,
+    );
+    assert.deepEqual(
+      mutations(calls)
+        .filter(({ query }) => query.includes('DeployPreview'))
+        .map(({ variables }) => variables.serviceId),
+      ['team-tracking'],
+    );
+  });
+}
 
 test('closed, forked, malformed, and production-targeted PRs are refused', () => {
   for (const change of [

@@ -21,6 +21,14 @@ const FINISHED = new Set([
   'SKIPPED',
   'NEEDS_APPROVAL',
 ]);
+const STOPPED_INSTANCES = new Set(['CRASHED', 'EXITED', 'REMOVED', 'SKIPPED', 'STOPPED']);
+
+export const PROJECT_TOKEN_QUERY = `query PreviewProjectToken {
+  projectToken {
+    projectId environmentId
+    project { baseEnvironmentId }
+  }
+}`;
 
 export const PROJECT_QUERY = `query PreviewProject($id: String!) {
   project(id: $id) {
@@ -47,7 +55,7 @@ const DEPLOYMENT_QUERY = `query PreviewDeployment($id: String!) {
 }`;
 const BOT_DEPLOYMENTS_QUERY = `query PreviewBotDeployments($environmentId: String!, $serviceId: String!, $after: String) {
   deployments(input: { environmentId: $environmentId, serviceId: $serviceId, includeDeleted: true }, first: 100, after: $after) {
-    edges { node { id status deploymentStopped } }
+    edges { node { id status deploymentStopped instances { status } } }
     pageInfo { hasNextPage endCursor }
   }
 }`;
@@ -150,22 +158,20 @@ export function validateEnvironment(environment, expectedServices) {
 
 async function waitFor(api, id, stopped, { sleep, now, timeoutMs, log, allowSleeping = false }) {
   const deadline = now() + timeoutMs;
-  let lastState;
+  let lastState = 'not observed before the deadline';
   let intervalMs = 3000;
   while (now() < deadline) {
     const { deployment } = await api(DEPLOYMENT_QUERY, { id });
     const state = `${deployment.status}${stopped ? ` (deploymentStopped: ${deployment.deploymentStopped})` : ''}`;
+    intervalMs =
+      state === lastState &&
+      !stopped &&
+      ['BUILDING', 'QUEUED', 'INITIALIZING', 'WAITING'].includes(deployment.status)
+        ? Math.min(intervalMs * 2, 30_000)
+        : 3000;
     if (state !== lastState) {
       log(`Deployment ${id}: ${state}.`);
       lastState = state;
-      intervalMs = 3000;
-    } else if (
-      !stopped &&
-      ['BUILDING', 'QUEUED', 'INITIALIZING', 'WAITING'].includes(deployment.status)
-    ) {
-      intervalMs = Math.min(intervalMs * 2, 30_000);
-    } else {
-      intervalMs = 3000;
     }
     if (stopped) {
       if (deployment.status === 'REMOVED' && deployment.deploymentStopped === true)
@@ -192,6 +198,7 @@ async function waitFor(api, id, stopped, { sleep, now, timeoutMs, log, allowSlee
 
 async function readBotDeployments(api, environmentId, bot, previouslyObserved) {
   const history = new Map();
+  const observedGateways = new Set();
   let after = null;
   do {
     const { deployments } = await api(BOT_DEPLOYMENTS_QUERY, {
@@ -209,6 +216,9 @@ async function readBotDeployments(api, environmentId, bot, previouslyObserved) {
   // Preserve IDs seen before/during confirmation even if a concurrent removal
   // has already made them disappear from the history or active deployment list.
   for (const instance of [previouslyObserved, bot]) {
+    for (const observed of instance.activeDeployments) observedGateways.add(observed.id);
+    if (['SUCCESS', 'SLEEPING', 'CRASHED', 'REMOVING'].includes(instance.latestDeployment?.status))
+      observedGateways.add(instance.latestDeployment.id);
     for (const observed of [...instance.activeDeployments, instance.latestDeployment].filter(
       Boolean,
     )) {
@@ -228,10 +238,15 @@ async function readBotDeployments(api, environmentId, bot, previouslyObserved) {
       );
     }
   }
+  // A false stop flag on an old failed/skipped/removed build is not evidence
+  // of a gateway. Keep only runnable/removing deployments, gateways observed
+  // during this switch, and historical deployments with nonterminal instances.
   return [...history.values()].filter(
     (deployment) =>
-      deployment.deploymentStopped !== true ||
-      ['SUCCESS', 'SLEEPING', 'CRASHED'].includes(deployment.status),
+      ['SUCCESS', 'SLEEPING', 'CRASHED', 'REMOVING'].includes(deployment.status) ||
+      (deployment.deploymentStopped !== true &&
+        (observedGateways.has(deployment.id) ||
+          deployment.instances?.some((instance) => !STOPPED_INSTANCES.has(instance.status)))),
   );
 }
 
@@ -239,6 +254,7 @@ async function readBotDeployments(api, environmentId, bot, previouslyObserved) {
 // offline. No credentials are copied or read by this command.
 export async function switchPreview({
   projectId,
+  projectToken = false,
   pr,
   readSource,
   api,
@@ -251,21 +267,38 @@ export async function switchPreview({
 }) {
   validatePullRequest(pr);
   const expectedServices = previewServices(await readSource(pr.headRefOid));
-  const { project } = await api(PROJECT_QUERY, { id: projectId });
-  const target = nodes(project.environments).find((env) => env.name === 'dev');
-  if (!target || target.isEphemeral || target.id === project.baseEnvironmentId) {
+  let targetId;
+  let baseEnvironmentId;
+  if (projectToken) {
+    // RAILWAY_TOKEN is scoped to one environment. Resolve it without listing
+    // other environments; project metadata retains the PR-base safety check.
+    const { projectToken: scope } = await api(PROJECT_TOKEN_QUERY, {});
+    if (scope.projectId !== projectId || !scope.environmentId || !scope.project) {
+      throw new Error('RAILWAY_TOKEN must belong to the selected project and its dev environment.');
+    }
+    targetId = scope.environmentId;
+    baseEnvironmentId = scope.project.baseEnvironmentId;
+  } else {
+    const { project } = await api(PROJECT_QUERY, { id: projectId });
+    const target = nodes(project.environments).find(
+      (env) => env.name === 'dev' && !env.isEphemeral,
+    );
+    targetId = target?.id;
+    baseEnvironmentId = project.baseEnvironmentId;
+  }
+  if (!targetId || targetId === baseEnvironmentId) {
     throw new Error(
       'Create a persistent dev environment outside the PR base. See docs/pr-previews.md.',
     );
   }
   const readServices = async () =>
     validateEnvironment(
-      (await api(ENVIRONMENT_QUERY, { id: target.id })).environment,
+      (await api(ENVIRONMENT_QUERY, { id: targetId })).environment,
       expectedServices,
     );
   const services = await readServices();
   const before = services.map((service) => [service.serviceId, service.latestDeployment?.id]);
-  const plan = `PR #${pr.number} at ${pr.headRefOid}\nEnvironment: dev (${target.id})\nServices: ${services.map((service) => service.serviceName).join(', ')}`;
+  const plan = `PR #${pr.number} at ${pr.headRefOid}\nEnvironment: dev (${targetId})\nServices: ${services.map((service) => service.serviceName).join(', ')}`;
   log(plan);
   if (
     expectedServices.includes('connectors') &&
@@ -288,28 +321,32 @@ export async function switchPreview({
   const bot = refreshed.find((service) => service.serviceName === 'discord-bot');
   const waitOptions = { sleep, now, timeoutMs, log };
   const stopDeadline = now() + stopTimeoutMs;
-  const oldDeployments = await readBotDeployments(
-    api,
-    target.id,
-    bot,
-    services.find((service) => service.serviceName === 'discord-bot'),
-  );
-  for (const deployment of oldDeployments) {
+  const remainingStopTime = () => {
     const remaining = stopDeadline - now();
     if (remaining <= 0)
       throw new Error(
         'Timed out confirming previous bot shutdown. No new deployments were started.',
       );
+    return remaining;
+  };
+  const oldDeployments = await readBotDeployments(
+    api,
+    targetId,
+    bot,
+    services.find((service) => service.serviceName === 'discord-bot'),
+  );
+  for (const deployment of oldDeployments) {
+    remainingStopTime();
     if (!['REMOVED', 'REMOVING'].includes(deployment.status)) {
       log(`Disconnecting previous preview (${deployment.id})…`);
       const removed = await api(REMOVE, { id: deployment.id });
       if (!removed.deploymentRemove) throw new Error('Railway did not accept the stop request.');
     }
     log(`Confirming previous preview shutdown (${deployment.id})…`);
-    await waitFor(api, deployment.id, true, { ...waitOptions, timeoutMs: stopDeadline - now() });
+    await waitFor(api, deployment.id, true, { ...waitOptions, timeoutMs: remainingStopTime() });
   }
 
-  const completed = new Map();
+  const expectedDeployments = new Map(before);
   for (const service of services) {
     // Refuse to proceed if another operator/deployment has replaced a service
     // while this switch was in progress. A volume additionally makes the bot
@@ -319,15 +356,20 @@ export async function switchPreview({
     if (currentBot.activeDeployments.length) {
       throw new Error('Another bot deployment became active during the switch. Stopping here.');
     }
+    if (instances.length !== expectedDeployments.size) {
+      throw new Error('The services in dev changed during the switch. Stopping here.');
+    }
     for (const instance of instances) {
-      const expected = completed.get(instance.serviceId);
-      if (expected && instance.latestDeployment?.id !== expected) {
+      if (
+        !expectedDeployments.has(instance.serviceId) ||
+        instance.latestDeployment?.id !== expectedDeployments.get(instance.serviceId)
+      ) {
         throw new Error('Another deployment changed dev during the switch. Stopping here.');
       }
     }
     log(`Deploying ${service.serviceName}…`);
     const result = await api(DEPLOY, {
-      environmentId: target.id,
+      environmentId: targetId,
       serviceId: service.serviceId,
       commitSha: pr.headRefOid,
     });
@@ -337,18 +379,21 @@ export async function switchPreview({
       ...waitOptions,
       allowSleeping: service.serviceName !== 'discord-bot',
     });
-    completed.set(service.serviceId, id);
+    expectedDeployments.set(service.serviceId, id);
     log(`${service.serviceName}: ${status.toLowerCase()} (${id}).`);
   }
   const final = await readServices();
   const owners = final.find((service) => service.serviceName === 'discord-bot').activeDeployments;
   if (
-    final.some((service) => service.latestDeployment?.id !== completed.get(service.serviceId)) ||
+    final.length !== expectedDeployments.size ||
+    final.some(
+      (service) => service.latestDeployment?.id !== expectedDeployments.get(service.serviceId),
+    ) ||
     owners.length !== 1 ||
-    owners[0].id !== completed.get(bot.serviceId) ||
+    owners[0].id !== expectedDeployments.get(bot.serviceId) ||
     owners[0].status !== 'SUCCESS'
   ) {
     throw new Error('Another deployment changed the preview before verification completed.');
   }
-  return { changed: true, environmentId: target.id, commitSha: pr.headRefOid };
+  return { changed: true, environmentId: targetId, commitSha: pr.headRefOid };
 }

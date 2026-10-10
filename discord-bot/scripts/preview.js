@@ -17,6 +17,7 @@ async function main() {
   ]);
   const result = await switchPreview({
     projectId,
+    projectToken: Boolean(process.env.RAILWAY_TOKEN),
     pr,
     readSource: readPreviewSource,
     api: railwayApi,

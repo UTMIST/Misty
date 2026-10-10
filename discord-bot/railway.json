@@ -10,7 +10,10 @@
   },
   "environments": {
     "pr": {
-      "deploy": { "healthcheckPath": "/health/live", "preDeployCommand": [] }
+      "deploy": {
+        "healthcheckPath": "/health/live",
+        "preDeployCommand": "node -e \"console.log('Skipping Discord registration in Railway PR environment.')\""
+      }
     }
   }
 }

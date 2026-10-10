@@ -68,9 +68,21 @@ export async function railwayApi(query, variables, run = exec) {
     ['api', query, '--variables', JSON.stringify(variables), '--compact', '--allow-errors'],
     run,
   );
-  if (result.errors?.length) {
+  if (result?.errors?.length) {
     throw new Error(`Railway API: ${result.errors.map((error) => error.message).join('; ')}`);
   }
-  if (!result.data) throw new Error('Railway API returned no data.');
+  if (!result?.data || !Object.keys(result.data).length) {
+    throw new Error('Railway API returned no data.');
+  }
+  // Every root field requested by this selector is required. A purged resource
+  // or lost access must fail here, before callers dereference it or mutate dev.
+  for (const [field, value] of Object.entries(result.data)) {
+    if (value == null) {
+      const id = variables.id || variables.environmentId || 'selected target';
+      throw new Error(
+        `Railway API returned no ${field} for ${id}. The resource may have been deleted or access changed. Inspect dev before retrying.`,
+      );
+    }
+  }
   return result.data;
 }
