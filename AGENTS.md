@@ -115,6 +115,11 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 - **documentation-system's Swagger is at `/swagger`, not `/docs`** — `/docs` is a real docs-resource router on that service.
 - **`npm run dev:web` occupies port 8001 and 5433**, and needs Docker. Stop documentation-system first.
 - **`meeting` is stateful.** One process must own a session end-to-end. Its sessions live in memory and a restart drops every in-flight meeting.
+- **Discord PR testing uses one persistent `dev` slot.** Automatic Railway
+  PR copies must skip gateway login and command registration. The selected PR
+  runs the real gateway/voice code with a separate dev application; see
+  [`docs/pr-previews.md`](docs/pr-previews.md). Keep its bot volume attached:
+  it prevents overlapping gateway connections during Railway rollouts.
 - **No `ffmpeg` binary is needed anywhere**, including `meeting` — PyAV bundles its own libraries and nothing shells out.
 - **Never write a test that makes a real AWS, Google, or LLM call.** Every suite runs offline against fakes injected via `app.dependency_overrides`. Keep it that way.
 

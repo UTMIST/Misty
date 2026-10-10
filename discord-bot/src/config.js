@@ -1,3 +1,5 @@
+import { discordEnvironment } from './runtimeMode.js';
+
 const REQUIRED = [
   'DISCORD_TOKEN',
   'DISCORD_CLIENT_ID',
@@ -12,6 +14,7 @@ const REQUIRED = [
 ];
 
 export function loadConfig(env = process.env) {
+  env = discordEnvironment(env);
   const missing = REQUIRED.filter((k) => !env[k]);
   if (missing.length > 0) {
     throw new Error(`Missing required env vars: ${missing.join(', ')}`);

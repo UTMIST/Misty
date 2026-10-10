@@ -16,6 +16,7 @@
     "register:staging": "railway run --service discord-bot --environment staging -- node src/registerCommands.js",
     "register:production": "railway run --service discord-bot --environment production -- node src/registerCommands.js",
     "register:all": "npm run register:staging && npm run register:production",
+    "preview": "node scripts/preview.js",
     "test": "node --test",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

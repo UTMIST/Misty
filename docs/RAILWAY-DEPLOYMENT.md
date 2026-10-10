@@ -19,6 +19,12 @@ Railway + Neon dashboards / CLIs.
 All seven are **private** — no public domains. They reach each other over
 Railway's internal network as `<service>.railway.internal:<PORT>`.
 
+For the optional persistent `dev` environment used to test one PR at a
+time with a dedicated Discord bot, see [PR previews](pr-previews.md). That
+runbook covers the dev application's variables, database isolation, singleton
+bot volume, and selection command. The existing staging and production
+deployment flow is unchanged.
+
 ## Prerequisites
 - A Railway account + the `railway` CLI (`railway login`).
 - A Neon account.

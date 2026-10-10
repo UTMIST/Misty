@@ -5,8 +5,30 @@ import { commands } from './commands/index.js';
 import { startHealthServer } from './healthServer.js';
 import { wireDiscordClient } from './adapters/discord/index.js';
 import { makeAttachmentPoster, makeChannelNotifier } from './adapters/discord/meetingPosts.js';
+import { runtimeMode } from './runtimeMode.js';
 
 async function main() {
+  const mode = runtimeMode();
+  const enableDiscord = mode !== 'idle' && process.env.ENABLE_DISCORD !== 'false';
+  const enableWeb = process.env.ENABLE_WEB === 'true';
+  if (mode === 'idle' && !enableWeb) {
+    await startHealthServer(null, process.env.PORT || 3002);
+    console.log(
+      'Discord disabled in this Railway environment. Liveness is available; gateway readiness remains unavailable.',
+    );
+    return;
+  }
+  if (mode === 'preview') {
+    // This PR adds the singleton-volume requirement to dev only. Applying it
+    // to existing staging/production needs a coordinated infrastructure change;
+    // their rollout behavior is intentionally outside this preview feature.
+    if (!process.env.RAILWAY_VOLUME_MOUNT_PATH) {
+      throw new Error('dev requires a Railway volume to prevent overlapping bot deployments.');
+    }
+    if (!enableDiscord || enableWeb) {
+      throw new Error('dev requires ENABLE_DISCORD=true and ENABLE_WEB=false.');
+    }
+  }
   const config = loadConfig();
   // Inject the Discord attachment poster here (not inside context.js) so
   // context.js stays surface-agnostic — index.js is one of the few modules
@@ -15,9 +37,6 @@ async function main() {
     poster: makeAttachmentPoster(),
     notify: makeChannelNotifier(),
   });
-
-  const enableDiscord = process.env.ENABLE_DISCORD !== 'false';
-  const enableWeb = process.env.ENABLE_WEB === 'true';
 
   if (enableDiscord) {
     // MessageContent is required to pass full helper-thread history to the LLM.
@@ -52,6 +71,9 @@ async function main() {
     const { startWebServer } = await import('./web/server.js');
     const port = Number(process.env.WEB_PORT || 3001);
     await startWebServer({ commands, appContext, port });
+    // Unknown Railway environments disable the gateway only. Expose liveness
+    // after the requested playground and its dev:spoof guard have started.
+    if (mode === 'idle') await startHealthServer(null, process.env.PORT || 3002);
   }
 
   if (!enableDiscord && !enableWeb) {

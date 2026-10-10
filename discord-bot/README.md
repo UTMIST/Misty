@@ -14,6 +14,26 @@ gating each command.
 Neon staging branch in a private test guild; production runs globally against
 the prod branch. See [`docs/RAILWAY-DEPLOYMENT.md`](../docs/RAILWAY-DEPLOYMENT.md).
 
+For real Discord and recording tests against a PR, the optional persistent
+`dev` preview slot runs one selected PR using the same dev bot identity.
+Use `npm run preview -- <pr>` or GitHub Actions → **Preview Discord PR** after
+the [one-time setup](../docs/pr-previews.md). Automatic Railway PR copies keep
+Discord disabled, skip command registration, and use a liveness health check.
+
+Preview configuration (bot credentials belong only in `dev`; the selector
+override is optional in your shell):
+
+| Variable | Purpose |
+|---|---|
+| `MISTY_PREVIEW_ENVIRONMENT_ID` | Literal UUID of the persistent `dev` environment; copies cannot inherit ownership. |
+| `DISCORD_TOKEN_DEV` | Dedicated dev application's bot token. |
+| `DISCORD_CLIENT_ID_DEV` | Dedicated dev application's application ID. |
+| `DISCORD_GUILD_ID_DEV` | Test guild for the dev application, including beta commands. |
+| `MISTY_PREVIEW_PROJECT_ID` | Optional selector-only project override; export in the shell. Defaults to Misty's project and is overridden by `--project`. The selector does not load `.env`. |
+
+See the [preview runbook](../docs/pr-previews.md) for selection, preflight checks,
+shutdown, timeout options, and GitHub Actions setup.
+
 ## Complete startup (from cold)
 
 Two modes, one shared foundation. Pick which mode you need:
@@ -117,6 +137,9 @@ HTTP 200 while connected. Railway supplies `PORT` and uses this route for
 deployment health checks. Locally, request
 `http://localhost:3002/health/ready` to inspect the gateway state. This
 listener is separate from the playground's default `WEB_PORT=3001`.
+`GET /health/live` returns 200 while the process serves requests, including an
+idle PR copy (`{"status":"ok","discord":"disabled"}`). Railway's ephemeral
+PR override checks this route; persistent environments keep `/health/ready`.
 
 **Requires that `DIRECTORY_API_KEY` in `.env` is a valid key against main
 team-tracking**, not a scratch key. If Discord returns "directory is
@@ -474,6 +497,7 @@ local `.env`.
 | File | Responsibility |
 |---|---|
 | `src/config.js` | Load + validate env. |
+| `src/runtimeMode.js` | Shared Railway environment ownership and dev credential selection for startup, configuration, and command registration. |
 | `src/context.js` | Wire application services once. |
 | `src/clients/*.js` | Backend HTTP clients and shared request handling. |
 | `src/services/*.js` | Application orchestration over injected clients. |
@@ -487,7 +511,7 @@ local `.env`.
 | `src/commands/*.js` | Surface-neutral command handlers + registry. |
 | `src/index.js` | Client setup + interaction routing. |
 | `src/helperFlow.js` | Shared helper-bot authorization and answer handling used by Discord and the web playground. |
-| `src/registerCommands.js` | Slash-command registration (stable → global; beta → testing guild only). Runs as Railway's `preDeployCommand` on every deploy; `npm run register` runs it locally. |
+| `src/registerCommands.js` | Slash-command registration (stable → global; beta → testing guild only). Runs as Railway's persistent-environment `preDeployCommand`; ephemeral PR copies use the [preview override](../docs/pr-previews.md#automatic-railway-pr-environments). `npm run register` runs it locally. |
 | `src/defineCommand.js` | Neutral, surface-agnostic command factory. |
 | `src/adapters/discord/index.js` | Discord event wiring; dispatches to the router or dedicated recording handler. |
 | `src/adapters/discord/interactions.js` | Convert interactions to neutral intents and deliver replies. |
@@ -496,6 +520,9 @@ local `.env`.
 | `src/adapters/discord/voice.js` | Voice occupancy, meeting prompts, and recording auto-stop. |
 | `src/adapters/discord/meetingPosts.js` | Meeting notifications and minutes attachments. |
 | `scripts/dev-web.js` | Orchestrator: ephemeral scratch DB + scratch team-tracking + web server. |
+| `scripts/preview.js` | Compose the preview selector with CLI access and operator confirmation. |
+| `scripts/lib/previewCli.js` | Parse selector options and adapt GitHub/Railway CLI output to metadata, with command and API error handling. |
+| `scripts/lib/preview.js` | Validate and sequence preview deployments through injected API, clock, and confirmation functions; independent of bot runtime and backend internals. |
 | `scripts/lib/snapshotDb.js` | Pipes `pg_dump` from main into `psql` on scratch, under `set -e -o pipefail`. |
 | `scripts/lib/spawnTeamTracking.js` | Spawns a scratch uvicorn subprocess; polls `/openapi.json` for readiness. |
 | `scripts/lib/issueDevSpoofKey.js` | Runs `team-tracking-keys issue --scopes ... dev:spoof` against scratch. |

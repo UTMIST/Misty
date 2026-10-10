@@ -1,0 +1,78 @@
+name: Preview Discord PR
+run-name: "Preview PR #${{ inputs.pr }} in dev"
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to run in the dev Discord bot
+        required: true
+        type: string
+      recordings_stopped:
+        description: All dev recordings have finished and their minutes have arrived
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# Serialize switches; never interrupt one while it is changing deployments.
+concurrency:
+  group: misty-dev-preview
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate selection
+        env:
+          PREVIEW_PR: ${{ inputs.pr }}
+          RECORDINGS_STOPPED: ${{ inputs.recordings_stopped }}
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/staging" ]]; then
+            echo "::error::Run Preview Discord PR from the staging branch."
+            exit 1
+          fi
+          if [[ ! "$PREVIEW_PR" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Enter a positive PR number."
+            exit 1
+          fi
+          if [[ "$RECORDINGS_STOPPED" != "true" ]]; then
+            echo "::error::Stop recordings and wait for minutes before switching."
+            exit 1
+          fi
+  preview:
+    needs: validate
+    runs-on: ubuntu-latest
+    # Seven services at 45 minutes each, a 15-minute stop, and setup/API headroom.
+    timeout-minutes: 360
+    # Restrict this GitHub environment to staging and give it a Railway
+    # project token scoped only to Railway's dev environment.
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: staging
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Railway CLI
+        run: npm install --global @railway/cli@5.49.6
+      # The selector uses only Node built-ins. No PR source or dependencies
+      # run on this runner; Railway builds the selected commit separately.
+      - name: Switch dev to the selected PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_DEV_TOKEN }}
+          PREVIEW_PR: ${{ inputs.pr }}
+        run: |
+          if [[ -z "$RAILWAY_TOKEN" ]]; then
+            echo "::error::Set RAILWAY_DEV_TOKEN on the GitHub dev environment."
+            exit 1
+          fi
+          node discord-bot/scripts/preview.js "$PREVIEW_PR" --recordings-stopped
