@@ -1,12 +1,14 @@
 export const REPOSITORY = 'UTMIST/Misty';
-const SERVICE_ORDER = [
+export const DEPLOYMENT_TIMEOUT_MS = 45 * 60_000;
+// Known backend dependencies run first; new services follow, then the bot.
+// Inventory comes from the selected commit, not this ordering preference.
+const BACKEND_ORDER = [
   'team-tracking',
   'llm',
   'connectors',
   'verification',
   'documentation-system',
   'meeting',
-  'discord-bot',
 ];
 // Settled Railway statuses. SUCCESS/SLEEPING can still own a process; a
 // stopped deployment additionally needs Railway's termination confirmation.
@@ -63,7 +65,30 @@ export function validatePullRequest(pr) {
   }
 }
 
-export function validateEnvironment(environment) {
+export function previewServices(source) {
+  if (source.truncated || !Array.isArray(source.tree)) {
+    throw new Error('GitHub returned an incomplete source tree; cannot validate this preview.');
+  }
+  if (
+    !source.tree.some(
+      (entry) => entry.path === 'discord-bot/src/runtimeMode.js' && entry.type === 'blob',
+    )
+  ) {
+    throw new Error(
+      'This PR lacks preview runtime support. Update its branch from staging before selecting it.',
+    );
+  }
+  // The label-consistency check enforces a zone for every services/* directory.
+  // Read the same inventory at the PR SHA so new backends cannot be omitted.
+  return [
+    ...source.tree
+      .filter((entry) => entry.type === 'tree' && /^services\/[^/]+$/.test(entry.path))
+      .map((entry) => entry.path.slice('services/'.length)),
+    'discord-bot',
+  ];
+}
+
+export function validateEnvironment(environment, expectedServices) {
   if (environment.name !== 'dev' || environment.isEphemeral) {
     throw new Error('Only the persistent dev environment may be changed.');
   }
@@ -71,10 +96,13 @@ export function validateEnvironment(environment) {
     throw new Error('Disable automatic GitHub deployments in dev before selecting a PR.');
   }
   const services = nodes(environment.serviceInstances);
-  if (services.some((service) => !SERVICE_ORDER.includes(service.serviceName))) {
-    throw new Error('dev contains an unknown service; review the preview deployment list.');
+  const extra = services.find((service) => !expectedServices.includes(service.serviceName));
+  if (extra) {
+    throw new Error(
+      `dev contains ${extra.serviceName}, which is absent from this PR's service directories.`,
+    );
   }
-  for (const name of SERVICE_ORDER.filter((name) => name !== 'connectors')) {
+  for (const name of expectedServices.filter((name) => name !== 'connectors')) {
     if (!services.some((service) => service.serviceName === name)) {
       throw new Error(`dev is missing ${name}. See docs/pr-previews.md for setup.`);
     }
@@ -102,8 +130,15 @@ export function validateEnvironment(environment) {
   ) {
     throw new Error('Attach a volume to the dev bot to prevent overlapping gateway sessions.');
   }
+  const priority = (name) => {
+    if (name === 'discord-bot') return BACKEND_ORDER.length + 1;
+    const index = BACKEND_ORDER.indexOf(name);
+    return index === -1 ? BACKEND_ORDER.length : index;
+  };
   return [...services].sort(
-    (a, b) => SERVICE_ORDER.indexOf(a.serviceName) - SERVICE_ORDER.indexOf(b.serviceName),
+    (a, b) =>
+      priority(a.serviceName) - priority(b.serviceName) ||
+      a.serviceName.localeCompare(b.serviceName),
   );
 }
 
@@ -119,12 +154,13 @@ async function waitFor(api, id, stopped, { sleep, now, timeoutMs, log }) {
     }
     if (stopped) {
       if (deployment.status === 'REMOVED' && deployment.deploymentStopped === true) return;
-      // SUCCESS/SLEEPING can briefly persist after Railway accepts removal.
-      // Other settled states cannot confirm the requested safe shutdown.
+      // Removal and instance shutdown are separate signals. REMOVED may
+      // precede deploymentStopped; keep polling until both confirm shutdown.
       if (
         FINISHED.has(deployment.status) &&
         deployment.status !== 'SUCCESS' &&
-        deployment.status !== 'SLEEPING'
+        deployment.status !== 'SLEEPING' &&
+        deployment.status !== 'REMOVED'
       ) {
         throw new Error(
           `Deployment ${id}: ${state}. Termination was not confirmed; inspect it before retrying. No new deployments were started.`,
@@ -150,14 +186,17 @@ async function waitFor(api, id, stopped, { sleep, now, timeoutMs, log }) {
 export async function switchPreview({
   projectId,
   pr,
+  readSource,
   api,
   confirm,
   log = console.log,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now = Date.now,
-  timeoutMs = 15 * 60_000,
+  timeoutMs = DEPLOYMENT_TIMEOUT_MS,
+  stopTimeoutMs = 15 * 60_000,
 }) {
   validatePullRequest(pr);
+  const expectedServices = previewServices(await readSource(pr.headRefOid));
   const { project } = await api(PROJECT_QUERY, { id: projectId });
   const target = nodes(project.environments).find((env) => env.name === 'dev');
   if (!target || target.isEphemeral || target.id === project.baseEnvironmentId) {
@@ -165,16 +204,24 @@ export async function switchPreview({
       'Create a persistent dev environment outside the PR base. See docs/pr-previews.md.',
     );
   }
-  const { environment } = await api(ENVIRONMENT_QUERY, { id: target.id });
-  const services = validateEnvironment(environment);
+  const readServices = async () =>
+    validateEnvironment(
+      (await api(ENVIRONMENT_QUERY, { id: target.id })).environment,
+      expectedServices,
+    );
+  const services = await readServices();
   const before = services.map((service) => [service.serviceId, service.latestDeployment?.id]);
   const plan = `PR #${pr.number} at ${pr.headRefOid}\nEnvironment: dev (${target.id})\nServices: ${services.map((service) => service.serviceName).join(', ')}`;
   log(plan);
+  if (
+    expectedServices.includes('connectors') &&
+    !services.some((service) => service.serviceName === 'connectors')
+  ) {
+    log('Optional connectors service is absent from dev and will not be tested.');
+  }
   if (!(await confirm())) return { changed: false };
 
-  const refreshed = validateEnvironment(
-    (await api(ENVIRONMENT_QUERY, { id: target.id })).environment,
-  );
+  const refreshed = await readServices();
   if (
     JSON.stringify(before) !==
     JSON.stringify(refreshed.map((service) => [service.serviceId, service.latestDeployment?.id]))
@@ -190,7 +237,16 @@ export async function switchPreview({
     log(`Disconnecting previous preview (${deployment.id})…`);
     const removed = await api(REMOVE, { id: deployment.id });
     if (!removed.deploymentRemove) throw new Error('Railway did not accept the stop request.');
-    await waitFor(api, deployment.id, true, waitOptions);
+    await waitFor(api, deployment.id, true, { ...waitOptions, timeoutMs: stopTimeoutMs });
+  }
+  // An operator may have removed the bot during confirmation. It can disappear
+  // from activeDeployments before its instances have actually stopped.
+  if (
+    bot.latestDeployment?.status === 'REMOVED' &&
+    !bot.activeDeployments.some((deployment) => deployment.id === bot.latestDeployment.id)
+  ) {
+    log(`Confirming previous preview shutdown (${bot.latestDeployment.id})…`);
+    await waitFor(api, bot.latestDeployment.id, true, { ...waitOptions, timeoutMs: stopTimeoutMs });
   }
 
   const completed = new Map();
@@ -198,8 +254,7 @@ export async function switchPreview({
     // Refuse to proceed if another operator/deployment has replaced a service
     // while this switch was in progress. A volume additionally makes the bot
     // singleton across Railway rollouts, including restarts outside this CLI.
-    const current = (await api(ENVIRONMENT_QUERY, { id: target.id })).environment;
-    const instances = validateEnvironment(current);
+    const instances = await readServices();
     const currentBot = instances.find((instance) => instance.serviceName === 'discord-bot');
     if (currentBot.activeDeployments.length) {
       throw new Error('Another bot deployment became active during the switch. Stopping here.');
@@ -222,7 +277,7 @@ export async function switchPreview({
     completed.set(service.serviceId, id);
     log(`${service.serviceName}: ready (${id}).`);
   }
-  const final = validateEnvironment((await api(ENVIRONMENT_QUERY, { id: target.id })).environment);
+  const final = await readServices();
   const owners = final.find((service) => service.serviceName === 'discord-bot').activeDeployments;
   if (
     final.some((service) => service.latestDeployment?.id !== completed.get(service.serviceId)) ||

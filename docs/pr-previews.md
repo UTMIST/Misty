@@ -15,6 +15,9 @@ cannot register commands or open a gateway connection with inherited tokens.
 The selected PR must include this preview support. After it lands on `staging`,
 update older PR branches from staging so their startup and registration code
 includes it. The initial preview-support PR can bootstrap the environment.
+The selector checks for `discord-bot/src/runtimeMode.js` at the PR's exact head
+commit before contacting Railway. A missing file fails preflight; this checks
+compatibility, not the correctness of arbitrary changes inside that file.
 
 1. Create a Discord application named `misty-dev` in the Developer Portal,
    separate from production and staging. Create its bot, enable **Message
@@ -59,6 +62,12 @@ includes it. The initial preview-support PR can bootstrap the environment.
    including `MEETING_BASE_URL` and `MEETING_API_KEY` for recording tests.
    Missing dev credentials never fall back to staging credentials. The
    selector does not read or copy Discord credentials.
+
+   These guards are deliberate: the name selects the runtime, the literal ID
+   prevents a copied environment renamed `dev` from inheriting ownership, and
+   the dedicated credential names prevent falling back to copied staging
+   credentials. If recreating `dev`, update its literal ID in Railway before
+   deploying; the startup error identifies this setting.
 7. Commit the reviewed environment configuration with deployments skipped
    (`environmentPatchCommitStaged` with `skipDeploys: true`). Verify automatic
    deployment triggers are disabled after this commit: committing a source
@@ -108,11 +117,27 @@ Misty's project is the default; no project ID or environment export is needed.
 For another installation, `MISTY_PREVIEW_PROJECT_ID` overrides the default and
 `--project <id>` overrides both.
 
+Each new deployment has a 45-minute wait budget. For a slower cold build, use
+`--timeout-minutes 60` (a positive whole number, applied per deployment). Old bot
+shutdown has a separate 15-minute deadline. Actions allows six hours: the
+current seven-service maximum needs up to 330 minutes of waits plus setup and
+API overhead. Review that budget when adding services or changing timeouts;
+use the terminal for sequences that could exceed the Actions limit.
+
 The command prints the PR's exact commit and target services. Before confirming,
 stop any recording and wait for its minutes to arrive. Switching will disconnect
 the dev bot and restart the backends. For a noninteractive invocation, pass
 `--recordings-stopped` to attest that this is already done. `--plan` never
 changes deployments.
+
+Preflight compares `dev` with the `services/*` directories at the selected SHA,
+the same directory inventory enforced by the label-consistency workflow. Every
+backend must be provisioned in `dev`, except the currently optional `connectors`
+service; an omitted connector is explicitly reported as untested. A Railway
+service absent from the PR also fails preflight. New backends are included
+automatically and run after the known backend dependencies, before the bot.
+If a new backend must start earlier, update the ordering preference in
+`discord-bot/scripts/lib/preview.js`.
 
 The selector stops the old bot and waits until Railway confirms termination.
 It deploys each configured backend from the selected commit, waits for each
@@ -141,9 +166,10 @@ not provide an atomic transaction across all backend deployments.
   switch while deployments are unfinished.
 - Existing sleeping deployments do not block selection. A deployment awaiting
   approval must be approved or cancelled first. While switching, the CLI logs
-  status changes and stops immediately on failed terminal states. A removed
-  bot without confirmed termination also stops the switch before any new
-  deployment; inspect it in Railway before retrying. Newly deployed services
+  status changes and stops immediately on failed terminal states. `REMOVED`
+  alone does not confirm termination: the selector keeps polling until
+  `deploymentStopped` is true or the stop deadline expires, and starts no new
+  deployment before confirmation. Newly deployed services
   must reach `SUCCESS`, including a connected gateway for the bot.
 - CLI failures include their installation, login, access, or GraphQL error
   details. Address the reported cause before rerunning the command.
@@ -171,6 +197,13 @@ whether the environment is ephemeral, so the bot does not infer a healthy idle
 mode from a PR-name pattern. There is no idle CLI flag or `environments.pr`
 override. The persistent `dev` slot is the supported path for Discord previews.
 
+This deliberately means an automatic PR-copy bot deployment fails its Railway
+readiness check and can generate failure notifications. Automatic PR
+environments remain disabled for this setup. If they are enabled later, exclude
+the bot or add an explicit, platform-verified ephemeral mode before expecting
+healthy no-op deployments; returning 200 for every unknown name would also hide
+an accidental rename of a live environment.
+
 This is only a bot safeguard. Before enabling full-stack automatic PR
 environments, separately arrange isolated database branches: copied Neon URLs
 would otherwise let preview migrations alter the base database. The persistent
@@ -181,7 +214,8 @@ would otherwise let preview migrations alter the base database. The persistent
 Run `npm test`, `npm run lint`, and `npm run format:check` in `discord-bot`.
 Offline tests cover environment ownership, copied credentials and flags,
 registration suppression, unavailable idle readiness, the stop-before-deploy
-sequence, sleeping and terminal deployment states, CLI diagnostics, confirmation
-races, failed backends, timeouts, competing deployments, and production/staging
-exclusion. A live recording round trip is still required after provisioning;
+sequence, lagging shutdown confirmation, source compatibility and service
+inventory, sleeping and terminal deployment states, CLI diagnostics, argument
+validation, confirmation races, cold builds, timeouts, competing deployments,
+and production/staging exclusion. A live recording round trip is still required after provisioning;
 the automated suite never logs in to Discord or calls paid providers.

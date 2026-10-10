@@ -9,7 +9,7 @@ export function runtimeMode(env = process.env) {
       env.RAILWAY_ENVIRONMENT_ID !== env.MISTY_PREVIEW_ENVIRONMENT_ID
     ) {
       throw new Error(
-        'MISTY_PREVIEW_ENVIRONMENT_ID must identify this persistent dev environment.',
+        'Dev environment ownership mismatch. Set MISTY_PREVIEW_ENVIRONMENT_ID to the literal ID of the persistent dev environment in Railway; do not copy or reference another environment ID.',
       );
     }
     return 'preview';

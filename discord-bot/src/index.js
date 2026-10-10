@@ -16,14 +16,13 @@ async function main() {
     );
     return;
   }
-  if (mode === 'preview' && !process.env.RAILWAY_VOLUME_MOUNT_PATH) {
-    throw new Error('dev requires a Railway volume to prevent overlapping bot deployments.');
-  }
-  if (
-    mode === 'preview' &&
-    (process.env.ENABLE_DISCORD === 'false' || process.env.ENABLE_WEB === 'true')
-  ) {
-    throw new Error('dev requires ENABLE_DISCORD=true and ENABLE_WEB=false.');
+  if (mode === 'preview') {
+    if (!process.env.RAILWAY_VOLUME_MOUNT_PATH) {
+      throw new Error('dev requires a Railway volume to prevent overlapping bot deployments.');
+    }
+    if (process.env.ENABLE_DISCORD === 'false' || process.env.ENABLE_WEB === 'true') {
+      throw new Error('dev requires ENABLE_DISCORD=true and ENABLE_WEB=false.');
+    }
   }
   const config = loadConfig();
   // Inject the Discord attachment poster here (not inside context.js) so

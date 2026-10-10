@@ -1,28 +1,11 @@
 import { createInterface } from 'node:readline/promises';
 import { REPOSITORY, switchPreview } from './lib/preview.js';
-import { jsonCommand, railwayApi } from './lib/previewCli.js';
-
-// Public project identifier; credentials still come from Railway CLI login.
-const DEFAULT_PROJECT_ID = 'abf9e8a2-9394-48e2-9d95-a71520c58a5b';
+import { jsonCommand, parsePreviewArgs, railwayApi, readPreviewSource } from './lib/previewCli.js';
 
 async function main() {
-  const args = process.argv.slice(2);
-  const number = args.shift();
-  let projectId = process.env.MISTY_PREVIEW_PROJECT_ID || DEFAULT_PROJECT_ID;
-  let planOnly = false;
-  let confirmedIdle = false;
-  while (args.length) {
-    const arg = args.shift();
-    if (arg === '--project' && args[0]) projectId = args.shift();
-    else if (arg === '--plan') planOnly = true;
-    else if (arg === '--recordings-stopped') confirmedIdle = true;
-    else throw new Error(`Unknown or incomplete option: ${arg}`);
-  }
-  if (!/^[1-9]\d*$/.test(number ?? '') || !projectId) {
-    throw new Error(
-      'Usage: npm run preview -- <pr> [--project <Railway-project-id>] [--plan] [--recordings-stopped]',
-    );
-  }
+  const { number, projectId, planOnly, confirmedIdle, timeoutMs } = parsePreviewArgs(
+    process.argv.slice(2),
+  );
   const pr = await jsonCommand('gh', [
     'pr',
     'view',
@@ -35,7 +18,9 @@ async function main() {
   const result = await switchPreview({
     projectId,
     pr,
+    readSource: readPreviewSource,
     api: railwayApi,
+    timeoutMs,
     confirm: async () => {
       if (planOnly) return false;
       if (confirmedIdle) return true;

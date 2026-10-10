@@ -32,6 +32,10 @@ Preview-only configuration (leave unset locally and on staging/production):
 The preview CLI defaults to Misty's Railway project. To target another project,
 set `MISTY_PREVIEW_PROJECT_ID` in the shell or pass `--project` (which takes
 precedence). It does not load `.env` or read Discord credentials.
+The selector checks preview support and service inventory at the PR's exact
+commit before switching. Deployment waits default to 45 minutes each; pass
+`--timeout-minutes <minutes>` for slower builds. See the
+[preview runbook](../docs/pr-previews.md) for shutdown and Actions limits.
 
 ## Complete startup (from cold)
 

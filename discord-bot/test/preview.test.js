@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { switchPreview, validateEnvironment, validatePullRequest } from '../scripts/lib/preview.js';
+import {
+  previewServices,
+  switchPreview,
+  validateEnvironment,
+  validatePullRequest,
+} from '../scripts/lib/preview.js';
 
 const connection = (values) => ({ edges: values.map((node) => ({ node })) });
 const PR = {
@@ -19,6 +24,8 @@ function fixture({
   stopResult,
   stuckStop = false,
   otherDeployment = false,
+  removedLagReads = 0,
+  buildDelayMs = 0,
 } = {}) {
   const names = [
     'discord-bot',
@@ -35,6 +42,16 @@ function fixture({
     latestDeployment: { id: `${name}-old`, status: initialStatus },
     activeDeployments: [{ id: `${name}-old`, status: initialStatus }],
   }));
+  const source = {
+    truncated: false,
+    tree: [
+      { path: 'discord-bot/src/runtimeMode.js', type: 'blob' },
+      ...names
+        .filter((name) => name !== 'discord-bot')
+        .concat('connectors')
+        .map((name) => ({ path: `services/${name}`, type: 'tree' })),
+    ],
+  };
   const environment = {
     id: 'dev',
     name: 'dev',
@@ -53,8 +70,10 @@ function fixture({
   let stopRequested = false;
   let stopReads = 0;
   let clock = 0;
+  let buildStartedAt;
   const api = async (query, variables) => {
     calls.push({ query, variables });
+    const instances = environment.serviceInstances.edges.map(({ node }) => node);
     if (query.includes('query PreviewProject')) return { project: structuredClone(project) };
     if (query.includes('query PreviewEnvironment')) {
       if (
@@ -73,21 +92,27 @@ function fixture({
     }
     if (query.includes('query PreviewDeployment')) {
       if (variables.id === 'discord-bot-old') {
-        assert.equal(stopRequested, true);
+        const bot = instances.find((s) => s.serviceId === 'discord-bot');
+        assert.ok(stopRequested || bot.latestDeployment.status === 'REMOVED');
         stopReads += 1;
-        if (stuckStop || stopReads === 1) {
+        if (stopRequested && (stuckStop || stopReads === 1)) {
           return {
             deployment: { id: variables.id, status: firstStopStatus, deploymentStopped: false },
           };
         }
         if (stopResult) return { deployment: { id: variables.id, ...stopResult } };
-        const bot = instances.find((s) => s.serviceId === 'discord-bot');
+        if (stopReads <= removedLagReads + Number(stopRequested)) {
+          return { deployment: { id: variables.id, status: 'REMOVED', deploymentStopped: false } };
+        }
         bot.activeDeployments = [];
         bot.latestDeployment.status = 'REMOVED';
         return { deployment: { id: variables.id, status: 'REMOVED', deploymentStopped: true } };
       }
       const service = instances.find((s) => s.latestDeployment.id === variables.id);
       assert.ok(service);
+      if (service.serviceId === 'meeting' && clock - buildStartedAt < buildDelayMs) {
+        return { deployment: { ...service.latestDeployment, deploymentStopped: false } };
+      }
       service.latestDeployment.status =
         service.serviceId === failService ? failureStatus : 'SUCCESS';
       service.activeDeployments = [service.latestDeployment];
@@ -103,6 +128,7 @@ function fixture({
       assert.equal(variables.commitSha, PR.headRefOid);
       const service = instances.find((s) => s.serviceId === variables.serviceId);
       service.latestDeployment = { id: `${service.serviceId}-new`, status: 'BUILDING' };
+      buildStartedAt = clock;
       return { serviceInstanceDeployV2: service.latestDeployment.id };
     }
     throw new Error(`Unexpected API query: ${query}`);
@@ -110,11 +136,16 @@ function fixture({
   return {
     environment,
     project,
+    source,
     calls,
     logs,
     options: {
       projectId: 'project',
       pr: PR,
+      readSource: async (sha) => {
+        assert.equal(sha, PR.headRefOid);
+        return structuredClone(source);
+      },
       api,
       confirm: async () => true,
       log: (message) => logs.push(message),
@@ -123,6 +154,7 @@ function fixture({
         clock += ms;
       },
       timeoutMs: 10_000,
+      stopTimeoutMs: 10_000,
     },
   };
 }
@@ -130,9 +162,10 @@ function fixture({
 const mutations = (calls) => calls.filter(({ query }) => query.startsWith('mutation'));
 
 test('switch waits for disconnect, pins all services to the PR commit, and deploys bot last', async () => {
-  const { options, calls } = fixture();
+  const { options, calls, logs } = fixture();
   const result = await switchPreview(options);
   assert.equal(result.changed, true);
+  assert.ok(logs.some((line) => /connectors.*will not be tested/.test(line)));
   const changes = mutations(calls);
   assert.match(changes[0].query, /StopPreview/);
   assert.deepEqual(
@@ -145,6 +178,55 @@ test('plan or declined confirmation performs no mutation', async () => {
   const { options, calls } = fixture();
   const result = await switchPreview({ ...options, confirm: async () => false });
   assert.equal(result.changed, false);
+  assert.deepEqual(mutations(calls), []);
+});
+
+test('branches without preview support fail before any Railway read or mutation', async () => {
+  const { source, options, calls } = fixture();
+  source.tree = source.tree.filter((entry) => entry.path !== 'discord-bot/src/runtimeMode.js');
+  await assert.rejects(switchPreview(options), /lacks preview runtime support.*Update its branch/);
+  assert.deepEqual(calls, []);
+});
+
+test('truncated GitHub trees fail before any Railway read or mutation', async () => {
+  const { source, options, calls } = fixture();
+  source.truncated = true;
+  await assert.rejects(switchPreview(options), /incomplete source tree/);
+  assert.deepEqual(calls, []);
+});
+
+test('new service directories must be provisioned before the bot is stopped', async () => {
+  const { source, options, calls } = fixture();
+  source.tree.push({ path: 'services/scheduler', type: 'tree' });
+  await assert.rejects(switchPreview(options), /dev is missing scheduler/);
+  assert.deepEqual(mutations(calls), []);
+});
+
+test('a newly provisioned backend from the PR inventory deploys before the bot', async () => {
+  const { source, environment, options, calls } = fixture();
+  source.tree.push({ path: 'services/scheduler', type: 'tree' });
+  environment.serviceInstances.edges.push({
+    node: {
+      serviceId: 'scheduler',
+      serviceName: 'scheduler',
+      source: { repo: 'UTMIST/Misty' },
+      latestDeployment: null,
+      activeDeployments: [],
+    },
+  });
+  assert.equal((await switchPreview(options)).changed, true);
+  assert.deepEqual(
+    mutations(calls)
+      .slice(-2)
+      .map(({ variables }) => variables.serviceId),
+    ['scheduler', 'discord-bot'],
+  );
+});
+
+test('services present only in Railway fail preflight with a named mismatch', async () => {
+  const { source, options, calls } = fixture();
+  source.tree = source.tree.filter((entry) => entry.path !== 'services/meeting');
+  await assert.rejects(switchPreview(options), /meeting.*absent from this PR/);
   assert.deepEqual(mutations(calls), []);
 });
 
@@ -179,6 +261,22 @@ test('a bot removed during confirmation is not removed a second time', async () 
   assert.ok(mutations(calls).every(({ query }) => query.includes('DeployPreview')));
 });
 
+test('manual removal still waits for lagging instance shutdown before restarting backends', async () => {
+  const { options, environment, calls } = fixture({ removedLagReads: 2 });
+  const result = await switchPreview({
+    ...options,
+    confirm: async () => {
+      const bot = environment.serviceInstances.edges[0].node;
+      bot.activeDeployments = [];
+      bot.latestDeployment.status = 'REMOVED';
+      return true;
+    },
+  });
+  assert.equal(result.changed, true);
+  assert.equal(options.now(), 6000);
+  assert.ok(mutations(calls).every(({ query }) => query.includes('DeployPreview')));
+});
+
 test('sleeping services do not block a switch and sleeping bot removal is confirmed', async () => {
   const { options } = fixture({ initialStatus: 'SLEEPING', firstStopStatus: 'SLEEPING' });
   const result = await switchPreview(options);
@@ -190,6 +288,38 @@ test('a successful old deployment can take a poll to begin removal', async () =>
   const { options } = fixture({ firstStopStatus: 'SUCCESS' });
   assert.equal((await switchPreview(options)).changed, true);
   assert.equal(options.now(), 3000);
+});
+
+test('REMOVED waits through lagging shutdown confirmation before deploying', async () => {
+  const { options, calls } = fixture({ removedLagReads: 2 });
+  assert.equal((await switchPreview(options)).changed, true);
+  assert.equal(options.now(), 9000);
+  assert.equal(mutations(calls).length, 7);
+});
+
+test('REMOVED without shutdown confirmation waits until the stop deadline', async () => {
+  const { options, calls } = fixture({
+    stopResult: { status: 'REMOVED', deploymentStopped: false },
+  });
+  await assert.rejects(switchPreview(options), /Timed out.*REMOVED.*deploymentStopped: false/);
+  assert.ok(options.now() >= options.stopTimeoutMs);
+  assert.equal(mutations(calls).length, 1);
+});
+
+test('the default timeout allows a cold meeting build longer than fifteen minutes', async () => {
+  const { options } = fixture({ buildDelayMs: 20 * 60_000 });
+  delete options.timeoutMs;
+  assert.equal((await switchPreview(options)).changed, true);
+  assert.ok(options.now() > 20 * 60_000);
+});
+
+test('a custom deployment timeout still bounds unfinished builds', async () => {
+  const { options, calls } = fixture({ buildDelayMs: 20 * 60_000 });
+  await assert.rejects(switchPreview(options), /Timed out.*meeting-new.*BUILDING/);
+  assert.equal(
+    mutations(calls).some(({ variables }) => variables.serviceId === 'discord-bot'),
+    false,
+  );
 });
 
 test('backend failure leaves bot disconnected and stops the deployment sequence', async () => {
@@ -208,7 +338,7 @@ test('unconfirmed old-process termination prevents every new deployment', async 
   assert.ok(logs.some((message) => /REMOVING.*deploymentStopped: false/.test(message)));
 });
 
-for (const status of ['CRASHED', 'FAILED', 'SKIPPED', 'NEEDS_APPROVAL', 'REMOVED']) {
+for (const status of ['CRASHED', 'FAILED', 'SKIPPED', 'NEEDS_APPROVAL']) {
   test(`stop fails promptly on ${status} without confirmed termination`, async () => {
     const { options, calls } = fixture({ stopResult: { status, deploymentStopped: false } });
     await assert.rejects(
@@ -257,14 +387,22 @@ test('wrong target, missing volume, automatic deploys, and in-flight deploys are
     { volumeInstances: connection([]) },
     { deploymentTriggers: connection([{ id: 'trigger' }]) },
   ]) {
-    const { environment } = fixture();
-    assert.throws(() => validateEnvironment({ ...environment, ...change }));
+    const { environment, source } = fixture();
+    assert.throws(() =>
+      validateEnvironment({ ...environment, ...change }, previewServices(source)),
+    );
   }
-  const { environment } = fixture();
+  const { environment, source } = fixture();
   environment.serviceInstances.edges[0].node.latestDeployment.status = 'BUILDING';
-  assert.throws(() => validateEnvironment(environment), /unfinished deployment/);
+  assert.throws(
+    () => validateEnvironment(environment, previewServices(source)),
+    /unfinished deployment/,
+  );
   environment.serviceInstances.edges[0].node.latestDeployment.status = 'NEEDS_APPROVAL';
-  assert.throws(() => validateEnvironment(environment), /approve or cancel/);
+  assert.throws(
+    () => validateEnvironment(environment, previewServices(source)),
+    /approve or cancel/,
+  );
 });
 
 test('a preview environment configured as the PR base is refused before changes', async () => {

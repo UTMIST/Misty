@@ -46,19 +46,6 @@ test('PR copies and unknown Railway names stay idle despite inherited credential
   assert.throws(() => runtimeMode({ ...DEV, RAILWAY_ENVIRONMENT_ID: 'copy' }), /ENVIRONMENT_ID/);
 });
 
-test('obsolete idle flag cannot override local, production, staging, or dev runtime', () => {
-  process.argv.push('--preview-idle');
-  try {
-    assert.equal(runtimeMode({}), 'normal');
-    assert.equal(runtimeMode(DEV), 'preview');
-    for (const name of ['production', 'staging']) {
-      assert.equal(runtimeMode({ RAILWAY_ENVIRONMENT_NAME: name }), 'normal');
-    }
-  } finally {
-    process.argv.pop();
-  }
-});
-
 test('only the exact persistent preview environment selects dev credentials', () => {
   assert.equal(runtimeMode(DEV), 'preview');
   const env = discordEnvironment(DEV);

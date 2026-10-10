@@ -27,7 +27,8 @@ jobs:
   preview:
     if: github.ref == 'refs/heads/staging'
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # Seven services at 45 minutes each, a 15-minute stop, and setup/API headroom.
+    timeout-minutes: 360
     # Restrict this GitHub environment to staging and give it a Railway
     # project token scoped only to Railway's dev environment.
     environment: dev

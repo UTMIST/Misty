@@ -1,6 +1,53 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { jsonCommand, railwayApi } from '../scripts/lib/previewCli.js';
+import {
+  jsonCommand,
+  parsePreviewArgs,
+  railwayApi,
+  readPreviewSource,
+} from '../scripts/lib/previewCli.js';
+
+test('options requiring values never consume another flag', () => {
+  for (const flag of ['--project', '--timeout-minutes']) {
+    for (const trailing of [[], ['--plan'], ['--recordings-stopped']]) {
+      assert.throws(() => parsePreviewArgs(['123', flag, ...trailing], {}), /Missing value/);
+    }
+  }
+});
+
+test('project precedence and dry-run mode survive valid arguments', () => {
+  const options = parsePreviewArgs(
+    ['123', '--project', 'override', '--plan', '--timeout-minutes', '60'],
+    { MISTY_PREVIEW_PROJECT_ID: 'environment' },
+  );
+  assert.equal(options.projectId, 'override');
+  assert.equal(options.planOnly, true);
+  assert.equal(options.confirmedIdle, false);
+  assert.equal(options.timeoutMs, 60 * 60_000);
+  assert.equal(
+    parsePreviewArgs(['123'], { MISTY_PREVIEW_PROJECT_ID: 'environment' }).projectId,
+    'environment',
+  );
+});
+
+test('deployment timeout options reject invalid durations', () => {
+  for (const value of ['0', '-1', '1.5', 'oops', '9999999999999999999999']) {
+    assert.throws(
+      () => parsePreviewArgs(['123', '--timeout-minutes', value], {}),
+      /--timeout-minutes/,
+    );
+  }
+});
+
+test('source metadata is fetched from the exact PR commit without executing PR code', async () => {
+  const sha = 'a'.repeat(40);
+  const result = await readPreviewSource(sha, async (command, args) => {
+    assert.equal(command, 'gh');
+    assert.deepEqual(args, ['api', `repos/UTMIST/Misty/git/trees/${sha}?recursive=1`]);
+    return { stdout: '{"tree":[],"truncated":false}' };
+  });
+  assert.deepEqual(result, { tree: [], truncated: false });
+});
 
 test('a missing CLI is identified by name with an installation hint', async () => {
   for (const command of ['gh', 'railway']) {
