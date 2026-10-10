@@ -6,15 +6,27 @@ Feature owner: Misty #92. Related: [platform ARCHITECTURE](ARCHITECTURE.md), [`s
 
 ## What it does
 
-A **linked** member (identity resolved via the directory — see "Authorization" below) runs `/record start` in a Discord voice channel, optionally supplying a name up to 100 characters and `subtitles:false` to disable live subtitles (default on). Before a recording is active, the first human to enter an empty voice channel receives a direct message prompting them to start one. The bot joins, and as people talk it streams their audio to the `meeting` service, which transcribes each speaker live into a rolling transcript. Recording ends on `/record stop` **or automatically when everyone leaves the voice channel** (the bot ends the meeting once no non-bot member remains). On stop the service turns the transcript into minutes (via the `llm` service), renders a PDF, and hands it back; the bot posts the **PDF** to the text channel, @-mentioning whoever started the recording. A supplied name becomes the PDF title and is sanitized into the attachment filename as `<name>_<YYYY-MM-DD_HHMM>.pdf` in America/Toronto; unnamed recordings use `meeting_<YYYY-MM-DD_HHMM>.pdf`, based on the meeting start time. The service retains no transcript after cleanup; the PDF and subtitle-thread messages remain in Discord.
+A **linked** member (identity resolved via the directory — see "Authorization" below) runs `/record start` from a server text channel or thread while connected to a Discord voice channel, optionally supplying a name up to 100 characters and `subtitles:false` to disable live subtitles (default on). Before a recording is active, the first human to enter an empty voice channel receives a direct message prompting them to start one. The bot joins, and as people talk it streams their audio to the `meeting` service, which transcribes each speaker live into a rolling transcript. Recording ends on `/record stop` **or automatically when everyone leaves the voice channel** (the bot ends the meeting once no non-bot member remains). On stop the service turns the transcript into minutes (via the `llm` service), renders a PDF, and hands it back; the bot posts the **PDF** to the text channel, @-mentioning whoever started the recording. A supplied name becomes the PDF title and is sanitized into the attachment filename as `<name>_<YYYY-MM-DD_HHMM>.pdf` in America/Toronto; unnamed recordings use `meeting_<YYYY-MM-DD_HHMM>.pdf`, based on the meeting start time. The service retains no transcript after cleanup; the PDF and subtitle-thread messages remain in Discord.
 
 ## Live subtitles
+
+Run `/record start` from a server text channel or a thread while connected to
+voice. Starts from voice-channel text chat (including stage channels) are
+rejected with an unsupported-channel explanation before recording begins,
+even with `subtitles:false`. `/record status` and `/record stop` remain usable
+there.
 
 Misty creates a new subtitle thread in the text channel where `/record start`
 was launched, after recording starts and the service confirms subtitle support.
 If launched inside a thread, it creates a **sibling** in that thread's parent
 text channel. The ephemeral command reply cannot serve as the starter, so Misty
-posts a normal public starter message. Each meeting owns its newly created
+posts a normal public starter message and attaches the subtitle thread beneath
+that message. After successfully archiving the thread, Misty edits its starter
+to `Live subtitles for this meeting (archived).` This update is best-effort if
+Discord is unavailable or the starter has been deleted. `/record status`
+includes a link to the subtitle thread while subtitles are active; it omits
+the link while setup is pending, when subtitles are disabled, or after subtitle
+delivery has stopped. Each meeting owns its newly created
 subtitle thread; ending one meeting never archives the launch thread or another
 meeting's thread.
 

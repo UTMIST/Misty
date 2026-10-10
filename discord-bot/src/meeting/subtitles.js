@@ -180,6 +180,9 @@ export function createSubtitles({
   }
 
   return {
+    activeThreadId() {
+      return !closing && !closed ? (thread?.id ?? null) : null;
+    },
     activate() {
       if (active || closing || closed) return;
       active = true;

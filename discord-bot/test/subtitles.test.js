@@ -238,16 +238,25 @@ test('a failed report closes subtitle history immediately without waiting for co
 
 test('Discord adapter creates a sibling thread and suppresses mentions on every send', async () => {
   const messages = [];
+  const edits = [];
+  const order = [];
   let options;
   let archives = 0;
   const thread = {
     send: async (payload) => messages.push(payload),
-    setArchived: async () => archives++,
+    setArchived: async () => {
+      order.push('archive');
+      archives++;
+    },
   };
   const parent = {
     send: async (payload) => {
       messages.push(payload);
       return {
+        edit: async (payload) => {
+          order.push('edit');
+          edits.push(payload);
+        },
         startThread: async (opts) => {
           options = opts;
           return thread;
@@ -273,7 +282,105 @@ test('Discord adapter creates a sibling thread and suppresses mentions on every 
   await adapter.send(result, '@everyone hello');
   await adapter.archive(result);
   assert.equal(archives, 1);
+  assert.deepEqual(order, ['archive', 'edit']);
+  assert.match(edits[0].content, /live subtitles.*archived/i);
+  assert.deepEqual(edits[0].allowedMentions, { parse: [] });
   assert.ok(messages.every((m) => m.allowedMentions.parse.length === 0));
+});
+
+test('archiving one subtitle thread updates only its own starter', async () => {
+  const edits = [];
+  const adapter = makeSubtitleAdapter();
+  let id = 0;
+  const channel = {
+    async send() {
+      const ownId = ++id;
+      return {
+        async startThread() {
+          return { id: ownId, async setArchived() {} };
+        },
+        async edit(payload) {
+          edits.push([ownId, payload.content]);
+        },
+      };
+    },
+  };
+  const first = await adapter.createThread({ channel, startedAt: 0 });
+  const second = await adapter.createThread({ channel, startedAt: 0 });
+  await adapter.archive(first);
+  assert.deepEqual(
+    edits.map(([starterId]) => starterId),
+    [1],
+  );
+  await adapter.archive(second);
+  assert.deepEqual(
+    edits.map(([starterId]) => starterId),
+    [1, 2],
+  );
+});
+
+test('failed thread archive does not label its starter archived', async () => {
+  let edited = false;
+  const adapter = makeSubtitleAdapter();
+  const thread = await adapter.createThread({
+    channel: {
+      async send() {
+        return {
+          async startThread() {
+            return {
+              async setArchived() {
+                throw new Error('missing permission');
+              },
+            };
+          },
+          async edit() {
+            edited = true;
+          },
+        };
+      },
+    },
+    startedAt: 0,
+  });
+  await assert.rejects(() => adapter.archive(thread), /missing permission/);
+  assert.equal(edited, false);
+});
+
+test('recording status exposes a subtitle link only after setup and until subtitles stop', async () => {
+  let options;
+  let release;
+  const setup = new Promise((resolve) => {
+    release = resolve;
+  });
+  const surface = createMeetingSurface({
+    ...clock(),
+    genId: () => 's1',
+    subtitleAdapter: {
+      createThread: () => setup,
+      async send() {},
+      async archive() {},
+    },
+    meetingClient: {
+      openStream(sessionId, opts) {
+        options = opts;
+        queueMicrotask(() => opts.onEvent({ type: 'session.ready', session_id: sessionId }));
+        return { close() {}, endAudio() {} };
+      },
+      async stop() {
+        return { pdf_b64: 'fake' };
+      },
+    },
+    makeRecorder: () => ({ async start() {}, async stop() {} }),
+    async poster() {},
+  });
+  await surface.start({ guildId: 'g1', textChannel: {} });
+  assert.equal(surface.status('g1').subtitleThreadId, null);
+  release({ id: 'sub1' });
+  await settle();
+  assert.equal(surface.status('g1').subtitleThreadId, 'sub1');
+  options.onEvent({ type: 'subtitles.error', session_id: 's1', code: 'queue_overflow' });
+  assert.equal(surface.status('g1').status, 'recording');
+  assert.equal(surface.status('g1').subtitleThreadId, null);
+  await surface.stop('g1');
 });
 
 test('different servers and successive sessions keep tail captions and archives isolated', async () => {
@@ -356,6 +463,7 @@ test('subtitles:false skips subscription and thread creation while still posting
   });
   await surface.start({ guildId: 'g1', subtitles: false });
   assert.equal(options.subtitles, false);
+  assert.equal(surface.status('g1').subtitleThreadId, null);
   assert.deepEqual(await surface.stop('g1'), { status: 'stopped' });
   assert.equal(posted, true);
 });

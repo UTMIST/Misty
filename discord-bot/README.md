@@ -212,8 +212,9 @@ and skips them.
 - `/record start [name:<meeting name>] [subtitles:<true|false>]` (**linked**) — joins your current voice channel and starts
   recording the meeting (one recording at a time **per Discord server** — sessions are
   keyed by `guildId`). `/record status` (**public**) — shows elapsed recording
-  time and the voice channel Misty is in; when idle, it explains which voice
-  channel Misty will join when recording starts. `/record stop` (**public**) —
+  time, the voice channel Misty is in, and a link to the subtitle thread while
+  subtitles are active. When idle, it explains which voice channel Misty will
+  join when recording starts. `/record stop` (**public**) —
   ends the recording when you are in Misty's recorded voice channel and, within roughly
   30–60s, posts a branded PDF named from the optional meeting name and
   America/Toronto start timestamp (or `meeting_<timestamp>.pdf` when unnamed).
@@ -235,13 +236,23 @@ and skips them.
   to a new thread in the launch channel. Launching from a thread creates a
   sibling thread in its parent channel. On completion, Misty flushes the tail,
   posts an ended marker, and archives that meeting's subtitle thread, leaving
-  its messages available to Discord search. Names/timestamps identify speakers;
-  partial text is never posted or revised in place. Missing permissions or
+  its messages available to Discord search. The thread is attached beneath
+  `Live subtitles for this meeting.` After successful archive, that same starter
+  is edited to `Live subtitles for this meeting (archived).`; subtitle messages
+  stay unchanged. `/record status` omits the subtitle link during setup, when
+  subtitles are disabled, or after subtitle delivery has stopped.
+  Names/timestamps identify speakers; partial text is never posted or revised
+  in place. Missing permissions or
   subtitle delivery failures produce one notice while recording/PDF continue.
   Late AWS results can appear out of speech order across batches; earlier
   messages are not edited to reorder them.
   See [live subtitles](../docs/MEETING-RECORDING.md#live-subtitles) for ordering,
   permissions, latency, and incomplete-history behavior.
+
+  Start recordings from a server text channel or thread while connected to
+  voice. Starts from voice-channel text chat (including stage channels) are
+  rejected before recording begins, even with `subtitles:false`; status and
+  stop commands still work there.
 
   When the first human enters an empty voice channel, the bot @-mentions them
   via direct message and prompts them to run `/record start`.

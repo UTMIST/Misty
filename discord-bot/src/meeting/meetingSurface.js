@@ -227,7 +227,11 @@ export function createMeetingSurface({
   function status(guildId) {
     const session = sessions.get(guildId);
     if (!session) return { status: 'not-recording' };
-    return { status: 'recording', elapsedMs: now() - session.startedAt };
+    return {
+      status: 'recording',
+      elapsedMs: now() - session.startedAt,
+      subtitleThreadId: session.captions?.activeThreadId() ?? null,
+    };
   }
 
   // A snapshot of the guild's active recording, or null: its `sessionId` and
