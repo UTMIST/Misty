@@ -2,9 +2,12 @@
 (no real ffmpeg/AWS/network) injected via app.dependency_overrides."""
 
 import asyncio
+from dataclasses import replace
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from src.api.app import create_app
 from src.api.deps import get_key_store
@@ -134,6 +137,97 @@ def test_get_transcript_returns_fake_segments(client, registry, consumer_key):
     assert resp.status_code == 200
     body = resp.json()
     assert body["segments"] == [{"speaker": "alice", "start_ms": 0, "text": "hello"}]
+
+
+def test_opted_in_socket_emits_final_chunks_and_completion_before_report(client, consumer_key):
+    from tests.test_sessions import _make_deps
+    from tests.test_subtitles import FinalStream
+    from src.sessions import SessionRegistry
+
+    real_registry = SessionRegistry(_make_deps([FinalStream()]))
+    client.app.dependency_overrides[get_session_registry] = lambda: real_registry
+    with client.websocket_connect("/meetings/subs1/stream?guild_id=g1") as ws:
+        ws.send_json({"key": consumer_key, "subtitle_events": True})
+        assert ws.receive_json() == {
+            "type": "session.ready",
+            "session_id": "subs1",
+            "subtitle_events": True,
+        }
+        ws.send_json({"speaker_id": "u1", "display_name": "Alice"})
+        speaker = b"u1"
+        frame = len(speaker).to_bytes(2, "big") + speaker + (12000).to_bytes(8, "big")
+        ws.send_bytes(frame + b"\x00" * 640)
+        ws.send_json({"end_of_audio": True})
+        response = client.post("/meetings/subs1/stop", headers={"X-API-Key": consumer_key})
+        assert response.status_code == 200
+        assert ws.receive_json() == {
+            "type": "subtitles.chunk",
+            "session_id": "subs1",
+            "sequence": 1,
+            "speaker_id": "u1",
+            "display_name": "Alice",
+            "start_ms": 12040,
+            "text": "tail",
+        }
+        assert ws.receive_json() == {
+            "type": "subtitles.complete",
+            "session_id": "subs1",
+            "last_sequence": 1,
+            "status": "complete",
+        }
+
+
+def test_socket_without_subtitle_opt_in_has_no_subtitle_observer(client, consumer_key):
+    from tests.test_sessions import _make_deps
+    from src.sessions import SessionRegistry
+
+    real_registry = SessionRegistry(_make_deps([]))
+    client.app.dependency_overrides[get_session_registry] = lambda: real_registry
+    with client.websocket_connect("/meetings/no-subtitles/stream") as ws:
+        ws.send_json({"key": consumer_key})
+        # An HTTP read is a barrier proving auth/session creation completed.
+        ws.send_json({"end_of_audio": True})
+        response = client.get(
+            "/meetings/no-subtitles/transcript", headers={"X-API-Key": consumer_key}
+        )
+        assert response.status_code == 200
+        assert real_registry.get("no-subtitles")._subtitle_sink is None
+
+
+@pytest.mark.parametrize("transport", ["query", "first-frame"])
+@pytest.mark.parametrize("credential", ["invalid", "wrong-scope", "inactive", "revoked"])
+def test_rejected_credentials_never_create_session_or_emit_events(
+    client, registry, store, transport, credential
+):
+    key = "invalid-key"
+    if credential != "invalid":
+        key, prefix, key_hash = generate_key()
+        store.add(
+            prefix=prefix,
+            key_hash=key_hash,
+            name="bot",
+            scopes=["other"] if credential == "wrong-scope" else ["meetings"],
+        )
+        row = store.get_api_key_by_prefix(prefix)
+        if credential == "inactive":
+            store._row_by_prefix[prefix] = replace(row, active=False)
+        elif credential == "revoked":
+            store._row_by_prefix[prefix] = replace(row, revoked_at=datetime.now(timezone.utc))
+
+    if transport == "query":
+        with pytest.raises(WebSocketDisconnect) as rejected:
+            with client.websocket_connect(f"/meetings/unauthorized/stream?key={key}"):
+                pass
+        assert rejected.value.code == 1008
+    else:
+        with client.websocket_connect("/meetings/unauthorized/stream") as ws:
+            ws.send_json({"key": key, "subtitle_events": True})
+            # The very first server message must be a close, never session.ready
+            # or a subtitle frame, despite the requested subscription.
+            message = ws.receive()
+            assert message["type"] == "websocket.close"
+            assert message["code"] == 1008
+    assert registry.created_with == []
 
 
 def test_get_transcript_requires_key(client, registry):

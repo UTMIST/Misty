@@ -7,7 +7,7 @@ Base URL (local): `http://localhost:8004` · Swagger UI: `/docs` · Schema: `/op
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/health` | none | Liveness probe |
-| WS | `/meetings/{id}/stream` | `?key=` or first frame | Live audio ingest + control |
+| WS | `/meetings/{id}/stream` | `?key=` or first frame | Audio ingest + optional finalized subtitle events |
 | GET | `/meetings/{id}/transcript` | `X-API-Key` | Poll the rolling transcript |
 | POST | `/meetings/{id}/stop` | `X-API-Key` | Finalize: transcript + minutes + PDF; accepts an optional title |
 
@@ -35,14 +35,56 @@ ws://.../meetings/{session_id}/stream?key=<consumer-key>&guild_id=<guild-id>
 
 ### Handshake
 
+**Connection URL query parameters:**
+
 | Param | Required | Notes |
 |---|---|---|
-| `key` | preferred | Validated **before** the socket is accepted; a bad key is rejected at the handshake |
+| `key` | optional; required in first frame if omitted here | Supported query parameter. Validated **before** the socket is accepted; a bad key is rejected at the handshake. The bot uses first-frame auth to keep keys out of URL logs. |
 | `guild_id` | optional | Passed to session creation. Omitted → `session_id` is used as the guild_id |
 
 If `key` is omitted from the query string, the server accepts the socket and requires the **first** message to be a text frame `{"key": "..."}`. Missing, malformed, or invalid → closed with **1008** (policy violation) before any audio is processed.
 
 Close code **1008** is also used for: an invalid `session_id` (before any session is created), and a second connect for an already-active `session_id` (the existing session is left untouched).
+
+**First JSON message: authentication and subtitle opt-in together (client → service):**
+
+To subscribe to subtitles, connect without a `key` query parameter and send
+this JSON text frame **first**, before speaker controls or audio:
+
+```text
+ws://localhost:8004/meetings/meeting-123/stream?guild_id=<discord-server-id>
+```
+
+```json
+{"key": "<consumer-key>", "subtitle_events": true}
+```
+
+This is the same first message that carries the API key, with the optional
+subtitle flag added. There is no second authentication handshake or separate
+subscription message. The WebSocket's HTTP upgrade opens the transport; the
+service then validates this message's key and scope before sending
+`session.ready` or any subtitle events.
+
+| JSON field | Type | Required | Meaning |
+|---|---|---|---|
+| `key` | string | yes, when authenticating through the first frame | Existing consumer API key, requiring `meetings` or `admin`. |
+| `subtitle_events` | boolean | no; default `false` | Set to `true` to request finalized subtitle events on this connection. Only the JSON boolean `true` enables it. |
+
+`subtitle_events` belongs to this first authentication message. It is
+not a URL query parameter or HTTP upgrade header, and sending it later as a
+control message does not enable subtitles. The service acknowledges an
+authenticated subscription with `session.ready`, shown below. `/record start`
+defaults subtitles to on, so the bot sends this flag unless the member chooses
+`subtitles:false`; the protocol itself defaults the flag to off.
+
+Omitting the flag, setting it to false, or using query-parameter auth produces
+no service-to-client events. Audio/control messages remain unchanged.
+
+Both key transports remain supported. Subtitle opt-in is independent of
+authentication: the service creates no session or outgoing sender and sends
+no ready/subtitle events until authentication and the `meetings`/`admin` scope
+check succeed. First-frame auth accepts the WebSocket transport so it can read
+the key, but that acceptance alone does not authenticate the client.
 
 ### Messages the server accepts
 
@@ -75,6 +117,102 @@ Unknown or malformed text frames are ignored, not fatal.
 
 A length-prefixed speaker id, an 8-byte millisecond timestamp, then the raw Opus payload with no further framing. Truncated or undersized frames are dropped and counted, not fatal.
 
+### Optional messages the server sends
+
+Every event is a UTF-8 JSON text frame on the **same authenticated connection**.
+The bot authenticates with its existing `meetings` key; no reverse webhook,
+listener, or additional credential is needed. Each meeting has its own socket,
+even when the bot records in multiple Discord servers (API term: guilds).
+
+```json
+{"type": "session.ready", "session_id": "meeting-123", "subtitle_events": true}
+```
+
+Sent only after successful authentication and session creation. Confirms that
+this service supports the subscription. An older service sends no ready event;
+the bot disables subtitles after five seconds while recording continues.
+
+**Live subtitle message (`subtitles.chunk`, service → client):**
+
+The live transcription result arrives as one JSON text message per finalized
+chunk. It is pushed over the socket, rather than returned as an HTTP response
+or a cumulative transcript array:
+
+```json
+{
+  "type": "subtitles.chunk",
+  "session_id": "meeting-123",
+  "sequence": 1,
+  "speaker_id": "discord-user-id",
+  "display_name": "Alice",
+  "start_ms": 12000,
+  "text": "We should launch on Friday"
+}
+```
+
+Every field below is present in each chunk message:
+
+| Field | JSON type | Meaning |
+|---|---|---|
+| `type` | string | Always `"subtitles.chunk"`; distinguishes subtitle text from ready, completion, and error events. |
+| `session_id` | string | Meeting session bound to this authenticated socket. |
+| `sequence` | integer | Positive, 1-based chunk number within the session, allocated in delivery order. |
+| `speaker_id` | string | Speaker identifier supplied with the audio; the bot uses the Discord user ID. |
+| `display_name` | string | Speaker name at chunk creation, falling back to `speaker_id` when no name is known. |
+| `start_ms` | integer | Chunk start in milliseconds since the meeting began, mapped to the meeting timeline. |
+| `text` | string | Finalized text for this chunk only. Subsequent chunks do not replace or extend this message. |
+
+Only **finalized** AWS results produce chunks. Provisional results never leave
+the service. Each result is split using the existing word-gap (1.5 s) and
+segment-span (5 s) rules, and its boundary closes the chunks: published text is
+immutable. These thresholds format already-finalized words; they do **not**
+bound AWS finalization latency. Names and meeting-relative timestamps are
+captured when the chunk is produced. A later name update affects future chunks.
+
+`sequence` starts at 1 for each meeting and describes **delivery order**, not
+speech order. All speakers share one bounded FIFO and one sender for their
+meeting. Sequence assignment and insertion run together on the event loop
+without an await; the sender awaits each send before taking the next event.
+WebSocket preserves that send order on the live connection. Independent
+speakers can finalize in a different order from when they spoke: use `start_ms`
+to sort speech, and `sequence` to detect delivery gaps/duplicates. Neither the
+socket nor this queue is durable; there are no acknowledgements, reconnects,
+or replay. The bot routes by its own session/thread binding, never by a
+Discord destination supplied in an event.
+
+The bot formats the example chunk as `[00:12] **Alice:** We should launch on
+Friday` (the speaker label renders in bold). Multiple chunks received within
+the same two-second batch can share a Discord message. IDs and sequence numbers
+are used internally and are not displayed. See the
+[Discord message example](../../../docs/MEETING-RECORDING.md#subtitle-message-example)
+for a complete batch and its end marker.
+
+```json
+{"type": "subtitles.complete", "session_id": "meeting-123", "last_sequence": 1, "status": "complete"}
+```
+
+Enqueued **after** all speakers finish flushing, behind their tail chunks,
+before minutes/PDF generation. `last_sequence` is the last allocated chunk
+number (0 for no speech). `status` is `complete` or `incomplete`; a failed or
+timed-out speaker flush is incomplete. This describes the finalized subtitle
+stream, not successful PDF delivery or a guarantee that AWS recognized every
+word. Discarding a still-connected session also attempts incomplete completion.
+
+```json
+{"type": "subtitles.error", "session_id": "meeting-123", "code": "queue_overflow"}
+```
+
+Fixed codes are `queue_overflow` and `send_failed`. The sender holds at most
+256 queued events or 256 KiB of serialized JSON and bounds each send at 5 s.
+Overflow/failure disables subtitles and attempts one content-free error event;
+it never blocks audio ingestion or report generation. A failed socket may be
+unable to deliver the error. The bot marks received history incomplete and
+uses the existing HTTP stop/salvage path for the PDF.
+
+See [architecture](ARCHITECTURE.md#finalized-subtitle-delivery) for the queue
+trade-offs and [the recording guide](../../../docs/MEETING-RECORDING.md#live-subtitles)
+for Discord batching, permissions, and retained history.
+
 ### Disconnect
 
 Disconnecting (or erroring) **without** a preceding `POST /stop` **holds** the session for `DISCONNECT_GRACE_S` (default 60 s) rather than destroying it. The transcript is already assembled server-side, so within that window `POST /stop` still finalizes it into minutes and a PDF exactly as a normal stop would — which is how a client that lost its socket recovers a meeting. The disconnect also marks end-of-audio, since a closed socket can deliver no more frames.
@@ -100,7 +238,9 @@ Poll the rolling transcript of an active session.
 ]}
 ```
 
-**Polling is free.** It reads what each speaker's live Transcribe stream has already finalized — no AWS call, no audio re-sent, no cost. Poll as often as you like.
+**Polling makes no additional AWS or LLM call.** It reads finalized words, but
+each request maps, groups, sorts, and transfers the accumulated transcript.
+Repeated polling therefore consumes service CPU and bandwidth even in silence.
 
 It is a **cumulative view, not a diff**. Each response is the whole transcript so far; there is no cursor or append stream. `start_ms` is meeting-relative, mapped back from each speaker's stream-relative timings.
 

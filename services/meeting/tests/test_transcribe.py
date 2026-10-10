@@ -177,6 +177,51 @@ def test_streaming_sends_audio_once_and_exposes_words_as_they_finalize():
     asyncio.run(scenario())
 
 
+def test_final_callback_receives_only_finals_and_cannot_break_transcription():
+    async def scenario():
+        client = _LiveClient()
+        stream = create_transcription_stream(region="us-east-1", client=client)
+        received = []
+
+        def on_final(words):
+            received.append(words)
+            raise RuntimeError("subtitle consumer failed")
+
+        stream.set_final_callback(on_final)
+        stream.start()
+        stream.send(b"\x00" * 640)
+        await drain(stream)
+        client.streams[0].output_stream.push(_partial_event())
+        await drain(stream)
+        assert received == []
+        client.streams[0].output_stream.push(_final_event())
+        await drain(stream)
+        assert received == [
+            [
+                {"text": "hello", "start_ms": 100},
+                {"text": "world", "start_ms": 512},
+            ]
+        ]
+        assert await stream.aclose() == received[0]
+        assert len(client.calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_aborted_transcription_reports_incomplete_when_finalized():
+    async def scenario():
+        client = _LiveClient()
+        stream = create_transcription_stream(region="us-east-1", client=client)
+        stream.start()
+        stream.send(b"\x00" * 640)
+        await drain(stream)
+        stream.abort()
+        await stream.aclose()
+        assert stream.incomplete is True
+
+    asyncio.run(scenario())
+
+
 def test_streaming_reopens_after_the_aws_stream_ends_and_offsets_word_times():
     """AWS ends a streaming session on its own (idle timeout, or the 4h cap). If
     the speaker talks again afterwards we must transparently open a NEW stream --

@@ -4,7 +4,14 @@ Stateful HTTP + WebSocket service that ingests live per-speaker Discord voice au
 
 ## What this service does
 
-A Discord bot opens one WebSocket per meeting and streams each speaker's raw Opus audio frame-by-frame as it arrives from voice channels. `meeting` decodes each frame to PCM in-process (one stateful PyAV Opus decoder per speaker) and streams it straight into that speaker's **persistent Amazon Transcribe session**, held open for the whole meeting. Audio is sent once and never replayed, so the rolling transcript is a free read of what those sessions have finalized so far. When the meeting ends (`POST /stop` or a client disconnect), it assembles the final transcript, calls the `llm` service to summarize decisions/action items into structured minutes, and renders a PDF — returning transcript, minutes, and PDF. Meeting audio is never mixed, persisted, or returned.
+A Discord bot opens one WebSocket per meeting and streams each speaker's raw Opus audio frame-by-frame as it arrives from voice channels. `meeting` decodes each frame to PCM in-process (one stateful PyAV Opus decoder per speaker) and streams it straight into that speaker's **persistent Amazon Transcribe session**, held open for the whole meeting. Audio is sent once and never replayed. The rolling transcript reads words already finalized; subscribed clients also receive immutable `subtitles.*` events over the same socket. `POST /stop` assembles the final transcript, calls the `llm` service to summarize decisions/action items into structured minutes, and renders a PDF — returning transcript, minutes, and PDF. A disconnected session is held briefly for HTTP stop/salvage; disconnect alone does not generate a report. Meeting audio is never mixed, persisted, or returned.
+
+The service retains no subtitle store. The Discord bot posts subtitles to a
+thread whose messages remain searchable after archiving. See the
+[event contract](docs/API.md#optional-messages-the-server-sends) for sequencing
+and completion, and the [recording guide](../../docs/MEETING-RECORDING.md#live-subtitles)
+for Discord behavior. The existing `/transcript` endpoint and PDF remain full
+transcripts; `subtitles.*` names distinguish live presentation events.
 
 Two design choices shape everything:
 
@@ -104,6 +111,21 @@ The wire contract the Discord-bot side mirrors.
 - `key` (query param, preferred): validated against the key store before the socket is accepted; on failure the connection is rejected during the handshake. If `key` is omitted from the query string, the server instead accepts the socket and requires the *first* message to be a text frame `{"key": "..."}` — if that's missing, malformed, or invalid, the socket is closed with WS code **1008** (policy violation) before any audio is processed.
 - `guild_id` (optional): passed to session creation; if omitted, `session_id` is used as the guild_id.
 - An invalid `session_id` (fails the regex above) closes with code 1008 before a session is created.
+
+**The bot sends authentication and subtitle opt-in together in its first JSON
+message**, immediately after the WebSocket opens:
+
+```json
+{"key": "<consumer-key>", "subtitle_events": true}
+```
+
+There is no separate subtitle handshake or subscription message. The sequence
+is: open the WebSocket → send this single authentication message → service
+validates the key and scope → service sends `session.ready` for an authenticated
+subtitle subscription. Speaker controls and audio follow the first message on
+the same socket. With subtitles disabled, the bot sends only `{"key": "..."}`.
+See [the handshake contract](docs/API.md#handshake) for both supported key
+transports and the subtitle flag's default.
 
 **Once authenticated, two kinds of message are accepted — control (text) and audio (binary):**
 

@@ -62,7 +62,8 @@ class _StreamingTranscription:
     so ``send()`` never blocks the ingest path and never touches asyncio state
     from the wrong thread.
 
-    Public contract: ``start`` / ``send`` / ``words`` / ``aclose`` / ``abort``.
+    Public contract: ``start`` / ``send`` / ``words`` / ``aclose`` / ``abort``,
+    plus optional ``set_final_callback`` and the ``incomplete`` flush indicator.
 
     Restarts: AWS ends a streaming session on its own (idle timeout, or the 4h
     per-stream cap). Each session reports word times relative to ITS OWN start,
@@ -82,6 +83,8 @@ class _StreamingTranscription:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task | None = None
         self._words: list[dict] = []
+        self._on_final = None
+        self.incomplete = False
         self._closing = False
         # Distinct from ``_closing``: abort() is a hard teardown, and it can
         # land BEFORE the scheduled _spawn() has run. ``_spawn`` checks this so
@@ -93,6 +96,14 @@ class _StreamingTranscription:
         # what send() accepted; ``_delivered_bytes`` what actually reached AWS).
         self._sent_bytes = 0
         self._delivered_bytes = 0
+
+    def set_final_callback(self, callback) -> None:
+        """Observe each immutable final result on the pump's event loop.
+
+        The observer must be synchronous/nonblocking. Subtitle delivery never
+        owns the transcript: store words first and isolate observer failures.
+        """
+        self._on_final = callback
 
     def _resolve_client(self):
         if self._client is None:
@@ -215,6 +226,7 @@ class _StreamingTranscription:
                 if not (self._aborted and self._task.cancelled()):
                     raise
             except Exception as exc:  # noqa: BLE001 -- finalize must not raise
+                self.incomplete = True
                 _logger.warning("transcription stream ended with an error: %s", exc)
         return list(self._words)
 
@@ -223,6 +235,7 @@ class _StreamingTranscription:
         the pump so the AWS stream is released instead of lingering until its
         idle timeout. Fire-and-forget: no results are collected."""
         self._aborted = True
+        self.incomplete = True
         self._closing = True
         if self._task is not None and not self._task.done():
             self._task.cancel()
@@ -271,6 +284,7 @@ class _StreamingTranscription:
                 # refused, throttled, credentials). Those do count.
                 failures += 1
                 if failures >= _MAX_SESSION_FAILURES:
+                    self.incomplete = True
                     _logger.warning(
                         "transcription failed %s times in a row (%s); giving up on this "
                         "speaker -- words already finalized are kept",
@@ -289,6 +303,7 @@ class _StreamingTranscription:
             if self._delivered_bytes == delivered_before:
                 barren_sessions += 1
                 if barren_sessions >= _MAX_BARREN_SESSIONS:
+                    self.incomplete = True
                     _logger.warning(
                         "%s consecutive Transcribe sessions ended without accepting audio; "
                         "giving up on this speaker",
@@ -338,7 +353,13 @@ class _StreamingTranscription:
                     # Partials get revised; only finals may reach the transcript.
                     if result.is_partial:
                         continue
-                    self._words.extend(_words_from_result(result, offset_ms))
+                    words = _words_from_result(result, offset_ms)
+                    self._words.extend(words)
+                    if words and self._on_final is not None:
+                        try:
+                            self._on_final(words)
+                        except Exception:  # noqa: BLE001 -- subtitles are optional
+                            _logger.warning("subtitle final-result observer failed")
 
         consume_task = asyncio.ensure_future(consume())
         ended = False
@@ -384,6 +405,7 @@ class _StreamingTranscription:
                     try:
                         await asyncio.wait_for(consume_task, FINAL_FLUSH_TIMEOUT_S)
                     except asyncio.TimeoutError:
+                        self.incomplete = True
                         _logger.warning(
                             "timed out waiting %ss for final Transcribe results",
                             FINAL_FLUSH_TIMEOUT_S,

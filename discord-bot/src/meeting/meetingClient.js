@@ -28,7 +28,7 @@ export function createMeetingClient({
     return Buffer.concat([head, id, ts, opusBuffer]);
   }
 
-  function openStream(sessionId, { guildId, onError, onClose }) {
+  function openStream(sessionId, { guildId, onError, onClose, subtitles = false, onEvent }) {
     // The API key is intentionally NOT put in the URL (query strings leak into
     // access/proxy logs). Instead we rely on the service's first-text-frame
     // auth fallback: connect with no `key` query param, then send exactly one
@@ -45,7 +45,7 @@ export function createMeetingClient({
     const onOpen = () => {
       open = true;
       // Auth frame MUST be sent first, before any queued control/audio frames.
-      ws.send(JSON.stringify({ key: apiKey }));
+      ws.send(JSON.stringify({ key: apiKey, ...(subtitles ? { subtitle_events: true } : {}) }));
       for (const data of queue.splice(0)) ws.send(data);
     };
     const onErrorEvent = (e) => {
@@ -89,14 +89,54 @@ export function createMeetingClient({
       }
     };
 
+    const onMessage = (message, isBinary) => {
+      if (!subtitles || dead || isBinary === true) return;
+      const data =
+        message && typeof message === 'object' && 'data' in message ? message.data : message;
+      if (typeof data !== 'string' && !Buffer.isBuffer(data)) return;
+      if (Buffer.byteLength(data) > 256 * 1024) return;
+      let event;
+      try {
+        event = JSON.parse(data.toString());
+      } catch {
+        return;
+      }
+      if (!event || event.session_id !== sessionId) return;
+      const integer = (n) => Number.isSafeInteger(n) && n >= 0;
+      const valid =
+        (event.type === 'session.ready' && event.subtitle_events === true) ||
+        (event.type === 'subtitles.chunk' &&
+          integer(event.sequence) &&
+          event.sequence > 0 &&
+          integer(event.start_ms) &&
+          typeof event.speaker_id === 'string' &&
+          typeof event.display_name === 'string' &&
+          typeof event.text === 'string' &&
+          event.text.length > 0) ||
+        (event.type === 'subtitles.complete' &&
+          integer(event.last_sequence) &&
+          ['complete', 'incomplete'].includes(event.status)) ||
+        (event.type === 'subtitles.error' && typeof event.code === 'string');
+      if (!valid) return;
+      try {
+        Promise.resolve(onEvent?.(event)).catch(() => {
+          console.error('meeting subtitle event handler failed');
+        });
+      } catch {
+        console.error('meeting subtitle event handler failed');
+      }
+    };
+
     if (typeof ws.addEventListener === 'function') {
       ws.addEventListener('open', onOpen);
       ws.addEventListener('error', onErrorEvent);
       ws.addEventListener('close', onCloseEvent);
+      ws.addEventListener('message', onMessage);
     } else if (typeof ws.on === 'function') {
       ws.on('open', onOpen);
       ws.on('error', onErrorEvent);
       ws.on('close', onCloseEvent);
+      ws.on('message', onMessage);
     }
 
     const dispatch = (data) => {

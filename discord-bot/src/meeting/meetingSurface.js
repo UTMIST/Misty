@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { createSubtitles } from './subtitles.js';
 
 // Per-guild live-meeting lifecycle. Pure orchestration: all collaborators
 // (transport client, recorder factory, poster) are injected. No discord.js
@@ -7,6 +8,9 @@ export function createMeetingSurface({
   meetingClient,
   makeRecorder,
   poster,
+  subtitleAdapter,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
   // Tells the meeting's text channel that a recording died on its own. Without
   // it a dropped connection is invisible: the session is gone, /record status
   // says nothing is recording, and nobody knows the meeting was lost.
@@ -20,12 +24,33 @@ export function createMeetingSurface({
   // stored on the session (not read off the stopping interaction) so the
   // minutes always @-mention the person who asked for them -- including when
   // the recording ends via auto-stop, where there's no interaction at all.
-  async function start({ guildId, voiceChannel, textChannel, requesterId, name }) {
+  async function start({
+    guildId,
+    voiceChannel,
+    textChannel,
+    requesterId,
+    name,
+    subtitles = true,
+  }) {
     if (sessions.has(guildId)) {
       return { status: 'already-recording' };
     }
 
     const sessionId = genId();
+    const startedAt = now();
+    const captions =
+      subtitles && subtitleAdapter
+        ? createSubtitles({
+            sessionId,
+            channel: textChannel,
+            name,
+            startedAt,
+            adapter: subtitleAdapter,
+            notify,
+            setTimer,
+            clearTimer,
+          })
+        : null;
     // Both are read by teardown, which openStream can invoke before either has
     // been assigned -- hence `let ... = null` rather than a const below.
     let recorder = null;
@@ -54,6 +79,7 @@ export function createMeetingSurface({
       // minutes posted.
       if (registered && sessions.get(guildId)?.sessionId !== sessionId) return;
       tornDown = true;
+      captions?.cancel();
       const wasRegistered = registered;
       if (wasRegistered) sessions.delete(guildId);
       try {
@@ -88,6 +114,7 @@ export function createMeetingSurface({
     // lost. Tearing down immediately is what threw away two fully-transcribed
     // production meetings in one morning.
     const salvage = async (reason) => {
+      captions?.connectionLost();
       if (tornDown) return;
       // Not registered yet (openStream failed synchronously, auth rejected, a
       // duplicate session id): there is no server-side session to finalize, and
@@ -125,6 +152,8 @@ export function createMeetingSurface({
 
     stream = meetingClient.openStream(sessionId, {
       guildId,
+      subtitles: Boolean(captions),
+      onEvent: (event) => captions?.event(event),
       onError: () => salvage('connection error'),
       // A clean close counts too: an auth rejection, a duplicate session, or a
       // service redeploy all close the socket without an error, and every frame
@@ -170,7 +199,8 @@ export function createMeetingSurface({
       voiceChannel,
       requesterId,
       name,
-      startedAt: now(),
+      startedAt,
+      captions,
     });
     registered = true;
 
@@ -180,6 +210,7 @@ export function createMeetingSurface({
     try {
       await recorder.start(voiceChannel);
     } catch (err) {
+      captions?.cancel();
       console.error(`meetingSurface: recorder failed to start for guild ${guildId}:`, err);
       if (sessions.get(guildId)?.sessionId === sessionId) sessions.delete(guildId);
       await Promise.resolve(stream.close()).catch(() => {});
@@ -189,6 +220,7 @@ export function createMeetingSurface({
     // A teardown may have removed us while we were joining.
     if (sessions.get(guildId)?.sessionId !== sessionId) return { status: 'error' };
 
+    captions?.activate();
     return { status: 'recording', sessionId };
   }
 
@@ -250,8 +282,10 @@ export function createMeetingSurface({
       return { status: 'stopped' };
     } catch (err) {
       console.error(`meetingSurface: error stopping meeting for guild ${guildId}:`, err);
+      session.captions?.connectionLost();
       return { status: 'error' };
     } finally {
+      await session.captions?.finish();
       // Close regardless of outcome so a failed recorder.stop()/finalize
       // never leaves the WS connected to the meeting service.
       await Promise.resolve(stream.close()).catch((closeErr) => {

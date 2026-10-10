@@ -56,7 +56,9 @@ The original design buffered each speaker's PCM and re-transcribed the whole acc
 The current design opens **one persistent Transcribe stream per speaker** on their first frame and feeds it as audio arrives. Consequences, all of them load-bearing:
 
 - **Audio is sent exactly once and never replayed.** Each decoded PCM chunk goes straight to that speaker's stream and is dropped.
-- **`/transcript` is a free read.** It returns what the streams have already finalized — no AWS call, no cost, no latency. Poll it as often as you like.
+- **`/transcript` requires no new inference.** It returns finalized words without
+  replaying audio or calling AWS/LLM. Rebuilding and transferring the cumulative
+  snapshot still consumes CPU and bandwidth.
 - **Nothing retains the audio**, because nothing needs to replay it.
 
 If you're ever tempted to buffer audio "just in case," this is the reason not to.
@@ -116,6 +118,50 @@ The window is short on purpose. A held session keeps its Transcribe streams park
 **Ephemeral by design.** A restart or crash mid-meeting loses everything in flight: the rolling transcript, the open streams, all of it. There is no database, no durable queue, and **nothing is ever written to disk** (there's a test asserting exactly that: `test_session_lifecycle_never_touches_the_filesystem`). If a meeting's minutes matter, the consumer must call `/stop` and persist the response itself — this service retains nothing after replying.
 
 ## Concurrency in the WebSocket handler
+
+### Finalized subtitle delivery
+
+Live subtitles reuse the existing bot-initiated authenticated socket. The bot
+opens one connection per meeting, with one active recording per Discord server;
+two servers recording concurrently have separate sessions, sockets, and queues.
+A stopping session can overlap the next session while its final results drain.
+The bot therefore binds captions and cleanup to session-owned thread objects,
+not to whichever session currently occupies the server map.
+
+The transcriber stores each final result in the ordinary transcript **before**
+calling its optional synchronous observer on the event loop. Observer failures
+cannot erase words or kill transcription. Sessions map word timestamps through
+the existing speaker anchors and close immutable chunks at each AWS final-result
+boundary, using the existing segmentation rules within that result. The full
+HTTP transcript and PDF continue to regroup all words as before.
+
+At the API boundary, one nonblocking enqueue function allocates the per-session
+sequence and inserts the event without yielding. One sender consumes the FIFO,
+awaiting each socket send. This prevents concurrent speakers from assigning
+numbers in one order and sending in another. Completion uses the same FIFO and
+is inserted only after all speaker closes finish; it precedes the independent
+report builder. The wire fields and queue limits live in [API.md](API.md#optional-messages-the-server-sends).
+
+Sequence order is **finalization/delivery order**, not speech chronology. Each
+speaker has an independent AWS stream, so earlier speech may finalize later.
+The bot sorts only within each two-second batch by `start_ms`, breaking ties
+with sequence. Previously posted messages stay unchanged. Late captions may
+appear in a later batch, which is an accepted trade-off for immutable history.
+
+This is an in-memory delivery queue, not durable messaging. No replay or
+reconnection is implemented. Sequence numbers help detect gaps and validate
+completion; they do not recover dropped chunks or acknowledge Discord delivery.
+The bounded queue and send timeout isolate a slow consumer from audio and PDF
+work. Client-side buffering and cleanup are bounded too; archive and error
+notifications remain best-effort when Discord is unavailable.
+
+Polling would avoid an outgoing-event protocol, but the existing endpoint
+rebuilds and transfers the entire transcript on each request, including during
+silence. WS sends only new finalized chunks and avoids the polling interval.
+Neither approach makes AWS finalize speech sooner. No fixed worst-case live
+subtitle delay is promised, and no provider stabilization setting is changed.
+
+### Audio ingest
 
 Three things in `stream_meeting` exist because of specific failures:
 

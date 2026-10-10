@@ -65,6 +65,45 @@ FakeWebSocket.CLOSING = 2;
 FakeWebSocket.CLOSED = 3;
 FakeWebSocket.instances = [];
 
+test('subtitle subscription is authenticated first and validates session-scoped incoming events', () => {
+  const events = [];
+  const client = createMeetingClient({
+    baseUrl: BASE,
+    wsUrl: WS_BASE,
+    apiKey: KEY,
+    WebSocketImpl: FakeWebSocket,
+  });
+  client.openStream('s1', { guildId: 'g1', subtitles: true, onEvent: (e) => events.push(e) });
+  const ws = FakeWebSocket.instances.at(-1);
+  ws._open();
+  assert.deepEqual(JSON.parse(ws.sent[0]), { key: KEY, subtitle_events: true });
+  const emit = (data) => {
+    for (const cb of ws.listeners.message ?? []) cb({ data });
+  };
+  emit('{bad json');
+  emit(JSON.stringify({ type: 'unknown', session_id: 's1' }));
+  emit(JSON.stringify({ type: 'session.ready', session_id: 'other', subtitle_events: true }));
+  emit(JSON.stringify({ type: 'subtitles.chunk', session_id: 's1', sequence: 1, text: 'bad' }));
+  emit(JSON.stringify({ type: 'session.ready', session_id: 's1', subtitle_events: true }));
+  emit(
+    Buffer.from(
+      JSON.stringify({
+        type: 'subtitles.chunk',
+        session_id: 's1',
+        sequence: 1,
+        speaker_id: 'u1',
+        display_name: 'Alice',
+        start_ms: 12000,
+        text: 'hello',
+      }),
+    ),
+  );
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ['session.ready', 'subtitles.chunk'],
+  );
+});
+
 test('encodeFrame produces exact byte layout: len, speakerId utf8, 8-byte BE ts, opus payload', () => {
   const { encodeFrame } = createMeetingClient({ baseUrl: BASE, wsUrl: WS_BASE, apiKey: KEY });
   const frame = encodeFrame('u1', 500, Buffer.from([1, 2, 3]));

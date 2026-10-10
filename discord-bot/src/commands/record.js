@@ -33,6 +33,12 @@ export default defineCommand({
           description: 'Name for the meeting minutes',
           maxLength: 100,
         },
+        {
+          name: 'subtitles',
+          type: 'boolean',
+          required: false,
+          description: 'Post live subtitles in a thread (default: on)',
+        },
       ],
       handler: unreachable,
     },
