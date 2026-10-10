@@ -18,7 +18,7 @@ For real Discord and recording tests against a PR, the optional persistent
 `dev` preview slot runs one selected PR using the same dev bot identity.
 Use `npm run preview -- <pr>` or GitHub Actions → **Preview Discord PR** after
 the [one-time setup](../docs/pr-previews.md). Automatic Railway PR copies keep
-Discord disabled, skip command registration, and report unavailable readiness.
+Discord disabled, skip command registration, and use a liveness health check.
 
 Preview-only configuration (leave unset locally and on staging/production):
 
@@ -140,6 +140,9 @@ HTTP 200 while connected. Railway supplies `PORT` and uses this route for
 deployment health checks. Locally, request
 `http://localhost:3002/health/ready` to inspect the gateway state. This
 listener is separate from the playground's default `WEB_PORT=3001`.
+`GET /health/live` returns 200 while the process serves requests, including an
+idle PR copy (`{"status":"ok","discord":"disabled"}`). Railway's ephemeral
+PR override checks this route; persistent environments keep `/health/ready`.
 
 **Requires that `DIRECTORY_API_KEY` in `.env` is a valid key against main
 team-tracking**, not a scratch key. If Discord returns "directory is

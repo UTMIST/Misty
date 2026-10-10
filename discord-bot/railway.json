@@ -7,5 +7,10 @@
     "preDeployTimeoutSeconds": 120,
     "healthcheckPath": "/health/ready",
     "restartPolicyType": "ON_FAILURE"
+  },
+  "environments": {
+    "pr": {
+      "deploy": { "healthcheckPath": "/health/live" }
+    }
   }
 }

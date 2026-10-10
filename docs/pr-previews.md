@@ -194,15 +194,17 @@ PR copies and misspellings such as `prod` or `Production`: they must not appear
 healthy while disconnected. Railway's documented
 [runtime variables](https://docs.railway.com/variables/reference) do not expose
 whether the environment is ephemeral, so the bot does not infer a healthy idle
-mode from a PR-name pattern. There is no idle CLI flag or `environments.pr`
-override. The persistent `dev` slot is the supported path for Discord previews.
+mode from a PR-name pattern. There is no idle CLI flag. The persistent `dev`
+slot is the supported path for Discord previews.
 
-This deliberately means an automatic PR-copy bot deployment fails its Railway
-readiness check and can generate failure notifications. Automatic PR
-environments remain disabled for this setup. If they are enabled later, exclude
-the bot or add an explicit, platform-verified ephemeral mode before expecting
-healthy no-op deployments; returning 200 for every unknown name would also hide
-an accidental rename of a live environment.
+For automatic PR copies, `railway.json` uses an
+[`environments.pr` health-check override](https://docs.railway.com/config-as-code/reference#pr-environment-overrides)
+to check `/health/live`, which returns 200 for a running idle process with
+`discord: disabled`. Railway selects that override for ephemeral deployments;
+it changes only the health-check path. Runtime mode still comes from the same
+environment check, and persistent environments keep `/health/ready`. This
+avoids failed-deployment notifications for intentional PR no-ops while an
+accidentally renamed persistent environment still fails readiness.
 
 This is only a bot safeguard. Before enabling full-stack automatic PR
 environments, separately arrange isolated database branches: copied Neon URLs
@@ -213,9 +215,10 @@ would otherwise let preview migrations alter the base database. The persistent
 
 Run `npm test`, `npm run lint`, and `npm run format:check` in `discord-bot`.
 Offline tests cover environment ownership, copied credentials and flags,
-registration suppression, unavailable idle readiness, the stop-before-deploy
-sequence, lagging shutdown confirmation, source compatibility and service
+registration suppression, PR liveness and unavailable persistent readiness,
+the stop-before-deploy sequence, lagging shutdown confirmation, source compatibility and service
 inventory, sleeping and terminal deployment states, CLI diagnostics, argument
 validation, confirmation races, cold builds, timeouts, competing deployments,
-and production/staging exclusion. A live recording round trip is still required after provisioning;
-the automated suite never logs in to Discord or calls paid providers.
+and production/staging exclusion. A live recording round trip is still required
+after provisioning; the automated suite never logs in to Discord or calls paid
+providers.

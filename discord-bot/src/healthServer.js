@@ -2,6 +2,9 @@ import Fastify from 'fastify';
 
 export function buildHealthServer(client, { idle = false } = {}) {
   const server = Fastify({ logger: false });
+  server.get('/health/live', async () =>
+    idle ? { status: 'ok', discord: 'disabled' } : { status: 'ok' },
+  );
   server.get('/health/ready', async (_request, reply) => {
     if (idle) {
       reply.code(503);

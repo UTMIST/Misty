@@ -37,8 +37,8 @@ Open `http://127.0.0.1:3001`, paste `100000000000000000` into "Acting as", pick 
 For deployed PR recording tests, use the persistent
 [`dev` preview slot](../../docs/pr-previews.md). Its gateway and voice
 handlers run the selected PR directly. Railway PR copies skip Discord
-registration and gateway login and report unavailable readiness; never bypass
-that environment guard to test a PR.
+registration and gateway login and use a liveness health check; never bypass
+the runtime environment guard to test a PR.
 
 Other modes: `npm run dev:web:plain` (web only, no scratch stack), `npm run dev:discord` (Discord only), `npm run dev` (both).
 

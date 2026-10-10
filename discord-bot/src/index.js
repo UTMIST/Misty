@@ -11,8 +11,8 @@ async function main() {
   const mode = runtimeMode();
   if (mode === 'idle') {
     await startHealthServer(null, process.env.PORT || 3002, { idle: true });
-    console.error(
-      'Discord disabled: unrecognized Railway environment. Readiness is unavailable; expected production, staging, or dev.',
+    console.log(
+      'Discord disabled in this Railway environment. Liveness is available; gateway readiness remains unavailable.',
     );
     return;
   }
