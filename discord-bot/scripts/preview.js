@@ -4,6 +4,8 @@ import { createInterface } from 'node:readline/promises';
 import { REPOSITORY, switchPreview } from './lib/preview.js';
 
 const exec = promisify(execFile);
+// Public project identifier; credentials still come from Railway CLI login.
+const DEFAULT_PROJECT_ID = 'abf9e8a2-9394-48e2-9d95-a71520c58a5b';
 
 async function jsonCommand(command, args) {
   try {
@@ -22,7 +24,7 @@ async function jsonCommand(command, args) {
 async function main() {
   const args = process.argv.slice(2);
   const number = args.shift();
-  let projectId = process.env.MISTY_PREVIEW_PROJECT_ID;
+  let projectId = process.env.MISTY_PREVIEW_PROJECT_ID || DEFAULT_PROJECT_ID;
   let planOnly = false;
   let confirmedIdle = false;
   while (args.length) {
@@ -34,7 +36,7 @@ async function main() {
   }
   if (!/^[1-9]\d*$/.test(number ?? '') || !projectId) {
     throw new Error(
-      'Usage: npm run preview -- <pr> --project <Railway-project-id> [--plan] [--recordings-stopped]',
+      'Usage: npm run preview -- <pr> [--project <Railway-project-id>] [--plan] [--recordings-stopped]',
     );
   }
   const pr = await jsonCommand('gh', [

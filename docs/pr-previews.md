@@ -40,8 +40,8 @@ includes it. The initial preview-support PR can bootstrap the environment.
    push to another branch cannot replace the selected PR during a recording.
 5. Attach a Railway volume to the preview's `discord-bot` service, for example
    at `/data`, in the same region as the bot. No bot database is stored there:
-   its purpose is Railway's
-   guarantee that deployments sharing that volume cannot overlap. A replica
+   its purpose is Railway's guarantee that deployments sharing that volume
+   cannot overlap. A replica
    count of one or an overlap time of zero alone does not prevent simultaneous
    old/new processes during startup. Keep `meeting` at one replica as usual.
    See [Railway's volume caveats](https://docs.railway.com/volumes/reference#caveats).
@@ -72,15 +72,39 @@ deployment, not a sandbox for untrusted code.
 
 ## Select a PR
 
+### From GitHub
+
+After this workflow has merged into `staging` (the repository's default branch),
+open **Actions → Preview Discord PR → Run workflow**. Leave the branch on
+`staging`, enter the PR number, and confirm recordings have finished and their
+minutes have arrived. The workflow uses the same selector as the terminal and
+serializes its runs without cancelling an active switch.
+
+One-time Actions setup: create a GitHub environment named `dev`, restrict its
+deployment branches to `staging`, and add its `RAILWAY_TOKEN` secret using a
+Railway project token scoped to Misty's **`dev` environment only**. Do not use
+an account token or a production/staging token. The workflow reads the selector
+from `staging`; it never checks out or executes the selected PR on the runner.
+Railway builds that PR's commit with the preview's existing service credentials.
+
+GitHub only exposes manual workflows after they exist on the default branch;
+see [GitHub's workflow-dispatch documentation](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).
+The terminal command can bootstrap this PR before that merge.
+
+### From the terminal
+
 Install and authenticate `gh` and Railway CLI (5.28+), then:
 
 ```bash
 cd discord-bot
 npm ci
-export MISTY_PREVIEW_PROJECT_ID='<Railway project UUID>'
 npm run preview -- 123 --plan
 npm run preview -- 123
 ```
+
+Misty's project is the default; no project ID or environment export is needed.
+For another installation, `MISTY_PREVIEW_PROJECT_ID` overrides the default and
+`--project <id>` overrides both.
 
 The command prints the PR's exact commit and target services. Before confirming,
 stop any recording and wait for its minutes to arrive. Switching will disconnect
@@ -100,7 +124,8 @@ is pinned to the PR's current head commit; run the command again to test later
 commits. Closing or merging a PR does not automatically replace the persistent
 slot. Select another open PR when ready.
 
-Run one selector at a time. The command checks for unfinished or competing
+Run one selector at a time, including terminal runs while an Actions run is
+active. The command checks for unfinished or competing
 deployments, and the bot volume prevents overlapping gateway owners. It does
 not provide an atomic transaction across all backend deployments.
 
