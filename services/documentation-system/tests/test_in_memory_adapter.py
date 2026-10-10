@@ -1,9 +1,9 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
 
-from contracts.types import Source
+from contracts.types import Source, SourceGrant
 from contracts.visibility import DENY, SEE_ALL, Actor
 from src.storage.in_memory import InMemoryStorageAdapter
 
@@ -150,6 +150,48 @@ def test_add_list_remove_grant():
 def test_add_grant_missing_doc_returns_false():
     a = InMemoryStorageAdapter()
     assert a.add_grant(UUID(int=0), grantee_type="org", grantee_id=None, actor="t") is False
+
+
+def test_replace_source_grants_preserves_manual_and_revokes_old_source_rows():
+    a = InMemoryStorageAdapter()
+    d = _mk_vis(a)
+    now = datetime.now(timezone.utc)
+    a.add_grant(d.id, grantee_type="person", grantee_id=P1, actor="admin")
+    a.replace_source_grants(
+        d.id,
+        origin="google_drive",
+        grants=[
+            SourceGrant(
+                grantee_type="team",
+                grantee_id=T1,
+                source_permission_id="permission-1",
+                source_principal="team@example.com",
+                source_role="reader",
+                source_inherited_from=["folder-1"],
+            )
+        ],
+        synced_at=now,
+        expires_at=now + timedelta(hours=48),
+        actor="sync",
+    )
+    ordinary_member = Actor(person_id=uuid4(), team_ids=frozenset({T1}))
+    synced_member = Actor(
+        person_id=ordinary_member.person_id,
+        team_ids=frozenset({T1}),
+        source_team_ids=frozenset({T1}),
+    )
+    assert a.get_doc(d.id, visibility=ordinary_member) is None
+    assert a.get_doc(d.id, visibility=synced_member) is not None
+    a.replace_source_grants(
+        d.id,
+        origin="google_drive",
+        grants=[],
+        synced_at=now,
+        expires_at=now + timedelta(hours=48),
+        actor="sync",
+    )
+    grants = a.list_grants(d.id)
+    assert [(g.origin, g.grantee_type, g.grantee_id) for g in grants] == [("manual", "person", P1)]
 
 
 def test_get_doc_visibility_filters_and_hydrates_grants():

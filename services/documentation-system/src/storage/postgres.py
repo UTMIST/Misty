@@ -1,13 +1,13 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import and_, delete, false, insert, or_, select, text, update
+from sqlalchemy import and_, delete, false, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from contracts.storage import DuplicateActiveUrl
-from contracts.types import ApiKey, Doc, DocContentMeta, DocGrant, Source
+from contracts.types import ApiKey, Doc, DocContentMeta, DocGrant, Source, SourceGrant
 from contracts.visibility import Actor, ActorContext, DENY, SEE_ALL
 from src.storage.schema import api_keys, doc_content, doc_grants, doc_tags, docs, sources
 
@@ -76,14 +76,27 @@ class PostgresStorageAdapter:
             .where(
                 doc_grants.c.doc_id == docs.c.id,
                 or_(
-                    doc_grants.c.grantee_type == "org",
+                    doc_grants.c.origin == "manual",
+                    doc_grants.c.expires_at > func.now(),
+                ),
+                or_(
+                    and_(
+                        doc_grants.c.origin == "manual",
+                        doc_grants.c.grantee_type == "org",
+                    ),
                     and_(
                         doc_grants.c.grantee_type == "person",
                         doc_grants.c.grantee_id == actor.person_id,
                     ),
                     and_(
+                        doc_grants.c.origin == "manual",
                         doc_grants.c.grantee_type == "team",
                         doc_grants.c.grantee_id.in_(team_ids),
+                    ),
+                    and_(
+                        doc_grants.c.origin != "manual",
+                        doc_grants.c.grantee_type == "team",
+                        doc_grants.c.grantee_id.in_(list(actor.source_team_ids)),
                     ),
                 ),
             )
@@ -108,6 +121,14 @@ class PostgresStorageAdapter:
                 grantee_label=None,
                 created_at=r.created_at,
                 created_by=r.created_by,
+                origin=r.origin,
+                source_permission_id=r.source_permission_id,
+                source_principal=r.source_principal,
+                source_role=r.source_role,
+                source_inherited=r.source_inherited,
+                source_inherited_from=list(r.source_inherited_from),
+                source_expires_at=r.source_expires_at,
+                expires_at=r.expires_at,
             )
             for r in rows
         ]
@@ -134,6 +155,8 @@ class PostgresStorageAdapter:
             owning_person_label=row.owning_person_label,
             content_snapshot=row.content_snapshot,
             fetched_at=row.fetched_at,
+            source_access_synced_at=row.source_access_synced_at,
+            source_access_attempted_at=row.source_access_attempted_at,
             active=row.active,
             tags=self._tags_for(conn, row.id) if tags is None else tags,
             created_at=row.created_at,
@@ -311,6 +334,7 @@ class PostgresStorageAdapter:
             already = conn.execute(
                 select(doc_grants.c.id).where(
                     doc_grants.c.doc_id == doc_id,
+                    doc_grants.c.origin == "manual",
                     doc_grants.c.grantee_type == grantee_type,
                     doc_grants.c.grantee_id.is_(None)
                     if grantee_id is None
@@ -331,6 +355,7 @@ class PostgresStorageAdapter:
                                 grantee_type=grantee_type,
                                 grantee_id=grantee_id,
                                 created_by=actor,
+                                origin="manual",
                             )
                         )
                 except IntegrityError:
@@ -342,6 +367,7 @@ class PostgresStorageAdapter:
             result = conn.execute(
                 delete(doc_grants).where(
                     doc_grants.c.doc_id == doc_id,
+                    doc_grants.c.origin == "manual",
                     doc_grants.c.grantee_type == grantee_type,
                     doc_grants.c.grantee_id.is_(None)
                     if grantee_id is None
@@ -353,6 +379,58 @@ class PostgresStorageAdapter:
     def list_grants(self, doc_id) -> list[DocGrant]:
         with self._engine.connect() as conn:
             return self._grants_for(conn, doc_id)
+
+    def replace_source_grants(
+        self,
+        doc_id: UUID,
+        *,
+        origin: str,
+        grants: list[SourceGrant],
+        synced_at: datetime,
+        expires_at: datetime,
+        actor: str,
+    ) -> bool:
+        with self._engine.begin() as conn:
+            exists = conn.execute(select(docs.c.id).where(docs.c.id == doc_id)).one_or_none()
+            if exists is None:
+                return False
+            conn.execute(
+                delete(doc_grants).where(
+                    doc_grants.c.doc_id == doc_id,
+                    doc_grants.c.origin == origin,
+                )
+            )
+            for grant in grants:
+                conn.execute(
+                    insert(doc_grants).values(
+                        doc_id=doc_id,
+                        grantee_type=grant.grantee_type,
+                        grantee_id=grant.grantee_id,
+                        created_at=synced_at,
+                        created_by=actor,
+                        origin=origin,
+                        source_permission_id=grant.source_permission_id,
+                        source_principal=grant.source_principal,
+                        source_role=grant.source_role,
+                        source_inherited=grant.source_inherited,
+                        source_inherited_from=grant.source_inherited_from,
+                        source_expires_at=grant.source_expires_at,
+                        expires_at=min(expires_at, grant.source_expires_at)
+                        if grant.source_expires_at is not None
+                        else expires_at,
+                    )
+                )
+            conn.execute(
+                update(docs)
+                .where(docs.c.id == doc_id)
+                .values(
+                    source_access_synced_at=synced_at,
+                    source_access_attempted_at=synced_at,
+                    updated_at=synced_at,
+                    updated_by=actor,
+                )
+            )
+            return True
 
     def upsert_doc_content(
         self, doc_id: UUID, *, content_text: str, content_hash: str, fetched_at: datetime | None

@@ -37,6 +37,17 @@ def test_person_and_team_grants():
     assert _v(actor, grants=[("team", T2)]) is False
 
 
+def test_source_team_grant_requires_confirmed_google_membership():
+    ordinary_only = Actor(person_id=P1, team_ids=frozenset({T1}))
+    assert _v(ordinary_only, grants=[("team", T1, "google_drive")]) is False
+    synced = Actor(
+        person_id=P1,
+        team_ids=frozenset({T1}),
+        source_team_ids=frozenset({T1}),
+    )
+    assert _v(synced, grants=[("team", T1, "google_drive")]) is True
+
+
 def test_no_match_is_hidden():
     actor = Actor(person_id=P1, team_ids=frozenset({T1}))
     assert _v(actor, owner_p=P2, grants=[("person", P2), ("team", T2)]) is False

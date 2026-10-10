@@ -11,9 +11,9 @@ An **outbound adapter**: it holds the credential for an external document source
 Two non-goals do more to explain the design than any of the goals:
 
 - **Not a gateway.** It does not front other UTMIST services or route traffic to them. Its only outbound direction is *away* from the platform, to Google.
-- **Not an authorization boundary.** It authenticates the *calling service* via a scoped API key, but it never learns which end user that service is fetching on behalf of. There is no `X-On-Behalf-Of` here (unlike documentation-system). Access control for the underlying file is entirely Drive's own sharing settings on the service account's address.
+- **Not the final authorization boundary.** It authenticates the *calling service* and never learns the end user. Google fetches return complete source ACL evidence alongside content; documentation-system maps that evidence to its people/teams and applies actor-scoped visibility.
 
-The second point is the one that bites. A consumer that needs "can *this particular person* read this doc?" must answer that itself **before** calling `/fetch`. connectors will happily return any document the service account can see, to any caller holding the `fetch` scope.
+The second point is the one that bites. connectors reads the Drive permission list **before** any export/download and refuses the fetch if that list cannot be read completely, but it cannot decide which UTMIST identity a Google email/group represents. A consumer must reconcile the returned ACL before persisting or disclosing the content. Broad service-account reach alone is never an end-user grant.
 
 ## Layering
 

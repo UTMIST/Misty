@@ -2,7 +2,7 @@ import logging
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,19 @@ class Settings(BaseSettings):
     connectors_base_url: str = "http://localhost:8005"
     connectors_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
     docs_env: Literal["local", "staging", "production"] = "local"
+    # A scheduler should call the source-access refresh endpoint after the
+    # first interval. Source-derived grants expire at the second interval so
+    # a failed/stopped scheduler eventually fails closed.
+    source_access_refresh_after_hours: int = Field(default=24, gt=0)
+    source_access_max_age_hours: int = Field(default=48, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_source_access_windows(self) -> "Settings":
+        if self.source_access_max_age_hours <= self.source_access_refresh_after_hours:
+            raise ValueError(
+                "SOURCE_ACCESS_MAX_AGE_HOURS must exceed SOURCE_ACCESS_REFRESH_AFTER_HOURS"
+            )
+        return self
 
 
 @lru_cache(maxsize=1)

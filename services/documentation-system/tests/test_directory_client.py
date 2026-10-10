@@ -133,3 +133,44 @@ def test_get_active_team_ids_non_uuid_team_id_raises_unavailable():
     dc = HttpDirectoryClient("http://dir", "k", client=_client(handler))
     with pytest.raises(DirectoryUnavailable):
         dc.get_active_team_ids(pid)
+
+
+def test_verified_email_falls_back_from_primary_to_verified_identifier():
+    person_id = UUID("11111111-1111-1111-1111-111111111111")
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        if request.url.path.startswith("/people/by-email/"):
+            return httpx.Response(404)
+        return httpx.Response(200, json={"id": str(person_id)})
+
+    dc = HttpDirectoryClient("http://dir", "k", client=_client(handler))
+    assert dc.get_person_id_by_verified_email("Member+docs@Example.com") == person_id
+    assert seen == [
+        "/people/by-email/member+docs@example.com",
+        "/people/by-identifier/email/member+docs@example.com",
+    ]
+
+
+def test_synced_google_group_uses_fail_closed_mapping_endpoint():
+    team_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+
+    def handler(request):
+        assert request.url.path == "/teams/by-synced-google-group/team@example.com"
+        return httpx.Response(200, json={"id": str(team_id)})
+
+    dc = HttpDirectoryClient("http://dir", "k", client=_client(handler))
+    assert dc.get_team_id_by_synced_google_group("TEAM@example.com") == team_id
+
+
+def test_source_access_team_ids_are_separate_from_ordinary_memberships():
+    person_id = UUID("11111111-1111-1111-1111-111111111111")
+    team_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+
+    def handler(request):
+        assert request.url.path == f"/people/{person_id}/synced-google-teams"
+        return httpx.Response(200, json=[{"team_id": str(team_id)}])
+
+    dc = HttpDirectoryClient("http://dir", "k", client=_client(handler))
+    assert dc.get_source_access_team_ids(person_id) == frozenset({team_id})

@@ -103,6 +103,7 @@ Set these per environment (staging vs production) per service.
 | `DIRECTORY_API_KEY` | — | *(set by the provisioning script — step 4)* | — |
 | `CONNECTORS_BASE_URL` | — | `http://${{connectors.RAILWAY_PRIVATE_DOMAIN}}:${{connectors.PORT}}` | — |
 | `CONNECTORS_API_KEY` | — | a `connectors` consumer key with the `fetch` scope — see step 4b | — |
+| source ACL cadence | — | `SOURCE_ACCESS_REFRESH_AFTER_HOURS=24`, `SOURCE_ACCESS_MAX_AGE_HOURS=48` | — |
 | `CODE_HMAC_SECRET` | — | — | a strong random secret |
 | `EMAIL_BACKEND` | — | — | `resend` (or `gmail`) — **not** `fake` |
 | `EMAIL_FROM` | — | — | `UTMIST <noreply@utmist.ca>` |
@@ -219,9 +220,16 @@ and sets each service's `DIRECTORY_API_KEY`. The discord-bot key's scopes
 include `people:elevate` (alongside its `people:*`/`teams:*`/`memberships:*`
 scopes) so its `/seed` can promote people to `admin`/`superuser` — plain
 `people:write` cannot set a non-`member` `access_level`. The
-documentation-system key stays read-only (`people:read teams:read`). Re-running issues a fresh key and
+documentation-system key stays read-only (`people:read teams:read memberships:read
+identifiers:read`) so it can resolve verified emails, active memberships, and the synced-group
+mapping supplied by team-tracking. Re-running issues a fresh key and
 repoints the consumer; the previous key stays active until you revoke it
 manually (`team-tracking-keys revoke <id>`).
+
+Configure a Railway cron/external scheduler to call documentation-system's
+`POST /docs/source-access/refresh-due?limit=10` daily with a `docs:write` key, repeating
+until `attempted < limit`. Source-derived grants stop authorizing reads after 48 hours
+without a complete successful refresh.
 
 > **Gotcha — `src` package collision when minting keys.** Both
 > `services/team-tracking` and `services/documentation-system` declare a top-level

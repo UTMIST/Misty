@@ -25,7 +25,12 @@ def _actor(actor_id: UUID, directory: DirectoryClient) -> Actor:
         team_ids = directory.get_active_team_ids(actor_id)
     except DirectoryUnavailable:
         team_ids = frozenset()  # partial fail-closed: team-granted docs withheld
-    return Actor(person_id=actor_id, team_ids=team_ids)
+    try:
+        lookup = getattr(directory, "get_source_access_team_ids", None)
+        source_team_ids = lookup(actor_id) if lookup is not None else frozenset()
+    except DirectoryUnavailable:
+        source_team_ids = frozenset()
+    return Actor(person_id=actor_id, team_ids=team_ids, source_team_ids=source_team_ids)
 
 
 def read_context(

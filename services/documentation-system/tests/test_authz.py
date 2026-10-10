@@ -15,13 +15,18 @@ class _Key:
 
 
 class _Dir:
-    def __init__(self, teams=frozenset(), down=False):
-        self._teams, self._down = teams, down
+    def __init__(self, teams=frozenset(), source_teams=frozenset(), down=False):
+        self._teams, self._source_teams, self._down = teams, source_teams, down
 
     def get_active_team_ids(self, pid):
         if self._down:
             raise DirectoryUnavailable("down")
         return self._teams
+
+    def get_source_access_team_ids(self, pid):
+        if self._down:
+            raise DirectoryUnavailable("down")
+        return self._source_teams
 
 
 def _resolve(dep, **overrides):
@@ -38,6 +43,19 @@ def test_read_context_actor_resolves_teams():
     )
     assert isinstance(ctx, Actor)
     assert ctx.team_ids == frozenset({T1})
+
+
+def test_read_context_keeps_synced_google_memberships_separate():
+    from src.api.authz import read_context
+
+    T1 = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    ctx = read_context(
+        actor_id=UUID(int=1),
+        key=_Key(["docs:read"]),
+        directory=_Dir(teams=frozenset({T1}), source_teams=frozenset()),
+    )
+    assert ctx.team_ids == frozenset({T1})
+    assert ctx.source_team_ids == frozenset()
 
 
 def test_read_context_directory_down_degrades_to_empty_teams():
