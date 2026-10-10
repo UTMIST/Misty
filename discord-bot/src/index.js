@@ -5,8 +5,24 @@ import { commands } from './commands/index.js';
 import { startHealthServer } from './healthServer.js';
 import { wireDiscordClient } from './adapters/discord/index.js';
 import { makeAttachmentPoster, makeChannelNotifier } from './adapters/discord/meetingPosts.js';
+import { runtimeMode } from './runtimeMode.js';
 
 async function main() {
+  const mode = runtimeMode();
+  if (mode === 'idle') {
+    await startHealthServer(null, process.env.PORT || 3002, { idle: true });
+    console.log('Discord disabled in this Railway environment. Select a PR in dev.');
+    return;
+  }
+  if (mode === 'preview' && !process.env.RAILWAY_VOLUME_MOUNT_PATH) {
+    throw new Error('dev requires a Railway volume to prevent overlapping bot deployments.');
+  }
+  if (
+    mode === 'preview' &&
+    (process.env.ENABLE_DISCORD === 'false' || process.env.ENABLE_WEB === 'true')
+  ) {
+    throw new Error('dev requires ENABLE_DISCORD=true and ENABLE_WEB=false.');
+  }
   const config = loadConfig();
   // Inject the Discord attachment poster here (not inside context.js) so
   // context.js stays surface-agnostic — index.js is one of the few modules

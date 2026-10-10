@@ -1,6 +1,7 @@
 import { REST, Routes, SlashCommandBuilder } from 'discord.js';
 import { loadConfig } from './config.js';
 import { commands, partitionCommands } from './commands/index.js';
+import { runtimeMode } from './runtimeMode.js';
 
 function applyOption(target, o) {
   if (o.type === 'string') {
@@ -40,6 +41,10 @@ export function buildDiscordData(command) {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  if (runtimeMode() === 'idle') {
+    console.log('Skipping Discord command registration in this Railway environment.');
+    process.exit(0);
+  }
   const config = loadConfig();
   const { stable, beta } = partitionCommands([...commands.values()]);
   const stableBody = stable.map((c) => buildDiscordData(c));

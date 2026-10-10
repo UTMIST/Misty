@@ -14,6 +14,24 @@ gating each command.
 Neon staging branch in a private test guild; production runs globally against
 the prod branch. See [`docs/RAILWAY-DEPLOYMENT.md`](../docs/RAILWAY-DEPLOYMENT.md).
 
+For real Discord and recording tests against a PR, the optional persistent
+`dev` preview slot runs one selected PR using the same dev bot identity.
+Use `npm run preview -- <pr> --project <project-id>` after the
+[one-time setup](../docs/pr-previews.md). Automatic Railway PR copies keep
+Discord disabled and skip command registration.
+
+Preview-only configuration (leave unset locally and on staging/production):
+
+| Variable | Purpose |
+|---|---|
+| `MISTY_PREVIEW_ENVIRONMENT_ID` | Literal UUID of the persistent `dev` environment; copies cannot inherit ownership. |
+| `DISCORD_TOKEN_DEV` | Dedicated dev application's bot token. |
+| `DISCORD_CLIENT_ID_DEV` | Dedicated dev application's application ID. |
+| `DISCORD_GUILD_ID_DEV` | Test guild for the dev application, including beta commands. |
+
+The preview CLI accepts `MISTY_PREVIEW_PROJECT_ID` from the shell instead of
+`--project`. It does not load `.env` or read Discord credentials.
+
 ## Complete startup (from cold)
 
 Two modes, one shared foundation. Pick which mode you need:

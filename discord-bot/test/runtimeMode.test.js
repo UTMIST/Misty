@@ -1,0 +1,100 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+import { runtimeMode, discordEnvironment } from '../src/runtimeMode.js';
+import { buildHealthServer } from '../src/healthServer.js';
+
+const DEV = {
+  RAILWAY_ENVIRONMENT_NAME: 'dev',
+  RAILWAY_ENVIRONMENT_ID: 'dev-environment',
+  MISTY_PREVIEW_ENVIRONMENT_ID: 'dev-environment',
+  DISCORD_TOKEN_DEV: 'dev-token',
+  DISCORD_CLIENT_ID_DEV: 'dev-app',
+  DISCORD_GUILD_ID_DEV: 'dev-guild',
+  DISCORD_TOKEN: 'inherited-token',
+  DISCORD_CLIENT_ID: 'inherited-app',
+  DISCORD_GUILD_ID: 'inherited-guild',
+  ENABLE_DISCORD: 'true',
+  ENABLE_WEB: 'true',
+};
+
+test('local, production, and staging retain their normal runtime', () => {
+  assert.equal(runtimeMode({}, []), 'normal');
+  for (const name of ['production', 'staging']) {
+    assert.equal(runtimeMode({ RAILWAY_ENVIRONMENT_NAME: name }, []), 'normal');
+  }
+});
+
+test('PR copies and unknown Railway names stay idle despite inherited credentials and flags', () => {
+  for (const name of ['pr-123', 'Misty-pr-123', 'misty-dev', 'renamed-preview', '']) {
+    assert.equal(
+      runtimeMode({ ...DEV, RAILWAY_ENVIRONMENT_NAME: name, RAILWAY_ENVIRONMENT_ID: 'copy' }, []),
+      'idle',
+    );
+  }
+  assert.throws(() => runtimeMode({ RAILWAY_ENVIRONMENT_NAME: 'dev' }, []), /ENVIRONMENT_ID/);
+  assert.throws(
+    () => runtimeMode({ ...DEV, RAILWAY_ENVIRONMENT_ID: 'copy' }, []),
+    /ENVIRONMENT_ID/,
+  );
+});
+
+test('Railway PR command override takes precedence even over copied persistent metadata', () => {
+  assert.equal(runtimeMode(DEV, ['--preview-idle']), 'idle');
+  assert.equal(runtimeMode({ RAILWAY_ENVIRONMENT_NAME: 'staging' }, ['--preview-idle']), 'idle');
+});
+
+test('only the exact persistent preview environment selects dev credentials', () => {
+  assert.equal(runtimeMode(DEV, []), 'preview');
+  const env = discordEnvironment(DEV);
+  assert.equal(env.DISCORD_TOKEN, 'dev-token');
+  assert.equal(env.DISCORD_CLIENT_ID, 'dev-app');
+  assert.equal(env.DISCORD_GUILD_ID, 'dev-guild');
+  assert.equal(DEV.DISCORD_TOKEN, 'inherited-token');
+});
+
+test('missing dev credentials never fall back to inherited staging credentials', () => {
+  for (const key of ['DISCORD_TOKEN_DEV', 'DISCORD_CLIENT_ID_DEV', 'DISCORD_GUILD_ID_DEV']) {
+    assert.throws(() => discordEnvironment({ ...DEV, [key]: '' }), new RegExp(key));
+  }
+  const normal = { ...DEV, RAILWAY_ENVIRONMENT_NAME: 'staging' };
+  assert.equal(discordEnvironment(normal), normal);
+});
+
+test('idle preview health needs neither credentials nor a Discord client', async () => {
+  const server = buildHealthServer(null, { idle: true });
+  try {
+    const response = await server.inject('/health/ready');
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json(), { status: 'ok', discord: 'disabled' });
+  } finally {
+    await server.close();
+  }
+});
+
+test('PR registration exits before config validation and any Discord request', async () => {
+  const script = fileURLToPath(new URL('../src/registerCommands.js', import.meta.url));
+  const { stdout } = await promisify(execFile)(process.execPath, [script, '--preview-idle'], {
+    env: { PATH: process.env.PATH },
+    timeout: 10_000,
+  });
+  assert.match(stdout, /Skipping Discord command registration/);
+});
+
+test('preview boot refuses to connect without a volume', async () => {
+  const script = fileURLToPath(new URL('../src/index.js', import.meta.url));
+  await assert.rejects(
+    promisify(execFile)(process.execPath, [script], {
+      env: {
+        PATH: process.env.PATH,
+        RAILWAY_ENVIRONMENT_NAME: 'dev',
+        RAILWAY_ENVIRONMENT_ID: 'dev',
+        MISTY_PREVIEW_ENVIRONMENT_ID: 'dev',
+      },
+      timeout: 10_000,
+    }),
+    (error) => error.code === 1 && /requires a Railway volume/.test(error.stderr),
+  );
+});

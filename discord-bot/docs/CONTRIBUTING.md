@@ -34,6 +34,11 @@ Open `http://127.0.0.1:3001`, paste `100000000000000000` into "Acting as", pick 
 
 `/record` has **no playground equivalent** — voice capture needs the real Discord surface (`npm start`).
 
+For deployed PR recording tests, use the persistent
+[`dev` preview slot](../../docs/pr-previews.md). Its gateway and voice
+handlers run the selected PR directly. Railway PR copies start an idle health
+listener and skip Discord registration; never bypass those guards to test a PR.
+
 Other modes: `npm run dev:web:plain` (web only, no scratch stack), `npm run dev:discord` (Discord only), `npm run dev` (both).
 
 ## Walkthrough: add a command
