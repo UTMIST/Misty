@@ -26,6 +26,8 @@ function fixture({
   otherDeployment = false,
   removedLagReads = 0,
   buildDelayMs = 0,
+  historyPageSize = 100,
+  omitOldFromHistory = false,
 } = {}) {
   const names = [
     'discord-bot',
@@ -67,8 +69,10 @@ function fixture({
   };
   const calls = [];
   const logs = [];
-  let stopRequested = false;
-  let stopReads = 0;
+  const botHistory = [{ id: 'discord-bot-old', status: initialStatus, deploymentStopped: false }];
+  const stopRequested = new Set();
+  const stopReads = new Map();
+  const sleeps = [];
   let clock = 0;
   let buildStartedAt;
   const api = async (query, variables) => {
@@ -85,27 +89,56 @@ function fixture({
       }
       return { environment: structuredClone(environment) };
     }
+    if (query.includes('query PreviewBotDeployments')) {
+      assert.equal(variables.environmentId, 'dev');
+      assert.equal(variables.serviceId, 'discord-bot');
+      assert.match(query, /includeDeleted: true/);
+      const bot = instances.find((s) => s.serviceId === 'discord-bot');
+      const head = botHistory.find((deployment) => deployment.id === bot.latestDeployment?.id);
+      if (head) head.status = bot.latestDeployment.status;
+      const visible = botHistory.filter(
+        (deployment) => !omitOldFromHistory || deployment.id !== 'discord-bot-old',
+      );
+      const offset = Number(variables.after || 0);
+      const next = offset + historyPageSize;
+      return {
+        deployments: {
+          ...connection(structuredClone(visible.slice(offset, next))),
+          pageInfo: { hasNextPage: next < visible.length, endCursor: String(next) },
+        },
+      };
+    }
     if (query.includes('mutation StopPreview')) {
-      assert.equal(variables.id, 'discord-bot-old');
-      stopRequested = true;
+      assert.ok(botHistory.some((deployment) => deployment.id === variables.id));
+      stopRequested.add(variables.id);
       return { deploymentRemove: true };
     }
     if (query.includes('query PreviewDeployment')) {
-      if (variables.id === 'discord-bot-old') {
+      const old = botHistory.find((deployment) => deployment.id === variables.id);
+      if (old) {
         const bot = instances.find((s) => s.serviceId === 'discord-bot');
-        assert.ok(stopRequested || bot.latestDeployment.status === 'REMOVED');
-        stopReads += 1;
-        if (stopRequested && (stuckStop || stopReads === 1)) {
+        if (bot.latestDeployment?.id === old.id && bot.latestDeployment.status === 'REMOVED')
+          old.status = 'REMOVED';
+        const requested = stopRequested.has(old.id);
+        if (!requested && !['REMOVED', 'REMOVING'].includes(old.status))
+          return { deployment: structuredClone(old) };
+        const reads = (stopReads.get(old.id) || 0) + 1;
+        stopReads.set(old.id, reads);
+        if (requested && (stuckStop || reads === 1)) {
           return {
             deployment: { id: variables.id, status: firstStopStatus, deploymentStopped: false },
           };
         }
         if (stopResult) return { deployment: { id: variables.id, ...stopResult } };
-        if (stopReads <= removedLagReads + Number(stopRequested)) {
+        if (reads <= removedLagReads + Number(requested)) {
           return { deployment: { id: variables.id, status: 'REMOVED', deploymentStopped: false } };
         }
-        bot.activeDeployments = [];
-        bot.latestDeployment.status = 'REMOVED';
+        bot.activeDeployments = bot.activeDeployments.filter(
+          (deployment) => deployment.id !== old.id,
+        );
+        if (bot.latestDeployment?.id === old.id) bot.latestDeployment.status = 'REMOVED';
+        old.status = 'REMOVED';
+        old.deploymentStopped = true;
         return { deployment: { id: variables.id, status: 'REMOVED', deploymentStopped: true } };
       }
       const service = instances.find((s) => s.latestDeployment.id === variables.id);
@@ -119,9 +152,8 @@ function fixture({
       return { deployment: { ...service.latestDeployment, deploymentStopped: false } };
     }
     if (query.includes('mutation DeployPreview')) {
-      assert.equal(
-        instances.find((s) => s.serviceId === 'discord-bot').activeDeployments.length,
-        0,
+      assert.ok(
+        botHistory.every((deployment) => deployment.deploymentStopped === true),
         'must wait until the previous bot has actually stopped',
       );
       assert.equal(variables.environmentId, 'dev');
@@ -139,6 +171,8 @@ function fixture({
     source,
     calls,
     logs,
+    botHistory,
+    sleeps,
     options: {
       projectId: 'project',
       pr: PR,
@@ -151,6 +185,7 @@ function fixture({
       log: (message) => logs.push(message),
       now: () => clock,
       sleep: async (ms) => {
+        sleeps.push(ms);
         clock += ms;
       },
       timeoutMs: 10_000,
@@ -277,6 +312,102 @@ test('manual removal still waits for lagging instance shutdown before restarting
   assert.ok(mutations(calls).every(({ query }) => query.includes('DeployPreview')));
 });
 
+test('a newer failed build does not hide the older gateway deployment', async () => {
+  const { options, environment, botHistory, calls } = fixture({ historyPageSize: 1 });
+  const failed = { id: 'failed-build', status: 'FAILED', deploymentStopped: true };
+  botHistory.unshift(failed);
+  environment.serviceInstances.edges[0].node.latestDeployment = { ...failed };
+  assert.equal((await switchPreview(options)).changed, true);
+  assert.equal(mutations(calls)[0].variables.id, 'discord-bot-old');
+  assert.equal(
+    calls.filter(({ query }) => query.includes('query PreviewBotDeployments')).length,
+    2,
+  );
+  assert.ok(botHistory.every((deployment) => deployment.deploymentStopped));
+});
+
+test('history finds an older draining gateway hidden by a failed head and an empty active list', async () => {
+  const { options, environment, botHistory, calls } = fixture({
+    historyPageSize: 1,
+    removedLagReads: 2,
+  });
+  const failed = { id: 'failed-build', status: 'FAILED', deploymentStopped: true };
+  botHistory[0].status = 'REMOVED';
+  botHistory.unshift(failed);
+  const bot = environment.serviceInstances.edges[0].node;
+  bot.latestDeployment = { ...failed };
+  bot.activeDeployments = [];
+  assert.equal((await switchPreview(options)).changed, true);
+  assert.equal(options.now(), 6000);
+  assert.ok(mutations(calls).every(({ query }) => query.includes('DeployPreview')));
+});
+
+test('IDs observed before confirmation remain tracked if removal hides them from history', async () => {
+  const { options, environment, botHistory, calls } = fixture({
+    omitOldFromHistory: true,
+    removedLagReads: 2,
+  });
+  const failed = { id: 'failed-build', status: 'FAILED', deploymentStopped: true };
+  botHistory.unshift(failed);
+  const bot = environment.serviceInstances.edges[0].node;
+  bot.latestDeployment = { ...failed };
+  assert.equal(
+    (
+      await switchPreview({
+        ...options,
+        confirm: async () => {
+          bot.activeDeployments = [];
+          botHistory.find((deployment) => deployment.id === 'discord-bot-old').status = 'REMOVED';
+          return true;
+        },
+      })
+    ).changed,
+    true,
+  );
+  assert.ok(options.now() > 0);
+  assert.ok(mutations(calls).every(({ query }) => query.includes('DeployPreview')));
+});
+
+test('all prior gateway deployments share the stop deadline', async () => {
+  const { options, botHistory, calls } = fixture({ removedLagReads: 2 });
+  botHistory.push({ id: 'older-gateway', status: 'REMOVED', deploymentStopped: false });
+  await assert.rejects(switchPreview(options), /Timed out/);
+  assert.equal(options.now(), options.stopTimeoutMs);
+  assert.equal(mutations(calls).length, 1);
+});
+
+test('an unfinished bot deployment in history fails before any removal', async () => {
+  const { options, botHistory, calls } = fixture();
+  botHistory.unshift({ id: 'older-build', status: 'BUILDING', deploymentStopped: true });
+  await assert.rejects(switchPreview(options), /older-build.*BUILDING.*resolve it/);
+  assert.deepEqual(mutations(calls), []);
+});
+
+test('a crash-looping bot can be removed even when its first stop poll still reports CRASHED', async () => {
+  const { options, environment } = fixture({ firstStopStatus: 'CRASHED' });
+  environment.serviceInstances.edges[0].node.latestDeployment.status = 'CRASHED';
+  assert.equal((await switchPreview(options)).changed, true);
+  assert.equal(options.now(), 3000);
+});
+
+test('a sleeping backend is accepted and the gateway bot is deployed last', async () => {
+  const { options, calls, logs } = fixture({
+    failService: 'team-tracking',
+    failureStatus: 'SLEEPING',
+  });
+  assert.equal((await switchPreview(options)).changed, true);
+  assert.match(
+    logs.find((line) => line.startsWith('team-tracking:')),
+    /sleeping/,
+  );
+  assert.equal(mutations(calls).at(-1).variables.serviceId, 'discord-bot');
+});
+
+test('a sleeping gateway bot cannot complete the switch', async () => {
+  const { options } = fixture({ failService: 'discord-bot', failureStatus: 'SLEEPING' });
+  await assert.rejects(switchPreview(options), /SLEEPING.*switch did not finish/);
+});
+
 test('sleeping services do not block a switch and sleeping bot removal is confirmed', async () => {
   const { options } = fixture({ initialStatus: 'SLEEPING', firstStopStatus: 'SLEEPING' });
   const result = await switchPreview(options);
@@ -307,10 +438,17 @@ test('REMOVED without shutdown confirmation waits until the stop deadline', asyn
 });
 
 test('the default timeout allows a cold meeting build longer than fifteen minutes', async () => {
-  const { options } = fixture({ buildDelayMs: 20 * 60_000 });
+  const { options, calls, sleeps } = fixture({ buildDelayMs: 20 * 60_000 });
   delete options.timeoutMs;
   assert.equal((await switchPreview(options)).changed, true);
   assert.ok(options.now() > 20 * 60_000);
+  assert.ok(
+    calls.filter(
+      ({ query, variables }) =>
+        query.includes('query PreviewDeployment') && variables.id === 'meeting-new',
+    ).length < 60,
+  );
+  assert.ok(Math.max(...sleeps) <= 30_000);
 });
 
 test('a custom deployment timeout still bounds unfinished builds', async () => {
@@ -339,18 +477,15 @@ test('unconfirmed old-process termination prevents every new deployment', async 
 });
 
 for (const status of ['CRASHED', 'FAILED', 'SKIPPED', 'NEEDS_APPROVAL']) {
-  test(`stop fails promptly on ${status} without confirmed termination`, async () => {
+  test(`stop keeps polling stale ${status} until its deadline without starting deployments`, async () => {
     const { options, calls } = fixture({ stopResult: { status, deploymentStopped: false } });
-    await assert.rejects(
-      switchPreview(options),
-      new RegExp(`${status}.*Termination was not confirmed`),
-    );
-    assert.equal(options.now(), 3000, 'must fail on the terminal status, not the overall timeout');
+    await assert.rejects(switchPreview(options), new RegExp(`Timed out.*${status}`));
+    assert.equal(options.now(), options.stopTimeoutMs);
     assert.equal(mutations(calls).length, 1, 'must not start a new deployment');
   });
 }
 
-for (const status of ['CRASHED', 'FAILED', 'SKIPPED', 'NEEDS_APPROVAL', 'REMOVED', 'SLEEPING']) {
+for (const status of ['CRASHED', 'FAILED', 'SKIPPED', 'NEEDS_APPROVAL', 'REMOVED']) {
   test(`new deployment stops promptly on ${status} instead of waiting for success`, async () => {
     const { options, calls } = fixture({ failService: 'team-tracking', failureStatus: status });
     await assert.rejects(switchPreview(options), new RegExp(`${status}.*switch did not finish`));

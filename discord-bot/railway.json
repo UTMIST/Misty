@@ -10,7 +10,7 @@
   },
   "environments": {
     "pr": {
-      "deploy": { "healthcheckPath": "/health/live" }
+      "deploy": { "healthcheckPath": "/health/live", "preDeployCommand": [] }
     }
   }
 }

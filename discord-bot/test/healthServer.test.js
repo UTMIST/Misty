@@ -27,7 +27,7 @@ test('Discord health follows gateway readiness through connect and disconnect', 
 
 test('Railway PR health checks accept an idle process while persistent readiness stays unavailable', async () => {
   const config = JSON.parse(await readFile(new URL('../railway.json', import.meta.url), 'utf8'));
-  const server = buildHealthServer(null, { idle: true });
+  const server = buildHealthServer(null);
   try {
     const pr = await server.inject(config.environments.pr.deploy.healthcheckPath);
     assert.equal(pr.statusCode, 200);

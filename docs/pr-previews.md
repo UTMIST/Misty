@@ -48,6 +48,12 @@ compatibility, not the correctness of arbitrary changes inside that file.
    count of one or an overlap time of zero alone does not prevent simultaneous
    old/new processes during startup. Keep `meeting` at one replica as usual.
    See [Railway's volume caveats](https://docs.railway.com/volumes/reference#caveats).
+
+   The startup volume requirement applies only to `dev` so this feature does
+   not break existing staging/production deployments that have no volume.
+   Gateway overlap is also a risk there; this PR does not establish a singleton
+   guarantee for those environments. Extending it requires a coordinated
+   infrastructure rollout with volumes provisioned before enforcing the guard.
 6. Set the following on the bot in the `dev` environment's variable editor:
 
    | Variable | Value |
@@ -88,6 +94,8 @@ open **Actions → Preview Discord PR → Run workflow**. Leave the branch on
 `staging`, enter the PR number, and confirm recordings have finished and their
 minutes have arrived. The workflow uses the same selector as the terminal and
 serializes its runs without cancelling an active switch.
+Dispatching from another branch fails the validation job with a staging-branch
+instruction, before the deployment job accesses the `dev` environment.
 
 One-time Actions setup: create a GitHub environment named `dev`, restrict its
 deployment branches to `staging`, and add its `RAILWAY_DEV_TOKEN` secret using a
@@ -119,7 +127,9 @@ For another installation, `MISTY_PREVIEW_PROJECT_ID` overrides the default and
 
 Each new deployment has a 45-minute wait budget. For a slower cold build, use
 `--timeout-minutes 60` (a positive whole number, applied per deployment). Old bot
-shutdown has a separate 15-minute deadline. Actions allows six hours: the
+shutdown has one shared 15-minute deadline for all prior bot deployments.
+Build/queue polls back off from 3 to 30 seconds; shutdown and startup-transition
+polls stay at 3 seconds. Actions allows six hours: the
 current seven-service maximum needs up to 330 minutes of waits plus setup and
 API overhead. Review that budget when adding services or changing timeouts;
 use the terminal for sequences that could exceed the Actions limit.
@@ -139,9 +149,14 @@ automatically and run after the known backend dependencies, before the bot.
 If a new backend must start earlier, update the ordering preference in
 `discord-bot/scripts/lib/preview.js`.
 
-The selector stops the old bot and waits until Railway confirms termination.
-It deploys each configured backend from the selected commit, waits for each
-deployment to succeed, and deploys the bot last. Its pre-deploy step registers
+The selector scans the bot's full paginated deployment history, including
+removed deployments whose instances may still be draining, and retains IDs
+observed before confirmation. A newer failed build cannot hide an older live
+gateway. It removes every deployment that can still run and waits until Railway
+confirms termination before restarting any backend.
+It deploys each configured backend from the selected commit, accepts `SUCCESS`
+or `SLEEPING` for backends, and deploys the bot last. The bot must reach
+`SUCCESS`; sleeping is not sufficient for its gateway. Its pre-deploy step registers
 that PR's command definitions against the dev application. Normal readiness
 requires a connected gateway.
 
@@ -166,11 +181,11 @@ not provide an atomic transaction across all backend deployments.
   switch while deployments are unfinished.
 - Existing sleeping deployments do not block selection. A deployment awaiting
   approval must be approved or cancelled first. While switching, the CLI logs
-  status changes and stops immediately on failed terminal states. `REMOVED`
-  alone does not confirm termination: the selector keeps polling until
-  `deploymentStopped` is true or the stop deadline expires, and starts no new
-  deployment before confirmation. Newly deployed services
-  must reach `SUCCESS`, including a connected gateway for the bot.
+  status changes. New deployments fail on failed terminal states; backend
+  `SLEEPING` is accepted and explicitly reported. After a removal request,
+  even `CRASHED` or `FAILED` may still be a stale status: the selector polls
+  until both `REMOVED` and `deploymentStopped: true` are observed, or the stop
+  deadline expires. It starts no new deployment before confirmation.
 - CLI failures include their installation, login, access, or GraphQL error
   details. Address the reported cause before rerunning the command.
 - Database contents persist across PR selections. The command does not reset
@@ -198,11 +213,14 @@ mode from a PR-name pattern. There is no idle CLI flag. The persistent `dev`
 slot is the supported path for Discord previews.
 
 For automatic PR copies, `railway.json` uses an
-[`environments.pr` health-check override](https://docs.railway.com/config-as-code/reference#pr-environment-overrides)
+[`environments.pr` override](https://docs.railway.com/config-as-code/reference#pr-environment-overrides)
 to check `/health/live`, which returns 200 for a running idle process with
 `discord: disabled`. Railway selects that override for ephemeral deployments;
-it changes only the health-check path. Runtime mode still comes from the same
-environment check, and persistent environments keep `/health/ready`. This
+it sets the liveness path and clears the pre-deploy command so no registration
+is attempted. Directly running the registration CLI in any unknown environment,
+including a PR copy, exits nonzero with an environment error. Runtime mode
+still comes from the same environment check, and persistent environments keep
+their registration step and `/health/ready`. This
 avoids failed-deployment notifications for intentional PR no-ops while an
 accidentally renamed persistent environment still fails readiness.
 
@@ -216,9 +234,10 @@ would otherwise let preview migrations alter the base database. The persistent
 Run `npm test`, `npm run lint`, and `npm run format:check` in `discord-bot`.
 Offline tests cover environment ownership, copied credentials and flags,
 registration suppression, PR liveness and unavailable persistent readiness,
-the stop-before-deploy sequence, lagging shutdown confirmation, source compatibility and service
-inventory, sleeping and terminal deployment states, CLI diagnostics, argument
-validation, confirmation races, cold builds, timeouts, competing deployments,
+the stop-before-deploy sequence, paginated shutdown tracking behind failed
+builds, crash loops, source compatibility and service inventory, sleeping
+backends, CLI diagnostics, argument validation, confirmation races, cold builds,
+polling backoff, timeouts, competing deployments,
 and production/staging exclusion. A live recording round trip is still required
 after provisioning; the automated suite never logs in to Discord or calls paid
 providers.

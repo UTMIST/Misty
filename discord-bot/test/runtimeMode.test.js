@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { readFile } from 'node:fs/promises';
 import { runtimeMode, discordEnvironment } from '../src/runtimeMode.js';
 import { buildHealthServer } from '../src/healthServer.js';
 
@@ -64,7 +65,7 @@ test('missing dev credentials never fall back to inherited staging credentials',
 });
 
 test('disabled Discord is never ready, even without credentials or a client', async () => {
-  const server = buildHealthServer(null, { idle: true });
+  const server = buildHealthServer(null);
   try {
     const response = await server.inject('/health/ready');
     assert.equal(response.statusCode, 503);
@@ -77,17 +78,28 @@ test('disabled Discord is never ready, even without credentials or a client', as
   }
 });
 
-test('PR registration exits before config validation and any Discord request', async () => {
+test('direct registration in idle environments fails before config validation or Discord requests', async () => {
   const script = fileURLToPath(new URL('../src/registerCommands.js', import.meta.url));
-  const { stdout } = await promisify(execFile)(process.execPath, [script], {
-    env: {
-      PATH: process.env.PATH,
-      RAILWAY_ENVIRONMENT_ID: 'pr-environment',
-      RAILWAY_ENVIRONMENT_NAME: 'pr-123',
-    },
-    timeout: 10_000,
-  });
-  assert.match(stdout, /Skipping Discord command registration/);
+  for (const name of ['pr-123', 'Production', 'secondary']) {
+    await assert.rejects(
+      promisify(execFile)(process.execPath, [script], {
+        env: {
+          PATH: process.env.PATH,
+          RAILWAY_ENVIRONMENT_ID: 'other-environment',
+          RAILWAY_ENVIRONMENT_NAME: name,
+        },
+        timeout: 10_000,
+      }),
+      (error) => error.code === 2 && /Refusing Discord command registration/.test(error.stderr),
+    );
+  }
+  const config = JSON.parse(await readFile(new URL('../railway.json', import.meta.url), 'utf8'));
+  assert.deepEqual(
+    config.environments.pr.deploy.preDeployCommand,
+    [],
+    'ephemeral PR deployments explicitly omit registration',
+  );
+  assert.equal(config.deploy.preDeployCommand, 'node src/registerCommands.js');
 });
 
 test('preview boot refuses to connect without a volume', async () => {

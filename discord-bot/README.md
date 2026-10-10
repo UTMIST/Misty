@@ -20,7 +20,8 @@ Use `npm run preview -- <pr>` or GitHub Actions → **Preview Discord PR** after
 the [one-time setup](../docs/pr-previews.md). Automatic Railway PR copies keep
 Discord disabled, skip command registration, and use a liveness health check.
 
-Preview-only configuration (leave unset locally and on staging/production):
+Preview configuration (bot credentials belong only in `dev`; the selector
+override is optional in your shell):
 
 | Variable | Purpose |
 |---|---|
@@ -28,6 +29,7 @@ Preview-only configuration (leave unset locally and on staging/production):
 | `DISCORD_TOKEN_DEV` | Dedicated dev application's bot token. |
 | `DISCORD_CLIENT_ID_DEV` | Dedicated dev application's application ID. |
 | `DISCORD_GUILD_ID_DEV` | Test guild for the dev application, including beta commands. |
+| `MISTY_PREVIEW_PROJECT_ID` | Optional selector-only project override; export in the shell. Defaults to Misty's project and is overridden by `--project`. The selector does not load `.env`. |
 
 The preview CLI defaults to Misty's Railway project. To target another project,
 set `MISTY_PREVIEW_PROJECT_ID` in the shell or pass `--project` (which takes

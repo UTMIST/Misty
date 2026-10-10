@@ -24,20 +24,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  preview:
-    if: github.ref == 'refs/heads/staging'
+  validate:
     runs-on: ubuntu-latest
-    # Seven services at 45 minutes each, a 15-minute stop, and setup/API headroom.
-    timeout-minutes: 360
-    # Restrict this GitHub environment to staging and give it a Railway
-    # project token scoped only to Railway's dev environment.
-    environment: dev
+    timeout-minutes: 5
     steps:
       - name: Validate selection
         env:
           PREVIEW_PR: ${{ inputs.pr }}
           RECORDINGS_STOPPED: ${{ inputs.recordings_stopped }}
         run: |
+          if [[ "$GITHUB_REF" != "refs/heads/staging" ]]; then
+            echo "::error::Run Preview Discord PR from the staging branch."
+            exit 1
+          fi
           if [[ ! "$PREVIEW_PR" =~ ^[1-9][0-9]*$ ]]; then
             echo "::error::Enter a positive PR number."
             exit 1
@@ -46,6 +45,15 @@ jobs:
             echo "::error::Stop recordings and wait for minutes before switching."
             exit 1
           fi
+  preview:
+    needs: validate
+    runs-on: ubuntu-latest
+    # Seven services at 45 minutes each, a 15-minute stop, and setup/API headroom.
+    timeout-minutes: 360
+    # Restrict this GitHub environment to staging and give it a Railway
+    # project token scoped only to Railway's dev environment.
+    environment: dev
+    steps:
       - uses: actions/checkout@v4
         with:
           ref: staging

@@ -45,6 +45,12 @@ export const ENVIRONMENT_QUERY = `query PreviewEnvironment($id: String!) {
 const DEPLOYMENT_QUERY = `query PreviewDeployment($id: String!) {
   deployment(id: $id) { id status deploymentStopped }
 }`;
+const BOT_DEPLOYMENTS_QUERY = `query PreviewBotDeployments($environmentId: String!, $serviceId: String!, $after: String) {
+  deployments(input: { environmentId: $environmentId, serviceId: $serviceId, includeDeleted: true }, first: 100, after: $after) {
+    edges { node { id status deploymentStopped } }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
 const REMOVE = `mutation StopPreview($id: String!) { deploymentRemove(id: $id) }`;
 const DEPLOY = `mutation DeployPreview($environmentId: String!, $serviceId: String!, $commitSha: String!) {
   serviceInstanceDeployV2(environmentId: $environmentId, serviceId: $serviceId, commitSha: $commitSha)
@@ -142,42 +148,90 @@ export function validateEnvironment(environment, expectedServices) {
   );
 }
 
-async function waitFor(api, id, stopped, { sleep, now, timeoutMs, log }) {
+async function waitFor(api, id, stopped, { sleep, now, timeoutMs, log, allowSleeping = false }) {
   const deadline = now() + timeoutMs;
   let lastState;
+  let intervalMs = 3000;
   while (now() < deadline) {
     const { deployment } = await api(DEPLOYMENT_QUERY, { id });
     const state = `${deployment.status}${stopped ? ` (deploymentStopped: ${deployment.deploymentStopped})` : ''}`;
     if (state !== lastState) {
       log(`Deployment ${id}: ${state}.`);
       lastState = state;
+      intervalMs = 3000;
+    } else if (
+      !stopped &&
+      ['BUILDING', 'QUEUED', 'INITIALIZING', 'WAITING'].includes(deployment.status)
+    ) {
+      intervalMs = Math.min(intervalMs * 2, 30_000);
+    } else {
+      intervalMs = 3000;
     }
     if (stopped) {
-      if (deployment.status === 'REMOVED' && deployment.deploymentStopped === true) return;
+      if (deployment.status === 'REMOVED' && deployment.deploymentStopped === true)
+        return deployment.status;
       // Removal and instance shutdown are separate signals. REMOVED may
       // precede deploymentStopped; keep polling until both confirm shutdown.
-      if (
-        FINISHED.has(deployment.status) &&
-        deployment.status !== 'SUCCESS' &&
-        deployment.status !== 'SLEEPING' &&
-        deployment.status !== 'REMOVED'
-      ) {
-        throw new Error(
-          `Deployment ${id}: ${state}. Termination was not confirmed; inspect it before retrying. No new deployments were started.`,
-        );
-      }
+      // Any status (including CRASHED/FAILED) can lag an accepted stop request.
     } else {
-      if (deployment.status === 'SUCCESS') return;
+      if (deployment.status === 'SUCCESS' || (allowSleeping && deployment.status === 'SLEEPING'))
+        return deployment.status;
       if (FINISHED.has(deployment.status)) {
         throw new Error(
           `Deployment ${id}: ${deployment.status}. The preview switch did not finish.`,
         );
       }
     }
-    await sleep(3000);
+    const remaining = deadline - now();
+    if (remaining > 0) await sleep(Math.min(intervalMs, remaining));
   }
   throw new Error(
     `Timed out waiting for deployment ${id}: ${lastState}. Inspect it before retrying.`,
+  );
+}
+
+async function readBotDeployments(api, environmentId, bot, previouslyObserved) {
+  const history = new Map();
+  let after = null;
+  do {
+    const { deployments } = await api(BOT_DEPLOYMENTS_QUERY, {
+      environmentId,
+      serviceId: bot.serviceId,
+      after,
+    });
+    for (const deployment of nodes(deployments)) history.set(deployment.id, deployment);
+    if (!deployments.pageInfo.hasNextPage) break;
+    const cursor = deployments.pageInfo.endCursor;
+    if (!cursor || cursor === after)
+      throw new Error('Incomplete bot deployment history; refusing to switch.');
+    after = cursor;
+  } while (after);
+  // Preserve IDs seen before/during confirmation even if a concurrent removal
+  // has already made them disappear from the history or active deployment list.
+  for (const instance of [previouslyObserved, bot]) {
+    for (const observed of [...instance.activeDeployments, instance.latestDeployment].filter(
+      Boolean,
+    )) {
+      if (!history.has(observed.id)) {
+        const { deployment } = await api(DEPLOYMENT_QUERY, { id: observed.id });
+        history.set(observed.id, deployment);
+      }
+    }
+  }
+  for (const deployment of history.values()) {
+    if (
+      (!FINISHED.has(deployment.status) && deployment.status !== 'REMOVING') ||
+      deployment.status === 'NEEDS_APPROVAL'
+    ) {
+      throw new Error(
+        `Bot deployment ${deployment.id} is ${deployment.status}; resolve it before switching.`,
+      );
+    }
+  }
+  return [...history.values()].filter(
+    (deployment) =>
+      deployment.deploymentStopped !== true ||
+      ['SUCCESS', 'SLEEPING', 'CRASHED'].includes(deployment.status),
   );
 }
 
@@ -233,20 +287,26 @@ export async function switchPreview({
   // for actual removal, not merely a successful request to remove it.
   const bot = refreshed.find((service) => service.serviceName === 'discord-bot');
   const waitOptions = { sleep, now, timeoutMs, log };
-  for (const deployment of bot.activeDeployments) {
-    log(`Disconnecting previous preview (${deployment.id})…`);
-    const removed = await api(REMOVE, { id: deployment.id });
-    if (!removed.deploymentRemove) throw new Error('Railway did not accept the stop request.');
-    await waitFor(api, deployment.id, true, { ...waitOptions, timeoutMs: stopTimeoutMs });
-  }
-  // An operator may have removed the bot during confirmation. It can disappear
-  // from activeDeployments before its instances have actually stopped.
-  if (
-    bot.latestDeployment?.status === 'REMOVED' &&
-    !bot.activeDeployments.some((deployment) => deployment.id === bot.latestDeployment.id)
-  ) {
-    log(`Confirming previous preview shutdown (${bot.latestDeployment.id})…`);
-    await waitFor(api, bot.latestDeployment.id, true, { ...waitOptions, timeoutMs: stopTimeoutMs });
+  const stopDeadline = now() + stopTimeoutMs;
+  const oldDeployments = await readBotDeployments(
+    api,
+    target.id,
+    bot,
+    services.find((service) => service.serviceName === 'discord-bot'),
+  );
+  for (const deployment of oldDeployments) {
+    const remaining = stopDeadline - now();
+    if (remaining <= 0)
+      throw new Error(
+        'Timed out confirming previous bot shutdown. No new deployments were started.',
+      );
+    if (!['REMOVED', 'REMOVING'].includes(deployment.status)) {
+      log(`Disconnecting previous preview (${deployment.id})…`);
+      const removed = await api(REMOVE, { id: deployment.id });
+      if (!removed.deploymentRemove) throw new Error('Railway did not accept the stop request.');
+    }
+    log(`Confirming previous preview shutdown (${deployment.id})…`);
+    await waitFor(api, deployment.id, true, { ...waitOptions, timeoutMs: stopDeadline - now() });
   }
 
   const completed = new Map();
@@ -273,16 +333,20 @@ export async function switchPreview({
     });
     const id = result.serviceInstanceDeployV2;
     if (!id) throw new Error('Railway returned no deployment ID. Inspect dev before retrying.');
-    await waitFor(api, id, false, waitOptions);
+    const status = await waitFor(api, id, false, {
+      ...waitOptions,
+      allowSleeping: service.serviceName !== 'discord-bot',
+    });
     completed.set(service.serviceId, id);
-    log(`${service.serviceName}: ready (${id}).`);
+    log(`${service.serviceName}: ${status.toLowerCase()} (${id}).`);
   }
   const final = await readServices();
   const owners = final.find((service) => service.serviceName === 'discord-bot').activeDeployments;
   if (
     final.some((service) => service.latestDeployment?.id !== completed.get(service.serviceId)) ||
     owners.length !== 1 ||
-    owners[0].id !== completed.get(bot.serviceId)
+    owners[0].id !== completed.get(bot.serviceId) ||
+    owners[0].status !== 'SUCCESS'
   ) {
     throw new Error('Another deployment changed the preview before verification completed.');
   }

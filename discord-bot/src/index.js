@@ -10,17 +10,22 @@ import { runtimeMode } from './runtimeMode.js';
 async function main() {
   const mode = runtimeMode();
   if (mode === 'idle') {
-    await startHealthServer(null, process.env.PORT || 3002, { idle: true });
+    await startHealthServer(null, process.env.PORT || 3002);
     console.log(
       'Discord disabled in this Railway environment. Liveness is available; gateway readiness remains unavailable.',
     );
     return;
   }
+  const enableDiscord = process.env.ENABLE_DISCORD !== 'false';
+  const enableWeb = process.env.ENABLE_WEB === 'true';
   if (mode === 'preview') {
+    // This PR adds the singleton-volume requirement to dev only. Applying it
+    // to existing staging/production needs a coordinated infrastructure change;
+    // their rollout behavior is intentionally outside this preview feature.
     if (!process.env.RAILWAY_VOLUME_MOUNT_PATH) {
       throw new Error('dev requires a Railway volume to prevent overlapping bot deployments.');
     }
-    if (process.env.ENABLE_DISCORD === 'false' || process.env.ENABLE_WEB === 'true') {
+    if (!enableDiscord || enableWeb) {
       throw new Error('dev requires ENABLE_DISCORD=true and ENABLE_WEB=false.');
     }
   }
@@ -32,9 +37,6 @@ async function main() {
     poster: makeAttachmentPoster(),
     notify: makeChannelNotifier(),
   });
-
-  const enableDiscord = process.env.ENABLE_DISCORD !== 'false';
-  const enableWeb = process.env.ENABLE_WEB === 'true';
 
   if (enableDiscord) {
     // MessageContent is required to pass full helper-thread history to the LLM.

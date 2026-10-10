@@ -42,8 +42,10 @@ export function buildDiscordData(command) {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   if (runtimeMode() === 'idle') {
-    console.log('Skipping Discord command registration in this Railway environment.');
-    process.exit(0);
+    console.error(
+      'Refusing Discord command registration in an unrecognized Railway environment. Use production, staging, or the configured dev environment.',
+    );
+    process.exit(2);
   }
   const config = loadConfig();
   const { stable, beta } = partitionCommands([...commands.values()]);
