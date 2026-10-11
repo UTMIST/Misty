@@ -5,6 +5,10 @@ on:
     branches: [main, staging]
   push:
     branches: [main, staging]
+  # Every required staging check must also test GitHub's queued merge commit.
+  merge_group:
+    types: [checks_requested]
+    branches: [staging]
 
 jobs:
   python-test:

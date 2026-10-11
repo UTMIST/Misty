@@ -1,5 +1,5 @@
 import { defineCommand } from '../defineCommand.js';
-import { renderMyTeamsResult } from '../messages.js';
+import { renderMyTeamsResult } from '../messages/team.js';
 
 export default defineCommand({
   name: 'my-teams',

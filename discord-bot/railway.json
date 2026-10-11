@@ -3,7 +3,17 @@
   "build": { "builder": "DOCKERFILE", "dockerfilePath": "Dockerfile" },
   "deploy": {
     "startCommand": "node src/index.js",
+    "preDeployCommand": "node src/registerCommands.js",
+    "preDeployTimeoutSeconds": 120,
     "healthcheckPath": "/health/ready",
     "restartPolicyType": "ON_FAILURE"
+  },
+  "environments": {
+    "pr": {
+      "deploy": {
+        "healthcheckPath": "/health/live",
+        "preDeployCommand": "node scripts/pr-predeploy.js"
+      }
+    }
   }
 }

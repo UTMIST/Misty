@@ -1,5 +1,5 @@
 import { defineCommand } from '../defineCommand.js';
-import { renderVerifyCodeResult } from '../messages.js';
+import { renderVerifyCodeResult } from '../messages/link.js';
 
 export default defineCommand({
   name: 'verify-code',

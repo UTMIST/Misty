@@ -2,7 +2,7 @@ import { defineCommand } from '../defineCommand.js';
 
 // Registration-only. This command exists so registerCommands.js registers the
 // `/record` slash command (and its subcommands) with Discord. The
-// interactionCreate handler in src/adapters/discord.js intercepts
+// interactionCreate handler in src/adapters/discord/index.js intercepts
 // commandName === 'record' BEFORE the neutral dispatch path and routes
 // straight to appContext.meetingSurface — the handlers below are never
 // invoked in production. They exist only so defineCommand's validation
@@ -25,6 +25,15 @@ export default defineCommand({
       // must be authenticated.
       name: 'start',
       description: 'Start recording the voice channel you are in',
+      options: [
+        {
+          name: 'name',
+          type: 'string',
+          required: false,
+          description: 'Name for the meeting minutes',
+          maxLength: 100,
+        },
+      ],
       handler: unreachable,
     },
     {

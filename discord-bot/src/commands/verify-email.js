@@ -1,5 +1,5 @@
 import { defineCommand } from '../defineCommand.js';
-import { renderVerifyEmailResult } from '../messages.js';
+import { renderVerifyEmailResult } from '../messages/email.js';
 
 export default defineCommand({
   name: 'verify-email',

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSeedService, llmSafe } from '../src/seedService.js';
-import { PersonExists, DirectoryUnavailable } from '../src/directoryClient.js';
+import { createSeedService, llmSafe } from '../src/services/seedService.js';
+import { PersonExists, DirectoryUnavailable } from '../src/clients/directoryClient.js';
 
 const adminCaller = { id: 'a', display_name: 'Admin', access_level: 'admin' };
 const memberCaller = { id: 'm', display_name: 'Member', access_level: 'member' };
