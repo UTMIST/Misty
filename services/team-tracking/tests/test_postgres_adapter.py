@@ -1,9 +1,10 @@
+import contextlib
 import threading
 from datetime import date
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from contracts.types import (
@@ -652,3 +653,53 @@ def test_pg_team_google_group_upsert(adapter):
             last_synced_at=None,
             actor="t",
         )
+
+
+def test_pg_stale_sync_in_another_process_cannot_readd_a_revoked_member(clean_db, monkeypatch):
+    """A CLI run pauses before adding Ada; meanwhile the API ends her membership
+    and syncs. Two engines and no in-process lock stand in for two processes,
+    so only the Postgres advisory lock can keep the API sync waiting."""
+    from test_google_groups import FakeGroups
+
+    from src import google_groups
+
+    monkeypatch.setattr(google_groups, "_lock", contextlib.nullcontext())
+
+    class PausingGroups(FakeGroups):
+        def __init__(self):
+            super().__init__()
+            self.paused, self.resume = threading.Event(), threading.Event()
+
+        def add_member(self, group_name, email):
+            if not self.resume.is_set():
+                self.paused.set()
+                assert self.resume.wait(10)
+            super().add_member(group_name, email)
+
+    cli = PostgresStorageAdapter(clean_db)
+    api = PostgresStorageAdapter(create_engine(clean_db.url, future=True))
+    groups = PausingGroups()
+    team = api.create_team(TeamCreate(slug="ml", label="ML"), actor="t")
+    google_groups.sync_team(api, groups, team.id, actor="api")  # create the group
+    ada = api.create_person(PersonCreate(display_name="Ada", primary_email="ada@x.ca"), actor="t")
+    m = api.create_membership(TeamMembershipCreate(person_id=ada.id, team_id=team.id), actor="t")
+
+    stale = threading.Thread(
+        target=google_groups.sync_team, args=(cli, groups, team.id), kwargs={"actor": "cli"}
+    )
+    stale.start()
+    assert groups.paused.wait(10)
+    api.end_membership(m.id, date.today(), actor="t")
+    fresh = threading.Thread(
+        target=google_groups.sync_team, args=(api, groups, team.id), kwargs={"actor": "api"}
+    )
+    fresh.start()
+    fresh.join(0.5)
+    assert fresh.is_alive(), "API sync must wait for the in-flight CLI sync"
+
+    groups.resume.set()
+    stale.join(10)
+    fresh.join(10)
+    state = api.get_team_google_group(team.id)
+    assert groups.members[state.group_name] == {}
+    assert (state.status, state.updated_by) == ("synced", "api")

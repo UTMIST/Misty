@@ -33,9 +33,11 @@ class GroupProvider(Protocol):
 
     def add_member(self, group_name: str, email: str) -> None:
         """Add `email` as a MEMBER. Already a member is success. Raises
-        ExternalMembersDisabled when the group refuses outside members."""
+        ExternalMembersDisabled when the group refuses outside members, and
+        GroupProviderError unless the change is confirmed complete."""
         ...
 
     def remove_member(self, membership_name: str) -> None:
-        """Delete the membership. Already gone is success."""
+        """Delete the membership. Already gone is success. Raises
+        GroupProviderError unless the removal is confirmed complete."""
         ...

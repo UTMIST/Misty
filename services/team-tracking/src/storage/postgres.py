@@ -1,3 +1,5 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from uuid import UUID
 
@@ -657,6 +659,22 @@ class PostgresStorageAdapter:
         except IntegrityError as e:
             raise ValueError("team_id not found") from e
         return TeamGoogleGroup(**row._mapping)
+
+    @contextmanager
+    def lock_team_google_group(self, team_id: UUID) -> Iterator[None]:
+        """Session-level advisory lock on a dedicated connection, so it spans
+        the whole sync and every process. A hashtext collision only
+        over-serializes, never under-serializes. If the connection dies, the
+        server drops the lock with it."""
+        key = func.hashtext(f"google-group:{team_id}")
+        with self._engine.connect() as conn:
+            conn.execute(select(func.pg_advisory_lock(key)))
+            conn.commit()  # don't sit idle in a transaction for the whole sync
+            try:
+                yield
+            finally:
+                conn.execute(select(func.pg_advisory_unlock(key)))
+                conn.commit()
 
     def add_person_email(self, person_id: UUID, email: str, *, actor: str) -> PersonIdentifier:
         addr = _norm_email(email)

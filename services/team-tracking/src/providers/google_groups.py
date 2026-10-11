@@ -10,6 +10,9 @@ from contracts.groups import ExternalMembersDisabled, GroupProviderError
 API = "https://cloudidentity.googleapis.com/v1"
 SCOPE = "https://www.googleapis.com/auth/cloud-identity.groups"
 TOKEN_URI = "https://oauth2.googleapis.com/token"
+# google.rpc.Code values carried in an Operation's `error.code`
+NOT_FOUND = 5
+ALREADY_EXISTS = 6
 
 
 class GoogleGroupsProvider:
@@ -58,8 +61,19 @@ class GoogleGroupsProvider:
 
     @staticmethod
     def _error(status: int, body: dict, what: str) -> GroupProviderError:
-        message = (body.get("error") or {}).get("message", "")
-        return GroupProviderError(f"{what}: HTTP {status} {message}".strip())
+        err = body.get("error") or {}
+        where = f"HTTP {status}" if status >= 400 else f"operation error {err.get('code', '')}"
+        return GroupProviderError(f"{what}: {where} {err.get('message', '')}".strip())
+
+    def _finished(self, status: int, body: dict, what: str) -> dict:
+        """Return a long-running Operation's `response`. Raises unless the call
+        succeeded and the Operation is `done` without an `error`; an unfinished
+        one is a retryable failure, picked up by the next sync."""
+        if status >= 400 or body.get("error"):
+            raise self._error(status, body, what)
+        if not body.get("done"):
+            raise GroupProviderError(f"{what}: operation not finished; retry")
+        return body.get("response") or {}
 
     def create_group(self, email: str, display_name: str, description: str) -> str:
         status, body = self._call(
@@ -76,14 +90,10 @@ class GoogleGroupsProvider:
         )
         if status == 409:
             return self._adopt(email, description)
-        if status >= 400:
-            raise self._error(status, body, "create group")
-        if body.get("error"):
-            raise GroupProviderError(f"create group: {body['error'].get('message', '')}")
-        name = (body.get("response") or {}).get("name")
-        if not body.get("done") or not name:
-            # The next sync's create gets a 409 and adopts the finished group.
-            raise GroupProviderError("create group: operation not finished; retry")
+        # An unfinished create is retried: the next sync gets a 409 and adopts it.
+        name = self._finished(status, body, "create group").get("name")
+        if not name:
+            raise GroupProviderError("create group: operation returned no group; retry")
         return name
 
     def _adopt(self, email: str, description: str) -> str:
@@ -117,18 +127,19 @@ class GoogleGroupsProvider:
             f"{group_name}/memberships",
             json={"preferredMemberKey": {"id": email}, "roles": [{"name": "MEMBER"}]},
         )
-        if status < 400 or status == 409:
+        err = body.get("error") or {}
+        if status == 409 or err.get("code") == ALREADY_EXISTS:
             return
-        message = (body.get("error") or {}).get("message", "").lower()
+        message = err.get("message", "").lower()
         # ponytail: matched on message text; #236 only recorded that the error
         # says the group disallows members "outside" the organization. Update
         # this if Google's wording changes.
         if "outside" in message or "external" in message:
             raise ExternalMembersDisabled(message)
-        raise self._error(status, body, f"add member {email}")
+        self._finished(status, body, f"add member {email}")
 
     def remove_member(self, membership_name: str) -> None:
         status, body = self._call("DELETE", membership_name)
-        if status < 400 or status == 404:
+        if status == 404 or (body.get("error") or {}).get("code") == NOT_FOUND:
             return
-        raise self._error(status, body, "remove member")
+        self._finished(status, body, "remove member")

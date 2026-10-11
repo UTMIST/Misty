@@ -7,7 +7,7 @@ from contracts.storage import StorageAdapter
 from contracts.types import Team, TeamCreate, TeamGoogleGroup, TeamUpdate
 from src.api.auth import AuthedKey, get_actor, require_scope
 from src.api.deps import get_group_provider, get_storage
-from src.google_groups import schedule_sync, sync_team
+from src.google_groups import schedule_sync, sync_team, synced_team_for_group
 from src.storage.errors import UnknownParentTeamError
 
 router = APIRouter(prefix="/teams", tags=["teams"])
@@ -59,6 +59,18 @@ def list_team_google_groups(
     _: AuthedKey = Depends(require_scope("teams:read")),
 ) -> list[TeamGoogleGroup]:
     return storage.list_team_google_groups()
+
+
+@router.get("/by-synced-google-group/{email}", response_model=Team)
+def get_team_by_synced_google_group(
+    email: str,
+    storage: StorageAdapter = Depends(get_storage),
+    _: AuthedKey = Depends(require_scope("teams:read")),
+) -> Team:
+    team = synced_team_for_group(storage, email)
+    if team is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="no synced team group")
+    return team
 
 
 @router.get("/{team_id}", response_model=Team)

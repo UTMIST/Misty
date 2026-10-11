@@ -1,3 +1,4 @@
+import threading
 from datetime import date, datetime, timezone
 from uuid import UUID, uuid4
 
@@ -74,6 +75,7 @@ class InMemoryStorageAdapter:
         # (guild_id, channel_id) -> (team_ids, created_by)
         self._channel_teams: dict[tuple[str, str], tuple[list[UUID], str]] = {}
         self._google_groups: dict[UUID, TeamGoogleGroup] = {}
+        self._google_group_lock = threading.Lock()
 
     # --- People ---
 
@@ -582,3 +584,7 @@ class InMemoryStorageAdapter:
         )
         self._google_groups[team_id] = row
         return row
+
+    def lock_team_google_group(self, team_id: UUID) -> threading.Lock:
+        # One process is all that can share this storage, so one lock suffices.
+        return self._google_group_lock

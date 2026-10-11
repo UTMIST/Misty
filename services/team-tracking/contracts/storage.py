@@ -1,3 +1,4 @@
+from contextlib import AbstractContextManager
 from datetime import date, datetime
 from typing import Protocol
 from uuid import UUID
@@ -225,4 +226,9 @@ class StorageAdapter(Protocol):
     ) -> TeamGoogleGroup:
         """Insert or overwrite the team's row; every field is replaced as given.
         Raises ValueError('team_id not found') for an unknown team."""
+        ...
+
+    def lock_team_google_group(self, team_id: UUID) -> AbstractContextManager[None]:
+        """Exclusive per-team lock, held across one whole sync. Must exclude
+        every process sharing this storage (API workers and the CLI cron)."""
         ...

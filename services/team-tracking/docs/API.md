@@ -430,7 +430,7 @@ Syncing happens after the response, never inside it: `POST`/`PATCH /teams`, `POS
 
 - `synced`: Google matches Team Tracking as of `last_synced_at`.
 - `needs_external_members`: the group exists but refuses addresses outside the managed domain. A group owner must enable **Allow external members** in Google Groups, then call the sync endpoint below. Internal addresses and removals were still applied.
-- `failed`: the group could not be created or read. `last_error` says why. Retry with the sync endpoint.
+- `failed`: the group could not be created or read, or at least one member add/remove failed or hadn't finished on Google's side. Every other change was still attempted, so one bad address never blocks another member's removal. `last_error` lists each failure, separated by `; `. Retry with the sync endpoint.
 
 A team with no row has never been synced, either because Google Groups is unconfigured or because no write or backfill has touched the team yet.
 
@@ -441,6 +441,18 @@ Every team's mapping (including retired teams, whose groups are kept but emptied
 ### GET /teams/{team_id}/google-group
 
 One team's mapping. **Scope:** `teams:read`. **Errors:** 404 if the team has no mapping.
+
+### GET /teams/by-synced-google-group/{email}
+
+The team (same body as `GET /teams/{team_id}`) whose managed group has this address, matched case-insensitively. Fails closed for access decisions: it answers only when the team's last sync is `synced`. Retired teams still resolve (check `active` in the body); their synced group is empty, so the mapping grants no one access. **Scope:** `teams:read`.
+
+**Errors:** 404 for an unknown address or a mapping in `needs_external_members` or `failed`. This reads the recorded sync state and makes no Google call.
+
+### GET /people/{person_id}/synced-google-teams
+
+Mappings (same shape as `GET /teams/google-groups`) for the `synced` teams whose Google Group currently contains this person as a MEMBER under their `primary_email` or any verified `email` identifier. Membership is read live from Google, one call per synced team, so it reflects Google even when the directory disagrees. Owners and managers don't count. **Scope:** `people:read`.
+
+**Errors:** 404 if the person does not exist. 503 if Google Groups is not configured or Google can't be read; there is no partial answer.
 
 ### POST /teams/{team_id}/google-group/sync
 

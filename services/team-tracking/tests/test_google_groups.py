@@ -1,5 +1,5 @@
 from datetime import date, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -175,6 +175,46 @@ def test_external_members_disabled_is_visible_then_recoverable(storage, groups):
     assert _emails(groups, state) == {"ada@gmail.com", "bob@utmist.example"}
 
 
+def test_failing_addition_does_not_block_revocation(storage, groups):
+    team = _team(storage)
+    leaves = _member(storage, team, "leaves@gmail.com")
+    state = sync_team(storage, groups, team.id, actor="t")
+    (m,) = storage.list_memberships(person_id=leaves.id)
+    storage.end_membership(m.id, date.today(), actor="t")
+    _member(storage, team, "rejected@gmail.com")
+
+    real_add = groups.add_member
+
+    def add_member(group_name, email):
+        if email == "rejected@gmail.com":
+            raise GroupProviderError("add member rejected@gmail.com: HTTP 400 invalid")
+        real_add(group_name, email)
+
+    groups.add_member = add_member
+    state = sync_team(storage, groups, team.id, actor="t")
+
+    assert _emails(groups, state) == set()
+    assert state.status == "failed" and "rejected@gmail.com" in state.last_error
+
+
+def test_external_block_alongside_another_failure_is_failed_with_both(storage, groups):
+    team = _team(storage)
+    _member(storage, team, "ada@gmail.com")
+    state = sync_team(storage, groups, team.id, actor="t")
+    stale = f"{state.group_name}/memberships/gone@gmail.com"
+    groups.members[state.group_name]["gone@gmail.com"] = stale
+    groups.members[state.group_name].pop("ada@gmail.com")
+    groups.external_allowed = False
+
+    def remove_member(membership_name):
+        raise GroupProviderError("remove member: HTTP 503 unavailable")
+
+    groups.remove_member = remove_member
+    state = sync_team(storage, groups, team.id, actor="t")
+    assert state.status == "failed"
+    assert "503" in state.last_error and "Allow external members" in state.last_error
+
+
 def test_failed_creation_is_recorded_and_retry_succeeds(storage, groups):
     team = _team(storage)
     _member(storage, team, "ada@gmail.com")
@@ -285,6 +325,58 @@ def test_unconfigured_provider_skips_sync_and_endpoint_503s(client):
     team = client.post("/teams", json={"slug": "ml", "label": "ML"}, headers=AUTH).json()
     assert client.get(f"/teams/{team['id']}/google-group", headers=AUTH).status_code == 404
     assert client.post(f"/teams/{team['id']}/google-group/sync", headers=AUTH).status_code == 503
+
+
+def test_team_lookup_by_group_requires_synced_status(client, storage, groups):
+    team = client.post("/teams", json={"slug": "ml", "label": "ML"}, headers=AUTH).json()
+    url = "/teams/by-synced-google-group/ML@utmist.example"
+    got = client.get(url, headers=AUTH)
+    assert got.status_code == 200 and got.json()["id"] == team["id"]
+
+    state = storage.get_team_google_group(UUID(team["id"]))
+    for bad in ("needs_external_members", "failed"):
+        storage.put_team_google_group(
+            state.team_id,
+            group_email=state.group_email,
+            group_name=state.group_name,
+            status=bad,
+            last_error="x",
+            last_synced_at=None,
+            actor="t",
+        )
+        assert client.get(url, headers=AUTH).status_code == 404
+
+    client.post(f"/teams/{team['id']}/google-group/sync", headers=AUTH)
+    client.patch(f"/teams/{team['id']}", json={"active": False}, headers=AUTH)
+    retired = client.get(url, headers=AUTH)
+    assert retired.status_code == 200 and retired.json()["active"] is False
+    assert client.get("/teams/by-synced-google-group/x@y", headers=AUTH).status_code == 404
+
+
+def test_synced_google_teams_reads_google_live(client, storage, groups):
+    ml = client.post("/teams", json={"slug": "ml", "label": "ML"}, headers=AUTH).json()
+    client.post("/teams", json={"slug": "ops", "label": "Ops"}, headers=AUTH)
+    person = client.post(
+        "/people", json={"display_name": "Ada", "primary_email": "ada@gmail.com"}, headers=AUTH
+    ).json()
+    client.post("/memberships", json={"person_id": person["id"], "team_id": ml["id"]}, headers=AUTH)
+    url = f"/people/{person['id']}/synced-google-teams"
+    assert [g["team_id"] for g in client.get(url, headers=AUTH).json()] == [ml["id"]]
+
+    # Google is the authority: a verified alternate address counts, and a
+    # member removed on Google's side is gone even though the directory says otherwise.
+    name = storage.get_team_google_group(UUID(ml["id"])).group_name
+    groups.members[name] = {"ada@alumni.ca": "m/1"}
+    storage.add_person_email(UUID(person["id"]), "ada@alumni.ca", actor="t")
+    assert [g["team_id"] for g in client.get(url, headers=AUTH).json()] == [ml["id"]]
+    groups.members[name] = {}
+    assert client.get(url, headers=AUTH).json() == []
+
+    groups.fail = "list_members"
+    assert client.get(url, headers=AUTH).status_code == 503
+    assert client.get(f"/people/{uuid4()}/synced-google-teams", headers=AUTH).status_code == 404
+    client.app.dependency_overrides[get_group_provider] = lambda: None
+    assert client.get(url, headers=AUTH).status_code == 503
 
 
 def test_retired_team_sync_endpoint_409(client):
@@ -404,7 +496,12 @@ def test_provider_lists_only_plain_members_across_pages():
 
 
 def test_provider_add_member_outcomes():
-    p, _ = _provider(FakeResponse(200, {"done": True}), FakeResponse(409, {}))
+    p, _ = _provider(
+        FakeResponse(200, {"done": True}),
+        FakeResponse(409, {}),
+        FakeResponse(200, {"done": True, "error": {"code": 6, "message": "exists"}}),
+    )
+    p.add_member("groups/abc", "ada@x")
     p.add_member("groups/abc", "ada@x")
     p.add_member("groups/abc", "ada@x")
 
@@ -421,12 +518,61 @@ def test_provider_add_member_outcomes():
 
 
 def test_provider_remove_member_tolerates_already_gone():
-    p, s = _provider(FakeResponse(200, {}), FakeResponse(404, {}), FakeResponse(500, None))
+    p, s = _provider(
+        FakeResponse(200, {"done": True}),
+        FakeResponse(404, {}),
+        FakeResponse(200, {"done": True, "error": {"code": 5, "message": "gone"}}),
+        FakeResponse(500, None),
+    )
+    p.remove_member("groups/abc/memberships/1")
     p.remove_member("groups/abc/memberships/1")
     p.remove_member("groups/abc/memberships/1")
     assert s.calls[0][0] == "DELETE" and s.calls[0][1].endswith("/groups/abc/memberships/1")
     with pytest.raises(GroupProviderError, match="500"):
         p.remove_member("groups/abc/memberships/1")
+
+
+@pytest.mark.parametrize(
+    "body, match",
+    [
+        ({"done": False}, "not finished"),
+        ({}, "not finished"),
+        ({"done": True, "error": {"code": 7, "message": "Permission denied"}}, "Permission denied"),
+    ],
+)
+def test_provider_membership_changes_require_a_finished_clean_operation(body, match):
+    p, _ = _provider(FakeResponse(200, body), FakeResponse(200, body))
+    with pytest.raises(GroupProviderError, match=match):
+        p.add_member("groups/abc", "ada@x")
+    with pytest.raises(GroupProviderError, match=match):
+        p.remove_member("groups/abc/memberships/1")
+
+
+def test_unfinished_removal_is_not_reported_as_synced(storage):
+    team = _team(storage)
+    leaves = _member(storage, team, "leaves@x")
+    p, _ = _provider(
+        FakeResponse(200, {"done": True, "response": {"name": "groups/abc"}}),  # create group
+        FakeResponse(200, {"memberships": []}),
+        FakeResponse(200, {"done": True}),  # add leaves@x
+    )
+    ok = sync_team(storage, p, team.id, actor="t")
+    assert ok.status == "synced"
+
+    (m,) = storage.list_memberships(person_id=leaves.id)
+    storage.end_membership(m.id, date.today(), actor="t")
+    member = {
+        "name": "m/1",
+        "preferredMemberKey": {"id": "leaves@x"},
+        "roles": [{"name": "MEMBER"}],
+    }
+    p._session.responses = [
+        FakeResponse(200, {"memberships": [member]}),
+        FakeResponse(200, {"done": False}),  # delete accepted but not finished
+    ]
+    state = sync_team(storage, p, team.id, actor="t")
+    assert state.status == "failed" and "not finished" in state.last_error
+    assert state.last_synced_at == ok.last_synced_at
 
 
 def test_provider_transport_failure_hides_details():

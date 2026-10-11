@@ -2,13 +2,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 
-from contracts.groups import GroupProvider
+from contracts.groups import GroupProvider, GroupProviderError
 from contracts.storage import StorageAdapter
-from contracts.types import Person, PersonCreate, PersonUpdate
+from contracts.types import Person, PersonCreate, PersonUpdate, TeamGoogleGroup
 from src.api.auth import AuthedKey, get_actor, require_scope
 from src.api.authz import require_access_level_change
 from src.api.deps import get_group_provider, get_storage
-from src.google_groups import current_team_ids, schedule_sync
+from src.google_groups import current_team_ids, schedule_sync, synced_groups_containing
 
 router = APIRouter(prefix="/people", tags=["people"])
 
@@ -63,6 +63,30 @@ def get_person(
     if person is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="person not found")
     return person
+
+
+@router.get("/{person_id}/synced-google-teams", response_model=list[TeamGoogleGroup])
+def list_synced_google_teams(
+    person_id: UUID,
+    storage: StorageAdapter = Depends(get_storage),
+    groups: GroupProvider | None = Depends(get_group_provider),
+    _: AuthedKey = Depends(require_scope("people:read")),
+) -> list[TeamGoogleGroup]:
+    person = storage.get_person(person_id)
+    if person is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="person not found")
+    if groups is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="google groups not configured",
+        )
+    try:
+        return synced_groups_containing(storage, groups, person)
+    except GroupProviderError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="google groups unavailable",
+        )
 
 
 @router.patch("/{person_id}", response_model=Person)

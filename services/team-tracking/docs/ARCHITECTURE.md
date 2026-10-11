@@ -109,7 +109,9 @@ Each team gets a Google Group so Drive documents and channel access can be grant
 
 **External members.** API-created groups reject addresses outside the managed domain until a group owner enables **Allow external members** in the Google Groups UI. The Groups Settings API returned 401 in testing ([#236](https://github.com/UTMIST/Misty/issues/236)), so this step is manual. A sync that hits that rejection still applies internal adds and all removals, then records `needs_external_members` with an instruction, rather than failing the whole sync.
 
-**Concurrency.** `sync_team` holds one process-wide lock, so a slow sync started before a membership ended can't finish after a newer sync and re-add the person. That's correct only while production runs a single uvicorn process (it does). With more workers or replicas, replace it with a per-team `pg_advisory_lock`. A concurrent CLI run in another process isn't covered by the lock either. Its worst case is one stale re-add, which the next sync fixes.
+**Independent changes, confirmed completion.** A sync applies removals before additions and attempts every one even when another fails, so a persistently rejected newcomer can't keep a departed member in the group. Any failure makes the whole sync `failed` with every error in `last_error`. Membership create/delete return a long-running Operation; the provider counts a change as made only when the Operation is `done` with no `error`. An unfinished Operation is a retryable failure, and the next sync re-reads Google and converges.
+
+**Concurrency.** `sync_team` holds a per-team lock from reading membership until it records the result, so a slow sync started before a membership ended can't finish after a newer sync and re-add the person. The lock is `StorageAdapter.lock_team_google_group`: in Postgres a session-level `pg_advisory_lock(hashtext('google-group:<team id>'))` on a dedicated connection, which covers every API worker *and* the separately running `team-tracking-groups sync` cron. A process-local lock in front of it keeps queued syncs in one process from each holding a pool connection while they wait.
 
 ## The data model (9 tables)
 
