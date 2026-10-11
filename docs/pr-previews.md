@@ -186,7 +186,14 @@ active. The command checks for unfinished or competing
 deployments, and the bot volume prevents overlapping gateway owners. It does
 not provide an atomic transaction across all backend deployments. Each service
 must retain its pre-switch deployment ID until selected; afterward, its ID must
-match the deployment started by this switch. A competing deployment of a backend
+match the deployment started by this switch. The stopped bot is the exception:
+after the selector confirms that exact deployment is `REMOVED` with
+`deploymentStopped: true`, Railway may clear its `latestDeployment` pointer,
+immediately or during a later backend build. The selector accepts that missing
+pointer while still refusing any active bot or a different deployment ID.
+A missing pointer alone never confirms shutdown. Final verification requires
+the newly deployed bot's exact ID and a single successful gateway owner.
+A competing deployment of a backend
 still waiting its turn aborts the sequence before it can be overwritten.
 After each backend is deployed, its status must remain `SUCCESS` or `SLEEPING`
 at every subsequent deployment step and at final verification. Existing failed
@@ -214,7 +221,9 @@ deployment status; the bot's readiness endpoint checks its gateway connection.
 - CLI failures include their installation, login, access, or GraphQL error
   details. A missing API resource identifies its field and requested ID;
   disappearance is not treated as confirmed shutdown. Address the reported
-  cause before rerunning the command.
+  cause before rerunning the command. Deployment conflicts name the service
+  and its expected and observed deployment IDs so an actual replacement can
+  be distinguished from a missing pointer.
 - Database contents persist across PR selections. The command does not reset
   databases or reverse migrations. Before switching between incompatible
   schemas, provision fresh development branches and update the preview URLs

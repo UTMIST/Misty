@@ -24,6 +24,7 @@ function fixture({
   firstStopStatus = 'REMOVING',
   stopResult,
   stuckStop = false,
+  clearStoppedBotPointer = true,
   otherDeployment = false,
   removedLagReads = 0,
   buildDelayMs = 0,
@@ -147,7 +148,10 @@ function fixture({
         bot.activeDeployments = bot.activeDeployments.filter(
           (deployment) => deployment.id !== old.id,
         );
-        if (bot.latestDeployment?.id === old.id) bot.latestDeployment.status = 'REMOVED';
+        if (bot.latestDeployment?.id === old.id) {
+          if (clearStoppedBotPointer) bot.latestDeployment = null;
+          else bot.latestDeployment.status = 'REMOVED';
+        }
         old.status = 'REMOVED';
         old.deploymentStopped = true;
         runningBots.delete(old.id);
@@ -206,17 +210,34 @@ function fixture({
 
 const mutations = (calls) => calls.filter(({ query }) => query.startsWith('mutation'));
 
-test('switch waits for disconnect, pins all services to the PR commit, and deploys bot last', async () => {
-  const { options, calls, logs } = fixture();
-  const result = await switchPreview(options);
+for (const clearStoppedBotPointer of [true, false]) {
+  test(`switch waits for disconnect, pins all services, and deploys bot last (clear pointer: ${clearStoppedBotPointer})`, async () => {
+    const { options, calls, logs } = fixture({ clearStoppedBotPointer });
+    const result = await switchPreview(options);
+    assert.equal(result.changed, true);
+    assert.ok(logs.some((line) => /connectors.*will not be tested/.test(line)));
+    const changes = mutations(calls);
+    assert.match(changes[0].query, /StopPreview/);
+    assert.deepEqual(
+      changes.slice(1).map(({ variables }) => variables.serviceId),
+      ['team-tracking', 'llm', 'verification', 'documentation-system', 'meeting', 'discord-bot'],
+    );
+  });
+}
+
+test('the stopped bot pointer can clear after backend deployments have started', async () => {
+  const { options, environment } = fixture({ clearStoppedBotPointer: false });
+  const result = await switchPreview({
+    ...options,
+    api: async (query, variables) => {
+      const result = await options.api(query, variables);
+      if (query.includes('query PreviewDeployment') && variables.id === 'team-tracking-new') {
+        environment.serviceInstances.edges[0].node.latestDeployment = null;
+      }
+      return result;
+    },
+  });
   assert.equal(result.changed, true);
-  assert.ok(logs.some((line) => /connectors.*will not be tested/.test(line)));
-  const changes = mutations(calls);
-  assert.match(changes[0].query, /StopPreview/);
-  assert.deepEqual(
-    changes.slice(1).map(({ variables }) => variables.serviceId),
-    ['team-tracking', 'llm', 'verification', 'documentation-system', 'meeting', 'discord-bot'],
-  );
 });
 
 test('plan or declined confirmation performs no mutation', async () => {
@@ -699,6 +720,28 @@ test('unconfirmed old-process termination prevents every new deployment', async 
   assert.ok(logs.some((message) => /REMOVING.*deploymentStopped: false/.test(message)));
 });
 
+test('a cleared bot pointer never substitutes for shutdown confirmation', async () => {
+  const { options, calls, environment } = fixture({
+    stopResult: { status: 'REMOVED', deploymentStopped: false },
+  });
+  await assert.rejects(
+    switchPreview({
+      ...options,
+      api: async (query, variables) => {
+        const result = await options.api(query, variables);
+        if (query.includes('mutation StopPreview')) {
+          environment.serviceInstances.edges[0].node.latestDeployment = null;
+          environment.serviceInstances.edges[0].node.activeDeployments = [];
+        }
+        return result;
+      },
+    }),
+    /Timed out.*REMOVED.*deploymentStopped: false/,
+  );
+  assert.equal(mutations(calls).length, 1);
+  assert.match(mutations(calls)[0].query, /StopPreview/);
+});
+
 for (const status of ['CRASHED', 'FAILED', 'SKIPPED', 'NEEDS_APPROVAL']) {
   test(`stop keeps polling stale ${status} until its deadline without starting deployments`, async () => {
     const { options, calls } = fixture({ stopResult: { status, deploymentStopped: false } });
@@ -732,6 +775,111 @@ test('a competing deployment stops the switch before the bot can start', async (
   assert.equal(
     mutations(calls).some(({ variables }) => variables.serviceId === 'discord-bot'),
     false,
+  );
+});
+
+for (const phase of ['shutdown', 'backend']) {
+  for (const [serviceName, latestDeployment] of [
+    ['discord-bot', { id: 'competing-bot', status: 'FAILED' }],
+    ['meeting', null],
+  ]) {
+    test(`an unexpected ${serviceName} pointer change during ${phase} stops further deployments`, async () => {
+      const { options, calls, environment } = fixture();
+      const service = environment.serviceInstances.edges.find(
+        ({ node }) => node.serviceName === serviceName,
+      ).node;
+      await assert.rejects(
+        switchPreview({
+          ...options,
+          api: async (query, variables) => {
+            const result = await options.api(query, variables);
+            if (
+              query.includes('query PreviewDeployment') &&
+              (phase === 'shutdown'
+                ? variables.id === 'discord-bot-old' && result.deployment.deploymentStopped
+                : variables.id === 'team-tracking-new')
+            ) {
+              service.latestDeployment = latestDeployment;
+              service.activeDeployments = [];
+            }
+            return result;
+          },
+        }),
+        new RegExp(
+          `${serviceName} expected ${serviceName}-old, observed ${latestDeployment?.id ?? 'none'}`,
+        ),
+      );
+      assert.deepEqual(
+        mutations(calls)
+          .filter(({ query }) => query.includes('DeployPreview'))
+          .map(({ variables }) => variables.serviceId),
+        phase === 'shutdown' ? [] : ['team-tracking'],
+      );
+    });
+  }
+}
+
+test('an active bot aborts the switch even when its latest pointer remains null', async () => {
+  const { options, calls, environment } = fixture();
+  await assert.rejects(
+    switchPreview({
+      ...options,
+      api: async (query, variables) => {
+        const result = await options.api(query, variables);
+        if (query.includes('query PreviewDeployment') && variables.id === 'team-tracking-new') {
+          const bot = environment.serviceInstances.edges[0].node;
+          assert.equal(bot.latestDeployment, null);
+          bot.activeDeployments = [{ id: 'competing-bot', status: 'SUCCESS' }];
+        }
+        return result;
+      },
+    }),
+    /Another bot deployment became active/,
+  );
+  assert.equal(mutations(calls).at(-1).variables.serviceId, 'team-tracking');
+});
+
+test('stopping an older bot does not permit an unrelated failed head to disappear', async () => {
+  const { options, calls, environment, botHistory } = fixture();
+  const failed = { id: 'failed-build', status: 'FAILED', deploymentStopped: true };
+  botHistory.unshift(failed);
+  const bot = environment.serviceInstances.edges[0].node;
+  bot.latestDeployment = { ...failed };
+  await assert.rejects(
+    switchPreview({
+      ...options,
+      api: async (query, variables) => {
+        const result = await options.api(query, variables);
+        if (
+          query.includes('query PreviewDeployment') &&
+          variables.id === 'discord-bot-old' &&
+          result.deployment.deploymentStopped
+        ) {
+          bot.latestDeployment = null;
+        }
+        return result;
+      },
+    }),
+    /discord-bot expected failed-build, observed none/,
+  );
+  assert.equal(mutations(calls).length, 1);
+  assert.match(mutations(calls)[0].query, /StopPreview/);
+});
+
+test('the new bot must retain its exact deployment ID at final verification', async () => {
+  const { options, environment } = fixture();
+  await assert.rejects(
+    switchPreview({
+      ...options,
+      api: async (query, variables) => {
+        const result = await options.api(query, variables);
+        if (query.includes('query PreviewDeployment') && variables.id === 'discord-bot-new') {
+          environment.serviceInstances.edges[0].node.latestDeployment = null;
+        }
+        return result;
+      },
+    }),
+    /Another deployment changed the preview before verification completed/,
   );
 });
 
