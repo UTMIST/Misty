@@ -376,6 +376,7 @@ export async function switchPreview({
     await waitFor(api, deployment.id, true, { ...waitOptions, timeoutMs: remainingStopTime() });
   }
 
+  const stoppedBotIds = new Set(oldDeployments.map((deployment) => deployment.id));
   const expectedDeployments = new Map(before);
   // Existing failed backends may be repaired by this switch. Once replaced,
   // they must remain healthy while the remaining services deploy.
@@ -393,11 +394,22 @@ export async function switchPreview({
       throw new Error('The services in dev changed during the switch. Stopping here.');
     }
     for (const instance of instances) {
+      const expectedId = expectedDeployments.get(instance.serviceId);
+      const observedId = instance.latestDeployment?.id;
+      // Railway can clear latestDeployment after removal, including on a
+      // later read. Allow only the bot ID whose shutdown we confirmed above;
+      // do not rebaseline other changes or treat a missing pointer as proof.
+      const stoppedBotPointerCleared =
+        instance.serviceId === bot.serviceId &&
+        instance.latestDeployment == null &&
+        stoppedBotIds.has(expectedId);
       if (
         !expectedDeployments.has(instance.serviceId) ||
-        instance.latestDeployment?.id !== expectedDeployments.get(instance.serviceId)
+        (observedId !== expectedId && !stoppedBotPointerCleared)
       ) {
-        throw new Error('Another deployment changed dev during the switch. Stopping here.');
+        throw new Error(
+          `Another deployment changed dev during the switch: ${instance.serviceName} expected ${expectedId ?? 'none'}, observed ${observedId ?? 'none'} (${instance.latestDeployment?.status ?? 'no deployment'}). Stopping here.`,
+        );
       }
     }
     validateDeployedBackends(instances, deployedBackends);
