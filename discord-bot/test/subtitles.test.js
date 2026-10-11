@@ -32,6 +32,7 @@ function clock() {
       await settle();
     },
     size: () => timers.size,
+    now: () => now,
   };
 }
 
@@ -40,6 +41,7 @@ function harness(overrides = {}) {
   const sent = [];
   const archived = [];
   const notices = [];
+  const timings = [];
   const thread = { id: 'thread-1' };
   const adapter = {
     createThread: async () => thread,
@@ -52,6 +54,8 @@ function harness(overrides = {}) {
     channel: {},
     adapter,
     notify: async (notice) => notices.push(notice),
+    monotonic: timer.now,
+    logLatency: (record) => timings.push(record),
     ...timer,
   });
   const emit = (sequence, text, start_ms = 0) =>
@@ -76,21 +80,25 @@ function harness(overrides = {}) {
       last_sequence,
       status: 'complete',
     });
-  return { ...timer, captions, sent, archived, notices, thread, emit, ready, complete };
+  return { ...timer, captions, sent, archived, notices, timings, thread, emit, ready, complete };
 }
 
-test('final chunks batch for two seconds, sort by speech time, then archive after tail', async () => {
+test('first chunk sends immediately; later chunks batch and sort before archiving', async () => {
   const f = harness();
   await f.ready();
-  f.emit(1, 'later speech', 12000);
+  f.emit(1, 'first speech', 0);
+  await settle();
+  assert.equal(f.sent.length, 1);
+  assert.match(f.sent[0].content, /first speech/);
+  f.emit(2, 'later speech', 12000);
   await f.advance(1000);
-  f.emit(2, 'earlier speech', 10000);
+  f.emit(3, 'earlier speech', 10000);
   await f.advance(999);
-  assert.equal(f.sent.length, 0);
+  assert.equal(f.sent.length, 1);
   await f.advance(1);
-  assert.match(f.sent[0].content, /earlier speech[\s\S]*later speech/);
-  f.emit(3, 'tail', 13000);
-  f.complete(3);
+  assert.match(f.sent[1].content, /earlier speech[\s\S]*later speech/);
+  f.emit(4, 'tail', 13000);
+  f.complete(4);
   await f.captions.finish();
   assert.match(f.sent.at(-2).content, /tail/);
   assert.match(f.sent.at(-1).content, /ended/i);
@@ -99,6 +107,65 @@ test('final chunks batch for two seconds, sort by speech time, then archive afte
   f.captions.connectionLost(); // normal socket close after successful finalization
   await settle();
   assert.equal(f.notices.length, 0);
+});
+
+test('early first chunk sends when setup finishes while other queued chunks retain batching', async () => {
+  let release;
+  const f = harness({
+    createThread: () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  });
+  f.captions.activate();
+  f.emit(1, 'first finalized speech', 12000);
+  f.emit(2, 'earlier speech finalized later', 10000);
+  f.captions.event({ type: 'session.ready', session_id: 's1', subtitle_events: true });
+  await settle();
+  assert.equal(f.sent.length, 0);
+  release(f.thread);
+  await settle();
+  assert.equal(f.sent.length, 1);
+  assert.match(f.sent[0].content, /first finalized speech/);
+  assert.doesNotMatch(f.sent[0].content, /earlier speech finalized later/);
+  await f.advance(1999);
+  assert.equal(f.sent.length, 1);
+  await f.advance(1);
+  assert.equal(f.sent.length, 2);
+  assert.match(f.sent[1].content, /earlier speech finalized later/);
+  f.complete(2);
+  await f.captions.finish();
+});
+
+// TEMP_SUBTITLE_LATENCY: remove this diagnostic test with the measurement stubs.
+test('temporary timing logs measure receipt through successful delivery without caption content', async () => {
+  let release;
+  const f = harness({
+    send: () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  });
+  await f.ready();
+  await f.advance(1000);
+  f.emit(1, 'private caption content');
+  await settle();
+  assert.equal(
+    f.timings.some((e) => e.event === 'first_chunk_sent'),
+    false,
+  );
+  await f.advance(250);
+  assert.equal(typeof release, 'function');
+  release();
+  await settle();
+  const delivered = f.timings.filter((e) => e.event === 'first_chunk_sent');
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].session_id, 's1');
+  assert.equal(delivered[0].elapsed_ms, 1250);
+  assert.equal(delivered[0].received_to_send_ms, 250);
+  assert.equal(delivered[0].discord_send_ms, 250);
+  assert.doesNotMatch(JSON.stringify(f.timings), /private caption content/);
+  f.captions.cancel();
 });
 
 test('duplicates and other sessions are ignored; sequence gaps mark subtitles incomplete', async () => {

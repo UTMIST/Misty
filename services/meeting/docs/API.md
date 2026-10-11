@@ -181,7 +181,8 @@ or replay. The bot routes by its own session/thread binding, never by a
 Discord destination supplied in an event.
 
 The bot formats the example chunk as `[00:12] **Alice:** We should launch on
-Friday` (the speaker label renders in bold). Multiple chunks received within
+Friday` (the speaker label renders in bold). The first chunk sends without a
+batching delay once the subtitle thread is ready. Later chunks received within
 the same two-second batch can share a Discord message. IDs and sequence numbers
 are used internally and are not displayed. See the
 [Discord message example](../../../docs/MEETING-RECORDING.md#subtitle-message-example)

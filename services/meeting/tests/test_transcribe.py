@@ -1,6 +1,7 @@
 """Tests for the AWS Transcribe streaming wrapper, using a fake client (no network)."""
 
 import asyncio
+import logging
 
 from amazon_transcribe.model import Alternative, Item, Result, Transcript, TranscriptEvent
 
@@ -204,6 +205,48 @@ def test_final_callback_receives_only_finals_and_cannot_break_transcription():
         ]
         assert await stream.aclose() == received[0]
         assert len(client.calls) == 1
+
+    asyncio.run(scenario())
+
+
+# TEMP_SUBTITLE_LATENCY: remove this diagnostic test with the measurement stubs.
+def test_temporary_latency_logs_first_events_once_without_transcript(monkeypatch, caplog):
+    from src.stt import transcribe
+
+    now = [10.0]
+    monkeypatch.setattr(transcribe, "monotonic", lambda: now[0])
+    caplog.set_level(logging.INFO, logger="meeting.audit")
+
+    async def scenario():
+        client = _LiveClient()
+        stream = create_transcription_stream(region="us-east-1", client=client)
+        stream.start()
+        stream.send(b"\x00" * 640)
+        await drain(stream)
+        now[0] = 10.2
+        client.streams[0].output_stream.push(_partial_event())
+        client.streams[0].output_stream.push(_partial_event())
+        await drain(stream)
+        assert stream.words() == []
+        now[0] = 10.8
+        client.streams[0].output_stream.push(_final_event())
+        client.streams[0].output_stream.push(_final_event())
+        await drain(stream)
+        await stream.aclose()
+        messages = [r.getMessage() for r in caplog.records if "TEMP_SUBTITLE_LATENCY" in r.message]
+        for event in (
+            "first_audio_queued",
+            "aws_connect_started",
+            "aws_connected",
+            "first_partial",
+            "first_final",
+        ):
+            assert sum(f"event={event} " in message for message in messages) == 1
+        assert any("event=first_partial elapsed_ms=200.0" in m for m in messages)
+        assert any("event=first_final elapsed_ms=800.0" in m for m in messages)
+        assert all(f"stream_id={id(stream)} " in m for m in messages)
+        assert "hello" not in " ".join(messages)
+        assert "world" not in " ".join(messages)
 
     asyncio.run(scenario())
 

@@ -255,7 +255,8 @@ and skips them.
   audio or transcript to disk. The posted PDF does contain the full
   transcript, and that lives in Discord like any other attachment.
 
-  Subtitles default to **on**: finalized text is posted in two-second batches
+  Subtitles default to **on**: the first finalized chunk sends as soon as its
+  subtitle thread is ready; later text is posted in two-second batches
   to a new thread in the launch channel. Launching from a thread creates a
   sibling thread in its parent channel. On completion, Misty flushes the tail,
   posts an ended marker, and archives that meeting's subtitle thread, leaving

@@ -144,7 +144,8 @@ report builder. The wire fields and queue limits live in [API.md](API.md#optiona
 
 Sequence order is **finalization/delivery order**, not speech chronology. Each
 speaker has an independent AWS stream, so earlier speech may finalize later.
-The bot sorts only within each two-second batch by `start_ms`, breaking ties
+The bot sends its first chunk as soon as its thread is ready, then sorts only
+within each subsequent two-second batch by `start_ms`, breaking ties
 with sequence. Previously posted messages stay unchanged. Late captions may
 appear in a later batch, which is an accepted trade-off for immutable history.
 
@@ -160,6 +161,9 @@ rebuilds and transfers the entire transcript on each request, including during
 silence. WS sends only new finalized chunks and avoids the polling interval.
 Neither approach makes AWS finalize speech sooner. No fixed worst-case live
 subtitle delay is promised, and no provider stabilization setting is changed.
+Temporary content-free latency measurements are documented in the
+[recording guide](../../../docs/MEETING-RECORDING.md#live-subtitles); the
+`TEMP_SUBTITLE_LATENCY` comments mark the diagnostics for removal after branch testing.
 
 ### Audio ingest
 

@@ -48,6 +48,9 @@ export function createSubtitles({
   notify = async () => {},
   setTimer = setTimeout,
   clearTimer = clearTimeout,
+  // TEMP_SUBTITLE_LATENCY: temporary measurement stubs; remove after branch testing.
+  monotonic = () => performance.now(),
+  logLatency = (record) => console.info('TEMP_SUBTITLE_LATENCY', JSON.stringify(record)),
 }) {
   let active = false;
   let ready = false;
@@ -63,6 +66,22 @@ export function createSubtitles({
   let thread;
   let setup;
   let sending = Promise.resolve();
+  // TEMP_SUBTITLE_LATENCY: remove this state and measure() calls after branch testing.
+  const latencyStartedAt = monotonic();
+  let firstChunkReceivedAt;
+  let firstChunkSent = false;
+  function measure(event, extra = {}) {
+    try {
+      logLatency({
+        session_id: sessionId,
+        event,
+        elapsed_ms: Math.round(monotonic() - latencyStartedAt),
+        ...extra,
+      });
+    } catch {
+      // Temporary diagnostics must never interrupt subtitle delivery.
+    }
+  }
   let resolveDone;
   const done = new Promise((resolve) => {
     resolveDone = resolve;
@@ -95,12 +114,11 @@ export function createSubtitles({
     });
   }
 
-  function flush() {
+  function flush(firstOnly = false) {
     clear(batchTimer);
     batchTimer = undefined;
     if (!pending.length || !setup) return;
-    const batch = pending;
-    pending = [];
+    const batch = pending.splice(0, firstOnly ? 1 : pending.length);
     const size = batch.reduce((sum, e) => sum + Buffer.byteLength(JSON.stringify(e)), 0);
     sending = sending
       .then(async () => {
@@ -108,7 +126,17 @@ export function createSubtitles({
         if (!thread || closed) return;
         for (const content of messages(batch)) {
           if (closed) return;
+          // TEMP_SUBTITLE_LATENCY: measure the first successful Discord request only.
+          const sendStartedAt = monotonic();
+          if (!firstChunkSent) measure('first_discord_send_started');
           await bounded(() => adapter.send(thread, content));
+          if (!firstChunkSent) {
+            firstChunkSent = true;
+            measure('first_chunk_sent', {
+              received_to_send_ms: Math.round(monotonic() - firstChunkReceivedAt),
+              discord_send_ms: Math.round(monotonic() - sendStartedAt),
+            });
+          }
         }
       })
       .catch(() => {
@@ -173,10 +201,15 @@ export function createSubtitles({
         return;
       }
       thread = created;
+      measure('thread_ready'); // TEMP_SUBTITLE_LATENCY
     }).catch(() => {
       fail();
     });
-    if (pending.length && batchTimer === undefined) batchTimer = setTimer(flush, 2000);
+    // Only the first queued chunk bypasses batching, even before readiness.
+    if (pending.length) {
+      flush(true);
+      if (pending.length) batchTimer = setTimer(flush, 2000);
+    }
   }
 
   return {
@@ -186,6 +219,7 @@ export function createSubtitles({
     activate() {
       if (active || closing || closed) return;
       active = true;
+      measure('captions_activated'); // TEMP_SUBTITLE_LATENCY
       if (!ready) readyTimer = setTimer(fail, 5000);
       prepare();
     },
@@ -193,6 +227,7 @@ export function createSubtitles({
       if (closing || closed || event.session_id !== sessionId) return;
       if (event.type === 'session.ready') {
         ready = true;
+        measure('session_ready'); // TEMP_SUBTITLE_LATENCY
         prepare();
         return;
       }
@@ -218,7 +253,14 @@ export function createSubtitles({
       lastSequence = event.sequence;
       bytes += size;
       pending.push(event);
-      if (setup && batchTimer === undefined) batchTimer = setTimer(flush, 2000);
+      if (lastSequence === 1) {
+        // TEMP_SUBTITLE_LATENCY: remove the timestamp and measurement call after testing.
+        firstChunkReceivedAt = monotonic();
+        measure('first_chunk_received', { speaker_id: event.speaker_id, sequence: event.sequence });
+        if (setup) flush(true);
+      } else if (setup && batchTimer === undefined) {
+        batchTimer = setTimer(flush, 2000);
+      }
     },
     connectionLost() {
       return close(true);

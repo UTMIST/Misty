@@ -30,14 +30,31 @@ delivery has stopped. Each meeting owns its newly created
 subtitle thread; ending one meeting never archives the launch thread or another
 meeting's thread.
 
-Only finalized text is published. Finalized chunks are batched every two seconds
-from the first waiting chunk (additional chunks do not reset the timer), sorted
+Only finalized text is published. The first chunk is sent as soon as its subtitle
+thread is ready, without a batching delay. Later chunks are batched every two
+seconds from the first waiting chunk (additional chunks do not reset the timer), sorted
 within that batch by speech start time, labeled with speaker names and elapsed
 timestamps, and split to fit Discord's message limit. Mentions are suppressed.
-Published chunks are not edited. The two-second window adds batching delay
-**after** AWS finalization; AWS has no fixed maximum finalization delay here.
+Published chunks are not edited. For later chunks, the two-second window adds
+batching delay **after** AWS finalization; AWS has no fixed maximum finalization delay here.
 Long continuous speech can delay finalized text. The segmentation thresholds
 are formatting rules, not latency promises.
+
+Temporary branch diagnostics are marked `TEMP_SUBTITLE_LATENCY` in source comments
+and logs; remove the measurement stubs, state, call sites, and diagnostic tests
+after branch testing. The meeting service logs first queued audio, AWS connection
+start/completion, and first partial/final results once per speaker stream. Match
+`stream_id` to the service's `stream_created` entry, which includes `session_id`
+and `speaker_id`. The bot logs setup, first chunk receipt (with speaker ID), and
+first Discord request start/success by `session_id`. Logs contain IDs and timing
+only. Service `elapsed_ms` starts at first queued audio; bot `elapsed_ms` starts
+when subtitle state is created. Subtract elapsed values only within the same
+stream/process: `aws_connected - aws_connect_started` measures connection time;
+`first_final - first_partial` measures the finalization wait. The bot's
+`received_to_send_ms` measures receipt through successful Discord delivery,
+including setup/queue time; `discord_send_ms` measures just the request.
+These measurements do not time capture before the service receives audio or
+prove exactly when a Discord client displays the message.
 
 One WS carries all speakers' audio up and subtitle events down for a meeting.
 Two Discord servers recording concurrently use **two separate connections**.

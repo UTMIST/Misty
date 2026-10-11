@@ -373,6 +373,15 @@ class MeetingSession:
             buf = self._speakers.get(speaker_id)
             if buf is None:
                 stream = self._deps["make_transcription_stream"]()
+                # TEMP_SUBTITLE_LATENCY: correlate transcriber timings with the bot's session.
+                # Remove this diagnostic block after branch testing; no names/audio/text.
+                _logger.info(
+                    "TEMP_SUBTITLE_LATENCY session_id=%s speaker_id=%s stream_id=%s "
+                    "event=stream_created",
+                    self.session_id,
+                    speaker_id,
+                    id(stream),
+                )
                 if self._subtitle_sink is not None:
                     stream.set_final_callback(lambda words: self._publish_final(speaker_id, words))
                 stream.start(self._loop)
