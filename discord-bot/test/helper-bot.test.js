@@ -578,51 +578,6 @@ test('messageCreate listener answers a pinged Misty reply with full thread conte
     replyPing: true,
   });
 
-  test('messageCreate serializes overlapping DMs and bounds each prompt to its message', async () => {
-    const handlers = {};
-    const seen = [];
-    let releaseFirst;
-    const firstStarted = new Promise((resolve) => {
-      releaseFirst = resolve;
-    });
-    const first = {
-      id: '100000000000000001',
-      createdTimestamp: 1,
-      author: { id: '1', username: 'alexx' },
-      content: 'first question',
-    };
-    const second = {
-      id: '100000000000000002',
-      createdTimestamp: 2,
-      author: { id: '1', username: 'alexx' },
-      content: 'second question',
-    };
-    const channel = fakeChannel({ isDM: true, history: [first, second] });
-    const client = {
-      user: { id: BOT_ID },
-      on: (evt, fn) => {
-        handlers[evt] = fn;
-      },
-    };
-    wireDiscordClient(client, {
-      commands: new Map(),
-      appContext: ctx({
-        answer: async ({ turns }) => {
-          seen.push(turns.map((turn) => turn.text));
-          if (seen.length === 1) await firstStarted;
-          return { content: `answer ${seen.length}` };
-        },
-      }),
-    });
-    const firstRun = handlers.messageCreate(fakeMessage({ ...first, channel }));
-    while (seen.length !== 1) await new Promise((resolve) => setImmediate(resolve));
-    const secondRun = handlers.messageCreate(fakeMessage({ ...second, channel }));
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(seen, [['first question']]);
-    releaseFirst();
-    await Promise.all([firstRun, secondRun]);
-    assert.deepEqual(seen, [['first question'], ['first question', 'second question']]);
-  });
   const client = {
     user: { id: BOT_ID },
     on: (evt, fn) => {
@@ -638,6 +593,52 @@ test('messageCreate listener answers a pinged Misty reply with full thread conte
     seen.map((turn) => turn.text),
     ['original question', 'original answer', 'pinged follow up'],
   );
+});
+
+test('messageCreate serializes overlapping DMs and bounds each prompt to its message', async () => {
+  const handlers = {};
+  const seen = [];
+  let releaseFirst;
+  const firstStarted = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const first = {
+    id: '100000000000000001',
+    createdTimestamp: 1,
+    author: { id: '1', username: 'alexx' },
+    content: 'first question',
+  };
+  const second = {
+    id: '100000000000000002',
+    createdTimestamp: 2,
+    author: { id: '1', username: 'alexx' },
+    content: 'second question',
+  };
+  const channel = fakeChannel({ isDM: true, history: [first, second] });
+  const client = {
+    user: { id: BOT_ID },
+    on: (evt, fn) => {
+      handlers[evt] = fn;
+    },
+  };
+  wireDiscordClient(client, {
+    commands: new Map(),
+    appContext: ctx({
+      answer: async ({ turns }) => {
+        seen.push(turns.map((turn) => turn.text));
+        if (seen.length === 1) await firstStarted;
+        return { content: `answer ${seen.length}` };
+      },
+    }),
+  });
+  const firstRun = handlers.messageCreate(fakeMessage({ ...first, channel }));
+  while (seen.length !== 1) await new Promise((resolve) => setImmediate(resolve));
+  const secondRun = handlers.messageCreate(fakeMessage({ ...second, channel }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(seen, [['first question']]);
+  releaseFirst();
+  await Promise.all([firstRun, secondRun]);
+  assert.deepEqual(seen, [['first question'], ['first question', 'second question']]);
 });
 
 test('messageCreate listener ignores a Misty reply when its reply ping is off', async () => {
