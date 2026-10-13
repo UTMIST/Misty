@@ -34,8 +34,18 @@ test('every factory index.js calls is imported or declared', () => {
   assert.deepEqual(missing, [], `index.js calls undeclared: ${missing.join(', ')}`);
 });
 
-test('index.js enables channel partials for uncached direct messages', () => {
+test('Discord client requests Message Content for full helper-thread history', () => {
   const src = readFileSync(fileURLToPath(new URL('../src/index.js', import.meta.url)), 'utf8');
-  assert.match(src, /import\s*\{[^}]*\bPartials\b[^}]*\}\s*from ['"]discord\.js['"]/);
-  assert.match(src, /partials:\s*\[\s*Partials\.Channel\s*\]/);
+
+  assert.match(
+    src,
+    /GatewayIntentBits\.MessageContent/,
+    'unmentioned history arrives with empty content without this privileged intent',
+  );
+});
+
+test('Discord client enables uncached direct messages', () => {
+  const src = readFileSync(fileURLToPath(new URL('../src/index.js', import.meta.url)), 'utf8');
+  assert.match(src, /GatewayIntentBits\.DirectMessages/);
+  assert.match(src, /Partials\.Channel/);
 });

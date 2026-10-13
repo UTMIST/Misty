@@ -5,14 +5,34 @@ The Discord frontend for the UTMIST platform — a thin Node.js layer over the
 slash commands to link their Discord account, look up teams and rosters, and
 (if they're an admin) manage the directory from Discord itself.
 
-The bot holds **no database and no business logic** — every action is an HTTP
-call to the directory (the API-only source of truth). It's designed to run in
-many Discord servers from a single deployment, with a proper **auth layer**
-gating each command.
+The bot holds **no database**. Directory data remains in the backend API;
+helper-bot request allowances are transient, per-user state in this process.
+It runs in many Discord servers from a single deployment, with an auth layer
+gating commands and helper mentions.
 
 **Status:** Deployed to Railway (staging + production). Staging runs against a
 Neon staging branch in a private test guild; production runs globally against
 the prod branch. See [`docs/RAILWAY-DEPLOYMENT.md`](../docs/RAILWAY-DEPLOYMENT.md).
+
+For real Discord and recording tests against a PR, the optional persistent
+`dev` preview slot runs one selected PR using the same dev bot identity.
+Use `npm run preview -- <pr>` or GitHub Actions → **Preview Discord PR** after
+the [one-time setup](../docs/pr-previews.md). Automatic Railway PR copies keep
+Discord disabled, skip command registration, and use a liveness health check.
+
+Preview configuration (bot credentials belong only in `dev`; the selector
+override is optional in your shell):
+
+| Variable | Purpose |
+|---|---|
+| `MISTY_PREVIEW_ENVIRONMENT_ID` | Literal UUID of the persistent `dev` environment; copies cannot inherit ownership. |
+| `DISCORD_TOKEN_DEV` | Dedicated dev application's bot token. |
+| `DISCORD_CLIENT_ID_DEV` | Dedicated dev application's application ID. |
+| `DISCORD_GUILD_ID_DEV` | Test guild for the dev application, including beta commands. |
+| `MISTY_PREVIEW_PROJECT_ID` | Optional selector-only project override; export in the shell. Defaults to Misty's project and is overridden by `--project`. The selector does not load `.env`. |
+
+See the [preview runbook](../docs/pr-previews.md) for selection, preflight checks,
+shutdown, timeout options, and GitHub Actions setup.
 
 ## Complete startup (from cold)
 
@@ -20,7 +40,7 @@ Two modes, one shared foundation. Pick which mode you need:
 
 - **Discord surface** — the bot connects to Discord and users invoke slash
   commands in your test server. Needs a Discord app + token.
-- **Web playground** — a browser-based Discord-lookalike that hits the same
+- **Web playground** — a Misty-branded browser workspace that hits the same
   handlers without going through Discord. No Discord token required. Isolated
   ephemeral scratch DB. This is the recommended dev loop.
 
@@ -101,6 +121,11 @@ cd discord-bot
 npm start                                # or: npm run dev for both surfaces
 ```
 
+Before starting Discord mode, enable **Message Content Intent** under Discord
+Developer Portal → your application → **Bot** → **Privileged Gateway Intents**.
+The bot requests this intent so it can include the full recent thread history in
+helper requests, including messages that did not mention Misty.
+
 Wait for `Logged in as <bot name>` in terminal 2, then use the slash commands
 in whichever Discord server you invited the bot to.
 
@@ -112,6 +137,9 @@ HTTP 200 while connected. Railway supplies `PORT` and uses this route for
 deployment health checks. Locally, request
 `http://localhost:3002/health/ready` to inspect the gateway state. This
 listener is separate from the playground's default `WEB_PORT=3001`.
+`GET /health/live` returns 200 while the process serves requests, including an
+idle PR copy (`{"status":"ok","discord":"disabled"}`). Railway's ephemeral
+PR override checks this route; persistent environments keep `/health/ready`.
 
 **Requires that `DIRECTORY_API_KEY` in `.env` is a valid key against main
 team-tracking**, not a scratch key. If Discord returns "directory is
@@ -180,7 +208,7 @@ and skips them.
 - `/link email:<your UTMIST email>` (public) — starts linking your Discord account
   to your directory record. Your email must already be in the directory (execs seed
   members). It emails a one-time code to that address; run `/verify-code` with the
-  code to finish linking. Backed by the verification service via `src/linkService.js`.
+  code to finish linking. Backed by the verification service via `src/services/linkService.js`.
 - `/verify-code code:<6-digit>` (public) — confirms the code emailed by `/link` and
   completes the link.
 - `/whoami` (linked) — shows which directory record you're linked to. Requires you
@@ -196,6 +224,13 @@ and skips them.
 - `/team roster team:<slug> [as_of:<YYYY-MM-DD>]` (linked) — show a team's current roster.
 - `/my-teams` (linked) — list your active memberships.
 - `/doc <add|list|show|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
+
+- `@Misty <question>` (linked) — opens a helper thread and answers using the
+  thread's recent history. In a thread Misty created, replying directly to one of
+  Misty's messages continues the conversation when the reply ping is enabled.
+  Ping-off replies, replies to other users, replies in regular channels, and replies
+  in threads Misty did not create do not trigger the helper. A typed leading
+  `@Misty` remains an independent trigger, including inside a Discord reply.
 
 - `/record start [name:<meeting name>]` (**linked**) — joins your current voice channel and starts
   recording the meeting (one recording at a time **per guild** — sessions are
@@ -312,10 +347,29 @@ parallel to team-tracking's scoped-key auth.
    channels" above.
 5. `npm start` — then invite the bot to any server via its OAuth2 URL.
 
+## Helper-bot request limits
+
+| Configuration | Default | Meaning |
+| --- | --- | --- |
+| `HELPER_USER_MAX_REQUESTS` | `10` | Admitted helper requests per Discord user per window |
+| `HELPER_USER_WINDOW_SECONDS` | `3600` | Fixed window duration, starting at that user's first admitted request |
+
+Both settings are optional positive integers. Omit them to use defaults; blank,
+zero, negative, fractional, non-numeric, or unsafe values fail startup. There is
+no unlimited/disabled sentinel. Set them on the **discord-bot** deployment, not
+the LLM service. Administrators can change the live values without a restart
+with `/helper-limits set`; `/helper-limits show` displays the current values.
+Changing the values preserves each user's existing usage.
+
+An exhausted user gets a slowdown reply with the seconds until their next
+allowance. Other users remain independent, including in the same thread.
+See [helper limits](docs/helper-limits.md) for accounting, failure behavior,
+reset semantics, deployment limitations, and offline verification.
+
 ## Web playground (local dev)
 
 For iterating on commands without going through Discord, the bot ships a
-Discord-shaped web playground. It runs against an **ephemeral scratch copy** of
+Misty-branded web playground. It runs against an **ephemeral scratch copy** of
 your local team-tracking DB — commands you run in the playground never touch
 your working directory data.
 
@@ -324,6 +378,12 @@ your working directory data.
 ```bash
 npm run dev:web
 ```
+
+The launcher loads `discord-bot/.env` itself. Set `LLM_BASE_URL` and
+`LLM_API_KEY` there (or start the local LLM service on port 8002) before using
+**DM Misty**; the scratch directory settings are created automatically. The
+launcher carries the same LLM settings through every **Reset DB**
+reconfiguration, so a reset does not silently disable helper answers.
 
 That boots an orchestrator (`scripts/dev-web.js`) which:
 
@@ -353,12 +413,32 @@ Discord DM. Its history is kept separately per selected Discord ID, so switching
 the Acting as picker cannot leak one person's conversation into another's.
 
 Open `http://127.0.0.1:3001`, paste one of the three Dev IDs above into
-"Acting as" (or pick from the datalist), click a command in the sidebar, fill
-the form, and run. Replies stream into the transcript above.
+"Acting as" (or pick from the datalist). Choose a quick-start task or browse
+commands under Conversations, Your account, Teams & people, Documents,
+Meetings, Administration, and Help & support. Search matches command names, descriptions,
+and categories. New uncategorized commands remain available under Other commands.
 
-Click **Reset DB** in the top strip to re-clone from your main DB whenever you
-want a clean slate — no restart required. The default personas are re-seeded
+Forms share labeled controls, help text, and Required/Optional indicators.
+Leaving an optional select at **Use default** preserves the command’s server
+default; selecting **No** explicitly sends false. Permission badges describe
+the command policy; the server still authorizes every request. Run a command
+to see its reply in **Activity**. Pending requests disable repeat submission.
+
+The layout adapts to narrow screens and supports keyboard navigation. On phones,
+**Commands** opens the category menu; selecting a command closes it.
+**Clear activity** only clears the visible replies; it does not reset Misty’s
+thread context. UTMIST’s existing astronaut logo and cobalt accent are reused
+locally, with no external font, icon, or image requests.
+
+Click **Reset DB** beside the identity picker to re-clone from your main DB
+whenever you want a clean slate — no restart required. The default personas are re-seeded
 after every reset.
+
+Choose **Reply to Misty** under **Conversations** to simulate a Discord reply. Toggle
+**Ping @Misty** to test both reply-ping settings: Misty answers only when it is on,
+while ping-off messages remain part of the simulated thread history. The playground
+sends that history with every triggered follow-up. **Reset thread** clears only this
+helper transcript; **Reset DB** also clears it.
 
 ### Picker only shows *linked* people
 
@@ -446,26 +526,46 @@ local `.env`.
 | File | Responsibility |
 |---|---|
 | `src/config.js` | Load + validate env. |
+| `src/runtimeMode.js` | Shared Railway environment ownership and dev credential selection for startup, configuration, and command registration. |
 | `src/context.js` | Wire application services once. |
-| `src/directoryClient.js` | The only module that knows the team-tracking HTTP shape. |
-| `src/linkService.js` | Orchestrates `/link` + `/verify-code` — email one-time-code verification via the verification service. |
+| `src/clients/*.js` | Backend HTTP clients and shared request handling. |
+| `src/services/*.js` | Application orchestration over injected clients. |
+| `src/meeting/*.js` | Recording client, session orchestration, and voice recorder. |
+| `src/clients/directoryClient.js` | The only module that knows the team-tracking HTTP shape. |
+| `src/services/linkService.js` | Orchestrates `/link` + `/verify-code` — email one-time-code verification via the verification service. |
 | `src/auth/principal.js` | Authentication: Discord id → Principal. |
 | `src/auth/policy.js` | Authorization: policy + principal → allow/deny. |
 | `src/router.js` | Policy Enforcement Point: authN → authZ → dispatch. |
-| `src/messages.js` | Pure reply-string rendering. |
-| `src/commands/*.js` | Thin discord.js interaction handlers + registry. |
+| `src/messages/*.js` | Pure reply rendering grouped by feature; shared fallback strings in `common.js`. |
+| `src/commands/*.js` | Surface-neutral command handlers + registry. |
 | `src/index.js` | Client setup + interaction routing. |
-| `src/registerCommands.js` | Slash-command registration (stable → global; beta → testing guild only). Runs as Railway's `preDeployCommand` on every deploy; `npm run register` runs it locally. |
+| `src/helperFlow.js` | Shared helper-bot authorization and answer handling used by Discord and the web playground. |
+| `src/registerCommands.js` | Slash-command registration (stable → global; beta → testing guild only). Runs as Railway's persistent-environment `preDeployCommand`; ephemeral PR copies use the [preview override](../docs/pr-previews.md#automatic-railway-pr-environments). `npm run register` runs it locally. |
 | `src/defineCommand.js` | Neutral, surface-agnostic command factory. |
-| `src/adapters/discord.js` | The ONLY module that imports from discord.js — turns interactions into intents. |
+| `src/adapters/discord/index.js` | Discord event wiring; dispatches to the router or dedicated recording handler. |
+| `src/adapters/discord/interactions.js` | Convert interactions to neutral intents and deliver replies. |
+| `src/adapters/discord/mentions.js` | Mention and reply helper with thread history. |
+| `src/adapters/discord/recording.js` | Dedicated `/record` interaction path and its authorization. |
+| `src/adapters/discord/voice.js` | Voice occupancy, meeting prompts, and recording auto-stop. |
+| `src/adapters/discord/meetingPosts.js` | Meeting notifications and minutes attachments. |
 | `scripts/dev-web.js` | Orchestrator: ephemeral scratch DB + scratch team-tracking + web server. |
+| `scripts/preview.js` | Compose the preview selector with CLI access and operator confirmation. |
+| `scripts/lib/previewCli.js` | Parse selector options and adapt GitHub/Railway CLI output to metadata, with command and API error handling. |
+| `scripts/lib/preview.js` | Validate and sequence preview deployments through injected API, clock, and confirmation functions; independent of bot runtime and backend internals. |
 | `scripts/lib/snapshotDb.js` | Pipes `pg_dump` from main into `psql` on scratch, under `set -e -o pipefail`. |
 | `scripts/lib/spawnTeamTracking.js` | Spawns a scratch uvicorn subprocess; polls `/openapi.json` for readiness. |
 | `scripts/lib/issueDevSpoofKey.js` | Runs `team-tracking-keys issue --scopes ... dev:spoof` against scratch. |
 | `scripts/lib/seedDefaultPersonas.js` | Idempotently seeds Dev Superuser/Admin/Member into scratch. |
 | `src/web/server.js` | Fastify web playground (see "Web playground" above). |
+| `src/web/public/catalog.js` | Presentation labels, categories, search, and option serialization; command definitions stay in the registry. |
+| `src/web/public/utmist-logo.png` | Unmodified copy of the meeting service’s UTMIST brand asset, served within the bot image. |
 | `src/web/public/mentions.js` | Client-side `<@id>` → user pill rendering. |
 | `src/startupGuard.js` | Refuses web-mode boot if the directory key lacks `dev:spoof`. |
+
+`discord.js` imports belong in the Discord adapter modules and the startup and
+registration entrypoints. Commands, reply renderers, and application services
+remain surface-neutral. Import the module that owns a function directly;
+`adapters/discord/index.js` wires events rather than re-exporting its siblings.
 
 ## Testing
 

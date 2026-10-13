@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createTeamService, llmSafe } from '../src/teamService.js';
-import { TeamExists, MembershipInvalid, DirectoryUnavailable } from '../src/directoryClient.js';
+import { createTeamService, llmSafe } from '../src/services/teamService.js';
+import {
+  TeamExists,
+  MembershipInvalid,
+  DirectoryUnavailable,
+} from '../src/clients/directoryClient.js';
 
 const admin = { id: 'a', display_name: 'A', access_level: 'admin' };
 

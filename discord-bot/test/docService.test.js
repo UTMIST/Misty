@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createDocService, llmSafe } from '../src/docService.js';
-import { DocUnavailable, DocBadReference } from '../src/docClient.js';
-import { DirectoryUnavailable } from '../src/directoryClient.js';
+import { createDocService, llmSafe } from '../src/services/docService.js';
+import { DocUnavailable, DocBadReference } from '../src/clients/docClient.js';
+import { DirectoryUnavailable } from '../src/clients/directoryClient.js';
 
 test('llmSafe is true', () => {
   assert.equal(llmSafe, true);
