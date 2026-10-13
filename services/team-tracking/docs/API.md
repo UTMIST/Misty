@@ -37,6 +37,7 @@ Each endpoint requires a specific scope. A key only reaches an endpoint if its s
 | Memberships | `memberships:read`, `memberships:write` |
 | Providers | `providers:read` |
 | Identifiers | `identifiers:read`, `identifiers:write` |
+| Channels | `channels:read`, `channels:write` |
 | Dev-only | `dev:spoof` — local-dev only; refused against `TT_ENV=production` at both issuance and request time |
 | Wildcard | `admin` — grants every scope, but does NOT satisfy the `dev:spoof` guard |
 
@@ -733,6 +734,73 @@ Unlink an external account from a person.
 curl -sS -X DELETE "http://localhost:8000/people/550e8400-e29b-41d4-a716-446655440000/identifiers/discord" \
   -H "X-API-Key: dev-api-key-change-me" \
   -H "X-Actor: admin"
+```
+
+---
+
+## Channel team access
+
+The teams whose documents may inform answers in a Discord channel. A channel is addressed by its guild and channel snowflakes; both must be all digits, or the request is a 422. **An unconfigured channel, or one configured with no teams, has no document access.** Thread scope is the caller's decision: pass whichever channel id should govern.
+
+Like person identifiers, this is current state, not history: a replace or clear hard-deletes the previous configuration.
+
+Scopes: `channels:read` for GET, `channels:write` for PUT/DELETE.
+
+**`ChannelTeams` shape:**
+
+```json
+{
+  "guild_id": "111111111111111111",
+  "channel_id": "222222222222222222",
+  "team_ids": ["660e8400-e29b-41d4-a716-446655440001"],
+  "updated_by": "discord-bot",
+  "version": "edad6e056c0095ff"
+}
+```
+
+- `team_ids` lists **active** teams only, sorted. Retiring a team (`PATCH /teams/{id}` with `active: false`) removes it from every channel immediately, without a write here.
+- `version` is a fingerprint of `team_ids` (a truncated SHA-256 of the sorted ids). It changes exactly when the channel's effective access changes, including a retirement, and is not derived from timestamps, so the order concurrent writes commit in cannot hide a change. Use it as a cache key; if it differs from the value you cached, drop what you cached. An unconfigured channel and one configured with no teams share the same version, because both grant nothing.
+- `updated_by` is the key that last configured the channel. `null` when unconfigured.
+
+Concurrent PUTs and DELETEs on the same channel are serialized: the last one to commit wins outright, never a mix of two requests.
+
+### GET /channels/{guild_id}/{channel_id}/teams
+
+Read a channel's teams. Always 200. An unconfigured channel returns `team_ids: []` with `updated_by` null, so there is no 404 to special-case.
+
+```bash
+curl -sS "http://localhost:8000/channels/111111111111111111/222222222222222222/teams" \
+  -H "X-API-Key: dev-api-key-change-me"
+```
+
+### PUT /channels/{guild_id}/{channel_id}/teams
+
+Replace the channel's whole team set. `{"team_ids": []}` clears it.
+
+**Request body:**
+
+```json
+{ "team_ids": ["660e8400-e29b-41d4-a716-446655440001", "660e8400-e29b-41d4-a716-446655440002"] }
+```
+
+**Response:** `ChannelTeams`, HTTP 200.
+
+**Errors:** 400 if any id is not an active team; the existing configuration is left unchanged. 422 for duplicate ids, unknown fields, or non-numeric guild/channel ids.
+
+```bash
+curl -sS -X PUT "http://localhost:8000/channels/111111111111111111/222222222222222222/teams" \
+  -H "X-API-Key: dev-api-key-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"team_ids": ["660e8400-e29b-41d4-a716-446655440001"]}'
+```
+
+### DELETE /channels/{guild_id}/{channel_id}/teams
+
+Clear the channel's configuration. HTTP 204, idempotent: clearing an unconfigured channel is also 204.
+
+```bash
+curl -sS -X DELETE "http://localhost:8000/channels/111111111111111111/222222222222222222/teams" \
+  -H "X-API-Key: dev-api-key-change-me"
 ```
 
 ---

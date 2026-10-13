@@ -1,6 +1,7 @@
 import { REST, Routes, SlashCommandBuilder } from 'discord.js';
 import { loadConfig } from './config.js';
 import { commands, partitionCommands } from './commands/index.js';
+import { runtimeMode } from './runtimeMode.js';
 
 function applyOption(target, o) {
   if (o.type === 'string') {
@@ -40,6 +41,12 @@ export function buildDiscordData(command) {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  if (runtimeMode() === 'idle') {
+    console.error(
+      'Refusing Discord command registration in an unrecognized Railway environment. Use production, staging, or the configured dev environment.',
+    );
+    process.exit(2);
+  }
   const config = loadConfig();
   const { stable, beta } = partitionCommands([...commands.values()]);
   const stableBody = stable.map((c) => buildDiscordData(c));

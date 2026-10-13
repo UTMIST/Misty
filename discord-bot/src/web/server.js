@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { dispatch } from '../router.js';
 import { resolvePrincipal } from '../auth/principal.js';
 import { authorize } from '../auth/policy.js';
-import { DirectoryUnavailable } from '../directoryClient.js';
+import { answerHelperTurns, resolveHelperCaller } from '../helperFlow.js';
+import { DirectoryUnavailable } from '../clients/directoryClient.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -19,6 +20,7 @@ export async function buildServer({ commands, appContext, onReset }) {
   const server = Fastify({ logger: false });
   const dmHistory = new Map();
   const dmRequestTails = new Map();
+  let dmHistoryGeneration = 0;
 
   function enqueueDmRequest(discordId, request) {
     const previous = dmRequestTails.get(discordId) ?? Promise.resolve();
@@ -28,6 +30,7 @@ export async function buildServer({ commands, appContext, onReset }) {
       if (dmRequestTails.get(discordId) === current) dmRequestTails.delete(discordId);
     });
   }
+  let helperTurns = [];
 
   await server.register(fastifyStatic, {
     root: path.join(__dirname, 'public'),
@@ -76,17 +79,72 @@ export async function buildServer({ commands, appContext, onReset }) {
       return { error: 'reset not available' };
     }
     dmHistory.clear();
+    dmRequestTails.clear();
+    dmHistoryGeneration += 1;
     await onReset();
+    helperTurns = [];
+    return { ok: true };
+  });
+
+  // Simulate the Discord path where a member replies to Misty's latest message
+  // inside a Misty-created thread. The transcript is deliberately in-memory:
+  // the real Discord adapter re-fetches the thread on every turn, while this
+  // local-only surface has no Discord channel to fetch from. Ping-off replies
+  // stay in the transcript but do not invoke the helper.
+  server.post('/api/helper/reply', async (req, reply) => {
+    const { content, actingAs, replyPing } = req.body ?? {};
+    if (typeof actingAs !== 'string' || actingAs.trim() === '') {
+      reply.code(400);
+      return { error: 'actingAs is required' };
+    }
+    if (typeof content !== 'string' || content.trim() === '') {
+      reply.code(400);
+      return { error: 'content is required' };
+    }
+    if (typeof replyPing !== 'boolean') {
+      reply.code(400);
+      return { error: 'replyPing must be a boolean' };
+    }
+
+    const userTurn = {
+      role: 'user',
+      text: content.trim(),
+      authorId: actingAs,
+      authorName: `Discord user ${actingAs}`,
+    };
+    if (!replyPing) {
+      helperTurns.push(userTurn);
+      return { triggered: false };
+    }
+
+    const caller = await resolveHelperCaller(appContext, actingAs);
+    if (!caller.ok) return { content: caller.content, ephemeral: true };
+
+    userTurn.authorName = caller.principal.person.display_name;
+    const turns = [...helperTurns, userTurn];
+    const answer = await answerHelperTurns(appContext, turns, caller.principal);
+    helperTurns.push(userTurn, { role: 'assistant', text: answer });
+    return { content: answer, ephemeral: false };
+  });
+
+  server.delete('/api/helper/thread', async () => {
+    helperTurns = [];
     return { ok: true };
   });
 
   server.post('/api/helper/dm', async (req, reply) => {
     const { actingAs, content } = req.body ?? {};
-    if (typeof actingAs !== 'string' || !actingAs.trim() || typeof content !== 'string') {
+    if (
+      typeof actingAs !== 'string' ||
+      !actingAs.trim() ||
+      typeof content !== 'string' ||
+      !content.trim()
+    ) {
       reply.code(400);
       return { error: 'actingAs and content are required' };
     }
     return enqueueDmRequest(actingAs, async () => {
+      const historyGeneration = dmHistoryGeneration;
       let principal;
       try {
         principal = await resolvePrincipal(appContext.directory, actingAs);
@@ -101,11 +159,11 @@ export async function buildServer({ commands, appContext, onReset }) {
         reply.code(403);
         return { error: 'You need to link your account first. Run `/link` in Discord.' };
       }
-      const turns = dmHistory.get(actingAs) ?? [];
+      const turns = [...(dmHistory.get(actingAs) ?? [])];
       turns.push({ role: 'user', text: content.trim(), authorId: actingAs, authorName: 'You' });
       const { content: answer } = await appContext.helperService.answer({ turns, principal });
       turns.push({ role: 'assistant', text: answer ?? '' });
-      dmHistory.set(actingAs, turns);
+      if (historyGeneration === dmHistoryGeneration) dmHistory.set(actingAs, turns);
       return { content: answer ?? '' };
     });
   });

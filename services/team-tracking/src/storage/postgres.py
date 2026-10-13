@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from contracts.types import (
     ApiKey,
+    ChannelTeams,
     Person,
     PersonCreate,
     PersonIdentifier,
@@ -26,6 +27,7 @@ from contracts.types import (
 from src.storage.errors import UnknownParentTeamError
 from src.storage.schema import (
     api_keys,
+    channel_team_access,
     people,
     person_identifiers,
     providers,
@@ -527,6 +529,85 @@ class PostgresStorageAdapter:
                 )
             ).one_or_none()
         return _person_row_to_model(row) if row else None
+
+    # --- Channel team access ---
+
+    @staticmethod
+    def _lock_channel(conn, guild_id: str, channel_id: str) -> None:
+        """Serialize writers to one channel until commit. Row locks can't do this:
+        an unconfigured channel has no rows to lock. A hashtext collision only
+        over-serializes two unrelated channels, never under-serializes."""
+        conn.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"{guild_id}:{channel_id}"))))
+
+    @staticmethod
+    def _read_channel_teams(conn, guild_id: str, channel_id: str) -> ChannelTeams:
+        rows = conn.execute(
+            select(channel_team_access.c.created_by, teams.c.id, teams.c.active)
+            .select_from(
+                channel_team_access.join(teams, channel_team_access.c.team_id == teams.c.id)
+            )
+            .where(
+                channel_team_access.c.guild_id == guild_id,
+                channel_team_access.c.channel_id == channel_id,
+            )
+        ).all()
+        if not rows:
+            return ChannelTeams(guild_id=guild_id, channel_id=channel_id, team_ids=[])
+        return ChannelTeams(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            team_ids=sorted(r.id for r in rows if r.active),
+            updated_by=rows[0].created_by,
+        )
+
+    def get_channel_teams(self, guild_id: str, channel_id: str) -> ChannelTeams:
+        with self._engine.connect() as conn:
+            return self._read_channel_teams(conn, guild_id, channel_id)
+
+    def replace_channel_teams(
+        self, guild_id: str, channel_id: str, team_ids: list[UUID], *, actor: str
+    ) -> ChannelTeams:
+        with self._engine.begin() as conn:
+            self._lock_channel(conn, guild_id, channel_id)
+            if team_ids:
+                # FOR SHARE blocks a concurrent retire until this transaction commits.
+                active = conn.execute(
+                    select(teams.c.id)
+                    .where(teams.c.id.in_(team_ids), teams.c.active.is_(True))
+                    .with_for_update(read=True)
+                ).all()
+                if len(active) != len(set(team_ids)):
+                    raise ValueError("unknown_or_inactive_team")
+            conn.execute(
+                delete(channel_team_access).where(
+                    channel_team_access.c.guild_id == guild_id,
+                    channel_team_access.c.channel_id == channel_id,
+                )
+            )
+            if team_ids:
+                conn.execute(
+                    insert(channel_team_access),
+                    [
+                        {
+                            "guild_id": guild_id,
+                            "channel_id": channel_id,
+                            "team_id": t,
+                            "created_by": actor,
+                        }
+                        for t in team_ids
+                    ],
+                )
+            return self._read_channel_teams(conn, guild_id, channel_id)
+
+    def clear_channel_teams(self, guild_id: str, channel_id: str) -> None:
+        with self._engine.begin() as conn:
+            self._lock_channel(conn, guild_id, channel_id)
+            conn.execute(
+                delete(channel_team_access).where(
+                    channel_team_access.c.guild_id == guild_id,
+                    channel_team_access.c.channel_id == channel_id,
+                )
+            )
 
     def add_person_email(self, person_id: UUID, email: str, *, actor: str) -> PersonIdentifier:
         addr = _norm_email(email)
