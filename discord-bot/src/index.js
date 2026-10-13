@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits } from 'discord.js';
+import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import { loadConfig } from './config.js';
 import { createAppContext } from './context.js';
 import { commands } from './commands/index.js';
@@ -48,8 +48,10 @@ async function main() {
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.DirectMessages,
         GatewayIntentBits.GuildVoiceStates,
       ],
+      partials: [Partials.Channel],
     });
     wireDiscordClient(client, { commands, appContext });
     client.once('clientReady', (c) => console.log(`Bot ready as ${c.user.tag}`));

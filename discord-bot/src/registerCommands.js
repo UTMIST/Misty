@@ -1,4 +1,5 @@
 import { REST, Routes, SlashCommandBuilder } from 'discord.js';
+import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
 import { commands, partitionCommands } from './commands/index.js';
 import { runtimeMode } from './runtimeMode.js';
@@ -40,7 +41,7 @@ export function buildDiscordData(command) {
   return b.toJSON();
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   if (runtimeMode() === 'idle') {
     console.error(
       'Refusing Discord command registration in an unrecognized Railway environment. Use production, staging, or the configured dev environment.',

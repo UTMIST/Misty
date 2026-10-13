@@ -379,6 +379,12 @@ your working directory data.
 npm run dev:web
 ```
 
+The launcher loads `discord-bot/.env` itself. Set `LLM_BASE_URL` and
+`LLM_API_KEY` there (or start the local LLM service on port 8002) before using
+**DM Misty**; the scratch directory settings are created automatically. The
+launcher carries the same LLM settings through every **Reset DB**
+reconfiguration, so a reset does not silently disable helper answers.
+
 That boots an orchestrator (`scripts/dev-web.js`) which:
 
 1. Ensures the team-tracking docker-compose Postgres is up (starts it if not).
@@ -401,6 +407,10 @@ That boots an orchestrator (`scripts/dev-web.js`) which:
 8. On Ctrl-C, tears everything down and drops the scratch DB.
 
 ### Using the playground
+
+The **DM Misty** composer exercises the same linked-only helper flow as a
+Discord DM. Its history is kept separately per selected Discord ID, so switching
+the Acting as picker cannot leak one person's conversation into another's.
 
 Open `http://127.0.0.1:3001`, paste one of the three Dev IDs above into
 "Acting as" (or pick from the datalist). Choose a quick-start task or browse

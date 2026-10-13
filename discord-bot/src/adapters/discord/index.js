@@ -7,7 +7,13 @@ import {
   resolveEphemeral,
   safeReply,
 } from './interactions.js';
-import { startsWithBotMention, isReplyToBotInOwnedThread, handleMention } from './mentions.js';
+import {
+  startsWithBotMention,
+  isReplyToBotInOwnedThread,
+  isDirectMessage,
+  handleMention,
+  handleDirectMessage,
+} from './mentions.js';
 import { handleRecordInteraction } from './recording.js';
 import { createAutoStop, createMeetingPrompt } from './voice.js';
 
@@ -15,6 +21,16 @@ import { createAutoStop, createMeetingPrompt } from './voice.js';
 // in sibling modules; the application router and commands stay surface-neutral.
 
 export function wireDiscordClient(client, { commands, appContext }) {
+  const dmRequestTails = new Map();
+  function enqueueDm(userId, request) {
+    const previous = dmRequestTails.get(userId) ?? Promise.resolve();
+    const current = previous.then(request, request);
+    dmRequestTails.set(userId, current);
+    return current.finally(() => {
+      if (dmRequestTails.get(userId) === current) dmRequestTails.delete(userId);
+    });
+  }
+
   client.on('interactionCreate', async (interaction) => {
     // Autocomplete interactions are a separate path: they CANNOT be deferred and
     // must respond within 3s. Best-effort — dispatchAutocomplete never throws.
@@ -79,6 +95,12 @@ export function wireDiscordClient(client, { commands, appContext }) {
       if (message.author?.bot) return;
       const botId = client.user?.id;
       if (!botId) return;
+      if (isDirectMessage(message)) {
+        await enqueueDm(message.author.id, () =>
+          handleDirectMessage(message, { appContext, botId }),
+        );
+        return;
+      }
       const isMention = startsWithBotMention(message.content, botId);
       if (!isMention && !(await isReplyToBotInOwnedThread(message, botId))) return;
       await handleMention(message, { appContext, botId });

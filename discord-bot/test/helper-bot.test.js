@@ -4,9 +4,12 @@ import {
   startsWithBotMention,
   stripLeadingMention,
   isReplyToBotInOwnedThread,
+  isDirectMessage,
+  directMessageHistoryToTurns,
   threadHistoryToTurns,
   chunkForDiscord,
   handleMention,
+  handleDirectMessage,
 } from '../src/adapters/discord/mentions.js';
 import { wireDiscordClient } from '../src/adapters/discord/index.js';
 import { DirectoryUnavailable } from '../src/clients/directoryClient.js';
@@ -21,6 +24,49 @@ test('startsWithBotMention: true only when the ping leads the message', () => {
   assert.equal(startsWithBotMention(`hey <@${BOT}> covered this`, BOT), false); // mid-message
   assert.equal(startsWithBotMention('no mention', BOT), false);
   assert.equal(startsWithBotMention('', BOT), false);
+  assert.deepEqual(
+    directMessageHistoryToTurns(
+      [
+        { author: { id: '1' }, content: 'q' },
+        { author: { id: '2' }, content: 'leak' },
+      ],
+      '1',
+      BOT,
+    ).map((turn) => turn.text),
+    ['q'],
+  );
+});
+
+test('direct messages isolate the user and preserve the triggering prompt boundary', async () => {
+  let seen;
+  const history = [
+    { id: '100000000000000001', createdTimestamp: 1, author: { id: '1' }, content: 'first' },
+    { id: '100000000000000002', createdTimestamp: 2, author: { id: BOT_ID }, content: 'answer' },
+    { id: '100000000000000003', createdTimestamp: 3, author: { id: '1' }, content: 'second' },
+    { id: '100000000000000004', createdTimestamp: 4, author: { id: '1' }, content: 'later' },
+  ];
+  const channel = fakeChannel({ isDM: true, history });
+  const message = fakeMessage({
+    id: '100000000000000003',
+    createdTimestamp: 3,
+    content: 'second',
+    channel,
+  });
+  assert.equal(isDirectMessage(message), true);
+  await handleDirectMessage(message, {
+    appContext: ctx({
+      answer: async ({ turns }) => {
+        seen = turns;
+        return { content: 'new answer' };
+      },
+    }),
+    botId: BOT_ID,
+  });
+  assert.deepEqual(
+    seen.map((turn) => turn.text),
+    ['first', 'answer', 'second'],
+  );
+  assert.deepEqual(channel.sent, ['new answer']);
 });
 
 test('stripLeadingMention removes the leading ping and following whitespace', () => {
@@ -87,6 +133,7 @@ const BOT_ID = '999';
 // is therefore absent from `history`. `starterThrows` models a deleted one.
 function fakeChannel({
   isThread = false,
+  isDM = false,
   history = [],
   starter,
   starterThrows = false,
@@ -100,6 +147,7 @@ function fakeChannel({
     ownerId,
     typing: 0,
     isThread: () => isThread,
+    isDMBased: () => isDM,
     async send(content) {
       sent.push(content);
     },
@@ -121,6 +169,8 @@ function fakeChannel({
 
 function fakeMessage({
   content,
+  id,
+  createdTimestamp,
   authorId = '1',
   authorName = 'alexx',
   channel,
@@ -137,6 +187,8 @@ function fakeMessage({
   }
   const message = {
     content,
+    id,
+    createdTimestamp,
     author: { id: authorId, bot: false, username: authorName },
     channel,
     reference,
@@ -525,6 +577,7 @@ test('messageCreate listener answers a pinged Misty reply with full thread conte
     referencedMessage: { author: { id: BOT_ID } },
     replyPing: true,
   });
+
   const client = {
     user: { id: BOT_ID },
     on: (evt, fn) => {
@@ -540,6 +593,52 @@ test('messageCreate listener answers a pinged Misty reply with full thread conte
     seen.map((turn) => turn.text),
     ['original question', 'original answer', 'pinged follow up'],
   );
+});
+
+test('messageCreate serializes overlapping DMs and bounds each prompt to its message', async () => {
+  const handlers = {};
+  const seen = [];
+  let releaseFirst;
+  const firstStarted = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const first = {
+    id: '100000000000000001',
+    createdTimestamp: 1,
+    author: { id: '1', username: 'alexx' },
+    content: 'first question',
+  };
+  const second = {
+    id: '100000000000000002',
+    createdTimestamp: 2,
+    author: { id: '1', username: 'alexx' },
+    content: 'second question',
+  };
+  const channel = fakeChannel({ isDM: true, history: [first, second] });
+  const client = {
+    user: { id: BOT_ID },
+    on: (evt, fn) => {
+      handlers[evt] = fn;
+    },
+  };
+  wireDiscordClient(client, {
+    commands: new Map(),
+    appContext: ctx({
+      answer: async ({ turns }) => {
+        seen.push(turns.map((turn) => turn.text));
+        if (seen.length === 1) await firstStarted;
+        return { content: `answer ${seen.length}` };
+      },
+    }),
+  });
+  const firstRun = handlers.messageCreate(fakeMessage({ ...first, channel }));
+  while (seen.length !== 1) await new Promise((resolve) => setImmediate(resolve));
+  const secondRun = handlers.messageCreate(fakeMessage({ ...second, channel }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(seen, [['first question']]);
+  releaseFirst();
+  await Promise.all([firstRun, secondRun]);
+  assert.deepEqual(seen, [['first question'], ['first question', 'second question']]);
 });
 
 test('messageCreate listener ignores a Misty reply when its reply ping is off', async () => {

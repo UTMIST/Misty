@@ -30,6 +30,14 @@ const helper = {
   category: 'conversation',
   auth: 'linked',
 };
+const dmHelper = {
+  key: 'helper-dm',
+  title: 'DM Misty',
+  displayName: 'DM Misty',
+  description: 'Continue a private conversation as the selected Discord user.',
+  category: 'conversation',
+  auth: 'linked',
+};
 
 async function request(url, options) {
   const response = await fetch(url, options);
@@ -87,7 +95,7 @@ function renderSidebar() {
   commandList.replaceChildren();
   let count = 0;
   for (const category of categories) {
-    const commands = [helper, ...state.commands].filter(
+    const commands = [helper, dmHelper, ...state.commands].filter(
       (cmd) => cmd.category === category.id && matchesSearch(cmd, query),
     );
     if (!commands.length) continue;
@@ -199,7 +207,12 @@ function showHome() {
 }
 
 function selectCommand(key) {
-  const command = key === helper.key ? helper : state.commands.find((cmd) => cmd.key === key);
+  const command =
+    key === helper.key
+      ? helper
+      : key === dmHelper.key
+        ? dmHelper
+        : state.commands.find((cmd) => cmd.key === key);
   if (!command) return;
   state.selectedKey = key;
   state.openCategories.add(command.category);
@@ -210,6 +223,7 @@ function selectCommand(key) {
   formStrip.hidden = false;
   renderSidebar();
   if (key === helper.key) renderHelperReplyForm();
+  else if (key === dmHelper.key) renderHelperDmForm();
   else renderForm(command);
   updateSubmitState();
   setNavigationOpen(false);
@@ -393,6 +407,49 @@ function renderHelperReplyForm() {
       });
       input.value = '';
       if (payload.triggered !== false) appendBotMessage(payload);
+    } catch (error) {
+      appendErrorMessage(error.message);
+    } finally {
+      setPending(false);
+    }
+  });
+  formStrip.append(form);
+}
+
+function renderHelperDmForm() {
+  renderCommandHeading(dmHelper);
+  const form = document.createElement('form');
+  form.className = 'command-form';
+  const input = document.createElement('textarea');
+  input.rows = 4;
+  input.placeholder = 'Ask Misty privately…';
+  form.append(
+    createField(
+      {
+        name: 'content',
+        label: 'Your message',
+        required: true,
+        fullWidth: true,
+        description: 'DM history is isolated per selected Discord ID and cleared by Reset DB.',
+      },
+      input,
+    ),
+  );
+  form.append(createActions('Send DM ↗'));
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const content = input.value.trim();
+    if (!content || !state.actingAs || state.pending) return;
+    appendYouText(content, true);
+    setPending(true, 'Misty is thinking…');
+    try {
+      const payload = await request('/api/helper/dm', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ content, actingAs: state.actingAs }),
+      });
+      input.value = '';
+      appendBotMessage(payload);
     } catch (error) {
       appendErrorMessage(error.message);
     } finally {
