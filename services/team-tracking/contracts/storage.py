@@ -7,6 +7,7 @@ from contracts.types import (
     ApiKey,
     ChannelTeams,
     GoogleGroupStatus,
+    PendingGroupChange,
     Person,
     PersonCreate,
     PersonIdentifier,
@@ -223,8 +224,11 @@ class StorageAdapter(Protocol):
         last_error: str | None,
         last_synced_at: datetime | None,
         actor: str,
+        pending_changes: list[PendingGroupChange] | None = None,
     ) -> TeamGoogleGroup:
         """Insert or overwrite the team's row; every field is replaced as given.
+        Omitted pending_changes means an empty list. Persist before each Google
+        membership write, and retain unresolved writes across sync attempts.
         Raises ValueError('team_id not found') for an unknown team."""
         ...
 

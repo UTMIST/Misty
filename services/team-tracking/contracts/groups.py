@@ -11,6 +11,18 @@ class ExternalMembersDisabled(GroupProviderError):
     enable "Allow external members" in Google Groups, then the team re-syncs."""
 
 
+class GroupOperationPending(GroupProviderError):
+    """A write may still complete. Keep its intent until its effect is observed.
+
+    `operation_name` is diagnostic only: Cloud Identity does not expose an
+    operations.get method. Transport failures may not return a name at all.
+    """
+
+    def __init__(self, message: str, operation_name: str | None = None) -> None:
+        super().__init__(message)
+        self.operation_name = operation_name
+
+
 class GroupProvider(Protocol):
     """Managed mailing groups (Google Groups in production, a fake in tests)."""
 
@@ -34,10 +46,12 @@ class GroupProvider(Protocol):
     def add_member(self, group_name: str, email: str) -> None:
         """Add `email` as a MEMBER. Already a member is success. Raises
         ExternalMembersDisabled when the group refuses outside members, and
-        GroupProviderError unless the change is confirmed complete."""
+        GroupOperationPending when the write may still complete. Other
+        GroupProviderErrors indicate a rejected change."""
         ...
 
     def remove_member(self, membership_name: str) -> None:
         """Delete the membership. Already gone is success. Raises
-        GroupProviderError unless the removal is confirmed complete."""
+        GroupOperationPending when the write may still complete. Other
+        GroupProviderErrors indicate a rejected change."""
         ...

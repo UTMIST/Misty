@@ -5,7 +5,7 @@ that is the setup verified in issue #236. Google libraries are imported
 lazily so the dependency never loads when Google Groups is unconfigured.
 """
 
-from contracts.groups import ExternalMembersDisabled, GroupProviderError
+from contracts.groups import ExternalMembersDisabled, GroupOperationPending, GroupProviderError
 
 API = "https://cloudidentity.googleapis.com/v1"
 SCOPE = "https://www.googleapis.com/auth/cloud-identity.groups"
@@ -48,15 +48,25 @@ class GoogleGroupsProvider:
 
     def _call(self, method: str, path: str, **kwargs):
         """Returns (status, json body). Transport and token-refresh failures
-        become GroupProviderError; HTTP error statuses are left to the caller."""
+        become domain errors. Uncertain writes stay pending; other HTTP error
+        statuses are left to the caller."""
         try:
             resp = self._session.request(method, f"{API}/{path}", timeout=self._timeout_s, **kwargs)
         except Exception as e:  # requests.RequestException, google.auth RefreshError
-            raise GroupProviderError(f"google request failed: {type(e).__name__}") from e
+            from google.auth.exceptions import RefreshError
+
+            error = (
+                GroupProviderError
+                if method == "GET" or isinstance(e, RefreshError)
+                else GroupOperationPending
+            )
+            raise error(f"google request failed: {type(e).__name__}") from e
         try:
             body = resp.json()
         except ValueError:
             body = {}
+        if method != "GET" and resp.status_code >= 500:
+            raise GroupOperationPending(f"google write outcome unknown: HTTP {resp.status_code}")
         return resp.status_code, body
 
     @staticmethod
@@ -67,12 +77,14 @@ class GoogleGroupsProvider:
 
     def _finished(self, status: int, body: dict, what: str) -> dict:
         """Return a long-running Operation's `response`. Raises unless the call
-        succeeded and the Operation is `done` without an `error`; an unfinished
-        one is a retryable failure, picked up by the next sync."""
+        succeeded and the Operation is `done` without an `error`. An unfinished
+        write must remain recorded until a later sync observes its effect."""
         if status >= 400 or body.get("error"):
             raise self._error(status, body, what)
         if not body.get("done"):
-            raise GroupProviderError(f"{what}: operation not finished; retry")
+            raise GroupOperationPending(
+                f"{what}: operation not finished; retry", operation_name=body.get("name")
+            )
         return body.get("response") or {}
 
     def create_group(self, email: str, display_name: str, description: str) -> str:

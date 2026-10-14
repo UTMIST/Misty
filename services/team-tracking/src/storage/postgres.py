@@ -12,6 +12,7 @@ from contracts.types import (
     ApiKey,
     ChannelTeams,
     GoogleGroupStatus,
+    PendingGroupChange,
     Person,
     PersonCreate,
     PersonIdentifier,
@@ -638,6 +639,7 @@ class PostgresStorageAdapter:
         last_error: str | None,
         last_synced_at: datetime | None,
         actor: str,
+        pending_changes: list[PendingGroupChange] | None = None,
     ) -> TeamGoogleGroup:
         values = {
             "group_email": group_email,
@@ -645,6 +647,7 @@ class PostgresStorageAdapter:
             "status": status,
             "last_error": last_error,
             "last_synced_at": last_synced_at,
+            "pending_changes": [p.model_dump() for p in pending_changes or []],
             "updated_at": _now(),
             "updated_by": actor,
         }

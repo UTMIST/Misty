@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from contracts.types import (
+    PendingGroupChange,
     PersonCreate,
     PersonIdentifierCreate,
     PersonIdentifierUpdate,
@@ -630,7 +631,12 @@ def test_pg_team_google_group_upsert(adapter):
         last_error="boom",
         last_synced_at=None,
         actor="first",
+        pending_changes=[
+            PendingGroupChange(action="add", email="ada@x.ca", operation_name="operations/add")
+        ],
     )
+    assert adapter.get_team_google_group(team.id).pending_changes == first.pending_changes
+    assert adapter.list_team_google_groups()[0].pending_changes == first.pending_changes
     second = adapter.put_team_google_group(
         team.id,
         group_email="a@x.ca",
@@ -642,6 +648,7 @@ def test_pg_team_google_group_upsert(adapter):
     )
     assert (second.created_by, second.updated_by) == ("first", "second")
     assert second.group_name == "groups/1" and second.last_error is None
+    assert second.pending_changes == []
     assert adapter.list_team_google_groups() == [second]
     with pytest.raises(ValueError, match="team_id not found"):
         adapter.put_team_google_group(
@@ -653,6 +660,54 @@ def test_pg_team_google_group_upsert(adapter):
             last_synced_at=None,
             actor="t",
         )
+
+
+def test_pg_pending_add_survives_a_new_adapter_and_provider(clean_db):
+    from test_google_groups import FakeResponse, _provider
+
+    from src.google_groups import sync_team, synced_groups_containing, synced_team_for_group
+
+    storage = PostgresStorageAdapter(clean_db)
+    team = storage.create_team(TeamCreate(slug="ml", label="ML"), actor="t")
+    person = storage.create_person(
+        PersonCreate(display_name="Ada", primary_email="ada@x"), actor="t"
+    )
+    membership = storage.create_membership(
+        TeamMembershipCreate(person_id=person.id, team_id=team.id), actor="t"
+    )
+    provider, _ = _provider(
+        FakeResponse(200, {"done": True, "response": {"name": "groups/abc"}}),
+        FakeResponse(200, {}),
+        FakeResponse(200, {"name": "operations/add-ada", "done": False}),
+    )
+    pending = sync_team(storage, provider, team.id, actor="cli")
+
+    # No Python object from the old sync carries the pending write forward.
+    engine = create_engine(clean_db.url, future=True)
+    try:
+        fresh = PostgresStorageAdapter(engine)
+        fresh.end_membership(membership.id, date.today(), actor="api")
+        provider, _ = _provider(FakeResponse(200, {}))
+        waiting = sync_team(fresh, provider, team.id, actor="api")
+        assert waiting.status == "failed" and waiting.pending_changes == pending.pending_changes
+        assert synced_team_for_group(fresh, waiting.group_email) is None
+        assert synced_groups_containing(fresh, provider, person) == []
+
+        member = {
+            "name": "groups/abc/memberships/ada",
+            "preferredMemberKey": {"id": "ada@x"},
+            "roles": [{"name": "MEMBER"}],
+        }
+        provider, session = _provider(
+            FakeResponse(200, {"memberships": [member]}),
+            FakeResponse(200, {"done": True}),
+        )
+        result = sync_team(fresh, provider, team.id, actor="api")
+        assert result.status == "synced" and result.pending_changes == []
+        assert session.calls[-1][0] == "DELETE"
+        assert storage.get_team_google_group(team.id) == result
+    finally:
+        engine.dispose()
 
 
 def test_pg_stale_sync_in_another_process_cannot_readd_a_revoked_member(clean_db, monkeypatch):

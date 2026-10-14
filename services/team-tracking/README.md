@@ -145,7 +145,8 @@ team-tracking/
 │       ├── 006_email_provider_multivalued.py  multi-valued email identifiers
 │       ├── 007_membership_no_overlap.py membership temporal-overlap EXCLUDE constraint
 │       ├── 008_channel_team_access.py   channel_team_access (Discord channel → teams)
-│       └── 009_team_google_groups.py    team_google_groups (team → managed Google Group)
+│       ├── 009_team_google_groups.py    team_google_groups (team → managed Google Group)
+│       └── 010_pending_group_changes.py  persist unconfirmed membership writes
 │
 ├── tests/                  Two-mode test suite (see Testing below)
 │
@@ -161,7 +162,7 @@ team-tracking/
 ```
 
 **Nine tables:** `people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `providers`, `person_identifiers`, `channel_team_access`, `team_google_groups`.
-**Eight routers, 32 endpoints.** **Nine migrations (001–009);** the latest, 009, adds `team_google_groups`.
+**Eight routers, 32 endpoints.** **Ten migrations (001–010);** the latest, 010, persists unconfirmed Google membership writes.
 
 **Dependency direction:** `contracts/` imports nothing from `src/`. The API layer imports only from `contracts/` and `src/config`. The storage layer imports `contracts/` for types and defines its own schema. Nothing imports from `src/storage/` except `src/api/deps.py` (the single wiring point). This is the **Protocol boundary** — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -256,7 +257,7 @@ Machine-readable OpenAPI schema: `GET /openapi.json`. Interactive Swagger UI: `G
 
 ## Status
 
-Nine tables (`people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `providers`, `person_identifiers`, `channel_team_access`, `team_google_groups`), 32 endpoints across 8 routers, two storage adapters, migrations 001–009 (latest: 009, team Google Groups). Level-2 auth (DB-issued scoped argon2 keys + attested actor + audit log) is merged, as is the `person_identifiers`/providers identity-mapping feature.
+Nine tables (`people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `providers`, `person_identifiers`, `channel_team_access`, `team_google_groups`), 32 endpoints across 8 routers, two storage adapters, migrations 001–010 (latest: 010, pending Google membership writes). Level-2 auth (DB-issued scoped argon2 keys + attested actor + audit log) is merged, as is the `person_identifiers`/providers identity-mapping feature.
 
 **Not implemented (by design):**
 

@@ -11,9 +11,14 @@ from uuid import UUID
 
 from fastapi import BackgroundTasks
 
-from contracts.groups import ExternalMembersDisabled, GroupProvider, GroupProviderError
+from contracts.groups import (
+    ExternalMembersDisabled,
+    GroupOperationPending,
+    GroupProvider,
+    GroupProviderError,
+)
 from contracts.storage import StorageAdapter
-from contracts.types import Person, Team, TeamGoogleGroup
+from contracts.types import GoogleGroupStatus, PendingGroupChange, Person, Team, TeamGoogleGroup
 
 # Queues this process's syncs so each waits for the cross-process team lock on
 # one pool connection, instead of every queued sync holding one.
@@ -97,29 +102,76 @@ def sync_team(
         # The address only becomes permanent once the group exists, so a failed
         # creation can be fixed by renaming the slug.
         email = state.group_email if group_name else f"{team.slug}@{groups.domain}"
+        pending = [p.model_copy(deep=True) for p in state.pending_changes] if state else []
+
+        def record(status: GoogleGroupStatus, error: str | None) -> TeamGoogleGroup:
+            return storage.put_team_google_group(
+                team_id,
+                group_email=email,
+                group_name=group_name,
+                status=status,
+                last_error=error,
+                last_synced_at=(
+                    datetime.now(timezone.utc)
+                    if status == "synced"
+                    else (state.last_synced_at if state else None)
+                ),
+                actor=actor,
+                pending_changes=pending,
+            )
+
         try:
             if group_name is None:
                 group_name = groups.create_group(
                     email, team.label, f"Managed by Misty team-tracking (team {team.id})"
                 )
             current = groups.list_members(group_name)
+            # Cloud Identity has no operations.get method. A missing addition
+            # or still-present removal is unresolved, even if today's desired
+            # membership has reversed. Never replay or undo that write until
+            # we observe its effect. The exact removal resource matters if a
+            # different membership for the same address has since been created.
+            pending = [
+                p
+                for p in pending
+                if (p.action == "add" and p.email not in current)
+                or (p.action == "remove" and current.get(p.email) == p.membership_name)
+            ]
+            blocked = {p.email for p in pending}
             want = desired_emails(storage, team_id)
             # Each change is independent: one bad address must never block
             # revoking someone else, so removals go first and errors accumulate.
             errors: list[str] = []
             external_blocked = False
-            for addr in sorted(current.keys() - want):
+            changes = [
+                PendingGroupChange(action="remove", email=addr, membership_name=current[addr])
+                for addr in sorted(current.keys() - want - blocked)
+            ] + [
+                PendingGroupChange(action="add", email=addr)
+                for addr in sorted(want - current.keys() - blocked)
+            ]
+            for change in changes:
+                # Save before calling Google: a crash or a lost response must
+                # leave enough state for another process to continue safely.
+                pending.append(change)
+                record("failed", "Google membership change awaiting confirmation")
                 try:
-                    groups.remove_member(current[addr])
-                except GroupProviderError as e:
+                    if change.action == "remove":
+                        groups.remove_member(change.membership_name)
+                    else:
+                        groups.add_member(group_name, change.email)
+                except GroupOperationPending as e:
+                    change.operation_name = e.operation_name
                     errors.append(str(e))
-            for addr in sorted(want - current.keys()):
-                try:
-                    groups.add_member(group_name, addr)
                 except ExternalMembersDisabled:
+                    pending.remove(change)
                     external_blocked = True
                 except GroupProviderError as e:
+                    pending.remove(change)
                     errors.append(str(e))
+                else:
+                    pending.remove(change)
+            errors.extend(f"awaiting Google {p.action} completion for {p.email}" for p in pending)
             if errors:
                 hint = [EXTERNAL_MEMBERS_HINT] if external_blocked else []
                 status, error = "failed", "; ".join(errors + hint)
@@ -129,16 +181,7 @@ def sync_team(
                 status, error = "synced", None
         except GroupProviderError as e:
             status, error = "failed", str(e)
-        synced_at = datetime.now(timezone.utc) if status == "synced" else None
-        return storage.put_team_google_group(
-            team_id,
-            group_email=email,
-            group_name=group_name,
-            status=status,
-            last_error=error,
-            last_synced_at=synced_at or (state.last_synced_at if state else None),
-            actor=actor,
-        )
+        return record(status, error)
 
 
 def current_team_ids(storage: StorageAdapter, person_id: UUID) -> set[UUID]:

@@ -18,7 +18,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, CITEXT, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, CITEXT, JSONB, UUID
 from sqlalchemy.dialects.postgresql import ExcludeConstraint
 
 metadata = MetaData()
@@ -184,6 +184,7 @@ team_google_groups = Table(
     Column("status", Text, nullable=False),
     Column("last_error", Text, nullable=True),
     Column("last_synced_at", DateTime(timezone=True), nullable=True),
+    Column("pending_changes", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("created_by", Text, nullable=False),

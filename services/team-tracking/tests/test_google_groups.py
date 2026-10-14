@@ -5,12 +5,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from conftest import build_seed_providers, build_seed_role_kinds
-from contracts.groups import ExternalMembersDisabled, GroupProviderError
+from contracts.groups import ExternalMembersDisabled, GroupOperationPending, GroupProviderError
 from contracts.types import PersonCreate, PersonUpdate, TeamCreate, TeamMembershipCreate, TeamUpdate
 from src.api.app import create_app
 from src.api.deps import get_group_provider, get_storage
 from src.config import Settings, verify_production_secrets
-from src.google_groups import sync_team
+from src.google_groups import sync_team, synced_groups_containing, synced_team_for_group
 from src.providers.google_groups import GoogleGroupsProvider
 from src.storage.in_memory import InMemoryStorageAdapter
 
@@ -575,11 +575,161 @@ def test_unfinished_removal_is_not_reported_as_synced(storage):
     assert state.last_synced_at == ok.last_synced_at
 
 
+@pytest.mark.parametrize("revoke", ["membership", "person", "team"])
+def test_pending_add_survives_retries_and_is_revoked_when_it_finishes(storage, revoke):
+    team = _team(storage)
+    person = _member(storage, team, "ada@x")
+    p, _ = _provider(
+        FakeResponse(200, {"done": True, "response": {"name": "groups/abc"}}),
+        FakeResponse(200, {}),
+        FakeResponse(200, {"name": "operations/add-ada", "done": False}),
+    )
+    pending = sync_team(storage, p, team.id, actor="t")
+    assert pending.status == "failed"
+    assert pending.pending_changes[0].operation_name == "operations/add-ada"
+
+    if revoke == "membership":
+        (m,) = storage.list_memberships(person_id=person.id)
+        storage.end_membership(m.id, date.today(), actor="t")
+    elif revoke == "person":
+        storage.update_person(person.id, PersonUpdate(active=False), actor="t")
+    else:
+        storage.update_team(team.id, TeamUpdate(active=False), actor="t")
+
+    # A new provider on each run stands in for a cron process or API restart.
+    # Absence must not clear an addition that is still executing remotely.
+    for _ in range(2):
+        p, session = _provider(FakeResponse(200, {}))
+        waiting = sync_team(storage, p, team.id, actor="retry")
+        assert waiting.status == "failed" and waiting.pending_changes == pending.pending_changes
+        assert waiting.last_synced_at is None
+        assert len(session.calls) == 1
+        assert synced_team_for_group(storage, waiting.group_email) is None
+        assert synced_groups_containing(storage, p, person) == []
+
+    # The old operation completes after the revocation. The next sync observes
+    # it, removes the departed person, then permits synced lookups again.
+    member = {
+        "name": "groups/abc/memberships/ada",
+        "preferredMemberKey": {"id": "ada@x"},
+        "roles": [{"name": "MEMBER"}],
+    }
+    p, session = _provider(
+        FakeResponse(200, {"memberships": [member]}),
+        FakeResponse(200, {"done": True}),
+    )
+    done = sync_team(storage, p, team.id, actor="retry")
+    assert done.status == "synced" and done.pending_changes == []
+    assert session.calls[-1][:2] == (
+        "DELETE",
+        "https://cloudidentity.googleapis.com/v1/groups/abc/memberships/ada",
+    )
+
+
+def test_pending_remove_must_finish_before_member_can_rejoin(storage):
+    team = _team(storage)
+    person = _member(storage, team, "ada@x")
+    p, _ = _provider(
+        FakeResponse(200, {"done": True, "response": {"name": "groups/abc"}}),
+        FakeResponse(200, {}),
+        FakeResponse(200, {"done": True}),
+    )
+    synced = sync_team(storage, p, team.id, actor="t")
+    storage.update_person(person.id, PersonUpdate(active=False), actor="t")
+    member = {
+        "name": "groups/abc/memberships/ada",
+        "preferredMemberKey": {"id": "ada@x"},
+        "roles": [{"name": "MEMBER"}],
+    }
+    p, _ = _provider(
+        FakeResponse(200, {"memberships": [member]}),
+        FakeResponse(200, {"name": "operations/remove-ada", "done": False}),
+    )
+    sync_team(storage, p, team.id, actor="t")
+    storage.update_person(person.id, PersonUpdate(active=True), actor="t")
+    p, session = _provider(FakeResponse(200, {"memberships": [member]}))
+    waiting = sync_team(storage, p, team.id, actor="retry")
+    assert waiting.status == "failed" and len(waiting.pending_changes) == 1
+    assert waiting.last_synced_at == synced.last_synced_at
+    assert len(session.calls) == 1
+
+    p, session = _provider(FakeResponse(200, {}), FakeResponse(200, {"done": True}))
+    done = sync_team(storage, p, team.id, actor="retry")
+    assert done.status == "synced" and done.pending_changes == []
+    assert session.calls[-1][0] == "POST"
+
+
+def test_pending_add_does_not_block_unrelated_revocations(storage, groups):
+    team = _team(storage)
+    leaves = _member(storage, team, "leaves@x")
+    sync_team(storage, groups, team.id, actor="t")
+    _member(storage, team, "pending@x")
+
+    def pending_add(group_name, email):
+        raise GroupOperationPending("still running", "operations/add")
+
+    groups.add_member = pending_add
+    sync_team(storage, groups, team.id, actor="t")
+    storage.update_person(leaves.id, PersonUpdate(active=False), actor="t")
+    result = sync_team(storage, groups, team.id, actor="t")
+    assert result.status == "failed" and len(result.pending_changes) == 1
+    assert groups.members[result.group_name] == {}
+
+
+def test_membership_intent_is_durable_before_the_provider_call(storage, groups):
+    team = _team(storage)
+    person = _member(storage, team, "ada@x")
+
+    def crash_after_sending(group_name, email):
+        saved = storage.get_team_google_group(team.id)
+        assert saved.status == "failed" and saved.pending_changes[0].email == email
+        raise KeyboardInterrupt("process stopped before receiving Google's response")
+
+    groups.add_member = crash_after_sending
+    with pytest.raises(KeyboardInterrupt):
+        sync_team(storage, groups, team.id, actor="t")
+    storage.update_person(person.id, PersonUpdate(active=False), actor="t")
+    result = sync_team(storage, groups, team.id, actor="retry")
+    assert result.status == "failed" and len(result.pending_changes) == 1
+
+
+@pytest.mark.parametrize("response", [TimeoutError("token=secret"), FakeResponse(503, {})])
+def test_uncertain_membership_write_stays_pending(storage, response):
+    team = _team(storage)
+    person = _member(storage, team, "ada@x")
+    p, _ = _provider(
+        FakeResponse(200, {"done": True, "response": {"name": "groups/abc"}}),
+        FakeResponse(200, {}),
+        response,
+    )
+    result = sync_team(storage, p, team.id, actor="t")
+    assert result.status == "failed" and len(result.pending_changes) == 1
+    assert "secret" not in result.last_error
+    storage.update_person(person.id, PersonUpdate(active=False), actor="t")
+    p, _ = _provider(FakeResponse(200, {}))
+    assert sync_team(storage, p, team.id, actor="retry").status == "failed"
+
+
 def test_provider_transport_failure_hides_details():
     p, _ = _provider(ConnectionError("token=secret-value"))
     with pytest.raises(GroupProviderError) as e:
         p.list_members("groups/abc")
     assert "secret-value" not in str(e.value)
+
+
+def test_refresh_failure_rejects_the_write_without_leaving_pending_intent(storage):
+    from google.auth.exceptions import RefreshError
+
+    team = _team(storage)
+    _member(storage, team, "ada@x")
+    p, _ = _provider(
+        FakeResponse(200, {"done": True, "response": {"name": "groups/abc"}}),
+        FakeResponse(200, {}),
+        RefreshError("secret refresh token"),
+    )
+    result = sync_team(storage, p, team.id, actor="t")
+    assert result.status == "failed" and result.pending_changes == []
+    assert "secret" not in result.last_error
 
 
 # --- Config ---

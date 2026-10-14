@@ -202,6 +202,14 @@ It prints one line per team (`slug  status  group_email  last_error`) and exits 
 
 Then run the same command **daily** as a Railway cron service on the team-tracking image (start command `team-tracking-groups sync`, the same variables as the service). API writes sync immediately, but nothing triggers on a date passing, so a membership with a future `started_at` or `ended_at` only takes effect in Google at the next scheduled run. The scheduled run also retries any team left `failed`.
 
+### Pending membership changes
+
+Apply migration **010** before deploying the API and cron with pending-change tracking. Keep both on the same image version: older writers cannot preserve this state. Downgrade to 009 refuses to run while any pending change remains.
+
+If `last_error` says a change is awaiting completion, inspect `pending_changes` via `GET /teams/{id}/google-group`, then retry the normal sync command. It will remain `failed` until it observes the pending addition or removal in Google, then apply current directory membership. Other addresses are still reconciled. A pending addition may finish after someone leaves; the next sync removes it, and the mapping stays excluded from synced-group lookups until that reconciliation succeeds. Run the recovery sync promptly for revocations; the daily cron is the fallback.
+
+Cloud Identity exposes no operation-polling endpoint. A write that ultimately fails without an observable effect therefore requires operator investigation. Use the recorded operation name, address, and exact membership resource with the Google owner/support to establish that the request has terminated. Only after that confirmation may a maintainer remove the corresponding entry from `team_google_groups.pending_changes`, while API and cron writers are stopped, then run a normal sync. Do not clear entries based only on elapsed time or an empty member list: that recreates the delayed-addition race. Lost responses may have no operation name and require the same investigation.
+
 ### Onboarding each new group (manual step)
 
 API-created groups reject members outside `utmist.skule.ca`, and most members use personal addresses. After a team's group is created, its mapping shows `status: needs_external_members` as soon as someone external is added:

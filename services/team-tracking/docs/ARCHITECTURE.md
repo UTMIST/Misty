@@ -109,7 +109,9 @@ Each team gets a Google Group so Drive documents and channel access can be grant
 
 **External members.** API-created groups reject addresses outside the managed domain until a group owner enables **Allow external members** in the Google Groups UI. The Groups Settings API returned 401 in testing ([#236](https://github.com/UTMIST/Misty/issues/236)), so this step is manual. A sync that hits that rejection still applies internal adds and all removals, then records `needs_external_members` with an instruction, rather than failing the whole sync.
 
-**Independent changes, confirmed completion.** A sync applies removals before additions and attempts every one even when another fails, so a persistently rejected newcomer can't keep a departed member in the group. Any failure makes the whole sync `failed` with every error in `last_error`. Membership create/delete return a long-running Operation; the provider counts a change as made only when the Operation is `done` with no `error`. An unfinished Operation is a retryable failure, and the next sync re-reads Google and converges.
+**Independent changes, confirmed completion.** A sync applies removals before additions and attempts every one even when another fails, so a persistently rejected newcomer can't keep a departed member in the group. Any failure makes the whole sync `failed` with every error in `last_error`. Membership create/delete return an Operation; the provider counts a change as made only when the Operation is `done` with no `error`, or an idempotent already-exists/already-gone result confirms it.
+
+**Unconfirmed writes survive retries.** Before each membership call, the sync stores its intent in `team_google_groups.pending_changes` and marks the mapping `failed`. A confirmed completion or rejection clears that intent. An unfinished Operation, uncertain transport/server failure, or process crash leaves it persisted, including the operation name when available. Cloud Identity's [API surface](https://docs.cloud.google.com/identity/docs/reference/rest) has no operation-polling method, so the next sync waits for the write's effect: an added address appears, or the exact membership resource being removed disappears. Until then it skips further writes for that address, continues unrelated changes, and cannot mark the group `synced`. Once the effect is observed, it reconciles against the latest directory membership; a delayed addition for a departed person is removed. Pending changes never expire automatically. See [recovery](DEPLOYMENT.md#pending-membership-changes) and the [review-fix audit](GOOGLE-GROUPS-REVIEW.md).
 
 **Concurrency.** `sync_team` holds a per-team lock from reading membership until it records the result, so a slow sync started before a membership ended can't finish after a newer sync and re-add the person. The lock is `StorageAdapter.lock_team_google_group`: in Postgres a session-level `pg_advisory_lock(hashtext('google-group:<team id>'))` on a dedicated connection, which covers every API worker *and* the separately running `team-tracking-groups sync` cron. A process-local lock in front of it keeps queued syncs in one process from each holding a pool connection while they wait.
 
@@ -221,8 +223,9 @@ Two trade-offs worth knowing:
 | `status` | text NOT NULL | `synced` / `needs_external_members` / `failed` (check constraint) |
 | `last_error` | text NULL | Why the last sync did not converge |
 | `last_synced_at` | timestamptz NULL | Last fully converged sync |
+| `pending_changes` | jsonb NOT NULL DEFAULT `[]` | Unconfirmed membership writes; shape is in [API.md](API.md#team-google-groups) |
 
-Written after every sync attempt (upsert on `team_id`). It records the mapping and the last outcome only. Google's membership list is the record of who is actually in the group; nothing here caches it. See [Managed Google Groups](#managed-google-groups).
+Written before membership calls and after every sync attempt (upsert on `team_id`). It records the mapping, unconfirmed writes, and last outcome. Google's membership list remains the record of who is actually in the group. See [Managed Google Groups](#managed-google-groups).
 
 ### Convention: named exec seats
 
@@ -230,7 +233,7 @@ UTMIST has titles like "President", "VP Partnerships", "Treasurer". The schema m
 
 ## Migrations layout
 
-Alembic manages the Postgres schema; migrations are written by hand and kept in sync with `schema.py`. Nine exist:
+Alembic manages the Postgres schema; migrations are written by hand and kept in sync with `schema.py`. Ten exist:
 
 - **`001_initial_schema.py`** — enables `citext`; creates `people`, `teams`, `role_kinds`, `team_memberships` and their indexes.
 - **`002_seed_role_kinds.py`** — inserts `executive`, `director`, `lead`, `member`.
@@ -241,6 +244,7 @@ Alembic manages the Postgres schema; migrations are written by hand and kept in 
 - **`007_membership_no_overlap.py`** — adds the `btree_gist` `EXCLUDE` constraint that stops a person holding overlapping memberships in the same team, after deduplicating existing overlaps.
 - **`008_channel_team_access.py`** — creates `channel_team_access`.
 - **`009_team_google_groups.py`** — creates `team_google_groups`.
+- **`010_pending_group_changes.py`** — persists unconfirmed membership changes. Downgrade refuses to discard pending changes; resolve them first.
 
 Apply with `uv run alembic upgrade head`; roll back with `uv run alembic downgrade base`.
 

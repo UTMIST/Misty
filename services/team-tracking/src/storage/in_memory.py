@@ -6,6 +6,7 @@ from contracts.types import (
     ApiKey,
     ChannelTeams,
     GoogleGroupStatus,
+    PendingGroupChange,
     Person,
     PersonCreate,
     PersonIdentifier,
@@ -565,6 +566,7 @@ class InMemoryStorageAdapter:
         last_error: str | None,
         last_synced_at: datetime | None,
         actor: str,
+        pending_changes: list[PendingGroupChange] | None = None,
     ) -> TeamGoogleGroup:
         if team_id not in self._teams:
             raise ValueError("team_id not found")
@@ -577,6 +579,7 @@ class InMemoryStorageAdapter:
             status=status,
             last_error=last_error,
             last_synced_at=last_synced_at,
+            pending_changes=[p.model_copy(deep=True) for p in pending_changes or []],
             created_at=existing.created_at if existing else now,
             created_by=existing.created_by if existing else actor,
             updated_at=now,
