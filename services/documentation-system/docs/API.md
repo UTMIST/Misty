@@ -113,6 +113,7 @@ lacking a read scope is `403`. Neither falls through to `SEE_ALL`.
 | `POST` | `/docs/{id}/refetch` | `docs:write` | Re-run the content fetch |
 | `GET` | `/sources` | `docs:read` | List source kinds |
 | `GET` | `/sources/{id}` | `docs:read` | Get one source |
+| `GET` | `/api-keys/self` | *(any valid key)* | The calling key's own name and scopes |
 
 ## The `Doc` shape
 
@@ -444,6 +445,29 @@ fetch through the connectors service.
 ## `GET /sources/{id}` — get one source
 
 Scope: `docs:read`. **200** with the `Source`, or **404** if unknown.
+
+---
+
+## `GET /api-keys/self` — what can this key do
+
+No scope beyond a valid key: a caller may always read its own grant, and the response
+describes the key the caller already holds. **401** without a valid key.
+
+```json
+{ "name": "content-backfill", "scopes": ["docs:read", "docs:read:all", "docs:write"] }
+```
+
+`scopes` is sorted and literal — `admin` is reported as `admin`, not expanded into the
+scopes it satisfies. Applying the wildcard is the caller's job (`AuthedKey.has_scope`
+does it server-side).
+
+**Why a tool needs this.** Read routes answer an authorization failure with *filtered
+data*, not an error: a key holding `docs:read` but not `docs:read:all`, sent without
+`X-On-Behalf-Of`, resolves to `DENY` and gets **200 `[]`** from `GET /docs` — identical
+on the wire to an empty catalog (see "Visibility and `X-On-Behalf-Of`" above). Anything
+that acts on a listing being empty — `doc-backfill` concluding there is nothing to
+repair — must check its scopes here first rather than infer them from the data.
+Mirrors team-tracking's endpoint of the same path.
 
 ---
 

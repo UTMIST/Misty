@@ -175,10 +175,17 @@ uv --project services/documentation-system run doc-keys \
 |-------|-----------|
 | `docs:read` | `GET /sources` — which sources have fetching enabled |
 | `docs:read:all` | `GET /docs?has_content=false` must see every doc, not one actor's |
-| `docs:write` | `POST /docs/{id}/refetch` |
+| `docs:write` | `POST /docs/{id}/refetch` (not needed for `--dry-run`) |
 
 `docs:read:all` does **not** imply `docs:read` — scope checks are an exact match plus the
 `admin` wildcard. A key holding only `docs:read:all` gets a 403 on `GET /sources`.
+
+The run reads its own scopes from `GET /api-keys/self` and refuses before listing
+anything if one is missing. That check is not belt-and-braces: a key with `docs:read`
+but not `docs:read:all`, sent without `X-On-Behalf-Of` (this tool never sends one),
+resolves to `DENY` rather than a 403 — `GET /docs` answers **200 `[]`**, which is
+indistinguishable from an empty catalog. Without the check, a mis-scoped key would
+print `nothing to do` and exit 0 with the gap untouched.
 
 ### Configuration
 
@@ -197,11 +204,19 @@ Each doc gets its own line, then a summary:
 
 ```
 repaired 4f3a1b2c-...  https://docs.google.com/document/d/abc
+empty    6c5d4e3f-...  https://github.com/owner/repo  refetch succeeded but no content was extracted
 failed   8b2c7d14-...  https://utmist.ca/handbook  502: connectors unreachable
 skipped  1a2b3c4d-...  https://notion.so/page  source 'notion' has content fetching disabled
-3 contentless doc(s): 1 repaired, 1 failed, 1 skipped
+4 contentless doc(s): 1 repaired, 1 empty, 1 failed, 1 skipped
 ```
 
+- **repaired** — content is now stored. Confirmed, not assumed: after the refetches the
+  run re-lists `has_content=false` once and demotes anything still in it.
+- **empty** — the refetch *worked* and produced no text to store. `POST /docs/{id}/refetch`
+  returns 200 whenever the fetch ran, and only writes content `if result.content`, so a
+  title-only fetcher (`github`, by design) or a page that extracts to nothing leaves the
+  doc contentless behind a 200. Reported apart from **failed** because nothing is broken
+  — but it still exits non-zero, because the doc is still missing content.
 - **failed** — the source still fails. The doc stays contentless and is named with its
   reason; one failure never aborts the rest of the run.
 - **skipped** — the source has `content_fetch_enabled=false` (`notion`, `youtube`), so it
@@ -209,9 +224,11 @@ skipped  1a2b3c4d-...  https://notion.so/page  source 'notion' has content fetch
   does not read as an error every run. The enabled set is read from `GET /sources`, so
   registering a fetcher for a new source needs no change to the CLI.
 
-Exit codes: **0** nothing failed, **1** at least one doc failed, **2** fatal (missing key,
-mis-scoped key, service unreachable). A mis-scoped key is a hard error rather than an
-empty run, so it can never be mistaken for "nothing to repair".
+Exit codes: **0** every contentless doc now has content, **1** at least one does not
+(**failed** or **empty**), **2** fatal (missing key, mis-scoped key, service unreachable,
+or a verification listing that could not be read). A mis-scoped key is a hard error
+rather than an empty run, so it can never be mistaken for "nothing to repair"; likewise
+exit 0 means the corpus is complete, not merely that every request returned 200.
 
 ---
 

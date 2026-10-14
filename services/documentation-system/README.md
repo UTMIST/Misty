@@ -91,7 +91,7 @@ DOCS_API_KEY=doc_<prefix>_<secret> uv run doc-backfill --dry-run
 DOCS_API_KEY=doc_<prefix>_<secret> uv run doc-backfill
 ```
 
-Sources with `content_fetch_enabled=false` (`notion`, `youtube`) can never have content, so they are reported as skipped rather than failed. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli).
+Sources with `content_fetch_enabled=false` (`notion`, `youtube`) can never have content, so they are reported as skipped rather than failed. A refetch that succeeds but extracts nothing (a title-only `github` doc, an empty page) is reported as `empty`, not `repaired` — a 200 from the refetch endpoint means the fetch ran, not that content was stored, so the run re-lists `has_content=false` to confirm. The tool checks its own scopes (`GET /api-keys/self`) before trusting any listing: without `docs:read:all` the catalog lists as empty rather than 403, which would otherwise read as "nothing to repair". See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli).
 
 **Ports:** this service runs on **8001** (team-tracking uses 8000) and its Postgres container is exposed on **5434** — both chosen to avoid colliding with team-tracking's defaults when running both services locally.
 
@@ -204,6 +204,7 @@ All endpoints require `X-API-Key` with the appropriate scope.
 | POST | `/docs/{id}/refetch` | `docs:write` | Re-run content fetch for an existing doc |
 | GET | `/sources` | `docs:read` | List sources (`?active_only=false`) |
 | GET | `/sources/{id}` | `docs:read` | Get one source |
+| GET | `/api-keys/self` | *(any valid key)* | The calling key's own name and scopes |
 
 Machine-readable OpenAPI schema: `GET /openapi.json`. Interactive Swagger UI: `GET /swagger`.
 
