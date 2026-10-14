@@ -52,21 +52,34 @@ class GoogleGroupsProvider:
         statuses are left to the caller."""
         try:
             resp = self._session.request(method, f"{API}/{path}", timeout=self._timeout_s, **kwargs)
-        except Exception as e:  # requests.RequestException, google.auth RefreshError
-            from google.auth.exceptions import RefreshError
+        except Exception as e:  # requests and google.auth transport/refresh errors
+            from google.auth.exceptions import RefreshError, TransportError
+            from requests.exceptions import ConnectTimeout
 
+            # Auth refresh fails before sending the write; ConnectTimeout
+            # guarantees no request was sent. Other transport errors may follow
+            # an accepted write, so keep its intent until the effect is known.
             error = (
                 GroupProviderError
-                if method == "GET" or isinstance(e, RefreshError)
+                if method == "GET" or isinstance(e, (RefreshError, TransportError, ConnectTimeout))
                 else GroupOperationPending
             )
             raise error(f"google request failed: {type(e).__name__}") from e
+        if method != "GET" and resp.status_code >= 500:
+            raise GroupOperationPending(f"google write outcome unknown: HTTP {resp.status_code}")
         try:
             body = resp.json()
         except ValueError:
+            if method == "GET" and resp.status_code < 400:
+                raise GroupProviderError("google read returned invalid JSON") from None
             body = {}
-        if method != "GET" and resp.status_code >= 500:
-            raise GroupOperationPending(f"google write outcome unknown: HTTP {resp.status_code}")
+        if not isinstance(body, dict):
+            error = (
+                GroupOperationPending
+                if method != "GET" and resp.status_code < 400
+                else GroupProviderError
+            )
+            raise error("google response was not a JSON object")
         return resp.status_code, body
 
     @staticmethod

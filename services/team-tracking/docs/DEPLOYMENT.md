@@ -40,7 +40,7 @@ Set in Railway per environment; see the runbook's env-var table for the full lis
 
 | Var | Purpose |
 |---|---|
-| `DATABASE_URL` | `postgresql+psycopg://…` at the Neon branch for this environment. |
+| `DATABASE_URL` | `postgresql+psycopg://…` at the Neon branch for this environment. Managed Google Groups requires the direct endpoint; see [database connection](#database-connection). |
 | `API_KEY` | Env bootstrap admin key. Generate with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`. Do NOT prefix with `tt_`. |
 | `TT_ENV` | `staging` or `production`. Controls the `dev:spoof` scope safety gates (the CLI refuses to issue such keys and the middleware 403s them when `TT_ENV=production`). |
 | `PORT` | `8000` (explicit — required so cross-service refs from consumers resolve). |
@@ -188,6 +188,10 @@ The client secret and refresh token are credentials: keep them in Railway variab
 
 **If the grant is revoked or expires**, every sync records `status: failed` with `last_error` `google request failed: RefreshError`. Repeat steps 1–3 as the same account, replace `GOOGLE_OAUTH_REFRESH_TOKEN`, then run the backfill below to catch up.
 
+### Database connection
+
+When Google Groups is enabled, both the API and sync cron must use Neon's **direct** connection string for `DATABASE_URL` (hostname without `-pooler`). The per-team sync lock spans several transactions on one database session. Neon's transaction pooler cannot preserve that session; see [the concurrency design](ARCHITECTURE.md#managed-google-groups). The existing SQLAlchemy connection pool can remain enabled.
+
 ### Backfill and the scheduled sync
 
 After the variables are set, create groups for all existing teams and reconcile them:
@@ -206,9 +210,11 @@ Then run the same command **daily** as a Railway cron service on the team-tracki
 
 Apply migration **010** before deploying the API and cron with pending-change tracking. Keep both on the same image version: older writers cannot preserve this state. Downgrade to 009 refuses to run while any pending change remains.
 
-If `last_error` says a change is awaiting completion, inspect `pending_changes` via `GET /teams/{id}/google-group`, then retry the normal sync command. It will remain `failed` until it observes the pending addition or removal in Google, then apply current directory membership. Other addresses are still reconciled. A pending addition may finish after someone leaves; the next sync removes it, and the mapping stays excluded from synced-group lookups until that reconciliation succeeds. Run the recovery sync promptly for revocations; the daily cron is the fallback.
+If `last_error` says a change is awaiting completion, inspect `pending_changes` via `GET /teams/{id}/google-group`, then retry the normal sync command. It checks whether pending writes have taken effect and retries a pending removal against its exact membership resource if the person still needs removal. An unresolved addition is never replayed; a removal for someone who rejoined must finish before they can be added again. The mapping stays `failed` until all pending changes resolve and current directory membership is applied. Other addresses are still reconciled. A pending addition may finish after someone leaves; the next sync removes it, and the mapping stays excluded from synced-group lookups until that reconciliation succeeds. Run the recovery sync promptly for revocations; the daily cron is the fallback.
 
-Cloud Identity exposes no operation-polling endpoint. A write that ultimately fails without an observable effect therefore requires operator investigation. Use the recorded operation name, address, and exact membership resource with the Google owner/support to establish that the request has terminated. Only after that confirmation may a maintainer remove the corresponding entry from `team_google_groups.pending_changes`, while API and cron writers are stopped, then run a normal sync. Do not clear entries based only on elapsed time or an empty member list: that recreates the delayed-addition race. Lost responses may have no operation name and require the same investigation.
+Connection-establishment timeouts and OAuth refresh failures leave no new pending intent because the membership request was not accepted. A normal sync retries these failures automatically.
+
+Cloud Identity exposes no operation-polling endpoint. A pending write whose effect never appears and cannot be safely retried requires operator investigation. Use the recorded operation name, address, and exact membership resource with the Google owner/support to establish that the request has terminated. Only after that confirmation may a maintainer remove the corresponding entry from `team_google_groups.pending_changes`, while API and cron writers are stopped, then run a normal sync. Do not clear entries based only on elapsed time or an empty member list: that recreates the delayed-addition race. Lost responses may have no operation name and require the same investigation.
 
 ### Onboarding each new group (manual step)
 

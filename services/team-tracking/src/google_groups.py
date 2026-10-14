@@ -128,17 +128,19 @@ def sync_team(
             current = groups.list_members(group_name)
             # Cloud Identity has no operations.get method. A missing addition
             # or still-present removal is unresolved, even if today's desired
-            # membership has reversed. Never replay or undo that write until
-            # we observe its effect. The exact removal resource matters if a
-            # different membership for the same address has since been created.
+            # membership has reversed. An addition cannot be replayed safely:
+            # the original could outlive a successful retry and later revocation.
+            # Retry a removal against the same resource if still unwanted.
+            # The exact resource matters if a different membership for the
+            # same address has since been created.
             pending = [
                 p
                 for p in pending
                 if (p.action == "add" and p.email not in current)
                 or (p.action == "remove" and current.get(p.email) == p.membership_name)
             ]
-            blocked = {p.email for p in pending}
             want = desired_emails(storage, team_id)
+            blocked = {p.email for p in pending if p.action == "add" or p.email in want}
             # Each change is independent: one bad address must never block
             # revoking someone else, so removals go first and errors accumulate.
             errors: list[str] = []
@@ -151,9 +153,13 @@ def sync_team(
                 for addr in sorted(want - current.keys() - blocked)
             ]
             for change in changes:
+                existing = next((p for p in pending if p.email == change.email), None)
+                if existing is not None:
+                    change = existing
+                else:
+                    pending.append(change)
                 # Save before calling Google: a crash or a lost response must
                 # leave enough state for another process to continue safely.
-                pending.append(change)
                 record("failed", "Google membership change awaiting confirmation")
                 try:
                     if change.action == "remove":
@@ -161,13 +167,15 @@ def sync_team(
                     else:
                         groups.add_member(group_name, change.email)
                 except GroupOperationPending as e:
-                    change.operation_name = e.operation_name
+                    change.operation_name = e.operation_name or change.operation_name
                     errors.append(str(e))
                 except ExternalMembersDisabled:
-                    pending.remove(change)
+                    if existing is None:
+                        pending.remove(change)
                     external_blocked = True
                 except GroupProviderError as e:
-                    pending.remove(change)
+                    if existing is None:
+                        pending.remove(change)
                     errors.append(str(e))
                 else:
                     pending.remove(change)

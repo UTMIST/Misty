@@ -6,16 +6,32 @@ even though Google can subsequently restore a departed member's access.
 
 The reconciler now persists each membership intent before sending the write.
 It keeps unfinished or uncertain writes across retries and process restarts,
-and waits to observe their effect before reconciling the address again.
+and waits to observe their effect before reversing the change.
 Unrelated revocations continue. Pending writes keep the mapping `failed`, so
 both synced-group lookups exclude it. A completed delayed addition is removed
 on the next sync if the person no longer belongs.
 
 Cloud Identity has no documented operation-polling method. Requests whose
-effects never appear require investigation before their pending state can be
-cleared; see [the recovery procedure](DEPLOYMENT.md#pending-membership-changes).
+effects never appear and cannot be safely retried require investigation before
+their pending state can be cleared; see
+[the recovery procedure](DEPLOYMENT.md#pending-membership-changes).
 This fixes the false healthy state; Google access already granted by a delayed
 write is removed when reconciliation runs, not at the instant Google finishes.
+
+A follow-up check distinguishes connection-establishment timeouts and OAuth
+refresh transport failures, which are safe to retry, from uncertain write
+outcomes. It also rejects malformed Google read responses instead of
+interpreting them as an empty membership list and prematurely clearing a
+pending removal.
+
+An independent Claude Code review identified that uncertain removals also need
+retries when the person remains unwanted. These now reuse the original pending
+record and exact membership resource; a rejected retry cannot erase an earlier
+uncertain outcome. Additions remain guarded because replaying one can recreate
+the delayed-addition race. The review also identified the session-lock deployment
+requirement, now explicit in the deployment and architecture docs: API and cron
+must use a direct database endpoint, not a transaction pooler. The deployed
+connection configuration was not inspected during this review.
 
 ## Changed-file justification
 
@@ -47,6 +63,8 @@ Paths below are relative to `services/team-tracking/` unless prefixed by `/`.
 - Imported `src` and `contracts` paths were verified against this checkout.
 - Pinned Ruff lint and format checks pass.
 - Repository-wide `make check` passes.
+- Claude Code's final static review found no remaining correctness blockers in
+  the corrections; the direct database endpoint remains a deployment prerequisite.
 - Migration `010 -> 009 -> 010` succeeds with resolved state, preserves an
   existing row with the new default, and refuses rollback with unresolved writes.
 - Google behavior is exercised only through injected fakes; no live Google
