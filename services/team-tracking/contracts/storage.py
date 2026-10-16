@@ -1,10 +1,13 @@
-from datetime import date
+from contextlib import AbstractContextManager
+from datetime import date, datetime
 from typing import Protocol
 from uuid import UUID
 
 from contracts.types import (
     ApiKey,
     ChannelTeams,
+    GoogleGroupStatus,
+    PendingGroupChange,
     Person,
     PersonCreate,
     PersonIdentifier,
@@ -15,6 +18,7 @@ from contracts.types import (
     RoleKind,
     Team,
     TeamCreate,
+    TeamGoogleGroup,
     TeamMembership,
     TeamMembershipCreate,
     TeamMembershipUpdate,
@@ -205,4 +209,30 @@ class StorageAdapter(Protocol):
 
     def clear_channel_teams(self, guild_id: str, channel_id: str) -> None:
         """Hard-delete the channel's configuration. Idempotent."""
+        ...
+
+    # Team Google Groups (one row per team, written after each sync attempt)
+    def get_team_google_group(self, team_id: UUID) -> TeamGoogleGroup | None: ...
+    def list_team_google_groups(self) -> list[TeamGoogleGroup]: ...
+    def put_team_google_group(
+        self,
+        team_id: UUID,
+        *,
+        group_email: str,
+        group_name: str | None,
+        status: GoogleGroupStatus,
+        last_error: str | None,
+        last_synced_at: datetime | None,
+        actor: str,
+        pending_changes: list[PendingGroupChange] | None = None,
+    ) -> TeamGoogleGroup:
+        """Insert or overwrite the team's row; every field is replaced as given.
+        Omitted pending_changes means an empty list. Persist before each Google
+        membership write, and retain unresolved writes across sync attempts.
+        Raises ValueError('team_id not found') for an unknown team."""
+        ...
+
+    def lock_team_google_group(self, team_id: UUID) -> AbstractContextManager[None]:
+        """Exclusive per-team lock, held across one whole sync. Must exclude
+        every process sharing this storage (API workers and the CLI cron)."""
         ...
