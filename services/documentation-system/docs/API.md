@@ -381,14 +381,16 @@ Scope: `docs:write`. Re-runs the content fetch for an existing doc on demand. Fo
 sources it first resolves the complete returned ACL and atomically replaces only the
 `google_drive` grants. A successful empty resolution revokes all source-derived access and
 does not store newly fetched content. On a mapped result, it updates `title`,
-`content_snapshot`, and `fetched_at`, then returns the updated `Doc`.
+`content_snapshot`, and `fetched_at`. Visibility is checked again after reconciliation;
+if the acting person's access was revoked, the route returns `404` while keeping the
+successful reconciliation. Otherwise it returns the updated `Doc`.
 
 ### Status codes
 
 | Status | Meaning |
 |--------|---------|
 | **200 OK** | Refetched; returns the updated `Doc` |
-| **404 Not Found** | No such doc |
+| **404 Not Found** | Doc is missing or invisible, including access revoked by this refetch |
 | **502 Bad Gateway** | Fetch failed, Google ACL was omitted/incomplete, or directory resolution was unavailable; prior source grants remain until their expiry |
 | **401 / 403** | Auth failure / missing scope |
 

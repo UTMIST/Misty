@@ -104,3 +104,28 @@ def test_ingest_ownership_does_not_bypass_another_readers_source_acl(ctx, owner_
     assert store.get_doc_content(UUID(doc_id)) == "old content"
     assert client.get(f"/docs/{doc_id}", headers=obo).status_code == 404
     assert client.get("/docs", headers=obo).json() == []
+
+
+@pytest.mark.parametrize("remaining_email", ["bob@example.com", None])
+@pytest.mark.parametrize("owner_field", [None, "owning_person_id", "owning_team_id"])
+def test_refetch_rechecks_access_after_successful_source_revocation(
+    ctx, remaining_email, owner_field
+):
+    client, store, fetchers, obo = ctx
+    payload = {"url": "https://docs.google.com/document/d/revoked/edit"}
+    if owner_field:
+        payload[owner_field] = str(P1 if owner_field == "owning_person_id" else T1)
+    response = client.post("/docs", headers=ADMIN, json=payload)
+    assert response.status_code == 201
+    doc_id = response.json()["doc"]["id"]
+    assert client.get(f"/docs/{doc_id}", headers=obo).status_code == 200
+    fetchers.result = _result(remaining_email, content="new restricted content")
+    response = client.post(f"/docs/{doc_id}/refetch", headers=obo)
+    assert response.status_code == 404
+    assert response.json() == {"detail": "doc not found"}
+    assert client.get(f"/docs/{doc_id}", headers=obo).status_code == 404
+    grants = store.list_grants(UUID(doc_id))
+    assert [grant.grantee_id for grant in grants] == ([P2] if remaining_email else [])
+    assert store.get_doc_content(UUID(doc_id)) == (
+        "new restricted content" if remaining_email else "old content"
+    )

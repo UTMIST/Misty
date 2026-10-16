@@ -255,7 +255,7 @@ def refetch(
     if doc is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="doc not found")
     try:
-        return _refetch_doc_source(
+        _refetch_doc_source(
             doc,
             storage=storage,
             fetchers=fetchers,
@@ -270,6 +270,8 @@ def refetch(
             actor=actor,
         )
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+    # Reconciliation may have revoked the caller's cached source grant.
+    return get_visible_doc_or_404(doc_id, wctx, storage)
 
 
 def _refetch_doc_source(
