@@ -110,10 +110,13 @@ def refresh_due_source_access(
     due_before = datetime.now(timezone.utc) - timedelta(
         hours=settings.source_access_refresh_after_hours
     )
+    fetch_enabled = {source.id for source in storage.list_sources() if source.content_fetch_enabled}
     due = [
         doc
         for doc in storage.list_docs(active_only=True)
-        if doc.source_id in GOOGLE_SOURCE_IDS and _source_access_due(doc, due_before)
+        if doc.source_id in GOOGLE_SOURCE_IDS
+        and doc.source_id in fetch_enabled
+        and _source_access_due(doc, due_before)
     ][:limit]
     refreshed = 0
     failed = 0

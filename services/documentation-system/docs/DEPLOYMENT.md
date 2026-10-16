@@ -230,7 +230,9 @@ is reversed.
 Configure Railway (or the approved external scheduler) to call
 `POST /docs/source-access/refresh-due?limit=10` once per day with a `docs:write` key.
 Repeat until the response's `attempted` count is below `limit`; the endpoint processes each
-document independently and reports `{attempted, refreshed, failed}`.
+document independently and reports `{attempted, refreshed, failed}`. Only sources with
+`content_fetch_enabled=true` are selected; disabled sources receive no automatic content
+or ACL refresh, so their existing source grants eventually expire.
 
 The defaults refresh after 24 hours and expire source-derived grants after 48 hours. A
 connector/directory failure retains the last complete grant set until its existing expiry;

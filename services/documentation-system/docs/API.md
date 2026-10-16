@@ -222,6 +222,10 @@ merged onto the existing doc, and `warnings` contains a note like
 (title, owners, etc.) are **not** applied on an idempotent hit — use `PATCH` to change
 those.
 
+For Google sources, repeated ingest also reconciles source grants and refreshes content
+only when that source's `content_fetch_enabled` setting is true. Disabled sources never
+retrieve or store new content through initial ingest, repeated ingest, or scheduled refresh.
+
 ### Content fetch (best-effort)
 
 If the source has content fetching enabled (`web`, `github`, and the Google sources), the
@@ -383,7 +387,8 @@ sources it first resolves the complete returned ACL and atomically replaces only
 does not store newly fetched content. On a mapped result, it updates `title`,
 `content_snapshot`, and `fetched_at`. Visibility is checked again after reconciliation;
 if the acting person's access was revoked, the route returns `404` while keeping the
-successful reconciliation. Otherwise it returns the updated `Doc`.
+successful reconciliation. Otherwise it returns the updated `Doc`. Explicit refetch remains
+available even when the source's automatic content fetching is disabled.
 
 ### Status codes
 
@@ -400,11 +405,13 @@ explicit `refetch` surfaces the failure as **502** so the caller knows it didn't
 ## `POST /docs/source-access/refresh-due` — scheduled reconciliation
 
 Scope: `docs:write`. Query parameter `limit` defaults to 10 and is constrained to 1–100.
-Selects active Google docs whose last complete ACL sync is older than
+Selects active Google docs with `content_fetch_enabled=true` whose latest sync or attempt is
+older than
 `SOURCE_ACCESS_REFRESH_AFTER_HOURS` (24 by default), refreshes each independently, and
 returns `{ "attempted", "refreshed", "failed" }`. One failed document does not stop the
 batch. Failed rows record their attempt time, so they do not starve later rows during the
-same daily drain; run until `attempted` is less than `limit`.
+same daily drain; run until `attempted` is less than `limit`. Disabled sources are skipped
+before applying the batch limit; neither their content nor ACL is fetched automatically.
 
 Source grants expire after `SOURCE_ACCESS_MAX_AGE_HOURS` (48 by default). A failed refresh
 does not erase a last-known-good grant immediately, but an extended connector, directory,

@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import pytest
@@ -129,3 +130,35 @@ def test_refetch_rechecks_access_after_successful_source_revocation(
     assert store.get_doc_content(UUID(doc_id)) == (
         "new restricted content" if remaining_email else "old content"
     )
+
+
+def test_scheduled_refresh_skips_fetch_disabled_sources_before_applying_limit(ctx):
+    client, store, fetchers, obo = ctx
+    disabled = client.post(
+        "/docs",
+        headers=ADMIN,
+        json={"url": "https://drive.google.com/file/d/disabled"},
+    ).json()["doc"]
+    enabled = client.post(
+        "/docs",
+        headers=ADMIN,
+        json={"url": "https://docs.google.com/document/d/enabled/edit"},
+    ).json()["doc"]
+    old = datetime.now(timezone.utc) - timedelta(hours=25)
+    store.update_doc(
+        UUID(enabled["id"]),
+        {
+            "source_access_synced_at": old,
+            "source_access_attempted_at": old,
+        },
+        actor="test",
+    )
+    fetchers.calls.clear()
+    response = client.post("/docs/source-access/refresh-due?limit=1", headers=ADMIN)
+    assert response.status_code == 200
+    assert response.json() == {"attempted": 1, "refreshed": 1, "failed": 0}
+    assert fetchers.calls == [("gdocs", enabled["url"])]
+    assert store.get_doc(UUID(disabled["id"])).content_snapshot is None
+    assert store.get_doc_content(UUID(disabled["id"])) is None
+    assert store.get_doc(UUID(disabled["id"])).source_access_attempted_at is None
+    assert client.post("/docs/source-access/refresh-due", headers=ADMIN).json()["attempted"] == 0

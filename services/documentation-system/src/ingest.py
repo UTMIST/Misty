@@ -61,6 +61,9 @@ def _refresh_existing_source_access(
     """A repeated ingest is also a source-ACL refresh for Google documents."""
     if existing.source_id not in GOOGLE_SOURCE_IDS:
         return []
+    source = storage.get_source(existing.source_id)
+    if source is None or not source.content_fetch_enabled:
+        return []
     warnings: list[str] = []
     try:
         result = fetchers.fetch_for(existing.source_id, existing.url)

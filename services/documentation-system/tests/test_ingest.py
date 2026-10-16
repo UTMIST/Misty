@@ -285,6 +285,34 @@ def test_google_ingest_unknown_email_creates_no_phantom_grant_or_content():
     assert result.doc.title == result.doc.url
 
 
+def test_google_reingest_never_fetches_when_content_fetch_disabled(store):
+    class NeverFetch:
+        def fetch_for(self, source_id, url):
+            pytest.fail("disabled source must not be fetched")
+
+    payload = DocIngest(url="https://drive.google.com/file/d/disabled")
+    first = ingest_doc(
+        payload,
+        storage=store,
+        fetchers=NeverFetch(),
+        directory=FakeDirectory(),
+        actor="bot",
+    )
+    second = ingest_doc(
+        payload,
+        storage=store,
+        fetchers=NeverFetch(),
+        directory=FakeDirectory(),
+        actor="bot",
+    )
+    assert first.created is True
+    assert second.created is False
+    assert second.doc.id == first.doc.id
+    assert second.doc.content_snapshot is None
+    assert second.doc.source_access_attempted_at is None
+    assert store.get_doc_content(second.doc.id) is None
+
+
 def test_ingest_bad_team_id_when_directory_up_raises(store):
     with pytest.raises(BadReference):
         ingest_doc(

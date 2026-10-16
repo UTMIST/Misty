@@ -104,7 +104,8 @@ it's trivially unit-testable with fakes. The five steps:
 
 1. **Normalize + dedup.** Normalize the URL (`normalize_url`) and look it up by normalized
    form. If an **active** doc already exists, merge any new tags, and return
-   `IngestResult(created=False, …)` — no duplicate, no other fields touched.
+   `IngestResult(created=False, …)` — no duplicate. Google sources also refresh source grants
+   and content when `content_fetch_enabled` is true; see "Source-derived access" below.
 2. **Determine the source.** A caller-supplied `source_id` wins (and is validated —
    unknown → `BadReference`). Otherwise the source is derived from the URL
    (`derive_source`).
