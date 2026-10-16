@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from contracts.types import ApiKey, Doc, DocContentMeta, DocGrant, Source, SourceGrant
+from contracts.types import ApiKey, Doc, DocChunk, DocContentMeta, DocGrant, Source, SourceGrant
 from contracts.visibility import ActorContext, SEE_ALL
 
 
@@ -124,6 +124,34 @@ class StorageAdapter(Protocol):
         predicate as get_doc_content — metadata about content is content.
         `content_hash` detects CHANGE, not freshness: compare `fetched_at` to know
         how current the row is."""
+        ...
+
+    def replace_doc_chunks(self, doc_id: UUID, chunks: list[DocChunk]) -> bool:
+        """Atomically replace a doc's entire chunk set; [] clears it.
+
+        Validate before accessing storage: ordinals must be exactly 0..n-1
+        (input order does not matter), with one source hash and embedding model
+        per set. Each chunk must satisfy DocChunk's validation, including its
+        MAX_CHUNK_CHARS text limit. Invalid input raises ValueError without
+        changing prior rows.
+        False for a missing doc, True otherwise; repeating a write creates no
+        duplicates. Concurrent replacements cannot produce a mixed set.
+
+        This stores supplied provenance; it does not check current doc_content,
+        trigger indexing, or implement retirement/model-mismatch policy.
+        """
+        ...
+
+    def list_doc_chunks(
+        self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL
+    ) -> list[DocChunk]:
+        """Chunks ordered by ordinal, using get_doc's visibility predicate.
+
+        Missing/invisible docs and docs without chunks all return []. Returned
+        values are immutable, with tuple embeddings, and the returned list is
+        detached from persisted data.
+        Like get_doc_content, this does not filter on the doc's active flag.
+        """
         ...
 
     # Sources
