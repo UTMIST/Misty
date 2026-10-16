@@ -37,7 +37,8 @@ BOT_KEY="$(issue_key "discord-bot-$ENVIRONMENT" \
 railway variables --service discord-bot --environment "$ENVIRONMENT" --set "DIRECTORY_API_KEY=$BOT_KEY"
 
 echo "▶ documentation-system: issuing scoped directory key ($ENVIRONMENT)…"
-DOCS_KEY="$(issue_key "documentation-system-$ENVIRONMENT" people:read teams:read)" \
+DOCS_KEY="$(issue_key "documentation-system-$ENVIRONMENT" \
+  people:read teams:read memberships:read identifiers:read)" \
   || { echo "ERROR: failed to mint documentation-system key" >&2; exit 1; }
 [ -n "$DOCS_KEY" ] || { echo "ERROR: documentation-system key came back empty" >&2; exit 1; }
 railway variables --service documentation-system --environment "$ENVIRONMENT" --set "DIRECTORY_API_KEY=$DOCS_KEY"

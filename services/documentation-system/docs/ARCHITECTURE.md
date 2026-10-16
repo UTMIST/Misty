@@ -83,16 +83,19 @@ So an owner id is rejected only when the directory positively doesn't know it.
 injected `storage`, `fetchers`, `directory`, and an `actor` string, so it is trivially
 unit-testable with fakes. Five steps:
 
-1. **Normalize + dedup.** Normalize the URL (`normalize_url`) and look it up. If an **active**
-   doc exists, merge any new tags and return `IngestResult(created=False, …)`; nothing else
-   is touched.
-2. **Determine the source.** A caller-supplied `source_id` wins (validated; unknown →
-   `BadReference`). Otherwise it is derived from the URL (`derive_source`).
-3. **Fetch, best-effort.** If the source has `content_fetch_enabled`, try its fetcher; on
-   `FetchError`, warn and continue. If it `requires_auth`, skip with a warning. With no
-   title, fall back to the URL.
-4. **Resolve ownership.** For each owner id: reachable + valid → label; reachable + unknown →
-   `BadReference` (→ 400); unreachable → warning + null label (degrade).
+1. **Normalize + dedup.** Normalize the URL (`normalize_url`) and look it up by normalized
+   form. If an **active** doc already exists, merge any new tags, and return
+   `IngestResult(created=False, …)` — no duplicate. Google sources also refresh source grants
+   and content when `content_fetch_enabled` is true; see "Source-derived access" below.
+2. **Determine the source.** A caller-supplied `source_id` wins (and is validated —
+   unknown → `BadReference`). Otherwise the source is derived from the URL
+   (`derive_source`).
+3. **Fetch, best-effort.** If the source has `content_fetch_enabled`, try the registry's
+   fetcher; on `FetchError`, append a warning and carry on. If the source `requires_auth`,
+   skip with a warning. If no title survives, fall back to the URL.
+4. **Resolve ownership.** For each owner id, call the directory. Reachable + valid → label;
+   reachable + unknown → `BadReference` (→ 400); unreachable → warning + null label
+   (degrade).
 5. **Persist** via `storage.create_doc`, returning `IngestResult(created=True, …)`.
 
 `BadReference` means "the caller gave a bad id and we can prove it"; routers map it to
@@ -120,8 +123,9 @@ heals on the next read or update.
 
 ## Data model
 
-Five tables (`src/storage/schema.py`; `001` creates the first four, `002` seeds sources,
-`003` adds `doc_grants`, `004` hardens dedup):
+Six tables (`src/storage/schema.py`; `001` creates the first four, `002` seeds sources,
+`003` adds `doc_grants`, `004` hardens dedup, `005` adds `doc_content`, and `007` adds
+source-access provenance/expiry):
 
 ### `sources`
 
@@ -131,10 +135,11 @@ The registry of URL kinds. `id` is a slug primary key. Key columns: `label`, `ur
 
 ### `docs`
 
-The catalog. Key columns: `url`, `url_normalized` (indexed dedup key), `title`, `source_id`
-(FK → `sources.id`, default `'web'`), `description`, the two `owning_*_id` / `owning_*_label`
-pairs, `content_snapshot`, `fetched_at`, and `active` (soft-delete flag). Indexed on
-`url_normalized`, both owner ids, and `source_id`.
+The catalog itself. Key columns: `url`, `url_normalized` (indexed dedup key), `title`,
+`source_id` (FK → `sources.id`, defaults `'web'`), `description`, the two
+`owning_*_id` / `owning_*_label` pairs, `content_snapshot`, `fetched_at`,
+`source_access_synced_at`, `source_access_attempted_at`, and `active`
+(the soft-delete flag). Indexed on `url_normalized`, both owner ids, and `source_id`.
 
 Migration `004` adds a **partial unique index** on `url_normalized WHERE active`, so the
 database enforces dedup rather than only ingest's read-then-write. `WHERE active` lets a
@@ -142,24 +147,58 @@ soft-deleted doc's URL be catalogued again.
 
 ### `doc_grants`
 
-Who may see a doc beyond its owners (migration `003`). One row per grant: `doc_id` (FK →
-`docs.id`, `ON DELETE CASCADE`), `grantee_type` (`person` / `team` / `org`), `grantee_id`
-(UUID, **null for `org`**), plus `created_at` / `created_by`.
+Who may see a doc (migrations `003` and `007`). Ownership is metadata only. One row per grant:
+`doc_id` (FK → `docs.id`, `ON DELETE CASCADE`), `grantee_type` (`person` / `team` /
+`org`), `grantee_id` (UUID, **null for `org`**), and `origin` (`manual` or
+`google_drive`). Source rows also retain permission id, normalized principal, role,
+inherited parent/shared-drive ids, source expiry, and effective expiry. Effective expiry is
+the earlier of Drive's permission expiration and the configured staleness deadline.
 
-Three constraints carry the invariants; the third is the non-obvious one:
+Four constraints/indexes carry the grant invariants:
 
-- `ck_doc_grants_grantee_shape` — CHECK that `org` grants have a null `grantee_id` and
-  `person`/`team` grants a non-null one. `contracts/types.py` validates the same rule, so a
-  bad shape is a 422 long before the DB; the CHECK is the backstop.
-- `uq_doc_grants_grantee` — unique on (`doc_id`, `grantee_type`, `grantee_id`), which makes
-  `add_grant` idempotent.
-- `uq_doc_grants_org` — a *partial* unique index on `doc_id WHERE grantee_type = 'org'`. The
-  constraint above **cannot** catch duplicate org grants: their `grantee_id` is NULL, and
-  `NULL != NULL` in SQL. Without it, "share with the org" twice would insert two rows.
+- `ck_doc_grants_grantee_shape` — a CHECK enforcing that `org` grants have a null
+  `grantee_id` while `person`/`team` grants have a non-null one. The same rule is
+  validated in `contracts/types.py`, so a bad shape is a 422 long before it reaches the DB;
+  the CHECK is the backstop.
+- `uq_doc_grants_manual_grantee` — partial uniqueness for manual person/team grants.
+- `uq_doc_grants_org` — a *partial* unique index on manual org grants.
+  It exists because the constraint above **cannot** catch duplicate org grants: their
+  `grantee_id` is NULL, and in SQL `NULL != NULL`, so two identical org rows don't collide.
+  Without this index, "share with the org" twice would insert two rows.
+- `uq_doc_grants_source_permission` — preserves one resolved row per source permission and
+  grantee while allowing a manual row for that same grantee to coexist.
 
 Grantee ids are **not** foreign keys: people and teams live in team-tracking's database,
 which this service never touches directly. Labels are resolved over HTTP at the API layer
 and never stored on the grant.
+
+### Source ACL reconciliation
+
+Google connector responses carry content and a complete Drive permission list. The
+connector reads that list before any export/download. documentation-system then resolves
+`user` entries through primary or verified `email` identities and `group` entries only
+through Team Tracking's fail-closed, membership-synced Google Group lookup. It never
+infers Google Group membership from an ordinary Team Tracking membership.
+
+Unknown/external emails, unmapped/legacy groups, domain-wide shares, and `anyone` shares
+produce warnings but no grant. This deliberately means a broadly shared file can remain
+absent from the catalog's source-backed audience until an explicit supported mapping
+exists. Email verification identifies the UTMIST person; the permission returned by
+Google is the separate evidence that the Google principal is actually entitled.
+
+`replace_source_grants` is atomic per document and origin. Postgres locks the document row
+before deleting grants, holding the lock through insertion and timestamp updates so concurrent
+replacements leave one complete ACL snapshot, even when the prior grant set is empty.
+A successful empty result is a revocation; a connector/directory failure keeps the last
+complete result. Source grants
+expire after the configured maximum age, so a prolonged refresh outage fails closed.
+Manual grants are independent and are never silently created or deleted by source
+reconciliation. Ownership fields are attribution metadata and do not authorize access.
+
+Visibility keeps two team sets in the actor context: ordinary active directory memberships
+for manual grants, and separately confirmed synchronized Google memberships for
+source-derived team grants. This prevents a newly added directory member from inheriting a
+Drive document before #237 has actually added them to the Google Group.
 
 ### `doc_tags`
 
@@ -180,10 +219,10 @@ Every table carries the audit quartet `created_at` / `updated_at` / `created_by`
 |----|-------|----------|:---:|:---:|
 | `web` | Web page | (none) | no | **yes** |
 | `github` | GitHub | `github.com` | no | **yes** |
-| `gdrive` | Google Drive | `drive.google.com` | yes | no |
-| `gdocs` | Google Docs | `docs.google.com/document` | yes | no |
-| `gsheets` | Google Sheets | `docs.google.com/spreadsheets` | yes | no |
-| `gslides` | Google Slides | `docs.google.com/presentation` | yes | no |
+| `gdrive` | Google Drive | `drive.google.com` | yes | **yes** |
+| `gdocs` | Google Docs | `docs.google.com/document` | yes | **yes** |
+| `gsheets` | Google Sheets | `docs.google.com/spreadsheets` | yes | **yes** |
+| `gslides` | Google Slides | `docs.google.com/presentation` | yes | **yes** |
 | `notion` | Notion | `notion.so`, `notion.site` | yes | no |
 | `youtube` | YouTube | `youtube.com`, `youtu.be` | no | no |
 
@@ -210,12 +249,14 @@ team-tracking) and re-export the same names:
 Scopes answer "may this key call this endpoint"; visibility answers "which *rows* may it
 see". A request must pass both.
 
-**One definition, two implementations.** `contracts/visibility.py` holds `doc_visible()`, a
-pure function over (actor context, owning ids, grants). The in-memory adapter calls it
-directly; the Postgres adapter compiles the *same* rule into SQL so filtering happens in the
-database, not in Python over a full scan. That duplication is held in lockstep by parity
-tests (`tests/test_visibility.py` plus the adapter parity suite). **If you change the rule,
-change both and extend those tests** — here a divergence becomes a silent data leak.
+**One definition, two implementations.** `contracts/visibility.py` holds `doc_visible()`
+— a pure function over actor context and grants (owning ids never authorize access).
+The in-memory adapter calls
+it directly; the Postgres adapter compiles the *same* rule into SQL so filtering happens
+in the database rather than in Python over a full table scan. That's a genuine duplication
+of logic, and it's held in lockstep by parity tests (`tests/test_visibility.py` plus the
+adapter parity suite). **If you change the rule, change both and extend those tests** —
+this is the file where a divergence becomes a silent data leak.
 
 **The actor context** is one of three things (`src/api/authz.py` builds it):
 
@@ -223,19 +264,20 @@ change both and extend those tests** — here a divergence becomes a silent data
 |---|---|---|
 | `SEE_ALL` | a `docs:read:all`/`admin` key with no `X-On-Behalf-Of`; or *any* write key with no `X-On-Behalf-Of` | every doc |
 | `DENY` | a plain `docs:read` key with no `X-On-Behalf-Of` | **no docs at all** |
-| `Actor(person_id, team_ids)` | `X-On-Behalf-Of: <uuid>` present | that person's view |
+| `Actor(person_id, team_ids, source_team_ids)` | `X-On-Behalf-Of: <uuid>` present | that person's directory and confirmed Google-group view |
 
 `DENY` is deliberate: a bare `docs:read` key carries no identity, so it has no basis for
 seeing anything; consumers must say *who* they act for. Reads on behalf of someone still
 **require** a read scope, so a write-only key can't read through that door.
 
-An `Actor` sees a doc if they own it personally, are on the owning team, or a grant matches
-(`org` / their `person` id / one of their teams).
+An `Actor` sees a doc only if a valid grant matches (`org` / their `person` id / one
+of their teams). Ownership remains available for attribution and filtering.
 
-**Team ids are resolved live** from the directory (`get_active_team_ids`). If it is
-unreachable, the set is treated as **empty** rather than failing — a partial fail-closed.
-Personally owned and `org`-granted docs still resolve; team-granted ones are withheld. An
-outage can hide a doc, never expose one.
+**Team ids are resolved live** from the directory (`get_active_team_ids`). If the
+directory is unreachable the set is treated as **empty** rather than failing the request —
+a partial fail-closed. Person-granted and `org`-granted docs still resolve; team-granted
+ones are withheld. Withholding is the safe direction: an outage can hide a doc, never
+expose one.
 
 **Invisible reads 404, not 403.** `get_visible_doc_or_404` guards read *and* write routes,
 so a caller can't probe for docs they may not see via status codes.

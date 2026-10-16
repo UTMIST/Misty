@@ -30,7 +30,7 @@ about the service in a real (staging / production) environment.
 ## Environment variables
 
 All configuration is env-driven (`src/config.py`, loaded from the process environment or a
-`.env` file). Six variables:
+`.env` file). Eight variables:
 
 | Env var | Setting | Default | Purpose |
 |---------|---------|---------|---------|
@@ -40,6 +40,12 @@ All configuration is env-driven (`src/config.py`, loaded from the process enviro
 | `DIRECTORY_API_KEY` | `directory_api_key` | `dev-api-key-change-me` | API key this service uses to call the directory |
 | `CONNECTORS_BASE_URL` | `connectors_base_url` | `http://localhost:8005` | Base URL of the connectors service (fetches Google source content) |
 | `CONNECTORS_API_KEY` | `connectors_api_key` | `dev-api-key-change-me` | API key this service uses to call connectors. **Should be overridden outside `local`**, but it's a soft dependency — `verify_production_secrets()` only logs a startup warning on the dev default, it does not refuse to boot (see [`src/config.py`](../src/config.py)). |
+| `SOURCE_ACCESS_REFRESH_AFTER_HOURS` | `source_access_refresh_after_hours` | `24` | A Google doc becomes due for ACL/content refresh after this interval. |
+| `SOURCE_ACCESS_MAX_AGE_HOURS` | `source_access_max_age_hours` | `48` | Source-derived grants expire and stop authorizing reads after this interval without a complete successful sync. Must exceed the refresh interval. |
+
+The directory key needs read-only scopes `people:read`, `teams:read`, `memberships:read`,
+and `identifiers:read`. The provisioning script issues exactly these; no directory write
+scope is required.
 
 Staging + production values live in **Railway** — set per environment via the
 runbook's env-var contract. Keep the defaults ONLY for local dev; anything
@@ -70,7 +76,7 @@ Schema is managed by Alembic (`migrations/`). Alembic reads the same
 `DATABASE_URL` the app uses — `migrations/env.py` pulls it from
 `src.config.get_settings()`, one source of truth.
 
-Four migrations ship today:
+Seven migrations ship today:
 
 - **`001_initial_schema`** — creates `sources`, `docs`, `doc_tags`, `api_keys`
   and their indexes.
@@ -82,6 +88,10 @@ Four migrations ship today:
   constraint can't because `grantee_id` is NULL there).
 - **`004_docs_url_unique_active`** — enforces the dedup invariant at the DB level
   with a partial unique index on `url_normalized WHERE active`.
+- **`005_doc_content`** — stores full extracted text, its content hash, and capture time.
+- **`006_enable_google_content_fetch`** — enables connector-backed Google fetches.
+- **`007_source_document_access`** — records source-grant provenance/expiry and each
+  document's last complete source-access sync.
 
 > **`004` is a data migration, not just a schema one.** It first collapses any
 > pre-existing duplicate active rows for the same `url_normalized` (keeping the
@@ -214,3 +224,29 @@ a runtime dependency with **two different failure modes** depending on when it's
 documentation-system. documentation-system deploys independently either way — see
 "Configuring / enabling fetchers" above for what degrades (not breaks) if the order
 is reversed.
+
+## Source-access refresh schedule
+
+Configure Railway (or the approved external scheduler) to call
+`POST /docs/source-access/refresh-due?limit=10` every hour (`0 * * * *`) with a `docs:write` key.
+Repeat until the response's `attempted` count is below `limit`; the endpoint processes each
+document independently and reports `{attempted, refreshed, failed}`. Only sources with
+`content_fetch_enabled=true` are selected; disabled sources receive no automatic content
+or ACL refresh, so their existing source grants eventually expire.
+
+Hourly checks retain the 24-hour eligibility threshold: they do not download each document
+hourly. A document refreshed a few minutes after a job starts becomes due just after the
+next day's matching job; an hourly check picks it up within another hour rather than
+waiting a second day and risking the 48-hour expiry.
+
+The defaults refresh after 24 hours and expire source-derived grants after 48 hours. A
+connector/directory failure retains the last complete grant set until its existing expiry;
+after that, source grants no longer authorize reads. Manual grants remain independent;
+ownership is metadata only and never authorizes access. Alert on a non-zero `failed`
+count or on the scheduler not completing for 24 hours.
+
+Only Drive `user` permissions matching a primary/verified email and Drive `group`
+permissions matching an active, membership-synced Team Tracking mapping become grants.
+Domain/link-wide shares, external or unknown users, unmapped groups, and pre-migration
+legacy groups are intentionally ignored. Add legacy group mappings through Team Tracking's
+managed-group migration; never infer access from an ordinary team membership.

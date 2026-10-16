@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from contracts.types import ApiKey, Doc, DocContentMeta, DocGrant, Source
+from contracts.types import ApiKey, Doc, DocContentMeta, DocGrant, Source, SourceGrant
 from contracts.visibility import ActorContext, SEE_ALL
 
 
@@ -78,6 +78,23 @@ class StorageAdapter(Protocol):
 
     def list_grants(self, doc_id: UUID) -> list[DocGrant]:
         """Grants for a doc, grantee_label unset (resolved at the API layer)."""
+        ...
+
+    def replace_source_grants(
+        self,
+        doc_id: UUID,
+        *,
+        origin: str,
+        grants: list[SourceGrant],
+        synced_at: datetime,
+        expires_at: datetime,
+        actor: str,
+    ) -> bool:
+        """Atomically replace one source's derived grants and mark sync time.
+
+        An empty list is a successful revocation. Manual grants are untouched.
+        Returns False only when the document does not exist.
+        """
         ...
 
     def upsert_doc_content(

@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from contracts.types import ApiKey, Doc, DocContentMeta, DocGrant, Source
+from contracts.types import ApiKey, Doc, DocContentMeta, DocGrant, Source, SourceGrant
 from contracts.visibility import ActorContext, SEE_ALL, doc_visible
 
 
@@ -22,7 +22,7 @@ class InMemoryStorageAdapter:
         self._sources: dict[str, Source] = {s.id: s for s in (seed_sources or [])}
         self._api_keys: dict[UUID, ApiKey] = {}
         self._api_key_hashes: dict[UUID, str] = {}
-        self._grants: dict[UUID, list[tuple[str, UUID | None, datetime, str]]] = {}
+        self._grants: dict[UUID, list[DocGrant]] = {}
         # doc_id -> (content_text, content_hash, fetched_at)
         self._content: dict[UUID, tuple[str, str, datetime | None]] = {}
 
@@ -31,8 +31,13 @@ class InMemoryStorageAdapter:
         data["tags"] = sorted(self._tags.get(doc.id, set()))
         return Doc(**data)
 
-    def _grant_pairs(self, doc_id: UUID) -> list[tuple[str, UUID | None]]:
-        return [(gt, gid) for (gt, gid, _at, _by) in self._grants.get(doc_id, [])]
+    def _grant_pairs(self, doc_id: UUID) -> list[tuple[str, UUID | None, str]]:
+        now = _now()
+        return [
+            (grant.grantee_type, grant.grantee_id, grant.origin)
+            for grant in self._grants.get(doc_id, [])
+            if grant.origin == "manual" or grant.expires_at is not None and grant.expires_at > now
+        ]
 
     def _visible(self, doc: Doc, visibility: ActorContext) -> bool:
         return doc_visible(
@@ -75,6 +80,8 @@ class InMemoryStorageAdapter:
             owning_person_label=owning_person_label,
             content_snapshot=content_snapshot,
             fetched_at=fetched_at,
+            source_access_synced_at=None,
+            source_access_attempted_at=None,
             active=True,
             tags=[],
             created_at=now,
@@ -166,26 +173,89 @@ class InMemoryStorageAdapter:
         if doc_id not in self._docs:
             return False
         rows = self._grants.setdefault(doc_id, [])
-        if any(gt == grantee_type and gid == grantee_id for (gt, gid, _a, _b) in rows):
+        if any(
+            grant.origin == "manual"
+            and grant.grantee_type == grantee_type
+            and grant.grantee_id == grantee_id
+            for grant in rows
+        ):
             return True
-        rows.append((grantee_type, grantee_id, _now(), actor))
+        rows.append(
+            DocGrant(
+                grantee_type=grantee_type,
+                grantee_id=grantee_id,
+                grantee_label=None,
+                created_at=_now(),
+                created_by=actor,
+            )
+        )
         return True
 
     def remove_grant(self, doc_id, *, grantee_type, grantee_id) -> bool:
         rows = self._grants.get(doc_id, [])
-        kept = [r for r in rows if not (r[0] == grantee_type and r[1] == grantee_id)]
+        kept = [
+            grant
+            for grant in rows
+            if not (
+                grant.origin == "manual"
+                and grant.grantee_type == grantee_type
+                and grant.grantee_id == grantee_id
+            )
+        ]
         if len(kept) == len(rows):
             return False
         self._grants[doc_id] = kept
         return True
 
     def list_grants(self, doc_id) -> list[DocGrant]:
-        return [
+        return list(self._grants.get(doc_id, []))
+
+    def replace_source_grants(
+        self,
+        doc_id: UUID,
+        *,
+        origin: str,
+        grants: list[SourceGrant],
+        synced_at: datetime,
+        expires_at: datetime,
+        actor: str,
+    ) -> bool:
+        existing = self._docs.get(doc_id)
+        if existing is None:
+            return False
+        rows = [grant for grant in self._grants.get(doc_id, []) if grant.origin != origin]
+        rows.extend(
             DocGrant(
-                grantee_type=gt, grantee_id=gid, grantee_label=None, created_at=at, created_by=by
+                grantee_type=grant.grantee_type,
+                grantee_id=grant.grantee_id,
+                grantee_label=None,
+                created_at=synced_at,
+                created_by=actor,
+                origin=origin,
+                source_permission_id=grant.source_permission_id,
+                source_principal=grant.source_principal,
+                source_role=grant.source_role,
+                source_inherited=grant.source_inherited,
+                source_inherited_from=grant.source_inherited_from,
+                source_expires_at=grant.source_expires_at,
+                expires_at=min(expires_at, grant.source_expires_at)
+                if grant.source_expires_at is not None
+                else expires_at,
             )
-            for (gt, gid, at, by) in self._grants.get(doc_id, [])
-        ]
+            for grant in grants
+        )
+        self._grants[doc_id] = rows
+        data = existing.model_dump()
+        data.update(
+            source_access_synced_at=synced_at,
+            source_access_attempted_at=synced_at,
+            updated_at=synced_at,
+            updated_by=actor,
+            tags=[],
+            grants=[],
+        )
+        self._docs[doc_id] = Doc(**data)
+        return True
 
     def upsert_doc_content(
         self, doc_id: UUID, *, content_text: str, content_hash: str, fetched_at: datetime | None

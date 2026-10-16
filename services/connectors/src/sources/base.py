@@ -5,7 +5,19 @@ normalized error hierarchy the router maps to HTTP status codes.
 """
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol
+
+
+@dataclass(frozen=True)
+class SourcePermission:
+    permission_id: str
+    principal_type: Literal["user", "group", "domain", "anyone"]
+    principal: str | None
+    role: str
+    inherited: bool = False
+    inherited_from: tuple[str, ...] = ()
+    allow_file_discovery: bool | None = None
+    expiration_time: str | None = None
 
 
 @dataclass
@@ -15,6 +27,7 @@ class SourceResult:
     # Non-fatal information loss (e.g. a spreadsheet whose extra tabs were not
     # read). Surfaced to the caller so partial content is never silent.
     warnings: list[str] = field(default_factory=list)
+    permissions: list[SourcePermission] | None = None
 
 
 class SourceFetcher(Protocol):

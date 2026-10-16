@@ -1,9 +1,9 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
 
-from contracts.types import Source
+from contracts.types import Source, SourceGrant
 from contracts.visibility import DENY, SEE_ALL, Actor
 from src.storage.in_memory import InMemoryStorageAdapter
 
@@ -152,6 +152,48 @@ def test_add_grant_missing_doc_returns_false():
     assert a.add_grant(UUID(int=0), grantee_type="org", grantee_id=None, actor="t") is False
 
 
+def test_replace_source_grants_preserves_manual_and_revokes_old_source_rows():
+    a = InMemoryStorageAdapter()
+    d = _mk_vis(a)
+    now = datetime.now(timezone.utc)
+    a.add_grant(d.id, grantee_type="person", grantee_id=P1, actor="admin")
+    a.replace_source_grants(
+        d.id,
+        origin="google_drive",
+        grants=[
+            SourceGrant(
+                grantee_type="team",
+                grantee_id=T1,
+                source_permission_id="permission-1",
+                source_principal="team@example.com",
+                source_role="reader",
+                source_inherited_from=["folder-1"],
+            )
+        ],
+        synced_at=now,
+        expires_at=now + timedelta(hours=48),
+        actor="sync",
+    )
+    ordinary_member = Actor(person_id=uuid4(), team_ids=frozenset({T1}))
+    synced_member = Actor(
+        person_id=ordinary_member.person_id,
+        team_ids=frozenset({T1}),
+        source_team_ids=frozenset({T1}),
+    )
+    assert a.get_doc(d.id, visibility=ordinary_member) is None
+    assert a.get_doc(d.id, visibility=synced_member) is not None
+    a.replace_source_grants(
+        d.id,
+        origin="google_drive",
+        grants=[],
+        synced_at=now,
+        expires_at=now + timedelta(hours=48),
+        actor="sync",
+    )
+    grants = a.list_grants(d.id)
+    assert [(g.origin, g.grantee_type, g.grantee_id) for g in grants] == [("manual", "person", P1)]
+
+
 def test_get_doc_visibility_filters_and_hydrates_grants():
     a = InMemoryStorageAdapter()
     d = _mk_vis(a)  # no grants, no owner
@@ -170,9 +212,51 @@ def test_list_docs_visibility():
     hidden = _mk_vis(a, url="https://hidden")
     actor = Actor(person_id=P1, team_ids=frozenset())
     ids = {d.id for d in a.list_docs(visibility=actor)}
+    assert ids == set()
+    a.add_grant(owned.id, grantee_type="person", grantee_id=P1, actor="t")
+    ids = {d.id for d in a.list_docs(visibility=actor)}
     assert owned.id in ids and hidden.id not in ids
     assert a.list_docs(visibility=DENY) == []
     assert len(a.list_docs(visibility=SEE_ALL)) == 2
+
+
+@pytest.mark.parametrize("owner_field", ["owning_person_id", "owning_team_id"])
+def test_ownership_requires_valid_grant_and_source_revocation_hides_doc(store, owner_field):
+    doc = _mk(store)
+    store.update_doc(
+        doc.id, {owner_field: P1 if owner_field == "owning_person_id" else T1}, actor="t"
+    )
+    store.upsert_doc_content(doc.id, content_text="secret", content_hash="hash", fetched_at=None)
+    actor = Actor(P1, frozenset({T1}))
+    assert store.get_doc(doc.id, visibility=actor) is None
+    assert store.list_docs(visibility=actor) == []
+    assert store.get_doc_content(doc.id, visibility=actor) is None
+    assert store.get_doc_content_meta(doc.id, visibility=actor) is None
+
+    now = datetime.now(timezone.utc)
+    grant = SourceGrant(
+        grantee_type="person",
+        grantee_id=P1,
+        source_permission_id="p1",
+        source_principal="one@example.com",
+        source_role="reader",
+    )
+    for grants, visible in [([grant], True), ([], False)]:
+        store.replace_source_grants(
+            doc.id,
+            origin="google_drive",
+            grants=grants,
+            synced_at=now,
+            expires_at=now + timedelta(hours=48),
+            actor="sync",
+        )
+        assert (store.get_doc(doc.id, visibility=actor) is not None) is visible
+        assert bool(store.list_docs(visibility=actor)) is visible
+        assert (store.get_doc_content(doc.id, visibility=actor) is not None) is visible
+        assert (store.get_doc_content_meta(doc.id, visibility=actor) is not None) is visible
+
+    store.add_grant(doc.id, grantee_type="person", grantee_id=P1, actor="admin")
+    assert store.get_doc(doc.id, visibility=actor) is not None
 
 
 def test_upsert_doc_content_round_trips(store):
