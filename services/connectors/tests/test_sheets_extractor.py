@@ -93,15 +93,26 @@ def test_metadata_call_does_not_request_grid_data():
     assert "includeGridData" not in recorder["get_kwargs"]
 
 
-def test_rows_render_as_csv():
+# CSV-shape tests, kept alongside the CSV renderer commented out in sheets.py.
+# def test_rows_render_as_csv():
+#     result, _ = _extract([("T", 0)], [[["Category", "Spent"], ["Events", "300"]]])
+#     assert "Category,Spent" in result.text
+#     assert "Events,300" in result.text
+
+
+def test_rows_render_as_a_markdown_table():
     result, _ = _extract([("T", 0)], [[["Category", "Spent"], ["Events", "300"]]])
-    assert "Category,Spent" in result.text
-    assert "Events,300" in result.text
+    assert result.text == "## T\n| Category | Spent |\n| --- | --- |\n| Events | 300 |"
 
 
-def test_cell_containing_a_comma_is_quoted_and_does_not_split_the_row():
+# def test_cell_containing_a_comma_is_quoted_and_does_not_split_the_row():
+#     result, _ = _extract([("T", 0)], [[["Amount"], ["$1,200"]]])
+#     assert '"$1,200"' in result.text
+
+
+def test_cell_containing_a_comma_stays_in_one_cell():
     result, _ = _extract([("T", 0)], [[["Amount"], ["$1,200"]]])
-    assert '"$1,200"' in result.text
+    assert "| $1,200 |" in result.text
 
 
 def test_empty_tab_is_skipped_with_no_heading_and_no_warning():
@@ -120,10 +131,30 @@ def test_oversized_tab_is_truncated_and_warns_with_the_real_row_count():
     assert result.text.count("\n") <= MAX_ROWS_PER_TAB + 1
 
 
+# def test_ragged_rows_survive():
+#     result, _ = _extract([("T", 0)], [[["a", "b", "c"], ["1"]]])
+#     assert "a,b,c" in result.text
+#     assert "\n1" in result.text
+
+
 def test_ragged_rows_survive():
     result, _ = _extract([("T", 0)], [[["a", "b", "c"], ["1"]]])
-    assert "a,b,c" in result.text
-    assert "\n1" in result.text
+    assert "| a | b | c |" in result.text
+    assert "| 1 |  |  |" in result.text
+
+
+def test_multiline_cell_stays_on_its_row_and_cannot_start_a_heading():
+    # A cell newline once let "## Page 9" start a line, which the chunker (#218)
+    # read as a section heading. As a table row it is <br>-joined and mid-line.
+    rows = [["name", "notes"], ["alice", "first\n## Page 9\nlast"], ["bob", "ok"]]
+    result, _ = _extract([("T", 0)], [rows])
+    assert "| alice | first<br>## Page 9<br>last |" in result.text
+    assert [line for line in result.text.split("\n") if line.startswith("#")] == ["## T"]
+
+
+def test_pipe_in_a_cell_is_escaped():
+    result, _ = _extract([("T", 0)], [[["a|b"]]])
+    assert r"| a\|b |" in result.text
 
 
 def test_short_value_ranges_warns_with_both_counts():
