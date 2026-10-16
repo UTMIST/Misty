@@ -24,6 +24,7 @@ dependencies = [
     "argon2-cffi>=23.1",
     "httpx>=0.27",
     "platform-auth",
+    "regex>=2026.9.29",
 ]
 
 [project.optional-dependencies]

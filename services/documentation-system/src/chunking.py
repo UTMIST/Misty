@@ -13,10 +13,11 @@ prefixed, so a chunk can always be traced back to the stored content.
 
 import re
 from bisect import bisect_right
-import unicodedata
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import ceil
+
+import regex
 
 from src.content import content_hash
 
@@ -46,6 +47,7 @@ _PARAGRAPH_BREAK = re.compile(r"\n(?:[ \t]*\r?\n)+")
 _LINE_BREAK = re.compile(r"\n")
 _SENTENCE_END = re.compile(r"[.!?][\"'”’)\]]*\s+|[。！？]")
 _WHITESPACE = re.compile(r"\s+")
+_GRAPHEME = regex.compile(r"\X")
 # The exact heading shapes the Slides and PDF extractors emit (connectors service).
 _LOCATOR = re.compile(r"^(Slide|Page) (\d+)(?::|$)")
 
@@ -159,8 +161,6 @@ class _Chunker:
         self.count_tokens = count_tokens
         self.headings = _scan_headings(text)
         self.heading_starts = [h.start for h in self.headings]
-        self.quoted = _scan_quoted(text, self.heading_starts)
-        self.quoted_opens = [q[0] for q in self.quoted]
 
     # ---- sizing -------------------------------------------------------------
 
@@ -178,11 +178,6 @@ class _Chunker:
 
     def _fits(self, start: int, end: int) -> bool:
         return self._tokens(start, end) <= self.settings.target_tokens
-
-    def _in_quote(self, pos: int) -> bool:
-        """True if a unit starting at `pos` would begin inside a quoted span."""
-        idx = bisect_right(self.quoted_opens, pos - 1) - 1
-        return idx >= 0 and pos <= self.quoted[idx][1]
 
     # ---- pass 1: split into boundary-respecting pieces that each fit ---------
 
@@ -217,11 +212,6 @@ class _Chunker:
             positions = _sentence_ends(text, start, end)
         else:  # word
             positions = [m.end() for m in _WHITESPACE.finditer(text, start, end)]
-        if level in ("list", "paragraph", "line"):
-            # A quoted CSV cell (Sheets) may hold lines, blank lines, or bullets;
-            # structural cuts must not go through it. Sentence/word cuts still may,
-            # so an oversized cell can be split.
-            positions = [p for p in positions if not self._in_quote(p)]
         return [p for p in positions if start < p < end]
 
     def _hard_split(self, start: int, end: int, label: str) -> list[_Piece]:
@@ -235,9 +225,11 @@ class _Chunker:
                     f"count_tokens counts {self.text[pos]!r} over target_tokens "
                     f"({self.settings.target_tokens}); no chunk can fit it"
                 )
-            # Don't split a user-perceived character (see _joins_previous).
-            while length > 1 and _joins_previous(self.text, pos, pos + length, end):
-                length -= 1
+            # Don't split a user-perceived character: back up to a cluster boundary,
+            # unless a single cluster is over budget on its own.
+            cut = _last_cluster_boundary(self.text, pos, pos + length, end)
+            if cut > pos:
+                length = cut - pos
             pieces.append((pos, pos + length, label if pos == start else "hard"))
             pos += length
         return pieces
@@ -325,8 +317,8 @@ class _Chunker:
     ) -> tuple[int, str] | None:
         """Where the next chunk starts inside the previous one's tail: the earliest
         boundary whose tail fits the overlap budget, preferring whole trailing pieces,
-        then sentence ends, then words. Never starts inside an open ASCII double quote
-        (a quoted CSV cell) or a heading line, and never reaches back across a heading."""
+        then sentence ends, then words. Never starts inside a heading line, and never
+        reaches back across a heading."""
         if self.settings.overlap_tokens == 0:
             return None
         text = self.text
@@ -340,7 +332,7 @@ class _Chunker:
             candidates = [
                 (pos, label)
                 for pos, label in tier
-                if pos < prev_end and not self._in_quote(pos) and not self._in_heading_line(pos)
+                if pos < prev_end and not self._in_heading_line(pos)
             ]
             # Tail size only shrinks as the start moves right, so binary search.
             lo, hi = 0, len(candidates)
@@ -425,13 +417,12 @@ def _scan_headings(text: str) -> list[_Heading]:
     # (level, title, locator, index into headings)
     stack: list[tuple[int, str, tuple[str, int] | None, int]] = []
     for idx, (start, title_end, level, title) in enumerate(raw):
+        # A section ends at the next heading of the same or a higher level, which
+        # is exactly when this one is popped; until then it runs to the end.
         end = len(text)
-        for later_start, _, later_level, _ in raw[idx + 1 :]:
-            if later_level <= level:
-                end = later_start
-                break
         while stack and stack[-1][0] >= level:
-            stack.pop()
+            popped = stack.pop()[3]
+            headings[popped] = replace(headings[popped], end=start)
         match = _LOCATOR.match(title)
         own = (match.group(1).lower(), int(match.group(2))) if match else None
         # Inherit the nearest enclosing slide/page, so a "### Notes" under
@@ -468,56 +459,19 @@ def _scan_fences(text: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _scan_quoted(text: str, heading_starts: list[int]) -> list[tuple[int, int]]:
-    """(open, close) offsets of ASCII double-quote pairs, matched left to right
-    within each section. A quote left open at the next heading is treated as
-    prose (e.g. `12" pipe`), so it cannot disable structural cuts beyond its
-    section. A CSV `""` escape pairs off harmlessly: no line starts between them."""
-    bounds = [*heading_starts, len(text)]
-    spans = []
-    open_at = None
-    b = 0
-    for m in re.finditer('"', text):
-        pos = m.start()
-        while pos >= bounds[b]:
-            open_at = None  # unclosed at a section boundary: drop it
-            b += 1
-        if open_at is None:
-            open_at = pos
-        else:
-            spans.append((open_at, pos))
-            open_at = None
-    return spans
-
-
-def _joins_previous(text: str, start: int, i: int, end: int) -> bool:
-    """True if cutting before text[i] would split a user-perceived character.
-    `start` is a known character boundary at or before i (the current piece's
-    start), bounding the look-back for regional-indicator pairs."""
+def _last_cluster_boundary(text: str, start: int, i: int, end: int) -> int:
+    """The last extended grapheme cluster boundary (UAX #29, via `regex`'s `\\X`)
+    in [start, i], or `start` if none. `start` must be a cluster boundary and `end`
+    is the span's end, itself a boundary. Scans from `start`, so a run of hard cuts
+    costs O(span) in total."""
     if i >= end:
-        return False
-    ch, prev = text[i], text[i - 1]
-    if _is_regional_indicator(ch):
-        # Flags are RI pairs: ch joins prev iff an odd number of RIs precede it.
-        run = 0
-        while i - run - 1 >= start and _is_regional_indicator(text[i - run - 1]):
-            run += 1
-        return run % 2 == 1
-    return (
-        unicodedata.category(ch).startswith("M")  # Mn/Mc/Me, incl. keycap U+20E3
-        or ch in "\u0e33\u0eb3"  # Thai/Lao SARA AM: letters, but spacing marks in UAX #29
-        or ch in "\u200d\ufe0e\ufe0f"  # ZWJ, text/emoji variation selectors
-        or "\U0001f3fb" <= ch <= "\U0001f3ff"  # skin-tone modifiers
-        or "\U000e0020" <= ch <= "\U000e007f"  # tag sequences (subdivision flags)
-        or "\u1160" <= ch <= "\u11ff"  # Hangul medial vowel / final consonant jamo
-        or "\ud7b0" <= ch <= "\ud7ff"
-        or prev == "\u200d"
-        or (prev == "\r" and ch == "\n")
-    )
-
-
-def _is_regional_indicator(ch: str) -> bool:
-    return "\U0001f1e6" <= ch <= "\U0001f1ff"
+        return end
+    last = start
+    for m in _GRAPHEME.finditer(text, start, end):
+        if m.end() > i:
+            break
+        last = m.end()
+    return last
 
 
 # A "." after one of these (or after a single letter, an initial) usually isn't a

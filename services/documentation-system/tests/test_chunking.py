@@ -152,6 +152,9 @@ def test_hard_cut_does_not_split_a_zwj_emoji_sequence():
         "\u0e01\u0e33",  # Thai
         "\U0001f3f4\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f",  # England
         "\u1100\u1161\u11a8",  # Hangul L V T jamo
+        "\u0915\u094d\u0937",  # Devanagari conjunct ksha: consonant + virama + consonant
+        "\u0995\u09cd\u09b7",  # Bengali conjunct
+        "\u0600\u0661",  # Arabic number sign: a prepend joins the character after it
     ],
 )
 @pytest.mark.parametrize("prefix", range(1, 5))
@@ -335,55 +338,76 @@ def test_pdf_shape_gets_page_locator():
     assert result.chunks[-1].locator == ("page", 2)
 
 
-def test_sheets_csv_is_not_cut_inside_a_quoted_multiline_cell():
-    rows = "".join(f'r{i},"first line\nsecond line",{i}\n' for i in range(20))
-    text = "## Roster\n" + rows
-    result = chunk_text(text, SMALL)
+def _sheets_tab(title, rows):
+    """The Sheets extractor's shape: a tab heading, then a Markdown table whose
+    cell newlines are already `<br>` (connectors' render_markdown_table)."""
+    lines = [f"| {' | '.join(r)} |" for r in rows]
+    lines.insert(1, "| " + " | ".join("---" for _ in rows[0]) + " |")
+    return f"## {title}\n\n" + "\n".join(lines) + "\n"
+
+
+def test_sheets_rows_are_never_cut_mid_row():
+    rows = [["name", "notes", "n"]] + [
+        [f"r{i}", "first line<br>second line", str(i)] for i in range(20)
+    ]
+    text = _sheets_tab("Roster", rows)
+    result = chunk_text(text, ChunkSettings(target_tokens=20, overlap_tokens=0))
     _check(text, result)
     for c in result.chunks:
-        if c.end_boundary != "end":
-            assert c.text.count('"') % 2 == 0, c.text
-    assert result.chunks[0].heading_path == ("Roster",)
+        assert c.heading_path == ("Roster",)
+        assert c.start == 0 or text[c.start - 1] == "\n", c.text
+        assert c.end == len(text) or text[c.end] == "\n", c.text
 
 
-def _starts_inside_quote(text, pos):
-    return text.count('"', 0, pos) % 2 == 1
+def test_heading_like_text_in_a_sheets_cell_is_not_a_section():
+    # Review of #259: a multi-line cell holding "## Page 9" once split the cell and
+    # relabelled every later row. As a table row the text is mid-line, not a heading.
+    rows = [["name", "notes", "n"], ["alice", "first line<br>## Page 9<br>second line", "1"]]
+    rows += [["bob", "ok", "2"]] + [["carol", "example", "3"]] * 5
+    text = _sheets_tab("Tab", rows)
+    result = chunk_text(text, ChunkSettings(target_tokens=15, overlap_tokens=0))
+    _check(text, result)
+    for c in result.chunks:
+        assert c.heading_path == ("Tab",)
+        assert c.locator is None
 
 
-def test_csv_cell_with_blank_lines_and_bullets_is_not_cut_through():
-    cell = '"' + "line one of cell\n\n- bullet a\n- bullet b\n" * 3 + '"'
-    text = "## Tab\nname,notes\nalice," + cell + ",1\nbob,ok,2\n"
+def test_oversized_sheets_row_splits_at_sentences_or_words():
+    rows = [["name", "notes"], ["alice", "word " * 60], ["bob", "ok"]]
+    text = _sheets_tab("Tab", rows)
     result = chunk_text(text, SMALL)
     _check(text, result)
-    # The cell exceeds the budget, so sentence/word cuts inside it are allowed,
-    # but no chunk may start at a paragraph, list, or line boundary inside it.
-    for c in result.chunks:
-        if _starts_inside_quote(text, c.start):
-            assert c.start_boundary in ("sentence", "word", "hard"), c
+    row_start = text.index("| alice")
+    row_end = text.index("\n", row_start)
+    inside = [c for c in result.chunks if row_start < c.start < row_end]
+    assert inside
+    assert {c.start_boundary for c in inside} <= {"sentence", "word"}
 
 
-def test_rows_after_an_oversized_quoted_cell_are_not_cut_mid_cell():
-    big = '"' + "word " * 60 + '"'
-    rows = "".join(f'r{i},"x\ny",{i}\n' for i in range(10))
-    text = f"## Tab\na,{big},1\n" + rows
-    result = chunk_text(text, SMALL)
-    _check(text, result)
-    after = text.index("r0,")
-    for c in result.chunks:
-        if c.start >= after:
-            assert not _starts_inside_quote(text, c.start), c.text
-
-
-def test_unbalanced_quote_does_not_disable_cuts_past_its_section():
+def test_quotes_do_not_affect_headings_or_cuts():
     text = '## A\n\nA 12" pipe.\n\n## B\n\n' + "".join(f"Line {i} of B\n" for i in range(30))
     result = chunk_text(text, SMALL)
     _check(text, result)
     b = [c for c in result.chunks if c.heading_path == ("B",)]
     assert {c.end_boundary for c in b[:-1]} == {"line"}
+    text = '## Page 1\n"Unclosed\n## Page 2\nPipe 10", ok\n'
+    chunks = chunk_text(text, ChunkSettings(target_tokens=5, overlap_tokens=0)).chunks
+    assert chunks[-1].locator == ("page", 2)
 
 
-def test_unbalanced_quote_at_scale_stays_fast():
-    # Regression: line cuts once re-counted quotes from the span start, O(n^2).
+def test_heading_heavy_text_stays_fast():
+    # Regression: section ends once rescanned every later heading, O(n^2).
+    import time
+
+    text = "## x\na\n" * 140_000
+    t = time.perf_counter()
+    result = chunk_text(text)
+    assert time.perf_counter() - t < 5
+    assert result.chunks[-1].end == len(text) - 1
+    assert result.chunks[-1].section_end == len(text)
+
+
+def test_line_heavy_text_stays_fast():
     import time
 
     text = 'He said "hi\n' + "".join(f"line {i} text here\n" for i in range(50_000))
@@ -450,7 +474,7 @@ _FRAGMENTS = (
     "- item {} here.\n",
     "Sentence {} is here. ",
     "\n\n",
-    'r{},"a\nb",x\n',
+    "| r{} | a<br>b | x |\n",
     "\U0001f469‍\U0001f4bb",
     "文。",
     "x" * 300,

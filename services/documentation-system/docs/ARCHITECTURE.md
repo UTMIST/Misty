@@ -265,7 +265,7 @@ Stored text is already source-specific. Current shapes (all from the Google conn
 |--------|-----------------|----------------------|
 | Google Docs | Markdown headings, bullets, links, and tables; cell paragraphs joined with spaces | Respect headings, paragraphs, and table rows where they fit |
 | Google Slides | `## Slide N`, title/body text, tables, and speaker notes | Preserve slide boundaries where they fit; table-cell newlines become `<br>` |
-| Google Sheets | Per-tab headings and CSV of `FORMATTED_VALUE` rows, row-capped | Split per tab and logical CSV record, not every newline; quoted cells may span lines |
+| Google Sheets | Per-tab headings and Markdown tables of `FORMATTED_VALUE` rows, row-capped; cell newlines become `<br>` | Split per tab, then per row: each row is one line |
 | PDF (Drive) | `## Page N` boundaries with extracted page text; internal structure can be lossy | Respect pages where they fit, then use recursive splitting |
 | DOCX (Drive) | Markdown headings, bullets, and tables in document order | Respect rendered structure where it fits; table-cell newlines become `<br>` |
 | GitHub READMEs (#86) | Markdown (future) | Split on headings then paragraphs |
@@ -406,8 +406,9 @@ Every chunk's `token_count` is `<= target_tokens`, including hard-cut ones.
    covers Docs headings, Slides `## Slide N`, PDF `## Page N`, and Sheets `## <tab>`) →
    `list` (top-level `-`, `*`, `+`, `1.`) → `paragraph` (blank line) → `line` → `sentence`
    (`.!?` + whitespace, or `。！？`; not after a common abbreviation or initial, or before a
-   lowercase word) → `word` → `hard` (character cut that keeps grapheme clusters whole:
-   combining marks, ZWJ/keycap/tag/flag emoji sequences, Hangul jamo, CRLF).
+   lowercase word) → `word` → `hard` (character cut at an extended grapheme cluster boundary,
+   UAX #29 via the `regex` package's `\X`, so a written character is never split unless a
+   single cluster is over budget on its own).
 2. *Pack* pieces greedily up to the budget. Whole small sections pack together, but a chunk
    starting mid-section ends at the next heading, and one that would end partway into an
    absorbed section closes before its heading. Otherwise an overflowing chunk prefers a
@@ -415,15 +416,14 @@ Every chunk's `token_count` is `<= target_tokens`, including hard-cut ones.
 
 **Overlap.** The next chunk starts in the previous chunk's tail at the earliest boundary whose
 tail fits `overlap_tokens`, preferring whole trailing pieces, then sentence ends, then words.
-It never crosses back over a heading or starts inside a heading line or quoted cell, and is
+It never crosses back over a heading or starts inside a heading line, and is
 dropped if it would overflow the chunk (so whitespace-free text like CJK may get none).
 `overlap_prev` counts the repeated characters for duplicate-free stitching.
 
-**CSV heuristic.** The extractor quotes Sheets cells containing newlines. ASCII `"` are paired
-left to right within each section, and `list`/`paragraph`/`line` cuts and overlap starts are
-skipped inside a pair, so a quoted cell isn't cut through structurally (an oversized cell can
-still split at sentences/words). A quote still open at the next heading is treated as prose,
-so a stray `"` can't disable cuts beyond its section.
+**No CSV rules.** Every input is treated as Markdown; quotes carry no meaning. Sheets reach
+the chunker as Markdown tables (the extractor renders them like Docs/Slides/DOCX tables, cell
+newlines as `<br>`), so a row is one line and heading-like text inside a cell is never at a line
+start. Sheets content stored before that extractor change is CSV; refetch it before indexing.
 
 **Metadata.**
 

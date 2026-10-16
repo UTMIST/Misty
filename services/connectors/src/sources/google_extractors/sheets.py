@@ -4,10 +4,11 @@ Drive's CSV export returns only the first tab. spreadsheets.get lists every
 tab and a single values.batchGet fetches them all.
 """
 
-import csv
-import io
+# import csv
+# import io
 
 from src.sources.google_extractors.base import ExtractedText, execute
+from src.sources.google_extractors.markdown import render_markdown_table
 
 SHEETS_READONLY = "https://www.googleapis.com/auth/spreadsheets.readonly"
 
@@ -32,20 +33,34 @@ def _a1_quote(title: str) -> str:
     return "'" + title.replace("'", "''") + "'"
 
 
-def _csv_lines(rows: list[list]) -> list[str]:
-    """Rows as CSV lines.
+# Replaced by _table_lines: the chunker (documentation-system, #218) treats all
+# stored text as Markdown, and a quoted multi-line CSV cell holding "## ..." was
+# read as a heading. Kept for reference until the Markdown shape has settled.
+# def _csv_lines(rows: list[list]) -> list[str]:
+#     """Rows as CSV lines.
+#
+#     csv.writer rather than ",".join: a cell containing a comma or a newline
+#     would otherwise silently corrupt the row, and "$1,200" is exactly what a
+#     budget sheet is full of.
+#     """
+#     if not rows:
+#         return []
+#     buffer = io.StringIO()
+#     writer = csv.writer(buffer, lineterminator="\n")
+#     for row in rows:
+#         writer.writerow(["" if cell is None else str(cell) for cell in row])
+#     return buffer.getvalue().rstrip("\n").split("\n")
 
-    csv.writer rather than ",".join: a cell containing a comma or a newline
-    would otherwise silently corrupt the row, and "$1,200" is exactly what a
-    budget sheet is full of.
+
+def _table_lines(rows: list[list]) -> list[str]:
+    """Rows as a Markdown table, the same shape as Docs/Slides/DOCX tables.
+
+    One row is always one line: cell newlines become `<br>` and `|` is escaped
+    (see markdown.py), so a cell can never start a line or split its row.
     """
-    if not rows:
-        return []
-    buffer = io.StringIO()
-    writer = csv.writer(buffer, lineterminator="\n")
-    for row in rows:
-        writer.writerow(["" if cell is None else str(cell) for cell in row])
-    return buffer.getvalue().rstrip("\n").split("\n")
+    return render_markdown_table(
+        [["" if cell is None else str(cell) for cell in row] for row in rows]
+    )
 
 
 class SheetsExtractor:
@@ -94,6 +109,7 @@ class SheetsExtractor:
                 )
                 rows = rows[:MAX_ROWS_PER_TAB]
             lines.append(f"## {title}")
-            lines.extend(_csv_lines(rows))
+            # lines.extend(_csv_lines(rows))
+            lines.extend(_table_lines(rows))
 
         return ExtractedText(text="\n".join(lines), warnings=warnings)
