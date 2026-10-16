@@ -1,12 +1,14 @@
+import contextlib
 import threading
 from datetime import date
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from contracts.types import (
+    PendingGroupChange,
     PersonCreate,
     PersonIdentifierCreate,
     PersonIdentifierUpdate,
@@ -616,3 +618,143 @@ def test_pg_channel_teams_rejects_inactive_and_keeps_config(adapter):
         with pytest.raises(ValueError, match="unknown_or_inactive_team"):
             adapter.replace_channel_teams("1", "2", [a.id, bad], actor="bot")
     assert adapter.get_channel_teams("1", "2").team_ids == [a.id]
+
+
+def test_pg_team_google_group_upsert(adapter):
+    team = adapter.create_team(TeamCreate(slug="a", label="A"), actor="t")
+    assert adapter.get_team_google_group(team.id) is None
+    first = adapter.put_team_google_group(
+        team.id,
+        group_email="a@x.ca",
+        group_name=None,
+        status="failed",
+        last_error="boom",
+        last_synced_at=None,
+        actor="first",
+        pending_changes=[
+            PendingGroupChange(action="add", email="ada@x.ca", operation_name="operations/add")
+        ],
+    )
+    assert adapter.get_team_google_group(team.id).pending_changes == first.pending_changes
+    assert adapter.list_team_google_groups()[0].pending_changes == first.pending_changes
+    second = adapter.put_team_google_group(
+        team.id,
+        group_email="a@x.ca",
+        group_name="groups/1",
+        status="synced",
+        last_error=None,
+        last_synced_at=first.updated_at,
+        actor="second",
+    )
+    assert (second.created_by, second.updated_by) == ("first", "second")
+    assert second.group_name == "groups/1" and second.last_error is None
+    assert second.pending_changes == []
+    assert adapter.list_team_google_groups() == [second]
+    with pytest.raises(ValueError, match="team_id not found"):
+        adapter.put_team_google_group(
+            uuid4(),
+            group_email="b@x.ca",
+            group_name=None,
+            status="failed",
+            last_error=None,
+            last_synced_at=None,
+            actor="t",
+        )
+
+
+def test_pg_pending_add_survives_a_new_adapter_and_provider(clean_db):
+    from test_google_groups import FakeResponse, _provider
+
+    from src.google_groups import sync_team, synced_groups_containing, synced_team_for_group
+
+    storage = PostgresStorageAdapter(clean_db)
+    team = storage.create_team(TeamCreate(slug="ml", label="ML"), actor="t")
+    person = storage.create_person(
+        PersonCreate(display_name="Ada", primary_email="ada@x"), actor="t"
+    )
+    membership = storage.create_membership(
+        TeamMembershipCreate(person_id=person.id, team_id=team.id), actor="t"
+    )
+    provider, _ = _provider(
+        FakeResponse(200, {"done": True, "response": {"name": "groups/abc"}}),
+        FakeResponse(200, {}),
+        FakeResponse(200, {"name": "operations/add-ada", "done": False}),
+    )
+    pending = sync_team(storage, provider, team.id, actor="cli")
+
+    # No Python object from the old sync carries the pending write forward.
+    engine = create_engine(clean_db.url, future=True)
+    try:
+        fresh = PostgresStorageAdapter(engine)
+        fresh.end_membership(membership.id, date.today(), actor="api")
+        provider, _ = _provider(FakeResponse(200, {}))
+        waiting = sync_team(fresh, provider, team.id, actor="api")
+        assert waiting.status == "failed" and waiting.pending_changes == pending.pending_changes
+        assert synced_team_for_group(fresh, waiting.group_email) is None
+        assert synced_groups_containing(fresh, provider, person) == []
+
+        member = {
+            "name": "groups/abc/memberships/ada",
+            "preferredMemberKey": {"id": "ada@x"},
+            "roles": [{"name": "MEMBER"}],
+        }
+        provider, session = _provider(
+            FakeResponse(200, {"memberships": [member]}),
+            FakeResponse(200, {"done": True}),
+        )
+        result = sync_team(fresh, provider, team.id, actor="api")
+        assert result.status == "synced" and result.pending_changes == []
+        assert session.calls[-1][0] == "DELETE"
+        assert storage.get_team_google_group(team.id) == result
+    finally:
+        engine.dispose()
+
+
+def test_pg_stale_sync_in_another_process_cannot_readd_a_revoked_member(clean_db, monkeypatch):
+    """A CLI run pauses before adding Ada; meanwhile the API ends her membership
+    and syncs. Two engines and no in-process lock stand in for two processes,
+    so only the Postgres advisory lock can keep the API sync waiting."""
+    from test_google_groups import FakeGroups
+
+    from src import google_groups
+
+    monkeypatch.setattr(google_groups, "_lock", contextlib.nullcontext())
+
+    class PausingGroups(FakeGroups):
+        def __init__(self):
+            super().__init__()
+            self.paused, self.resume = threading.Event(), threading.Event()
+
+        def add_member(self, group_name, email):
+            if not self.resume.is_set():
+                self.paused.set()
+                assert self.resume.wait(10)
+            super().add_member(group_name, email)
+
+    cli = PostgresStorageAdapter(clean_db)
+    api = PostgresStorageAdapter(create_engine(clean_db.url, future=True))
+    groups = PausingGroups()
+    team = api.create_team(TeamCreate(slug="ml", label="ML"), actor="t")
+    google_groups.sync_team(api, groups, team.id, actor="api")  # create the group
+    ada = api.create_person(PersonCreate(display_name="Ada", primary_email="ada@x.ca"), actor="t")
+    m = api.create_membership(TeamMembershipCreate(person_id=ada.id, team_id=team.id), actor="t")
+
+    stale = threading.Thread(
+        target=google_groups.sync_team, args=(cli, groups, team.id), kwargs={"actor": "cli"}
+    )
+    stale.start()
+    assert groups.paused.wait(10)
+    api.end_membership(m.id, date.today(), actor="t")
+    fresh = threading.Thread(
+        target=google_groups.sync_team, args=(api, groups, team.id), kwargs={"actor": "api"}
+    )
+    fresh.start()
+    fresh.join(0.5)
+    assert fresh.is_alive(), "API sync must wait for the in-flight CLI sync"
+
+    groups.resume.set()
+    stale.join(10)
+    fresh.join(10)
+    state = api.get_team_google_group(team.id)
+    assert groups.members[state.group_name] == {}
+    assert (state.status, state.updated_by) == ("synced", "api")

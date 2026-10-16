@@ -1,10 +1,11 @@
 """The same chunk persistence assertions run in both adapter suites."""
 
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 
-from contracts.types import DocChunk
+from contracts.types import MAX_CHUNK_CHARS, DocChunk, SourceGrant
 from contracts.visibility import Actor, DENY, SEE_ALL
 from src.content import content_hash
 
@@ -79,10 +80,8 @@ class ChunkStorageCases:
         assert adapter.replace_doc_chunks(missing, []) is False
         assert adapter.list_doc_chunks(make_doc(adapter).id) == []
 
-    @pytest.mark.parametrize(
-        "access", ["person_owner", "team_owner", "person_grant", "team_grant", "org_grant"]
-    )
-    def test_chunk_reads_use_doc_visibility(self, adapter, access):
+    @pytest.mark.parametrize("kind", ["person", "team", "org"])
+    def test_chunk_reads_use_doc_visibility(self, adapter, kind):
         doc, hidden = make_doc(adapter), make_doc(adapter)
         chunks = [make_chunk()]
         adapter.replace_doc_chunks(doc.id, chunks)
@@ -90,31 +89,85 @@ class ChunkStorageCases:
         person, team = uuid4(), uuid4()
         actor = Actor(person_id=person, team_ids=frozenset({team}))
         assert adapter.list_doc_chunks(doc.id, visibility=actor) == []
-        if access.endswith("owner"):
-            column, owner = (
-                ("owning_person_id", person)
-                if access == "person_owner"
-                else ("owning_team_id", team)
-            )
-            adapter.update_doc(doc.id, {column: owner}, actor="test")
-        else:
-            kind = access.removesuffix("_grant")
-            grantee = {"person": person, "team": team, "org": None}[kind]
-            adapter.add_grant(doc.id, grantee_type=kind, grantee_id=grantee, actor="test")
+        grantee = {"person": person, "team": team, "org": None}[kind]
+        adapter.add_grant(doc.id, grantee_type=kind, grantee_id=grantee, actor="test")
         assert adapter.list_doc_chunks(doc.id, visibility=actor) == chunks
         assert adapter.list_doc_chunks(hidden.id, visibility=actor) == []
         assert adapter.list_doc_chunks(doc.id, visibility=DENY) == []
         assert adapter.list_doc_chunks(hidden.id, visibility=SEE_ALL) == chunks
 
+    @pytest.mark.parametrize("owner_field", ["owning_person_id", "owning_team_id"])
+    def test_chunk_ownership_requires_an_independent_grant(self, adapter, owner_field):
+        doc = make_doc(adapter)
+        chunks = [make_chunk()]
+        adapter.replace_doc_chunks(doc.id, chunks)
+        person, team = uuid4(), uuid4()
+        actor = Actor(person, frozenset({team}))
+        owner = person if owner_field == "owning_person_id" else team
+        adapter.update_doc(doc.id, {owner_field: owner}, actor="test")
+        assert adapter.list_doc_chunks(doc.id, visibility=actor) == []
+        adapter.add_grant(doc.id, grantee_type="person", grantee_id=person, actor="test")
+        assert adapter.list_doc_chunks(doc.id, visibility=actor) == chunks
+        adapter.remove_grant(doc.id, grantee_type="person", grantee_id=person)
+        assert adapter.list_doc_chunks(doc.id, visibility=actor) == []
+
+    @pytest.mark.parametrize("kind", ["person", "team"])
+    def test_chunk_source_grants_require_current_access(self, adapter, kind):
+        doc = make_doc(adapter)
+        chunks = [make_chunk()]
+        adapter.replace_doc_chunks(doc.id, chunks)
+        person, team = uuid4(), uuid4()
+        actor = Actor(person, frozenset({team}), source_team_ids=frozenset({team}))
+        grant = SourceGrant(
+            grantee_type=kind,
+            grantee_id=person if kind == "person" else team,
+            source_permission_id="permission-1",
+            source_principal="reader@example.com",
+            source_role="reader",
+        )
+        now = datetime.now(timezone.utc)
+        for grants, expires_at, visible in [
+            ([grant], now + timedelta(hours=1), True),
+            ([grant], now - timedelta(hours=1), False),
+            ([grant], now + timedelta(hours=1), True),
+            ([], now + timedelta(hours=1), False),
+        ]:
+            adapter.replace_source_grants(
+                doc.id,
+                origin="google_drive",
+                grants=grants,
+                synced_at=now,
+                expires_at=expires_at,
+                actor="sync",
+            )
+            assert adapter.list_doc_chunks(doc.id, visibility=actor) == (chunks if visible else [])
+            if kind == "team":
+                ordinary_member = Actor(person, frozenset({team}))
+                assert adapter.list_doc_chunks(doc.id, visibility=ordinary_member) == []
+
     def test_chunk_storage_is_detached_from_input_and_output_vectors(self, adapter):
         doc = make_doc(adapter)
-        chunk = make_chunk()
-        adapter.replace_doc_chunks(doc.id, [chunk])
-        chunk.embedding[0] = 99.0
+        vector = [0.1] * 1536
+        chunk = make_chunk(embedding=vector)
+        chunks = [chunk]
+        adapter.replace_doc_chunks(doc.id, chunks)
+        vector[0] = 99.0
+        chunks.clear()
         read = adapter.list_doc_chunks(doc.id)
         assert read[0].embedding[0] == pytest.approx(0.1)
-        read[0].embedding[0] = 88.0
-        assert adapter.list_doc_chunks(doc.id)[0].embedding[0] == pytest.approx(0.1)
+        with pytest.raises(TypeError):
+            read[0].embedding[0] = 88.0
+        read.clear()
+        assert adapter.list_doc_chunks(doc.id) == [chunk]
+
+    @pytest.mark.parametrize("prefix", ["word", "\U00010400"])
+    def test_chunk_text_limit_round_trips_with_keyword_metadata(self, adapter, prefix):
+        # Distinct lexemes and multibyte text exercise generated tsvector storage.
+        text = " ".join(f"{prefix}{i}" for i in range(MAX_CHUNK_CHARS))[:MAX_CHUNK_CHARS]
+        chunk = make_chunk(text=text)
+        doc = make_doc(adapter)
+        assert adapter.replace_doc_chunks(doc.id, [chunk]) is True
+        assert adapter.list_doc_chunks(doc.id) == [chunk]
 
     @pytest.mark.parametrize(
         "changes",
@@ -133,6 +186,7 @@ class ChunkStorageCases:
             {"chunk_text": " "},
             {"chunk_text": "\x00"},
             {"chunk_text": "\ud800"},
+            {"chunk_text": "a" * (MAX_CHUNK_CHARS + 1), "end_offset": MAX_CHUNK_CHARS + 1},
             {"embedding_model": " "},
             {"source_content_hash": "not-a-sha256"},
         ],

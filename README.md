@@ -31,6 +31,7 @@ UTMIST is a student org with rotating leadership and mixed technical fluency. Ev
   trigger.
 - **`/help`** — list the commands you can use, or show details for one. Public.
 - **`/bug`** — where to report a bug (GitHub issue link and optional infrastructure contact). Public.
+- **DM Misty directly** — linked members can start a private helper conversation and send follow-ups without a server channel or @mention. DM history is isolated per Discord user.
 
 There are currently no beta commands.
 

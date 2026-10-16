@@ -153,13 +153,15 @@ every change.
 
 ```bash
 docker compose up -d postgres
-RUN_PG_TESTS=1 uv run pytest -q
+export DATABASE_URL=postgresql+psycopg://docs:dev_password@localhost:5434/docs
+RUN_PG_TESTS=1 RUN_PG_MIGRATION_TESTS=1 uv run pytest -q
 ```
 
 `tests/test_postgres_adapter.py` runs the same behavioral assertions against a live
-database and is gated behind `RUN_PG_TESTS=1` — without the flag it's skipped (running the
-whole suite without the flag reports **59 passed, 7 skipped**). Run this before any change
-that touches `postgres.py`, `schema.py`, or a migration.
+database and is gated behind `RUN_PG_TESTS=1`. The destructive migration regressions
+also require `RUN_PG_MIGRATION_TESTS=1`. Run the full suite before any change that
+touches `postgres.py`, `schema.py`, or a migration, using a disposable cluster as
+described in the [README testing instructions](../README.md#testing).
 
 ## Lint
 

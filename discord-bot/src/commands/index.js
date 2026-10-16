@@ -9,6 +9,7 @@ import myTeams from './my-teams.js';
 import doc from './doc.js';
 import help from './help.js';
 import record from './record.js';
+import helperLimits from './helper-limits.js';
 import bug from './bug.js';
 
 // Single source of truth for the command set: consumed by the router (dispatch)
@@ -27,6 +28,7 @@ export const commands = new Map([
   [help.name, help],
   [record.name, record],
   [bug.name, bug],
+  [helperLimits.name, helperLimits],
 ]);
 
 // Split a command list into release channels for registration:

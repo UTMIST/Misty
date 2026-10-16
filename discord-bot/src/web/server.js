@@ -16,6 +16,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export async function buildServer({ commands, appContext, onReset }) {
   const server = Fastify({ logger: false });
   let helperTurns = [];
+  const dmHistory = new Map();
+  const dmRequestTails = new Map();
+  let dmGeneration = 0;
+
+  function enqueueDmRequest(discordId, request) {
+    const previous = dmRequestTails.get(discordId) ?? Promise.resolve();
+    const current = previous.then(request, request);
+    dmRequestTails.set(discordId, current);
+    return current.finally(() => {
+      if (dmRequestTails.get(discordId) === current) dmRequestTails.delete(discordId);
+    });
+  }
 
   await server.register(fastifyStatic, {
     root: path.join(__dirname, 'public'),
@@ -63,8 +75,10 @@ export async function buildServer({ commands, appContext, onReset }) {
       reply.code(501);
       return { error: 'reset not available' };
     }
-    await onReset();
     helperTurns = [];
+    dmHistory.clear();
+    dmGeneration += 1;
+    await onReset();
     return { ok: true };
   });
 
@@ -112,6 +126,37 @@ export async function buildServer({ commands, appContext, onReset }) {
   server.delete('/api/helper/thread', async () => {
     helperTurns = [];
     return { ok: true };
+  });
+
+  server.post('/api/helper/dm', async (req, reply) => {
+    const { actingAs, content } = req.body ?? {};
+    if (typeof actingAs !== 'string' || !actingAs.trim()) {
+      reply.code(400);
+      return { error: 'actingAs is required' };
+    }
+    if (typeof content !== 'string' || !content.trim()) {
+      reply.code(400);
+      return { error: 'content is required' };
+    }
+    return enqueueDmRequest(actingAs, async () => {
+      const caller = await resolveHelperCaller(appContext, actingAs);
+      if (!caller.ok) return { content: caller.content, ephemeral: true };
+      const generation = dmGeneration;
+      const turns = [
+        ...(dmHistory.get(actingAs) ?? []),
+        {
+          role: 'user',
+          text: content.trim(),
+          authorId: actingAs,
+          authorName: caller.principal.person.display_name,
+        },
+      ];
+      const answer = await answerHelperTurns(appContext, turns, caller.principal);
+      if (generation === dmGeneration) {
+        dmHistory.set(actingAs, [...turns, { role: 'assistant', text: answer }]);
+      }
+      return { content: answer, ephemeral: false };
+    });
   });
 
   server.post('/api/commands/:name/run', async (req, reply) => {

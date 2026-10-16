@@ -90,6 +90,31 @@ export function chunkForDiscord(text) {
 const HISTORY_LIMIT = 100; // Discord's messages.fetch maximum; no pagination
 const THREAD_UNAVAILABLE =
   "I couldn't open a thread for that — please try again. (I may be missing the 'Create Public Threads' or 'Read Message History' permission.)";
+const DM_HISTORY_UNAVAILABLE =
+  "I couldn't read this conversation right now — please try again shortly.";
+
+export function isDirectMessage(message) {
+  return Boolean(
+    message.channel?.isDMBased?.() || message.channel?.type === 'DM' || message.channel?.type === 1,
+  );
+}
+
+export function directMessageHistoryToTurns(fetched, currentUserId, botId) {
+  return threadHistoryToTurns(
+    fetched.filter((message) => {
+      const authorId = message.author?.id;
+      return authorId === botId || authorId === currentUserId;
+    }),
+    botId,
+  );
+}
+
+function messageIsAtOrBefore(message, boundary) {
+  if (/^\d+$/.test(message.id ?? '') && /^\d+$/.test(boundary.id ?? '')) {
+    return BigInt(message.id) <= BigInt(boundary.id);
+  }
+  return (message.createdTimestamp ?? 0) <= (boundary.createdTimestamp ?? 0);
+}
 
 // The message a thread was started from lives in the PARENT channel, not the
 // thread — ThreadChannel#fetchStarterMessage reads it from `parent` unless the
@@ -131,6 +156,18 @@ export async function handleMention(message, { appContext, botId }) {
     return;
   }
 
+  // Charge the authenticated requester, never an author found in thread history.
+  // Reserve before any more awaits; even concurrent mentions share this limit.
+  const allowance = appContext.helperRequestLimiter.tryConsume(message.author.id);
+  if (!allowance.allowed) {
+    await message
+      .reply(
+        `Please slow down a little so everyone can use the helper. Try again in ${allowance.retryAfterSeconds} seconds.`,
+      )
+      .catch(() => {});
+    return;
+  }
+
   let target;
   let turns;
   try {
@@ -164,5 +201,50 @@ export async function handleMention(message, { appContext, botId }) {
   const content = await answerHelperTurns(appContext, turns, caller.principal);
   for (const chunk of chunkForDiscord(content)) {
     await target.send(chunk).catch((e) => console.error('helper reply failed:', e.message));
+  }
+}
+
+export async function handleDirectMessage(message, { appContext, botId }) {
+  const question = (message.content ?? '').trim();
+  if (!question) return;
+
+  const caller = await resolveHelperCaller(appContext, message.author.id);
+  if (!caller.ok) {
+    await message.reply(caller.content).catch(() => {});
+    return;
+  }
+  const allowance = appContext.helperRequestLimiter.tryConsume(message.author.id);
+  if (!allowance.allowed) {
+    await message
+      .reply(
+        `Please slow down a little so everyone can use the helper. Try again in ${allowance.retryAfterSeconds} seconds.`,
+      )
+      .catch(() => {});
+    return;
+  }
+
+  let turns;
+  try {
+    const fetched = await message.channel.messages.fetch({ limit: HISTORY_LIMIT });
+    const ordered = [...fetched.values()]
+      .filter((candidate) => messageIsAtOrBefore(candidate, message))
+      .sort((a, b) => (a.createdTimestamp ?? 0) - (b.createdTimestamp ?? 0));
+    if (!ordered.some((candidate) => candidate.id && candidate.id === message.id)) {
+      ordered.push(message);
+    }
+    turns = directMessageHistoryToTurns(ordered, message.author.id, botId);
+  } catch (e) {
+    console.error('DM history fetch failed:', e.message);
+    await message.reply(DM_HISTORY_UNAVAILABLE).catch(() => {});
+    return;
+  }
+  if (!turns.length) return;
+
+  await message.channel.sendTyping().catch(() => {});
+  const content = await answerHelperTurns(appContext, turns, caller.principal);
+  for (const chunk of chunkForDiscord(content)) {
+    await message.channel
+      .send(chunk)
+      .catch((e) => console.error('helper DM reply failed:', e.message));
   }
 }

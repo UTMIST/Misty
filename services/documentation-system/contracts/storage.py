@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from contracts.types import ApiKey, Doc, DocChunk, DocContentMeta, DocGrant, Source
+from contracts.types import ApiKey, Doc, DocChunk, DocContentMeta, DocGrant, Source, SourceGrant
 from contracts.visibility import ActorContext, SEE_ALL
 
 
@@ -80,6 +80,23 @@ class StorageAdapter(Protocol):
         """Grants for a doc, grantee_label unset (resolved at the API layer)."""
         ...
 
+    def replace_source_grants(
+        self,
+        doc_id: UUID,
+        *,
+        origin: str,
+        grants: list[SourceGrant],
+        synced_at: datetime,
+        expires_at: datetime,
+        actor: str,
+    ) -> bool:
+        """Atomically replace one source's derived grants and mark sync time.
+
+        An empty list is a successful revocation. Manual grants are untouched.
+        Returns False only when the document does not exist.
+        """
+        ...
+
     def upsert_doc_content(
         self, doc_id: UUID, *, content_text: str, content_hash: str, fetched_at: datetime | None
     ) -> None:
@@ -114,7 +131,9 @@ class StorageAdapter(Protocol):
 
         Validate before accessing storage: ordinals must be exactly 0..n-1
         (input order does not matter), with one source hash and embedding model
-        per set. Invalid input raises ValueError without changing prior rows.
+        per set. Each chunk must satisfy DocChunk's validation, including its
+        MAX_CHUNK_CHARS text limit. Invalid input raises ValueError without
+        changing prior rows.
         False for a missing doc, True otherwise; repeating a write creates no
         duplicates. Concurrent replacements cannot produce a mixed set.
 
@@ -129,7 +148,8 @@ class StorageAdapter(Protocol):
         """Chunks ordered by ordinal, using get_doc's visibility predicate.
 
         Missing/invisible docs and docs without chunks all return []. Returned
-        objects are detached: mutating them cannot change persisted data.
+        values are immutable, with tuple embeddings, and the returned list is
+        detached from persisted data.
         Like get_doc_content, this does not filter on the doc's active flag.
         """
         ...

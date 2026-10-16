@@ -25,6 +25,7 @@ dependencies = [
     "argon2-cffi>=23.1",
     "httpx>=0.27",
     "platform-auth",
+    "regex>=2026.9.29",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +40,11 @@ platform-auth = { workspace = true }
 
 [project.scripts]
 doc-keys = "src.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

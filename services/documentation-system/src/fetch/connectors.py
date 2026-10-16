@@ -8,7 +8,7 @@ Fetcher.fetch takes only a url — the registry has already resolved the source.
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from contracts.fetcher import FetchError, FetchResult
+from contracts.fetcher import FetchError, FetchResult, SourcePermission
 from src.fetch.web import SNAPSHOT_CHARS
 
 
@@ -23,6 +23,7 @@ class _ConnectorsResponseBody(BaseModel):
     title: str | None = None
     content: str | None = None
     warnings: list[str] = []
+    permissions: list[SourcePermission] | None = None
 
 
 class ConnectorsFetcher:
@@ -92,6 +93,7 @@ class ConnectorsFetcher:
             content=content,
             content_snapshot=content[:SNAPSHOT_CHARS] if content else None,
             warnings=list(body.warnings or []),
+            permissions=body.permissions,
         )
 
 

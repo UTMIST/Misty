@@ -4,8 +4,8 @@ The initial /embed profile is text-embedding-3-small at 1536 dimensions.
 Exact vector scans suit the estimated 1,000-5,000 chunks (#208); only the
 keyword branch needs a search index initially.
 
-Revision ID: 007
-Revises: 006
+Revision ID: 008
+Revises: 007
 Create Date: 2026-10-09
 """
 
@@ -14,8 +14,8 @@ from pgvector.sqlalchemy import VECTOR
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision = "007"
-down_revision = "006"
+revision = "008"
+down_revision = "007"
 branch_labels = None
 depends_on = None
 

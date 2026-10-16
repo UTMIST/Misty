@@ -56,7 +56,7 @@ Violating any of these is a bug even if tests pass.
 - **Change `src/storage/schema.py` first** — the SQLAlchemy Core tables are the schema source of truth.
 - **`down_revision` points at the current head**, and `downgrade()` must actually reverse `upgrade()`. Verify the round trip: `upgrade head` → `downgrade -1` → `upgrade head`.
 - **New columns on existing tables are nullable or have a `server_default`**, mirrored in the Pydantic model and both adapters.
-- Current heads: team-tracking **007**, documentation-system **007**, verification **001**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
+- Current heads: team-tracking **010**, documentation-system **008**, verification **001**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
 
 ### Configuration
 
@@ -110,11 +110,16 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 ## Gotchas that will cost you an hour
 
 - **Cross-worktree tests need source-path verification.** Pytest can prepend a historical tests checkout to `sys.path` and import its `contracts` instead of the edited code. Pin the target `src` and `contracts` packages before collection and verify imported modules' `__file__` paths; passing against the wrong checkout is not verification.
-- **`uv --project` is mandatory for the key CLIs.** Both `services/team-tracking` and `services/documentation-system` declare a top-level `src` package with a console script at `src.cli:main`. In the shared workspace venv they collide, so a bare `team-tracking-keys …` can resolve documentation-system's CLI and mint a `doc_`-envelope key that team-tracking rejects. Always `uv --project services/<service> run <service>-keys …`, and verify the token's prefix.
+- **`uv --project` is mandatory for the key CLIs.** Both `services/team-tracking` and `services/documentation-system` declare a top-level `src` package with a console script at `src.cli:main`. In the shared workspace venv they collide, so a bare `team-tracking-keys …` can resolve documentation-system's CLI and mint a `doc_`-envelope key that team-tracking rejects. Always `uv --project services/<service> run <service>-keys …`, and verify the token's prefix. The same applies to every other team-tracking console script (`team-tracking-seed`, `team-tracking-groups`).
 - **documentation-system and verification both bind host port 5434.** They cannot run locally at the same time. Remap one (`-p 5435:5432`) and update its `DATABASE_URL`. If Alembic reports an unknown revision, you're almost certainly pointed at the other service's database.
 - **documentation-system's Swagger is at `/swagger`, not `/docs`** — `/docs` is a real docs-resource router on that service.
 - **`npm run dev:web` occupies port 8001 and 5433**, and needs Docker. Stop documentation-system first.
 - **`meeting` is stateful.** One process must own a session end-to-end. Its sessions live in memory and a restart drops every in-flight meeting.
+- **Discord PR testing uses one persistent `dev` slot.** Automatic Railway
+  PR copies must skip gateway login and command registration. The selected PR
+  runs the real gateway/voice code with a separate dev application; see
+  [`docs/pr-previews.md`](docs/pr-previews.md). Keep its bot volume attached:
+  it prevents overlapping gateway connections during Railway rollouts.
 - **No `ffmpeg` binary is needed anywhere**, including `meeting` — PyAV bundles its own libraries and nothing shells out.
 - **Never write a test that makes a real AWS, Google, or LLM call.** Every suite runs offline against fakes injected via `app.dependency_overrides`. Keep it that way.
 

@@ -9,6 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 GranteeType = Literal["person", "team", "org"]
 
+# Well above the ~500-token target, but bounded for generated keyword metadata.
+MAX_CHUNK_CHARS = 16_384
+
 
 def _validate_grantee_shape(grantee_type: str, grantee_id) -> None:
     if grantee_type == "org" and grantee_id is not None:
@@ -51,6 +54,8 @@ class Doc(DirectoryBase):
     owning_person_label: str | None = None
     content_snapshot: str | None = None
     fetched_at: datetime | None = None
+    source_access_synced_at: datetime | None = None
+    source_access_attempted_at: datetime | None = None
     active: bool = True
     tags: list[str] = []
     grants: list["DocGrant"] = []
@@ -66,6 +71,28 @@ class DocGrant(BaseModel):
     grantee_label: str | None = None
     created_at: datetime
     created_by: str
+    origin: Literal["manual", "google_drive"] = "manual"
+    source_permission_id: str | None = None
+    source_principal: str | None = None
+    source_role: str | None = None
+    source_inherited: bool = False
+    source_inherited_from: list[str] = []
+    source_expires_at: datetime | None = None
+    expires_at: datetime | None = None
+
+
+class SourceGrant(BaseModel):
+    """Resolved source permission ready for atomic storage reconciliation."""
+
+    model_config = ConfigDict(extra="forbid")
+    grantee_type: Literal["person", "team"]
+    grantee_id: UUID
+    source_permission_id: str
+    source_principal: str
+    source_role: str
+    source_inherited: bool = False
+    source_inherited_from: list[str] = []
+    source_expires_at: datetime | None = None
 
 
 class DocGrantInput(BaseModel):
@@ -127,7 +154,9 @@ class DocChunk(BaseModel):
     Offsets are half-open Unicode code-point indices into the source text whose
     SHA-256 is source_content_hash. The caller supplies the resolved /embed model,
     not its configuration alias. Vectors use pgvector's float32 precision in both
-    adapters. A new vector width requires a schema migration.
+    adapters, stored as an immutable tuple. Text is capped at MAX_CHUNK_CHARS
+    Unicode code points to bound generated keyword metadata. A new vector width
+    requires a schema migration.
     """
 
     model_config = ConfigDict(
@@ -135,11 +164,11 @@ class DocChunk(BaseModel):
     )
 
     ordinal: int = Field(ge=0, le=2**31 - 1, strict=True)
-    chunk_text: str = Field(min_length=1, repr=False)
+    chunk_text: str = Field(min_length=1, max_length=MAX_CHUNK_CHARS, repr=False)
     start_offset: int = Field(ge=0, le=2**31 - 1, strict=True)
     end_offset: int = Field(gt=0, le=2**31 - 1, strict=True)
     source_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    embedding: list[float] = Field(min_length=1536, max_length=1536, repr=False)
+    embedding: tuple[float, ...] = Field(min_length=1536, max_length=1536, repr=False)
     embedding_model: str = Field(min_length=1)
     dimensions: Literal[1536]
 
@@ -156,9 +185,9 @@ class DocChunk(BaseModel):
 
     @field_validator("embedding")
     @classmethod
-    def _float32(cls, value: list[float]) -> list[float]:
+    def _float32(cls, value: tuple[float, ...]) -> tuple[float, ...]:
         try:
-            rounded = list(struct.unpack("1536f", struct.pack("1536f", *value)))
+            rounded = struct.unpack("1536f", struct.pack("1536f", *value))
         except (OverflowError, struct.error):
             raise ValueError("embedding values must fit finite float32") from None
         if not all(isfinite(element) for element in rounded):

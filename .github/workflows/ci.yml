@@ -197,6 +197,8 @@ jobs:
       # Runs the Postgres-adapter suite (test_postgres_adapter.py), which is
       # otherwise skipped. See tests/test_postgres_adapter.py.
       RUN_PG_TESTS: "1"
+      # This job owns a disposable cluster: allow downgrades and temporary roles/databases.
+      RUN_PG_MIGRATION_TESTS: "1"
     defaults:
       run:
         working-directory: services/documentation-system

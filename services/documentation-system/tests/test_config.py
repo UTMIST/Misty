@@ -242,3 +242,8 @@ def test_boot_refusal_message_never_prints_the_secret():
     with pytest.raises(RuntimeError) as exc:
         verify_production_secrets(s)
     assert DEFAULT_DEV_API_KEY not in str(exc.value)
+
+
+def test_source_access_max_age_must_exceed_refresh_interval():
+    with pytest.raises(ValueError, match="MAX_AGE_HOURS"):
+        Settings(source_access_refresh_after_hours=24, source_access_max_age_hours=24)
