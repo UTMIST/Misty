@@ -272,7 +272,13 @@ def test_google_ingest_unknown_email_creates_no_phantom_grant_or_content():
                         principal_type="user",
                         principal="external@example.com",
                         role="reader",
-                    )
+                    ),
+                    SourcePermission(
+                        permission_id="g1",
+                        principal_type="group",
+                        principal="private-team@example.com",
+                        role="reader",
+                    ),
                 ],
             )
         ),
@@ -283,6 +289,12 @@ def test_google_ingest_unknown_email_creates_no_phantom_grant_or_content():
     assert store.list_grants(result.doc.id) == []
     assert store.get_doc_content(result.doc.id) is None
     assert result.doc.title == result.doc.url
+    assert result.doc.content_snapshot is None
+    assert any("unmapped source user" in warning for warning in result.warnings)
+    assert any("unmapped or unsynchronized source group" in warning for warning in result.warnings)
+    assert any("no mapped audience" in warning for warning in result.warnings)
+    assert "external@example.com" not in result.model_dump_json()
+    assert "private-team@example.com" not in result.model_dump_json()
 
 
 def test_google_reingest_never_fetches_when_content_fetch_disabled(store):

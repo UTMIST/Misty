@@ -58,7 +58,7 @@ def test_direct_shares_resolve_each_verified_email_and_ignore_unknowns():
         ("person", P1),
         ("person", P2),
     ]
-    assert any("unknown@example.com" in warning for warning in resolved.warnings)
+    assert resolved.warnings == ["unmapped source user ignored"]
 
 
 def test_mapped_synced_group_preserves_inherited_provenance():
@@ -104,7 +104,7 @@ def test_expired_source_permission_creates_no_grant():
         Directory(people={"one@example.com": P1}),
     )
     assert resolved.grants == []
-    assert resolved.warnings == ["expired source permission ignored: expired"]
+    assert resolved.warnings == ["expired source permission ignored"]
 
 
 def test_unmapped_groups_domain_and_anyone_never_create_grants():

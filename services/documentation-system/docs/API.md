@@ -237,6 +237,9 @@ mapping. Unknown/external emails, unmapped or legacy groups, domain shares, and 
 title or content. A fetch/ACL failure is non-fatal at ingest: the URL is catalogued with a
 warning and no source-derived access.
 
+Warnings describe ignored or unmapped permission types without disclosing collaborator
+emails, group addresses, domains, or permission ids to the ingest caller.
+
 ### Owner validation and degrade
 
 Owner ids are validated against the team-tracking directory:

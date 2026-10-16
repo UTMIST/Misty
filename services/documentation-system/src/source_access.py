@@ -41,14 +41,14 @@ def resolve_google_permissions(
             if expiration_time is not None and expiration_time.tzinfo is None:
                 expiration_time = expiration_time.replace(tzinfo=timezone.utc)
             if expiration_time is not None and expiration_time <= datetime.now(timezone.utc):
-                warnings.append(f"expired source permission ignored: {permission.permission_id}")
+                warnings.append("expired source permission ignored")
                 continue
             if permission.principal_type == "user":
                 if not principal:
                     raise SourceAccessUnavailable("source user permission omitted its email")
                 grantee_id = directory.get_person_id_by_verified_email(principal)
                 if grantee_id is None:
-                    warnings.append(f"unmapped source user ignored: {principal}")
+                    warnings.append("unmapped source user ignored")
                     continue
                 grantee_type = "person"
             elif permission.principal_type == "group":
@@ -56,17 +56,14 @@ def resolve_google_permissions(
                     raise SourceAccessUnavailable("source group permission omitted its email")
                 grantee_id = directory.get_team_id_by_synced_google_group(principal)
                 if grantee_id is None:
-                    warnings.append(f"unmapped or unsynchronized source group ignored: {principal}")
+                    warnings.append("unmapped or unsynchronized source group ignored")
                     continue
                 grantee_type = "team"
             elif permission.principal_type in {"domain", "anyone"}:
-                label = principal or permission.principal_type
-                warnings.append(f"broad source share ignored by policy: {label}")
+                warnings.append("broad source share ignored by policy")
                 continue
             else:  # defensive for non-Pydantic test doubles
-                warnings.append(
-                    f"unsupported source principal ignored: {permission.principal_type}"
-                )
+                warnings.append("unsupported source principal ignored")
                 continue
 
             key = (grantee_type, grantee_id, permission.permission_id)
