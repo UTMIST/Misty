@@ -10,8 +10,8 @@ from src.api.ratelimit import enforce_key_rate_limit
 # "no discord identifier for that github login" — told an external caller
 # whether a given GitHub user is in the directory at all. That is a membership
 # oracle on a public endpoint, and enumerating it is cheap: exactly the kind of
-# leak this service exists to prevent. The two cases stay distinguishable in the
-# audit log, where only we can read them.
+# leak this service exists to prevent. The audit records the requested login
+# and status without including any upstream response data.
 _NOT_FOUND = "no discord id for that github login"
 
 
@@ -36,8 +36,8 @@ router = APIRouter(
 @router.get("/resolve/discord/{github_login}", response_model=DiscordId)
 def resolve_discord(
     github_login: str,
-    directory: DirectoryClient = Depends(get_directory),
     _: AuthedKey = Depends(require_scope("resolve:discord")),
+    directory: DirectoryClient = Depends(get_directory),
 ) -> DiscordId:
     # `github_login` reaches the audit log, because it is a path segment and
     # AuditLogMiddleware records request.url.path. That is deliberate: it is

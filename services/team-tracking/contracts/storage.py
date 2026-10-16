@@ -1,9 +1,13 @@
-from datetime import date
+from contextlib import AbstractContextManager
+from datetime import date, datetime
 from typing import Protocol
 from uuid import UUID
 
 from contracts.types import (
     ApiKey,
+    ChannelTeams,
+    GoogleGroupStatus,
+    PendingGroupChange,
     Person,
     PersonCreate,
     PersonIdentifier,
@@ -14,6 +18,7 @@ from contracts.types import (
     RoleKind,
     Team,
     TeamCreate,
+    TeamGoogleGroup,
     TeamMembership,
     TeamMembershipCreate,
     TeamMembershipUpdate,
@@ -36,6 +41,10 @@ class StorageAdapter(Protocol):
     - Records are never hard-deleted; use `active=False` on Person/Team, or
       `end_membership` for soft-removal.
     """
+
+    def is_ready(self) -> bool:
+        """Return whether the backing store can answer a trivial query."""
+        ...
 
     # People
     def create_person(self, payload: PersonCreate, *, actor: str) -> Person: ...
@@ -179,4 +188,51 @@ class StorageAdapter(Protocol):
     def get_person_by_identifier(self, provider: str, external_id: str) -> Person | None:
         """Reverse lookup: resolve an external account to its Person, or None.
         For provider='email' the external_id is normalized before matching."""
+        ...
+
+    # Channel team access (current state, like person identifiers)
+    def get_channel_teams(self, guild_id: str, channel_id: str) -> ChannelTeams:
+        """Return the channel's active teams, sorted. Never None: an unconfigured
+        channel returns empty `team_ids` with `updated_by` None. Retired teams are
+        omitted from `team_ids`."""
+        ...
+
+    def replace_channel_teams(
+        self, guild_id: str, channel_id: str, team_ids: list[UUID], *, actor: str
+    ) -> ChannelTeams:
+        """Atomically replace the channel's team set. An empty list clears it.
+        Concurrent replaces/clears of one channel serialize; the last to commit
+        wins outright, never a union. Raises ValueError('unknown_or_inactive_team')
+        if any id is not an active team, leaving the existing configuration
+        untouched."""
+        ...
+
+    def clear_channel_teams(self, guild_id: str, channel_id: str) -> None:
+        """Hard-delete the channel's configuration. Idempotent."""
+        ...
+
+    # Team Google Groups (one row per team, written after each sync attempt)
+    def get_team_google_group(self, team_id: UUID) -> TeamGoogleGroup | None: ...
+    def list_team_google_groups(self) -> list[TeamGoogleGroup]: ...
+    def put_team_google_group(
+        self,
+        team_id: UUID,
+        *,
+        group_email: str,
+        group_name: str | None,
+        status: GoogleGroupStatus,
+        last_error: str | None,
+        last_synced_at: datetime | None,
+        actor: str,
+        pending_changes: list[PendingGroupChange] | None = None,
+    ) -> TeamGoogleGroup:
+        """Insert or overwrite the team's row; every field is replaced as given.
+        Omitted pending_changes means an empty list. Persist before each Google
+        membership write, and retain unresolved writes across sync attempts.
+        Raises ValueError('team_id not found') for an unknown team."""
+        ...
+
+    def lock_team_google_group(self, team_id: UUID) -> AbstractContextManager[None]:
+        """Exclusive per-team lock, held across one whole sync. Must exclude
+        every process sharing this storage (API workers and the CLI cron)."""
         ...

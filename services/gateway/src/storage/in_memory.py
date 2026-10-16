@@ -15,6 +15,9 @@ class InMemoryStorageAdapter:
         self._api_keys: dict[UUID, ApiKey] = {}
         self._hashes: dict[UUID, str] = {}
 
+    def is_ready(self) -> bool:
+        return True
+
     def create_api_key(
         self, *, name: str, prefix: str, key_hash: str, scopes: list[str], actor: str
     ) -> ApiKey:
@@ -35,7 +38,7 @@ class InMemoryStorageAdapter:
 
     def get_api_key_hash(self, prefix: str) -> str | None:
         row = self._by_prefix(prefix)
-        return self._hashes.get(row.id) if row else None
+        return self._hashes.get(row.id) if row and row.active and row.revoked_at is None else None
 
     def list_api_keys(self, *, active_only: bool = False) -> list[ApiKey]:
         keys = list(self._api_keys.values())
@@ -47,6 +50,8 @@ class InMemoryStorageAdapter:
         key = self._api_keys.get(api_key_id)
         if key is None:
             return None
+        if key.revoked_at is not None:
+            return key
         updated = key.model_copy(update={"active": False, "revoked_at": _now()})
         self._api_keys[api_key_id] = updated
         return updated

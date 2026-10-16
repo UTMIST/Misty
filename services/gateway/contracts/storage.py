@@ -5,6 +5,7 @@ from contracts.types import ApiKey
 
 
 class StorageAdapter(Protocol):
+    def is_ready(self) -> bool: ...
     def create_api_key(
         self, *, name: str, prefix: str, key_hash: str, scopes: list[str], actor: str
     ) -> ApiKey: ...

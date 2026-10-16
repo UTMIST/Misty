@@ -4,7 +4,7 @@ from uuid import UUID
 
 from sqlalchemy import insert, select, update
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from contracts.types import ApiKey
 from src.storage.schema import api_keys
@@ -38,6 +38,15 @@ class PostgresStorageAdapter:
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+
+    def is_ready(self) -> bool:
+        try:
+            with self._engine.connect() as conn:
+                # Authentication needs the migrated key table, not just a live server.
+                conn.execute(select(api_keys.c.id).limit(1))
+        except SQLAlchemyError:
+            return False
+        return True
 
     def create_api_key(
         self,
@@ -98,10 +107,14 @@ class PostgresStorageAdapter:
         with self._engine.begin() as conn:
             row = conn.execute(
                 update(api_keys)
-                .where(api_keys.c.id == api_key_id)
+                .where(api_keys.c.id == api_key_id, api_keys.c.revoked_at.is_(None))
                 .values(active=False, revoked_at=now, updated_at=now, updated_by=actor)
                 .returning(api_keys)
             ).one_or_none()
+            if row is None:
+                row = conn.execute(
+                    select(api_keys).where(api_keys.c.id == api_key_id)
+                ).one_or_none()
         return _api_key_row_to_model(row) if row else None
 
     def touch_api_key_last_used(self, api_key_id: UUID) -> None:

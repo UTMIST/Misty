@@ -5,6 +5,10 @@ on:
     branches: [main, staging]
   push:
     branches: [main, staging]
+  # Every required staging check must also test GitHub's queued merge commit.
+  merge_group:
+    types: [checks_requested]
+    branches: [staging]
 
 jobs:
   python-test:
@@ -176,7 +180,7 @@ jobs:
       contents: read
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:0.8.2-pg16
         env:
           POSTGRES_USER: docs
           POSTGRES_PASSWORD: dev_password
@@ -193,6 +197,8 @@ jobs:
       # Runs the Postgres-adapter suite (test_postgres_adapter.py), which is
       # otherwise skipped. See tests/test_postgres_adapter.py.
       RUN_PG_TESTS: "1"
+      # This job owns a disposable cluster: allow downgrades and temporary roles/databases.
+      RUN_PG_MIGRATION_TESTS: "1"
     defaults:
       run:
         working-directory: services/documentation-system
@@ -215,6 +221,24 @@ jobs:
 
   gateway-test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: gateway
+          POSTGRES_PASSWORD: dev_password
+          POSTGRES_DB: gateway_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gateway -d gateway_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://gateway:dev_password@localhost:5432/gateway_test
+      GATEWAY_TEST_DATABASE_URL: postgresql+psycopg://gateway:dev_password@localhost:5432/gateway_test
+      RUN_PG_TESTS: "1"
     defaults:
       run:
         working-directory: services/gateway
@@ -224,6 +248,11 @@ jobs:
         uses: astral-sh/setup-uv@v5
       - name: Install dependencies
         run: uv sync --extra dev
+      - name: Verify migration round trip
+        run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade base
+          uv run alembic upgrade head
       - name: Run tests
         run: uv run pytest
       - name: Ruff check
@@ -275,6 +304,8 @@ jobs:
         run: docker build -f services/gateway/Dockerfile -t gateway:ci .
       - name: Smoke-test gateway image (imports incl. contracts/ resolve at boot)
         run: docker run --rm gateway:ci python -c "import src.api.app"
+      - name: Verify gateway against the current directory over HTTP
+        run: python3 services/gateway/tests/smoke_stack.py
       - name: Build discord-bot image
         run: docker build -t discord-bot:ci ./discord-bot
       - name: Smoke-test discord-bot image (source parses)

@@ -20,11 +20,15 @@ class FakeDir:
         return self._i
 
 
-def _client(fake):
+def _client(fake, *, scopes=None):
     store = InMemoryStorageAdapter()
     plaintext, prefix, key_hash = generate_key()
     store.create_api_key(
-        name="c", prefix=prefix, key_hash=key_hash, scopes=["resolve:discord"], actor="t"
+        name="c",
+        prefix=prefix,
+        key_hash=key_hash,
+        scopes=["resolve:discord"] if scopes is None else scopes,
+        actor="t",
     )
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: store
@@ -110,4 +114,15 @@ def test_requires_scope_and_key():
     c, h = _client(
         FakeDir(person={"id": "p1"}, idents=[{"provider": "discord", "external_id": "42"}])
     )
+    assert c.get("/v1/resolve/discord/octocat").status_code == 401
+
+
+def test_scope_checked_before_directory_dependency_is_constructed():
+    c, headers = _client(None, scopes=[])
+
+    def unexpected_directory():
+        raise AssertionError("directory must not be constructed without the required scope")
+
+    c.app.dependency_overrides[get_directory] = unexpected_directory
+    assert c.get("/v1/resolve/discord/octocat", headers=headers).status_code == 403
     assert c.get("/v1/resolve/discord/octocat").status_code == 401

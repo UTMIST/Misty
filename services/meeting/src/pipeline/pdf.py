@@ -210,11 +210,10 @@ def _meta_strip(meta: dict, minutes: Minutes) -> tuple[str, str]:
 
 
 def _document_title(minutes: Minutes, meta: dict) -> str:
-    """The big meeting title: the LLM-generated title, falling back to a
-    caller-supplied meta title, then a static default."""
+    """The big meeting title: a caller-supplied title, then the LLM title."""
     return (
-        (getattr(minutes, "title", "") or "").strip()
-        or (meta.get("title") or "").strip()
+        (meta.get("title") or "").strip()
+        or (getattr(minutes, "title", "") or "").strip()
         or "Meeting Minutes"
     )
 

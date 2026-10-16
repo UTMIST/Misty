@@ -2,14 +2,11 @@ from src.contracts import Minutes
 from src.pipeline.pdf import _document_title, render_meeting_pdf
 
 
-def test_document_title_prefers_llm_then_meta_then_default():
-    # The LLM-generated title wins.
-    assert (
-        _document_title(Minutes(title="Q3 Roadmap Sync", summary="s"), {"title": "x"})
-        == "Q3 Roadmap Sync"
-    )
-    # Falls back to a caller-supplied meta title when the LLM gave none.
-    assert _document_title(Minutes(title="", summary="s"), {"title": "Board Prep"}) == "Board Prep"
+def test_document_title_prefers_meta_then_llm_then_default():
+    # A caller-supplied title wins over the LLM-generated title.
+    assert _document_title(Minutes(title="Q3 Roadmap Sync", summary="s"), {"title": "x"}) == "x"
+    # Falls back to the LLM title when no caller title was supplied.
+    assert _document_title(Minutes(title="Board Prep", summary="s"), {}) == "Board Prep"
     # Static default when neither is present (whitespace-only counts as none).
     assert _document_title(Minutes(title="   ", summary="s"), {}) == "Meeting Minutes"
 

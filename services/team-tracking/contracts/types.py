@@ -1,9 +1,10 @@
+import hashlib
 import re
 from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 
 AccessLevel = Literal["member", "admin", "superuser"]
@@ -170,6 +171,68 @@ class PersonIdentifierUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     external_id: str | None = None
     handle: str | None = None
+
+
+class ChannelTeams(BaseModel):
+    """Teams whose documents may inform answers in a Discord channel.
+
+    An unconfigured channel has `team_ids == []` and no document access.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    guild_id: str
+    channel_id: str
+    team_ids: list[UUID]  # active teams only, sorted
+    updated_by: str | None = None
+
+    @computed_field
+    @property
+    def version(self) -> str:
+        """Fingerprint of the effective access. Derived from content, not
+        timestamps, so it changes exactly when `team_ids` does regardless of the
+        order concurrent writes commit in."""
+        return hashlib.sha256(",".join(sorted(map(str, self.team_ids))).encode()).hexdigest()[:16]
+
+
+class ChannelTeamsReplace(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    team_ids: list[UUID]
+
+    @field_validator("team_ids")
+    @classmethod
+    def no_duplicates(cls, v: list[UUID]) -> list[UUID]:
+        if len(set(v)) != len(v):
+            raise ValueError("team_ids must not contain duplicates")
+        return v
+
+
+GoogleGroupStatus = Literal["synced", "needs_external_members", "failed"]
+
+
+class PendingGroupChange(BaseModel):
+    """A membership write whose outcome is not yet confirmed."""
+
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["add", "remove"]
+    email: str
+    membership_name: str | None = None  # exact resource being removed
+    operation_name: str | None = None  # diagnostic, when Google returned one
+
+
+class TeamGoogleGroup(DirectoryBase):
+    """A team's managed Google Group and the outcome of its last sync.
+
+    `group_name` is the Cloud Identity resource (`groups/{id}`); it is None
+    until creation succeeds, and `group_email` is fixed once it is set.
+    """
+
+    team_id: UUID
+    group_email: str
+    group_name: str | None = None
+    status: GoogleGroupStatus
+    last_error: str | None = None
+    last_synced_at: datetime | None = None
+    pending_changes: list[PendingGroupChange] = Field(default_factory=list)
 
 
 class ApiKey(DirectoryBase):

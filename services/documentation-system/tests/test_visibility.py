@@ -17,11 +17,13 @@ def test_see_all_and_deny():
     assert _v(DENY, grants=[("org", None)]) is False
 
 
-def test_owner_person_and_team():
+def test_ownership_is_metadata_and_requires_an_independent_grant():
     actor = Actor(person_id=P1, team_ids=frozenset({T1}))
-    assert _v(actor, owner_p=P1) is True
-    assert _v(actor, owner_t=T1) is True
+    assert _v(actor, owner_p=P1) is False
+    assert _v(actor, owner_t=T1) is False
     assert _v(actor, owner_p=P2, owner_t=T2) is False
+    assert _v(actor, owner_p=P1, grants=[("person", P1)]) is True
+    assert _v(actor, owner_t=T1, grants=[("team", T1)]) is True
 
 
 def test_org_grant_visible_to_any_actor():
@@ -35,6 +37,17 @@ def test_person_and_team_grants():
     assert _v(actor, grants=[("person", P2)]) is False
     assert _v(actor, grants=[("team", T1)]) is True
     assert _v(actor, grants=[("team", T2)]) is False
+
+
+def test_source_team_grant_requires_confirmed_google_membership():
+    ordinary_only = Actor(person_id=P1, team_ids=frozenset({T1}))
+    assert _v(ordinary_only, grants=[("team", T1, "google_drive")]) is False
+    synced = Actor(
+        person_id=P1,
+        team_ids=frozenset({T1}),
+        source_team_ids=frozenset({T1}),
+    )
+    assert _v(synced, grants=[("team", T1, "google_drive")]) is True
 
 
 def test_no_match_is_hidden():

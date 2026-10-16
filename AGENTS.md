@@ -4,7 +4,7 @@ Instructions for AI coding agents working in this repository. Humans should read
 
 ## What this repo is
 
-The UTMIST ops platform: six Python HTTP services, a Node Discord bot, and one shared auth library, in a single uv workspace. It's deployed and running in production — **changes here reach a live system.** Merges to `staging` auto-deploy to Railway staging; merges to `main` auto-deploy to production.
+The UTMIST ops platform: seven Python HTTP services, a Node Discord bot, and one shared auth library, in a single uv workspace. It's deployed and running in production — **changes here reach a live system.** Merges to `staging` auto-deploy to Railway staging; merges to `main` auto-deploy to production.
 
 ```
 services/team-tracking/         directory (people/teams/roles) — 8000, Postgres 5433
@@ -13,6 +13,7 @@ services/llm/                   Bedrock /chat proxy            — 8002, no DB
 services/verification/          email one-time codes           — 8003, Postgres 5434 ⚠
 services/meeting/               live transcription → minutes   — 8004, no DB, STATEFUL
 services/connectors/            Google doc fetch adapter       — 8005, no DB
+services/gateway/               public external API            — 8006, Postgres 5435
 packages/auth/                  platform_auth — shared API-key auth library
 discord-bot/                    Discord frontend + web playground
 ```
@@ -22,6 +23,7 @@ discord-bot/                    Discord frontend + web playground
 1. **Read the service's own `docs/CONTRIBUTING.md`** before changing it. Every service has one, and each ends with a pre-push checklist specific to that service. They are not boilerplate — `verification`'s opens with a warning about the confirm-code state machine, `meeting`'s explains why you must not buffer audio.
 2. **Copy the nearest existing example.** The codebase is intentionally repetitive so patterns are easy to imitate. Find the closest existing case and mirror its shape rather than inventing a new one.
 3. **Prefer the smallest change that works.** This is a student org with rotating maintainers; clever is a liability.
+4. **Justify every changed file.** Explain why each created, edited, or deleted file is necessary in the PR description or a linked audit report.
 
 ## Hard invariants
 
@@ -44,7 +46,7 @@ Violating any of these is a bug even if tests pass.
 
 ### HTTP conventions
 
-- **DTOs forbid extra fields — where the convention is actually applied.** `team-tracking`, `documentation-system`, and `verification` set `extra="forbid"` on input models, so an unexpected field is a 422 rather than a silent no-op. **`llm` and `connectors` do not** — their `contracts/` models declare no `model_config`, so Pydantic's `extra="ignore"` default applies and unknown fields are silently dropped. Follow the convention in new models; don't assume it already holds when reading an existing one.
+- **DTOs forbid extra fields — where the convention is actually applied.** `team-tracking`, `documentation-system`, and `verification` set `extra="forbid"` on input models, so an unexpected field is a 422 rather than a silent no-op. `connectors` and the legacy `llm` chat/message wrappers retain Pydantic's `extra="ignore"` default. The new `llm` tool definitions and structured content blocks are strict and forbid extras; see `services/llm/docs/API.md` for their validation and replay contract. Follow the relevant model's convention; don't assume all models in a service behave alike.
 - **Errors map by convention.** Storage raises `ValueError` for rule violations; routers translate: duplicate → `409`, bad FK / unknown provider → `400`, `None` return → `404`. Pydantic gives `422`; auth gives `401`/`403`.
 - **Route order matters.** FastAPI matches in declaration order — a literal path (`/by-slug/{slug}`) must be declared **before** a `/{id}` catch-all in the same router, or the literal segment gets parsed as an id.
 - **Pick the right scope** on `require_scope(...)`: reads use `<domain>:read`, writes `<domain>:write`. Privileged operations get their own scope (`people:elevate` — plain `people:write` cannot escalate access level).
@@ -55,7 +57,7 @@ Violating any of these is a bug even if tests pass.
 - **Change `src/storage/schema.py` first** — the SQLAlchemy Core tables are the schema source of truth.
 - **`down_revision` points at the current head**, and `downgrade()` must actually reverse `upgrade()`. Verify the round trip: `upgrade head` → `downgrade -1` → `upgrade head`.
 - **New columns on existing tables are nullable or have a `server_default`**, mirrored in the Pydantic model and both adapters.
-- Current heads: team-tracking **007**, documentation-system **006**, verification **001**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
+- Current heads: team-tracking **010**, documentation-system **008**, verification **001**, gateway **001**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
 
 ### Configuration
 
@@ -73,6 +75,9 @@ Violating any of these is a bug even if tests pass.
 
 - **Keep a PR inside one CODEOWNERS zone.** `pr-zone-check.yml` warns (non-blocking) when a PR spans multiple zones. [`docs/CODE-OWNERSHIP.md`](docs/CODE-OWNERSHIP.md) is the zone list and what each one covers — note that editing *this* file puts a PR in `root`. If a change genuinely spans zones — a protocol change touching both `meeting` and `discord-bot` — that's fine, but it should be deliberate, not incidental.
 - **Open PRs into `staging`.** Green CI is required.
+- **Keep required staging checks compatible with `merge_group`.** CI supports
+  a staging merge queue; enforcement is a separate GitHub setting. Follow the
+  [rollout guide](docs/DEVELOPMENT.md#merge-queue-on-staging) before enabling it.
 - **Don't commit or push unless asked.** Especially don't push to `staging` or `main` directly.
 - **Issues declare blockers in the form's "Blocked by" field** (`#40, #42`), which drives the `blocked`/`ready` labels (`blocked-ready-automation.yml`). The pre-forms inline shape, `Blocked by: #40, #42` anywhere in the body, still works — issues filed before the forms landed use it.
 - **Zones label PRs; areas label issues.** `zone: *` comes from the changed paths and is single-valued (a PR should stay in one). `area/*` comes from the issue form's Area dropdown and is multi-valued. An issue is never given a zone. See [`docs/CODE-OWNERSHIP.md`](docs/CODE-OWNERSHIP.md).
@@ -80,7 +85,7 @@ Violating any of these is a bug even if tests pass.
 
 ### Run before you push
 
-`make check` from the repo root runs lint, format checks, and the fast suites across all seven Python directories plus the bot. **It is not CI-equivalent** — it skips the Postgres-adapter suites, so after touching storage, an adapter, or a migration use `make test-full` with Postgres up. `make help` lists the rest. It's a wrapper over the commands below — `ci.yml` is still authoritative, and a disagreement between the two means the Makefile is wrong.
+`make check` from the repo root runs lint, format checks, and the fast suites across all eight Python directories plus the bot. **It is not CI-equivalent** — it skips the Postgres-adapter suites, so after touching storage, an adapter, or a migration use `make test-full` with Postgres up. `make help` lists the rest. It's a wrapper over the commands below — `ci.yml` is still authoritative, and a disagreement between the two means the Makefile is wrong.
 
 For a single DB-backed service (team-tracking, documentation-system, verification):
 
@@ -105,11 +110,19 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 
 ## Gotchas that will cost you an hour
 
-- **`uv --project` is mandatory for the key CLIs.** Both `services/team-tracking` and `services/documentation-system` declare a top-level `src` package with a console script at `src.cli:main`. In the shared workspace venv they collide, so a bare `team-tracking-keys …` can resolve documentation-system's CLI and mint a `doc_`-envelope key that team-tracking rejects. Always `uv --project services/<service> run <service>-keys …`, and verify the token's prefix.
-- **documentation-system and verification both bind host port 5434.** They cannot run locally at the same time. Remap one (`-p 5435:5432`) and update its `DATABASE_URL`. If Alembic reports an unknown revision, you're almost certainly pointed at the other service's database.
+- **Cross-worktree tests need source-path verification.** Pytest can prepend a historical tests checkout to `sys.path` and import its `contracts` instead of the edited code. Pin the target `src` and `contracts` packages before collection and verify imported modules' `__file__` paths; passing against the wrong checkout is not verification.
+- **`uv --project` is mandatory for the key CLIs.** Both `services/team-tracking` and `services/documentation-system` declare a top-level `src` package with a console script at `src.cli:main`. In the shared workspace venv they collide, so a bare `team-tracking-keys …` can resolve documentation-system's CLI and mint a `doc_`-envelope key that team-tracking rejects. Always `uv --project services/<service> run <service>-keys …`, and verify the token's prefix. The same applies to every other team-tracking console script (`team-tracking-seed`, `team-tracking-groups`).
+- **Gateway provisioning must pin the import path too.** After installing all workspace members, `uv --project` alone can still import another service's `src.cli`. From the repo root use `uv --directory services/gateway --project . run python -m src.cli ...` (and the team-tracking directory for its internal key). The isolated containers can use their installed key CLI directly.
+- **Gateway is the public entry point.** It accepts only issued `gw_` keys, has no env-bootstrap `API_KEY`, and owns only its key database. Compute-platform data access must use explicit scoped HTTP operations; see `services/gateway/docs/ARCHITECTURE.md`. Run one replica/worker for its process-local rate limits.
+- **documentation-system and verification both bind host port 5434.** They cannot run locally at the same time. Remap one to an unused port (gateway uses 5435 by default) and update its `DATABASE_URL`. If Alembic reports an unknown revision, you're almost certainly pointed at the other service's database.
 - **documentation-system's Swagger is at `/swagger`, not `/docs`** — `/docs` is a real docs-resource router on that service.
 - **`npm run dev:web` occupies port 8001 and 5433**, and needs Docker. Stop documentation-system first.
 - **`meeting` is stateful.** One process must own a session end-to-end. Its sessions live in memory and a restart drops every in-flight meeting.
+- **Discord PR testing uses one persistent `dev` slot.** Automatic Railway
+  PR copies must skip gateway login and command registration. The selected PR
+  runs the real gateway/voice code with a separate dev application; see
+  [`docs/pr-previews.md`](docs/pr-previews.md). Keep its bot volume attached:
+  it prevents overlapping gateway connections during Railway rollouts.
 - **No `ffmpeg` binary is needed anywhere**, including `meeting` — PyAV bundles its own libraries and nothing shells out.
 - **Never write a test that makes a real AWS, Google, or LLM call.** Every suite runs offline against fakes injected via `app.dependency_overrides`. Keep it that way.
 

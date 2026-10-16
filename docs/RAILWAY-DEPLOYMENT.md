@@ -1,7 +1,7 @@
 # Railway Deployment (staging + production)
 
-Deploys the platform's six backend services plus the discord-bot to Railway,
-backed by Neon Postgres (a branch per environment) for the three services that
+Deploys the platform's seven backend services plus the discord-bot to Railway,
+backed by Neon Postgres (a branch per environment) for the four services that
 own a database. Repo-side config lives in each service's `Dockerfile` +
 `railway.json`; the steps below are the account-side setup you run in the
 Railway + Neon dashboards / CLIs.
@@ -11,20 +11,30 @@ Railway + Neon dashboards / CLIs.
 | `team-tracking` | `/` | Neon (own project) | `alembic upgrade head` | Deploy first — everything references it. |
 | `documentation-system` | `/` | Neon (own project) | `alembic upgrade head` | Consumes team-tracking (hard dependency) and connectors (soft — recommended to deploy connectors first, not required). |
 | `verification` | `/` | Neon (own project) | `alembic upgrade head` | Email one-time codes. |
-| `llm` | `/` | **none** | — | Stateless Bedrock proxy; keys from `CONSUMER_KEYS`. |
+| `llm` | `/` | **none** | — | Stateless Bedrock chat + OpenAI embedding API; keys from `CONSUMER_KEYS`. |
 | `meeting` | `/` | **none** | — | **Stateful in-memory**; keys from `CONSUMER_KEYS`. See the single-replica warning in step 2, and the WebSocket keepalive note in the Notes section — its `startCommand` is the one that isn't the plain template. |
 | `connectors` | `/` | **none** | — | Stateless outbound adapter (Google Drive/Docs); keys from `CONSUMER_KEYS`. Recommended to deploy before `documentation-system` (not required) — see its `CONNECTORS_API_KEY` note in step 3. |
-| `discord-bot` | `discord-bot` | none | — | Node; the only consumer-facing surface. |
+| `gateway` | `/` | Neon (own project) | `alembic upgrade head` | Public scoped reads; one replica. See [gateway setup](../services/gateway/docs/DEPLOYMENT.md). |
+| `discord-bot` | `discord-bot` | none | `node src/registerCommands.js` | Node Discord frontend. Pre-deploy registers the slash commands with Discord (step 5). |
 
-All seven are **private** — no public domains. They reach each other over
-Railway's internal network as `<service>.railway.internal:<PORT>`.
+The gateway receives a public HTTPS domain. All other services remain **private**
+and reach each other as `<service>.railway.internal:<PORT>`. Gateway credentials,
+consumer keys, proxy settings, and verification are covered in its
+[deployment runbook](../services/gateway/docs/DEPLOYMENT.md).
+
+For the optional persistent `dev` environment used to test one PR at a
+time with a dedicated Discord bot, see [PR previews](pr-previews.md). That
+runbook covers the dev application's variables, database isolation, singleton
+bot volume, and selection command. The existing staging and production
+deployment flow is unchanged.
 
 ## Prerequisites
 - A Railway account + the `railway` CLI (`railway login`).
 - A Neon account.
 - `uv` locally (for the key-provisioning script and the key-minting CLIs).
 - An AWS account with Bedrock **and** Amazon Transcribe enabled in your
-  `AWS_REGION`, for `llm` and `meeting` respectively.
+  `AWS_REGION`, for `llm` chat and `meeting` respectively.
+- An OpenAI API key for `llm` embeddings, configured before the target environment auto-deploys.
 
 ## Branching + auto-deploy model
 Each Railway environment is wired to a git branch. Merging a PR flips a deploy.
@@ -48,22 +58,29 @@ feature branch  ──PR──▶  staging  ──PR──▶  main
 - Both branches are protected; **all ten** CI jobs are required status checks,
   and `main` additionally requires `main-source-guard`. See
   [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md) for what each job covers.
+- CI supports a merge queue on `staging`; enable it only after the workflow
+  support has landed. See the [rollout guide](DEVELOPMENT.md#merge-queue-on-staging).
 
 ## 1. Neon: databases + branches
-Create **three Neon projects** — `team-tracking`, `documentation-system`, and
-`verification` (each service owns its own DB). In each project you get a `main`
+Create **four Neon projects** — `team-tracking`, `documentation-system`,
+`verification`, and `gateway` (each service owns its own DB). In each project you get a `main`
 branch (= production); create a second branch named `staging` (copy-on-write
-from main). Copy the six connection strings (3 projects × 2 branches). Use the
+from main). Copy the eight connection strings (4 projects × 2 branches). Use the
 `postgresql+psycopg://…` form (append `?sslmode=require` if not present).
 
 `llm`, `meeting`, and `connectors` have no database — nothing to provision for them here.
 
+The documentation-system database also requires the `vector` extension for chunk
+storage. Its pre-deploy migration enables it; verify availability and the migration
+role's permissions on the target Neon branch as described in the service's
+[Postgres prerequisites](../services/documentation-system/docs/DEPLOYMENT.md#postgres).
+
 ## 2. Railway: project, environments, services
 1. Create a Railway project; it starts with a `production` environment — add a
    `staging` environment too.
-2. Add seven services from this repo:
-   - The six Python services (`team-tracking`, `documentation-system`,
-     `verification`, `llm`, `meeting`, `connectors`). Their Dockerfiles build from the **repo
+2. Add eight services from this repo:
+   - The seven Python services (`team-tracking`, `documentation-system`,
+     `verification`, `llm`, `meeting`, `connectors`, `gateway`). Their Dockerfiles build from the **repo
      root** as context (so `packages/` is reachable) and install their workspace
      member with `uv sync --frozen --no-dev --package <name>` into a venv at
      `/app/.venv`. So each one's Railway **root directory is `/`**, with
@@ -73,21 +90,24 @@ from main). Copy the six connection strings (3 projects × 2 branches). Use the
      directory stays `discord-bot`.
 
    Railway picks up each service's `railway.json` (Dockerfile build, start
-   command, health check, and — for the three DB-backed services only — the
-   `alembic upgrade head` pre-deploy step). `llm`, `meeting`, and `connectors`
-   have no `preDeployCommand` because they have no schema.
-3. Keep **every** service private (no public domain). The bot needs no domain.
+   command, health check, and the pre-deploy step: `alembic upgrade head` for
+   the four DB-backed services, `node src/registerCommands.js` for the bot).
+   `llm`, `meeting`, and `connectors` have no `preDeployCommand` because they
+   have no schema.
+3. Generate a public domain for `gateway` only. The other services stay private.
 4. **Pin `meeting` to a single replica.** It keeps each live meeting's session
    entirely in process memory, so a given `session_id`'s WebSocket,
    `/transcript` polls, and `/stop` call must all land on the same process.
    Scaling it horizontally without sticky routing on `session_id` misroutes
    `/stop` to a process that never saw the meeting, and the recording is lost.
-   Every other service is stateless and scales freely.
+   The gateway also requires one replica and one worker for its in-memory rate
+   limits; see its deployment runbook. Other services are stateless.
 
 ## 3. Environment variables
 Set these per environment (staging vs production) per service.
 
-**The three DB-backed services:**
+**The internal DB-backed services** (gateway variables are in its
+[deployment runbook](../services/gateway/docs/DEPLOYMENT.md#railway-service)):
 
 | Var | team-tracking | documentation-system | verification |
 |---|---|---|---|
@@ -99,10 +119,12 @@ Set these per environment (staging vs production) per service.
 | `DIRECTORY_API_KEY` | — | *(set by the provisioning script — step 4)* | — |
 | `CONNECTORS_BASE_URL` | — | `http://${{connectors.RAILWAY_PRIVATE_DOMAIN}}:${{connectors.PORT}}` | — |
 | `CONNECTORS_API_KEY` | — | a `connectors` consumer key with the `fetch` scope — see step 4b | — |
+| source ACL cadence | — | `SOURCE_ACCESS_REFRESH_AFTER_HOURS=24`, `SOURCE_ACCESS_MAX_AGE_HOURS=48` | — |
 | `CODE_HMAC_SECRET` | — | — | a strong random secret |
 | `EMAIL_BACKEND` | — | — | `resend` (or `gmail`) — **not** `fake` |
 | `EMAIL_FROM` | — | — | `UTMIST <noreply@utmist.ca>` |
 | `RESEND_API_KEY` | — | — | from Resend |
+| `GOOGLE_GROUPS_CUSTOMER_ID`, `GOOGLE_GROUPS_DOMAIN`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` | optional, all-or-nothing; enables managed team Google Groups, plus a daily `team-tracking-groups sync` cron — see [team-tracking DEPLOYMENT.md](../services/team-tracking/docs/DEPLOYMENT.md#managed-google-groups) | — | — |
 
 > **documentation-system boots fine without `CONNECTORS_API_KEY`.** Unlike
 > `API_KEY`/`DIRECTORY_API_KEY`, `verify_production_secrets()` only logs a
@@ -123,15 +145,25 @@ Set these per environment (staging vs production) per service.
 | `PORT` | `8000` | `8000` | `8000` |
 | `AWS_REGION` | e.g. `us-east-1` (Bedrock) | e.g. `us-east-1` (Transcribe) | — |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | yes | yes | — |
-| `LLM_PROVIDER` / `LLM_MODEL` | `bedrock-converse` / `claude-sonnet-4-6` | — | — |
+| `LLM_PROVIDER` / `LLM_MODEL` | `bedrock-converse` / `claude-sonnet-4-6` (chat) | — | — |
+| `EMBED_MODEL` | `openai-embed-3-small` → `text-embedding-3-small`, **1536 dimensions** | — | — |
+| `OPENAI_API_KEY` | required outside `local` | — | — |
+| `EMBED_MAX_REQUEST_CHARS` | optional; default `400000` total characters, a coarse input guard | — | — |
 | `LLM_BASE_URL` | — | `http://${{llm.RAILWAY_PRIVATE_DOMAIN}}:${{llm.PORT}}` | — |
 | `LLM_API_KEY` | — | an `llm` consumer key with the `chat` scope | — |
 | `MAX_MEETING_MS` | — | optional; defaults to the 4h backstop | — |
 | `DISCONNECT_GRACE_S` | — | optional; defaults to 60s. How long a disconnected session is held so `POST /stop` can still finalize it | — |
 | `GOOGLE_CREDENTIALS_JSON` | — | — | base64 Google service-account key; empty is a valid running state (Google fetches 503, rest of the service works) |
+| `MAX_FILE_BYTES` | — | — | optional; defaults to 25 MiB. Pre-download limit for uploaded PDF, `.docx`, and `text/*` files |
 
-> Bedrock usage bills as **Amazon Bedrock** (credits apply) — do *not* point
-> `llm` at Claude Platform on AWS.
+> **Before merging or deploying llm**, configure a real `OPENAI_API_KEY` in the target
+> Railway environment, even for chat-only consumers. The boot check verifies presence,
+> not credential validity; follow the
+> [llm rollout prerequisites](../services/llm/docs/DEPLOYMENT.md#embeddings-post-embed).
+
+> Bedrock chat usage bills as **Amazon Bedrock** (credits apply) — do *not* point
+> `llm` at Claude Platform on AWS. Embeddings use **OpenAI billing**, not AWS
+> credits.
 
 **discord-bot:**
 
@@ -141,9 +173,12 @@ Set these per environment (staging vs production) per service.
 | `DISCORD_CLIENT_ID` | per app |
 | `DISCORD_GUILD_ID` | test guild (staging) / blank (prod) |
 | `ENABLE_DISCORD` / `ENABLE_WEB` | `true` / `false` |
+| `HELPER_USER_MAX_REQUESTS` / `HELPER_USER_WINDOW_SECONDS` | optional helper allowance overrides; see [bot configuration and reset semantics](../discord-bot/README.md#helper-bot-request-limits) |
+| `PORT` | Railway-injected port for the Discord readiness listener; defaults to `3002` locally |
 | `DIRECTORY_BASE_URL` / `DIRECTORY_API_KEY` | team-tracking; key set by the provisioning script |
 | `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system |
 | `VERIFICATION_BASE_URL` / `VERIFICATION_API_KEY` | verification |
+| `INFRASTRUCTURE_DISCORD_USERNAME` | *optional* — Discord username or ID shown by `/bug` for infrastructure support |
 | `MEETING_BASE_URL` / `MEETING_API_KEY` | meeting; a `meetings`-scoped consumer key |
 | `MEETING_WS_URL` | *optional* — derived from `MEETING_BASE_URL` if unset |
 
@@ -203,9 +238,19 @@ and sets each service's `DIRECTORY_API_KEY`. The discord-bot key's scopes
 include `people:elevate` (alongside its `people:*`/`teams:*`/`memberships:*`
 scopes) so its `/seed` can promote people to `admin`/`superuser` — plain
 `people:write` cannot set a non-`member` `access_level`. The
-documentation-system key stays read-only (`people:read teams:read`). Re-running issues a fresh key and
+documentation-system key stays read-only (`people:read teams:read memberships:read
+identifiers:read`) so it can resolve verified emails, active memberships, and the synced-group
+mapping supplied by team-tracking. Re-running issues a fresh key and
 repoints the consumer; the previous key stays active until you revoke it
 manually (`team-tracking-keys revoke <id>`).
+
+Configure a Railway cron/external scheduler to call documentation-system's
+`POST /docs/source-access/refresh-due?limit=10` hourly (`0 * * * *`) with a `docs:write` key, repeating
+until `attempted < limit`. Source-derived grants stop authorizing reads after 48 hours
+without a complete successful refresh. Eligibility still defaults to 24 hours; hourly checks
+avoid skipping a whole day when a document's prior refresh finished after the job started.
+See the service's [refresh schedule](../services/documentation-system/docs/DEPLOYMENT.md#source-access-refresh-schedule)
+for batching and disabled-source behavior.
 
 > **Gotcha — `src` package collision when minting keys.** Both
 > `services/team-tracking` and `services/documentation-system` declare a top-level
@@ -217,10 +262,11 @@ manually (`team-tracking-keys revoke <id>`).
 > ([`packages/auth/platform_auth/hashing.py`](../packages/auth/platform_auth/hashing.py))
 > returns `None` for any token that doesn't start with the `tt_` envelope, so the
 > key is dead on arrival. This actually bit us during key provisioning. Always
-> invoke the CLI with the project pinned —
-> `uv --project services/team-tracking run team-tracking-keys …`, which
-> `scripts/provision-directory-key.sh` already does — and **verify the minted
-> token's prefix is `tt_`, not `doc_`, before wiring it as `DIRECTORY_API_KEY`.**
+> pin the service directory and invoke its module —
+> `uv --directory services/team-tracking --project . run python -m src.cli …`.
+> Project selection alone does not pin imports after all workspace members are
+> installed. **Verify the token prefix is `tt_` before wiring `DIRECTORY_API_KEY`.**
+> Gateway provisioning uses the same pattern; see its deployment runbook.
 
 ## 4b. Provision the `llm` + `meeting` + `connectors` consumer keys (manual)
 
@@ -255,36 +301,64 @@ stderr**. Wire them like this:
 Then redeploy the service whose `CONSUMER_KEYS` you changed — the store is
 built at boot, so the new key isn't live until it restarts.
 
+For an **approved internal embedding caller**, mint an additional key from the repo root:
+
+```bash
+uv --project services/llm run llm-keys --name embedding-caller --scopes embed
+```
+
+Install it using [llm's consumer-key steps](../services/llm/docs/DEPLOYMENT.md#consumer-keys).
+`chat` does not grant `embed`; grant both only when needed. This provisions access,
+not a documentation-system indexing pipeline.
+
 **Revocation is a redeploy.** There is no `revoke` command; drop the entry from
 `CONSUMER_KEYS` and redeploy. `CONSUMER_KEYS` must stay a JSON **array** —
 both services reject any other shape at boot, deliberately, so a malformed
 variable fails the deploy rather than silently disabling auth.
 
+Before deploying the Discord bot, enable **Message Content Intent** for both the
+staging and production Discord applications in Developer Portal → **Bot** →
+**Privileged Gateway Intents**. The bot requests it at startup so members can
+use helper threads with full recent-message context, including messages that did
+not mention Misty. Without the portal toggle, Discord rejects the gateway
+connection or omits that content.
+
 ## 5. Register Discord slash commands
-The bot has to tell Discord which slash commands it supports. Re-run whenever the
-command set changes (new commands, beta→stable promotions, option tweaks). It's
-idempotent — safe to re-run.
+The bot has to tell Discord which slash commands it supports. **This happens
+automatically on every deploy**: `discord-bot/railway.json` sets
+`preDeployCommand` to `node src/registerCommands.js`, so Railway runs the
+registration in the freshly built image — with that environment's variables —
+between build and start, exactly the way the DB-backed services run
+`alembic upgrade head`. Merging to `staging` registers the staging bot; merging
+to `main` registers the production bot. It's idempotent, so re-running on a
+deploy that changed no commands is harmless.
 
-Use the wrapper so you register **both** environments in one go and can't
-accidentally skip staging (a partial run leaves stale duplicate guild commands —
-see #38). It always does staging first:
+If registration fails, the deploy fails and the previous deployment keeps
+running. `preDeployTimeoutSeconds` caps the step at 120 s (it normally takes a
+few seconds) so a hung Discord API call fails the deploy instead of holding it
+in progress forever. The success signal is the step's exit code, not a log
+line: on staging a clean run prints **both** `Registered N stable commands
+globally` and `Registered N beta commands to testing guild …`, and the deploy
+proceeds to start the new process. Seeing either line is also proof the
+service is reading `railway.json` at all (see the `railwayConfigFile` note in
+[`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md)).
 
-```bash
-cd discord-bot
-npm run register:all          # staging, then production
-```
+**A failure can leave Discord half-updated.** The script does two sequential
+bulk overwrites: global commands first, then the testing guild's. A failure
+*before* the first call — a rejected command definition, a bad token — changes
+nothing. A failure *between* the two (global succeeded, guild rejected) leaves
+the global set already overwritten while the old bot process keeps running,
+so members may see new commands the running code can't serve, and the guild
+set is stale. The `Registered N stable commands globally` line prints before
+the guild step, so it does not by itself mean the step succeeded. To recover,
+pick one:
 
-To target a single environment: `npm run register:staging` or
-`npm run register:production`. There's also a guarded shell wrapper that prompts
-before touching production: `./scripts/register.sh all` (or `staging` /
-`production`).
-
-> **Not** `npm run register` — that hardcodes `--env-file=.env` and only hits
-> your **local test bot**. The `register:*` scripts (and `register.sh`) are the
-> Railway-targeted ones; Railway injects each environment's secrets.
-
-Under the hood each script runs
-`railway run --service discord-bot --environment <env> -- node src/registerCommands.js`.
+- **Finish the deployment.** Fix the cause and push again; the next successful
+  pre-deploy overwrites both sets. This is the normal path.
+- **Restore the running revision's command set.** Find the commit the live
+  deployment was built from (`railway status`, or the deployment's page in the
+  dashboard), check it out, and run the manual wrapper for that environment
+  (below). Both overwrites then match the code that is actually serving.
 
 The script partitions commands into **stable** (registered globally — visible
 in every server the bot is in) and **beta** (registered only to
@@ -293,14 +367,58 @@ leave it blank in production, staging gets `beta` commands in the test guild
 only, and production correctly skips them.
 
 Global registrations can take up to ~1 hour to propagate through Discord's
-cache. Guild-scoped (staging) commands appear instantly.
+cache. Guild-scoped (staging) commands appear instantly. Because registration
+runs *before* the new bot process starts, a brand-new command can be visible for
+a few seconds while the old process is still serving — it answers "application
+did not respond" in that window, then works once the new deployment is live.
 
-> **Provision `meeting` before registering in an environment.** `/record` is now
-> stable and registers globally, so it becomes visible to every member the
-> moment you register. If `meeting` isn't deployed there (or `MEETING_BASE_URL`
-> is unset on the bot) the command answers "not configured" — visible but
-> useless. Either provision `meeting` first, or accept the degraded state
-> knowingly.
+### Registering by hand
+
+You only need this when you want to re-register **without** a deploy — to
+restore the running revision's commands after a failed pre-deploy (above), or
+to check what a branch would register before merging it. The manual wrappers
+run the same script via `railway run`, which injects that environment's
+secrets:
+
+```bash
+cd discord-bot
+npm run register:staging      # or register:production, or register:all
+./scripts/register.sh all     # same, but prompts before touching production
+```
+
+> **Not** `npm run register` — that hardcodes `--env-file=.env` and only hits
+> your **local test bot**.
+
+### Moving the testing guild (changing `DISCORD_GUILD_ID`)
+
+`registerCommands.js` only ever writes to the guild that is *currently*
+configured. Changing `DISCORD_GUILD_ID` from guild A to guild B and
+re-registering (by deploy or by hand) populates B and leaves A's command set
+exactly as it was — stale beta commands in A stay visible to that server and
+fail when invoked. Clear A explicitly, with its old id, as a separate step:
+
+```bash
+cd discord-bot
+OLD_GUILD_ID=<guild A id> railway run --service discord-bot --environment staging -- \
+  node --input-type=module -e '
+const { REST, Routes } = await import("discord.js");
+await new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN)
+  .put(Routes.applicationGuildCommands(process.env.DISCORD_CLIENT_ID, process.env.OLD_GUILD_ID), { body: [] });
+console.log(`cleared guild commands for ${process.env.OLD_GUILD_ID}`);'
+```
+
+`railway run` injects the environment's `DISCORD_TOKEN` / `DISCORD_CLIENT_ID`
+and passes your shell's `OLD_GUILD_ID` through. An empty bulk overwrite
+removes every command the bot had registered in that guild and nothing else.
+Then set the new `DISCORD_GUILD_ID` on the service and register into B — a
+redeploy does it, or `npm run register:staging`.
+
+> **Provision `meeting` before deploying the bot to an environment.** `/record`
+> is stable and registers globally, so it becomes visible to every member the
+> moment the bot deploys. If `meeting` isn't deployed there (or
+> `MEETING_BASE_URL` is unset on the bot) the command answers "not configured"
+> — visible but useless. Either provision `meeting` first, or accept the
+> degraded state knowingly.
 
 ## 6. Seed the first admin
 Nobody is a directory admin on a fresh production DB. Seed yourself as a
@@ -335,13 +453,20 @@ by an existing admin running `/seed` from Discord.
 - **APIs:** for each of the six services —
   `railway run --service <name> --environment <env> -- bash -c 'curl -s localhost:$PORT/health'`
   → `{"status":"ok"}`. `/health` is unauthenticated on every service, so no key
-  is needed. For the three DB-backed ones, pre-deploy logs should also show
-  `alembic upgrade head` ran.
-- **Bot:** Railway logs show `Bot ready as …` — staging bot appears in the test guild; prod bot registers globally.
+  is needed. For team-tracking, documentation-system, and gateway, also request
+  `/health/ready` to verify their own database connections; Railway uses that
+  path for those services. For the four DB-backed services, pre-deploy
+  logs should also show `alembic upgrade head` ran.
+- **Bot:** Railway checks `/health/ready` on its injected `PORT`. It returns
+  `503` before Discord is ready or after a disconnect, and 200 once connected.
+  The pre-deploy step exits 0 and its log shows `Registered N stable commands
+  globally` (and, on staging, `Registered N beta commands to testing guild …`
+  — both lines, see step 5); the deploy log shows `Bot ready as …`. Staging bot appears in the test guild and prod bot
+  registers globally.
 - **End-to-end (directory):** run a bot command (e.g. `/whoami`) in the staging guild → reaches staging team-tracking → staging Neon branch. If it returns "directory is temporarily unavailable," the two most common causes are (1) `DIRECTORY_BASE_URL` template not resolving (see the `PORT=8000` note above), or (2) `DIRECTORY_API_KEY` missing on the consumer (re-run the provisioning script).
-- **End-to-end (`/record`):** join a staging voice channel, `/record start`,
-  talk for ~30s, `/record stop`. Within roughly 30–60s a `meeting-minutes.pdf`
-  should be posted to the text channel. This exercises the whole chain —
+- **End-to-end (`/record`):** join a staging voice channel, `/record start
+  name:Smoke-Test`, talk for ~30s, `/record stop`. Within roughly 30–60s a
+  named PDF should be posted to the text channel. This exercises the whole chain —
   bot → `meeting` (WS) → Transcribe → `llm` → Bedrock → PDF. Failure modes to
   check in order: `MEETING_API_KEY` wrong (WS closes with code 1008),
   `LLM_API_KEY`/`LLM_BASE_URL` wrong on `meeting` (PDF arrives with degraded,

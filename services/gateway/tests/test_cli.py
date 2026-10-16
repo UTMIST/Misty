@@ -1,3 +1,5 @@
+import pytest
+
 from src import cli
 from src.api.hashing import parse_prefix, verify_key
 from src.storage.in_memory import InMemoryStorageAdapter
@@ -18,12 +20,39 @@ def test_issue_mints_verifiable_key(monkeypatch, capsys):
 def test_issue_reports_a_duplicate_name_without_a_traceback(monkeypatch, capsys):
     store = InMemoryStorageAdapter()
     monkeypatch.setattr(cli, "_adapter", lambda: store)
-    assert cli.main(["issue", "--name", "gh-action"]) == 0
+    args = ["issue", "--name", "gh-action", "--scopes", "resolve:discord"]
+    assert cli.main(args) == 0
     capsys.readouterr()
 
-    assert cli.main(["issue", "--name", "gh-action"]) == 1
+    assert cli.main(args) == 1
     captured = capsys.readouterr()
     assert "error:" in captured.err
     # Nothing on stdout: a caller piping stdout to a secrets store must not be
     # handed a key that was never persisted.
     assert captured.out.strip() == ""
+
+
+@pytest.mark.parametrize("scopes", [[], ["--scopes"], ["--scopes", "admin"], ["--scopes", "typo"]])
+def test_issue_rejects_missing_or_unknown_scopes_before_storage(monkeypatch, scopes):
+    def unexpected_store():
+        pytest.fail("invalid permissions must fail before connecting to storage")
+
+    monkeypatch.setattr(cli, "_adapter", unexpected_store)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["issue", "--name", "consumer", *scopes])
+    assert exc.value.code == 2
+
+
+def test_list_exposes_id_for_revoke_but_no_key_material(monkeypatch, capsys):
+    store = InMemoryStorageAdapter()
+    monkeypatch.setattr(cli, "_adapter", lambda: store)
+    cli.main(["issue", "--name", "consumer", "--scopes", "resolve:discord"])
+    plaintext = capsys.readouterr().out.strip()
+    key = store.list_api_keys()[0]
+    cli.main(["list", "--active-only"])
+    output = capsys.readouterr().out
+    assert str(key.id) in output
+    assert plaintext not in output
+    assert store.get_api_key_hash(key.prefix) not in output
+    assert cli.main(["revoke", str(key.id)]) == 0
+    assert store.list_api_keys(active_only=True) == []

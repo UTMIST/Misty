@@ -28,17 +28,41 @@ class HttpDirectoryClient:
     def _get(self, path: str):
         try:
             resp = self._client.get(f"{self._base_url}{path}")
-        except httpx.HTTPError as e:
-            raise DirectoryUnavailable(f"directory unreachable: {e}") from e
+        except httpx.HTTPError:
+            # Transport exceptions can contain URLs; keep logs free of upstream data.
+            raise DirectoryUnavailable("directory unreachable") from None
         if resp.status_code == 404:
             return None
         if not (200 <= resp.status_code < 300):
             raise DirectoryUnavailable(f"directory returned {resp.status_code}")
-        return resp.json()
+        try:
+            result = resp.json()
+        except ValueError:
+            raise DirectoryUnavailable("invalid directory JSON") from None
+        if result is None:
+            raise DirectoryUnavailable("empty directory response")
+        return result
 
     def get_person_by_github(self, github_login: str) -> dict | None:
-        return self._get(f"/people/by-identifier/github/{quote(github_login, safe='')}")
+        result = self._get(f"/people/by-identifier/github/{quote(github_login, safe='')}")
+        if result is not None and (
+            not isinstance(result, dict)
+            or not isinstance(result.get("id"), str)
+            or not result["id"]
+        ):
+            raise DirectoryUnavailable("invalid directory person response")
+        return result
 
     def list_identifiers(self, person_id: str) -> list[dict]:
-        result = self._get(f"/people/{person_id}/identifiers")
-        return result or []
+        result = self._get(f"/people/{quote(person_id, safe='')}/identifiers")
+        if result is None:
+            return []
+        if not isinstance(result, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("provider"), str)
+            or not isinstance(item.get("external_id"), str)
+            or not item["external_id"]
+            for item in result
+        ):
+            raise DirectoryUnavailable("invalid directory identifiers response")
+        return result

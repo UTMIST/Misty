@@ -10,6 +10,10 @@ Two tracks:
 - **New to Python/Node/Docker, or new to this repo?** Read
   [Prerequisites](#prerequisites-new-to-this-stack) first, then work down the page.
 
+This page is the *technical* path. The *process* side — zone ownership, how
+work gets assigned, PR review norms, what's expected of you — is
+[`ONBOARDING.md`](ONBOARDING.md).
+
 The platform is **six backend services plus the Discord bot**. You almost never
 need all of them at once — stand up only what you're touching.
 
@@ -277,7 +281,9 @@ The bot is the only thing that talks to `verification` and `meeting`, and
 `documentation-system` the only thing that talks to `connectors`. **Two things
 call `llm`:** `meeting` (for minutes at `/stop`) and the bot itself — `LLM_BASE_URL`
 and `LLM_API_KEY` are hard-required boot vars, and `helperService` calls `/chat`
-on the @-mention path (`src/context.js`, `src/adapters/discord.js`). All six backends are
+when a member @-mentions Misty or sends a ping-on reply to Misty in a
+Misty-created thread
+(`src/context.js`, `src/adapters/discord/mentions.js`). All six backends are
 built the same way on purpose — learning one gives you ~80% of the others. The
 core conventions (the `contracts/` Protocol boundary, swappable storage
 adapters, scoped API-key auth, attested actor, Alembic migrations) are listed in
@@ -452,6 +458,51 @@ is the workflow around them.
    run [`main-source-guard`](../.github/workflows/main-source-guard.yml), which
    enforces that they originate from `staging`. Operators: see
    [`RAILWAY-DEPLOYMENT.md`](RAILWAY-DEPLOYMENT.md).
+
+### Merge queue on `staging`
+
+[`ci.yml`](../.github/workflows/ci.yml) supports GitHub's native merge queue
+for `staging`. Enforcing the queue is a separate GitHub branch-protection
+setting; merging the workflow change does not enable it automatically.
+
+Once enabled, get the required approval and green PR checks, then use
+**Merge when ready** to enter the queue. GitHub tests the proposed merge
+against the latest `staging` and changes ahead of it in the queue. A failing
+required check removes the PR from the queue; fix the failure and requeue it.
+The eventual merge triggers the normal Railway staging deployment.
+
+**Operator rollout:**
+
+1. Merge the workflow support into `staging` through the existing PR process
+   and confirm its CI passes before enabling queue enforcement.
+2. In GitHub **Settings → Branches**, edit the protection rule for the exact
+   branch `staging` and enable **Require merge queue**. Preserve the existing
+   required checks and approval requirement. Start with these settings:
+
+   | Setting | Initial value |
+   | --- | --- |
+   | Merge method | Merge commit |
+   | Build concurrency | 1 |
+   | Minimum / maximum PRs per merge | 1 / 1 |
+   | Only merge non-failing pull requests | Enabled |
+   | Status check timeout | 30 minutes; increase if CI runs approach it |
+
+3. Queue a small approved PR. Confirm every required CI job runs on the
+   `merge_group` commit and succeeds before the PR merges, then verify the
+   staging deployment. Keep Railway's deployment branches on `staging` and
+   `main`; queue refs are temporary CI inputs.
+
+Keep production promotion through `staging → main`. The required
+[`main-source-guard`](../.github/workflows/main-source-guard.yml) only handles
+PR events, so enabling a queue on `main` would require adapting that check.
+Any future required staging check must also report on `merge_group` events.
+Keep checkout on the event's ref so CI tests the combined changes.
+
+To roll back enforcement, disable **Require merge queue** on `staging` and
+restore **Require branches to be up to date before merging**, retaining the
+required checks and reviews. The `merge_group` trigger can stay in place.
+See GitHub's [merge queue documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue)
+for queue settings and failure handling.
 
 ---
 

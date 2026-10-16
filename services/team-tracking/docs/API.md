@@ -6,9 +6,16 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for design decisions. The machine-readabl
 
 ## Base URL and auth
 
+`GET /health` is an unauthenticated liveness check. It returns `{"status":"ok"}`
+without contacting Postgres. `GET /health/ready` is an unauthenticated readiness
+check: it runs `SELECT 1` against this service's database, returning the same
+body on success or `503` with
+`{"detail":"team-tracking database unavailable"}` on failure. Railway uses
+`/health/ready` for deployment health checks.
+
 Local development: `http://localhost:8000`. In staging/production the API is deployed to Railway and reachable **only over Railway's private network** (no public domain) — consumers (bot, docs-system) hit it at `http://team-tracking.railway.internal:8000`. External access is a one-click "add public domain" in Railway if ever needed.
 
-Every request — read or write — must include a valid **scoped API key** in the `X-API-Key` header:
+Other requests — read or write — must include a valid **scoped API key** in the `X-API-Key` header:
 
 ```
 X-API-Key: tt_<prefix>_<secret>
@@ -30,6 +37,7 @@ Each endpoint requires a specific scope. A key only reaches an endpoint if its s
 | Memberships | `memberships:read`, `memberships:write` |
 | Providers | `providers:read` |
 | Identifiers | `identifiers:read`, `identifiers:write` |
+| Channels | `channels:read`, `channels:write` |
 | Dev-only | `dev:spoof` — local-dev only; refused against `TT_ENV=production` at both issuance and request time |
 | Wildcard | `admin` — grants every scope, but does NOT satisfy the `dev:spoof` guard |
 
@@ -400,6 +408,68 @@ curl -sS -X PATCH "http://localhost:8000/teams/660e8400-e29b-41d4-a716-446655440
 
 ---
 
+## Team Google Groups
+
+When Google Groups is configured (see [DEPLOYMENT.md](DEPLOYMENT.md#managed-google-groups)), every team gets a managed group at `<slug>@<GOOGLE_GROUPS_DOMAIN>`, and team-tracking keeps its members equal to the team's current membership. Consumers use the mapping to share Drive documents with a team, or to map a group address back to a team.
+
+Syncing happens after the response, never inside it: `POST`/`PATCH /teams`, `POST`/`PATCH /memberships`, `POST /memberships/{id}/end`, `POST /people/{id}/emails`, and a `PATCH /people/{id}` that changes `active` or `primary_email` each sync the affected teams. Those endpoints' responses and status codes are unchanged, and a Google failure never fails them; it is recorded on the mapping instead. Who belongs in a group, and how retries work, is in [ARCHITECTURE.md](ARCHITECTURE.md#managed-google-groups).
+
+**`TeamGoogleGroup` shape:**
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `team_id` | UUID | |
+| `group_email` | string | The group's address. Fixed once `group_name` is set. |
+| `group_name` | string \| null | Cloud Identity resource (`groups/{id}`); `null` until creation succeeds |
+| `status` | string | `synced`, `needs_external_members`, or `failed` |
+| `last_error` | string \| null | Why the last sync did not converge |
+| `last_synced_at` | datetime \| null | Last time a sync fully converged |
+| `pending_changes` | array | Unconfirmed membership writes: `action` (`add`/`remove`), `email`, nullable `membership_name` and `operation_name`; defaults to `[]` |
+| `created_at`, `updated_at`, `created_by`, `updated_by` | | `updated_by` is the key whose write triggered the last sync |
+
+`status` meanings:
+
+- `synced`: Google matches Team Tracking as of `last_synced_at`.
+- `needs_external_members`: the group exists but refuses addresses outside the managed domain. A group owner must enable **Allow external members** in Google Groups, then call the sync endpoint below. Internal addresses and removals were still applied.
+- `failed`: the group could not be created or read, or at least one member add/remove failed or hadn't finished on Google's side. Every other change was still attempted, so one bad address never blocks another member's removal. `last_error` lists each failure, separated by `; `. Retry with the sync endpoint.
+
+An unfinished or uncertain membership write stays in `pending_changes` across retries and restarts. A pending addition is not replayed until Google shows its effect. A pending removal can retry against the same membership resource while the person remains unwanted; if they rejoin, sync waits for the original removal to finish before adding them again. The sync then reconciles against current directory membership. An empty Google group alone cannot clear a pending addition or make its mapping `synced`. See [pending-change recovery](DEPLOYMENT.md#pending-membership-changes).
+
+A team with no row has never been synced, either because Google Groups is unconfigured or because no write or backfill has touched the team yet.
+
+### GET /teams/google-groups
+
+Every team's mapping (including retired teams, whose groups are kept but emptied). **Scope:** `teams:read`.
+
+### GET /teams/{team_id}/google-group
+
+One team's mapping. **Scope:** `teams:read`. **Errors:** 404 if the team has no mapping.
+
+### GET /teams/by-synced-google-group/{email}
+
+The team (same body as `GET /teams/{team_id}`) whose managed group has this address, matched case-insensitively. Fails closed for access decisions: it answers only when the team's last sync is `synced`. Retired teams still resolve (check `active` in the body); their synced group is empty, so the mapping grants no one access. **Scope:** `teams:read`.
+
+**Errors:** 404 for an unknown address or a mapping in `needs_external_members` or `failed`. This reads the recorded sync state and makes no Google call.
+
+### GET /people/{person_id}/synced-google-teams
+
+Mappings (same shape as `GET /teams/google-groups`) for the `synced` teams whose Google Group currently contains this person as a MEMBER under their `primary_email` or any verified `email` identifier. Membership is read live from Google, one call per synced team, so it reflects Google even when the directory disagrees. Owners and managers don't count. **Scope:** `people:read`.
+
+**Errors:** 404 if the person does not exist. 503 if Google Groups is not configured or Google can't be read; there is no partial answer.
+
+### POST /teams/{team_id}/google-group/sync
+
+Create the group if it is missing, reconcile its members now, and return the resulting mapping. Safe to repeat. **Scope:** `teams:write`.
+
+**Errors:** 404 if the team does not exist. 409 if the team is retired and never had a group. 503 if Google Groups is not configured. A Google failure is still a 200, with `status: "failed"` in the body.
+
+```bash
+curl -sS -X POST "http://localhost:8000/teams/660e8400-e29b-41d4-a716-446655440001/google-group/sync" \
+  -H "X-API-Key: dev-api-key-change-me"
+```
+
+---
+
 ## Role kinds
 
 Role kinds are the controlled vocabulary for the seniority axis of team roles. The four seed values are `executive`, `director`, `lead`, and `member`. Role kinds are read-only through the API (no create/update endpoints). Both endpoints require scope `role_kinds:read`.
@@ -726,6 +796,73 @@ Unlink an external account from a person.
 curl -sS -X DELETE "http://localhost:8000/people/550e8400-e29b-41d4-a716-446655440000/identifiers/discord" \
   -H "X-API-Key: dev-api-key-change-me" \
   -H "X-Actor: admin"
+```
+
+---
+
+## Channel team access
+
+The teams whose documents may inform answers in a Discord channel. A channel is addressed by its guild and channel snowflakes; both must be all digits, or the request is a 422. **An unconfigured channel, or one configured with no teams, has no document access.** Thread scope is the caller's decision: pass whichever channel id should govern.
+
+Like person identifiers, this is current state, not history: a replace or clear hard-deletes the previous configuration.
+
+Scopes: `channels:read` for GET, `channels:write` for PUT/DELETE.
+
+**`ChannelTeams` shape:**
+
+```json
+{
+  "guild_id": "111111111111111111",
+  "channel_id": "222222222222222222",
+  "team_ids": ["660e8400-e29b-41d4-a716-446655440001"],
+  "updated_by": "discord-bot",
+  "version": "edad6e056c0095ff"
+}
+```
+
+- `team_ids` lists **active** teams only, sorted. Retiring a team (`PATCH /teams/{id}` with `active: false`) removes it from every channel immediately, without a write here.
+- `version` is a fingerprint of `team_ids` (a truncated SHA-256 of the sorted ids). It changes exactly when the channel's effective access changes, including a retirement, and is not derived from timestamps, so the order concurrent writes commit in cannot hide a change. Use it as a cache key; if it differs from the value you cached, drop what you cached. An unconfigured channel and one configured with no teams share the same version, because both grant nothing.
+- `updated_by` is the key that last configured the channel. `null` when unconfigured.
+
+Concurrent PUTs and DELETEs on the same channel are serialized: the last one to commit wins outright, never a mix of two requests.
+
+### GET /channels/{guild_id}/{channel_id}/teams
+
+Read a channel's teams. Always 200. An unconfigured channel returns `team_ids: []` with `updated_by` null, so there is no 404 to special-case.
+
+```bash
+curl -sS "http://localhost:8000/channels/111111111111111111/222222222222222222/teams" \
+  -H "X-API-Key: dev-api-key-change-me"
+```
+
+### PUT /channels/{guild_id}/{channel_id}/teams
+
+Replace the channel's whole team set. `{"team_ids": []}` clears it.
+
+**Request body:**
+
+```json
+{ "team_ids": ["660e8400-e29b-41d4-a716-446655440001", "660e8400-e29b-41d4-a716-446655440002"] }
+```
+
+**Response:** `ChannelTeams`, HTTP 200.
+
+**Errors:** 400 if any id is not an active team; the existing configuration is left unchanged. 422 for duplicate ids, unknown fields, or non-numeric guild/channel ids.
+
+```bash
+curl -sS -X PUT "http://localhost:8000/channels/111111111111111111/222222222222222222/teams" \
+  -H "X-API-Key: dev-api-key-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"team_ids": ["660e8400-e29b-41d4-a716-446655440001"]}'
+```
+
+### DELETE /channels/{guild_id}/{channel_id}/teams
+
+Clear the channel's configuration. HTTP 204, idempotent: clearing an unconfigured channel is also 204.
+
+```bash
+curl -sS -X DELETE "http://localhost:8000/channels/111111111111111111/222222222222222222/teams" \
+  -H "X-API-Key: dev-api-key-change-me"
 ```
 
 ---

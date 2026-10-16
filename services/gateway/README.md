@@ -27,6 +27,10 @@ This is the "external door" half of the [access architecture](../../docs/ARCHITE
 internal services trust each other via the shared `packages/auth` library and their own
 keys; anything reaching in from outside the org goes through the gateway instead.
 
+See [API](docs/API.md), [architecture](docs/ARCHITECTURE.md),
+[contributing](docs/CONTRIBUTING.md), and the [deployment runbook](docs/DEPLOYMENT.md).
+The [integration audit](docs/CHANGE-AUDIT.md) records compatibility checks and file rationale.
+
 ## Quick start
 
 Prerequisites: Docker, Python 3.11+, [uv](https://github.com/astral-sh/uv).
@@ -62,7 +66,7 @@ schema is at `http://localhost:8006/openapi.json`.
 | `DATABASE_URL` | The gateway's **own** Postgres — it holds only `api_keys` (its external key registry), never a copy of team-tracking's data. |
 | `DIRECTORY_BASE_URL` | team-tracking's base URL — where the gateway makes its **outbound** call. |
 | `DIRECTORY_API_KEY` | The gateway's **one internal** team-tracking key, scoped `identifiers:read`. Issued on team-tracking via `team-tracking-keys issue --name gateway --scopes identifiers:read`. |
-| `GATEWAY_ENV` | `local` / `staging` / `production`. In non-`local` envs, startup refuses to boot if `DIRECTORY_API_KEY` is still the built-in dev default. |
+| `GATEWAY_ENV` | `local` / `staging` / `production`. In non-`local` envs, startup refuses to boot if `DIRECTORY_API_KEY` is blank or still the built-in dev default. |
 | `TRUST_PROXY_HEADERS` | Whether a proxy in front of the gateway sets `X-Forwarded-For` / `X-Real-IP`. **Set this to `true` on Railway.** Left `false`, the per-IP flood guard buckets every caller behind the proxy together; set `true` where no proxy exists, and a caller can forge their own source address. |
 
 **There is deliberately no `API_KEY`.** Every other service in this repo carries
@@ -108,8 +112,8 @@ The `404` is deliberately one message for two different situations: "that login
 isn't in the directory" and "it is, but there's no Discord account linked". Told
 apart, they let anyone holding a `resolve:discord` key feed in a list of GitHub
 logins and learn which of them are UTMIST members — a membership oracle on a
-public endpoint. The distinction is still visible in the audit log, where only
-we can read it. `tests/test_resolve.py` pins that the two responses are byte-identical.
+public endpoint. The audit records the requested login and status without directory response data.
+`tests/test_resolve.py` pins that the two responses are byte-identical.
 
 ### Two things to know about this endpoint
 
@@ -140,7 +144,7 @@ Two layers, because they defend different things:
 | Layer | Where | Limit | Keyed on |
 |---|---|---|---|
 | Per-consumer quota | Router dependency, **after** auth | 60 / 60s | `AuthedKey.name` — an issued key |
-| Flood guard | Middleware, **in front of** auth | 120 / 60s | Client IP (`/health` exempt) |
+| Flood guard | Middleware, **in front of** auth | 120 / 60s | Client IP (health routes exempt) |
 
 The quota is the one a consumer notices. It runs after `require_api_key`, so it
 can only ever be keyed on the name of a key we issued — the set is bounded by
@@ -153,32 +157,37 @@ Per-key limiting can't bound that — an attacker just varies the key — so
 something in front of auth has to. Its limit is loose on purpose; it is a
 floodgate, not a quota.
 
-Both are in-memory and process-local, which is correct for a single replica. A
+Both are in-memory and process-local, with synchronized updates across request
+threads. Run one replica and one worker. A
 shared store (Redis) is needed only if the gateway is ever scaled past one.
 
 ## Managing external keys (`gateway-keys`)
 
 The gateway keeps its own key registry, separate from team-tracking's. Manage it with
-the bundled CLI:
+the bundled CLI from the repository root, with the gateway database configured:
 
 ```bash
 # Issue an external key for a consumer (e.g. a GitHub Action)
-uv run gateway-keys issue --name reviewer-ping --scopes resolve:discord
+uv --directory services/gateway --project . run python -m src.cli issue --name reviewer-ping --scopes resolve:discord
 # Prints: gw_<prefix>_<secret>  (shown ONCE — capture it now)
 
-# List existing keys (metadata only, never plaintext)
-uv run gateway-keys list --active-only
+# List existing keys (IDs and metadata only, never plaintext)
+uv --directory services/gateway --project . run python -m src.cli list --active-only
 
 # Revoke a compromised key (soft-delete; history preserved)
-uv run gateway-keys revoke <api_key_id>
+uv --directory services/gateway --project . run python -m src.cli revoke <api_key_id>
 ```
+
+In the shared workspace, use the module commands above: `uv --project` alone
+does not resolve collisions between services named `src`. The isolated gateway
+container can use `gateway-keys` directly.
 
 Scopes recognized today:
 
 - `resolve:discord` — the only external-facing scope, and the only one to issue.
 
 `platform_auth` also treats `admin` as a wildcard that satisfies every scope
-check. **Never issue a gateway key with it.** There is no bootstrap path that
+check. The CLI rejects `admin`, unknown scopes, and missing scopes. There is no bootstrap path that
 needs one here (see the note on `API_KEY` above), and on a service reachable
 from the internet a wildcard key is a standing invitation. Scope every external
 key to exactly the endpoint its consumer calls.
@@ -215,16 +224,47 @@ gateway/
 
 ## Testing
 
+From `services/gateway`, run the fast suite:
+
 ```bash
-uv run pytest
+uv run pytest --ignore=tests/test_postgres_adapter.py
 ```
+
+For the full suite, start the local Compose Postgres and create a separate,
+disposable `gateway_test` database. The adapter tests clear its key table:
+
+```bash
+docker compose up -d postgres
+docker compose exec postgres createdb -U gateway gateway_test
+export GATEWAY_TEST_DATABASE_URL=postgresql+psycopg://gateway:dev_password@localhost:5435/gateway_test
+DATABASE_URL="$GATEWAY_TEST_DATABASE_URL" uv run alembic upgrade head
+DATABASE_URL="$GATEWAY_TEST_DATABASE_URL" uv run alembic downgrade base
+DATABASE_URL="$GATEWAY_TEST_DATABASE_URL" uv run alembic upgrade head
+RUN_PG_TESTS=1 uv run pytest
+```
+
+From the repo root, verify the actual HTTP integration with the current directory:
+
+```bash
+docker build -f services/team-tracking/Dockerfile -t team-tracking:ci .
+docker build -f services/gateway/Dockerfile -t gateway:ci .
+python3 services/gateway/tests/smoke_stack.py
+```
+
+The smoke script creates and removes its own Docker network, containers, and
+separate databases, using generated test keys and synthetic records. CI runs both
+the Postgres suite and this HTTP check. `make check` includes the fast gateway
+suite; `make test-full` includes Postgres when the test variables above are set.
 
 Lint and format with ruff:
 
 ```bash
 uv run ruff check .
-uv run ruff format .
+uv run ruff format --check .
 ```
+
+The health endpoints are documented in [API.md](docs/API.md#health). Railway uses
+`/health/ready` to verify the key database before admitting a deployment.
 
 ## Status
 

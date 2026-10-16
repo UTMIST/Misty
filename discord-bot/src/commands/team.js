@@ -7,7 +7,7 @@ import {
   renderAddMemberResult,
   renderRemoveMemberResult,
   renderRosterResult,
-} from '../messages.js';
+} from '../messages/team.js';
 
 const ROLE_CHOICES = [
   { name: 'executive', value: 'executive' },

@@ -20,7 +20,7 @@ export function createMeetingSurface({
   // stored on the session (not read off the stopping interaction) so the
   // minutes always @-mention the person who asked for them -- including when
   // the recording ends via auto-stop, where there's no interaction at all.
-  async function start({ guildId, voiceChannel, textChannel, requesterId }) {
+  async function start({ guildId, voiceChannel, textChannel, requesterId, name }) {
     if (sessions.has(guildId)) {
       return { status: 'already-recording' };
     }
@@ -169,6 +169,7 @@ export function createMeetingSurface({
       textChannel,
       voiceChannel,
       requesterId,
+      name,
       startedAt: now(),
     });
     registered = true;
@@ -210,6 +211,13 @@ export function createMeetingSurface({
     return { sessionId: session.sessionId, voiceChannel: session.voiceChannel };
   }
 
+  // Discord can move the bot while recording. The adapter supplies the new
+  // opaque channel so status, stop permissions, and auto-stop share its location.
+  function updateVoiceChannel(guildId, voiceChannel) {
+    const session = sessions.get(guildId);
+    if (session) session.voiceChannel = voiceChannel;
+  }
+
   async function stop(guildId) {
     const session = sessions.get(guildId);
     if (!session) return { status: 'not-recording' };
@@ -218,7 +226,7 @@ export function createMeetingSurface({
     // the same guild can't double-run the teardown below.
     sessions.delete(guildId);
 
-    const { sessionId, stream, recorder, textChannel, requesterId } = session;
+    const { sessionId, stream, recorder, textChannel, requesterId, name, startedAt } = session;
     try {
       // Order matters: finalize server-side (POST /stop) BEFORE closing the
       // WS. The service treats a WS disconnect with no prior /stop as an
@@ -237,8 +245,8 @@ export function createMeetingSurface({
       } catch (err) {
         console.error(`meetingSurface: end-of-audio signal failed for guild ${guildId}:`, err);
       }
-      const report = await meetingClient.stop(sessionId);
-      await poster({ channel: textChannel, report, requesterId });
+      const report = await meetingClient.stop(sessionId, { title: name });
+      await poster({ channel: textChannel, report, requesterId, name, startedAt });
       return { status: 'stopped' };
     } catch (err) {
       console.error(`meetingSurface: error stopping meeting for guild ${guildId}:`, err);
@@ -255,5 +263,5 @@ export function createMeetingSurface({
     }
   }
 
-  return { start, status, stop, activeSession };
+  return { start, status, stop, activeSession, updateVoiceChannel };
 }

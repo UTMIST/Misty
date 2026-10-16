@@ -52,6 +52,12 @@ Resolve a document URL to plain text.
 | `title` | string \| null | The Drive file name |
 | `content` | string \| null | Extracted text, truncated at `MAX_CONTENT_CHARS` (default 1,200,000) |
 | `warnings` | string[] | Non-fatal information loss. Empty on a clean fetch. |
+| `permissions` | object[] \| omitted | Complete effective Google Drive ACL. Omitted only for sources without an ACL contract. |
+
+Each permission carries `permission_id`, `principal_type` (`user`, `group`, `domain`, or
+`anyone`), `principal` (email/domain when applicable), `role`, `inherited`, `inherited_from` (folder or
+shared-drive ids), `expiration_time`, and `allow_file_discovery`. The ACL is fetched before content extraction;
+if it cannot be read completely the request fails and no content is exported/downloaded.
 
 **Example:**
 
@@ -116,6 +122,8 @@ The `/forms/d/e/<id>/viewform` published link carries a *published id*, not a Dr
 
 Every tab of a spreadsheet is read — there is no first-tab-only limitation. Docs and Slides have no size cap.
 
+The `MAX_FILE_BYTES` guard applies before download to uploaded PDFs, `.docx` files, and `text/*` files. Native Google editor types use their APIs and are not rejected when Drive metadata omits `size`.
+
 ### Errors
 
 | Condition | Status | Detail |
@@ -124,6 +132,7 @@ Every tab of a spreadsheet is read — there is no first-tab-only limitation. Do
 | File's MIME type has no text form | 422 | `no text form for mime type: <mime>` |
 | PDF is encrypted | 422 | `pdf is encrypted and cannot be read` |
 | PDF could not be parsed | 422 | `pdf could not be parsed: <ExceptionType>` |
+| Uploaded PDF, `.docx`, or `text/*` file exceeds `MAX_FILE_BYTES` | 422 | File-size limit detail; bytes are not downloaded |
 | Malformed request body | 422 | Pydantic validation error |
 | Source not configured (`GOOGLE_CREDENTIALS_JSON` empty or malformed) | 503 | `source not configured` |
 | Service account denied access to the file | 403 | `source denied access to this file` |

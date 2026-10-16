@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLinkService } from '../src/linkService.js';
-import { AlreadyLinked, DirectoryUnavailable } from '../src/directoryClient.js';
+import { createLinkService } from '../src/services/linkService.js';
+import { AlreadyLinked, DirectoryUnavailable } from '../src/clients/directoryClient.js';
 import {
   VerificationUnavailable,
   RateLimited,
@@ -9,7 +9,7 @@ import {
   TooManyAttempts,
   InvalidCode,
   NoPendingCode,
-} from '../src/verificationClient.js';
+} from '../src/clients/verificationClient.js';
 
 const ARGS = { email: 'alex@utmist.ca', discordUserId: '123', discordHandle: 'alex' };
 const CONFIRM_ARGS = { discordUserId: '123', discordHandle: 'alex', code: '123456' };

@@ -9,7 +9,7 @@ Consumers like documentation-system want the text of a Google Doc (or, later, ot
 Two things this service deliberately is **not**:
 
 - **Not a gateway.** It does not sit in front of other UTMIST services or route traffic to them.
-- **Not an authorization boundary.** It authenticates the *caller* (via a scoped API key) but never learns *who the caller is fetching on behalf of* — there is no per-end-user identity in the request. Access control for the underlying document is whatever the source system enforces (for Google, Drive's own sharing settings on the service account's email). A consumer that needs to enforce "can this particular user see this doc" must do that itself before calling `/fetch`.
+- **Not the final authorization boundary.** It authenticates the *calling service*, not an end user. For Google sources it returns the complete effective Drive ACL with the text; documentation-system resolves that evidence to verified people and membership-synced team groups before storing or disclosing content. The ACL is read before export/download, and an ACL-read failure blocks the content fetch.
 
 Like `llm`, it is stateless — no database, no migrations, no persisted key store. API keys are seeded from a config env var at boot.
 
@@ -63,6 +63,7 @@ All settings load from the environment (`src/config.py`, `.env` in dev):
 | `CONSUMER_KEYS` | `""` | JSON array of per-consumer keys (see auth model). |
 | `GOOGLE_CREDENTIALS_JSON` | `""` | Base64 of the Google service-account JSON key file. Empty is a valid running state — see the runbook below. |
 | `MAX_CONTENT_CHARS` | `1200000` | Transport guard: truncates fetched content above this length. Deliberately set above documentation-system's own `MAX_CONTENT_CHARS` (1,000,000) so that clamp — not this one — is the one that actually trips and reports a truncation warning. |
+| `MAX_FILE_BYTES` | `26214400` | Pre-download limit for uploaded PDFs, `.docx` files, and `text/*` media (25 MiB). Oversized files are rejected before download; native Google editor types are not checked here. |
 | `REQUEST_TIMEOUT_S` | `30` | Per-request timeout to upstream sources (seconds). |
 
 ## Auth model
@@ -117,7 +118,11 @@ Every endpoint except `/health` requires `X-API-Key`.
 
 Legacy `.doc` (`application/msword`, the pre-2007 binary Word format) is a different format from `.docx` and stays unsupported — `python-docx` cannot read it.
 
-**Response** (`FetchResponse`): `{ "title", "content", "warnings": [] }`.
+**Response** (`FetchResponse`): `{ "title", "content", "warnings": [], "permissions": [...] }`.
+Each Google permission includes its opaque permission id, principal type and email/domain,
+role, inherited parent/shared-drive ids, source expiration, and link-discovery flag. Non-Google sources may
+omit `permissions`; an omitted Google ACL is an authorization failure to consumers, never
+evidence that the file is public.
 
 ### Error → status table
 
@@ -175,6 +180,8 @@ Two cases are lossy by design:
 
 - **A spreadsheet tab larger than `MAX_ROWS_PER_TAB` (2000 rows).** Every tab of a spreadsheet is read (there is no first-tab-only limitation), but a tab over the cap is truncated to the first 2000 rows and a warning naming the tab and its real row count is added to the response's `warnings` list. Slides and Docs have no equivalent size cap.
 - **A scanned PDF with no text layer.** `pypdf` extracts embedded text; it does not run OCR. If every page of a PDF yields no text (the telltale sign of a scanned-image-only document), the extractor emits the `## Page N` headers but no page content, plus a warning that no text layer was found. OCR is out of scope.
+
+Uploaded PDFs, `.docx` files, and `text/*` files larger than `MAX_FILE_BYTES` are rejected before their bytes are downloaded or parsed, with a `422` error. Native Google Docs, Sheets, Slides, and Forms use their native APIs; Drive metadata may omit `size` for those types and that omission does not reject them. If Drive omits the size for a media file, the pre-download guard cannot establish a limit and allows the request to continue.
 
 ### Running without Google access
 

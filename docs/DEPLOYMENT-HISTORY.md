@@ -123,6 +123,10 @@ Minting them is a manual per-environment step — see the runbook's
 - **`node-test`** — the bot's `node --test` suite + ESLint and Prettier `--check` (the JS counterpart to the ruff pair)
 - **`docker-build`** — builds *and boot-smoke-tests* every service image (`python -c "import src.api.app"` for the six APIs, `node --check src/index.js` for the bot)
 
+The same jobs also run on pushes to `staging` and `main`, and on
+`merge_group` events targeting `staging`. Queue enforcement is configured
+separately in GitHub; see the [rollout guide](DEVELOPMENT.md#merge-queue-on-staging).
+
 **All ten are required status checks** in branch protection on both `staging`
 and `main`; `main` additionally requires `main-source-guard`. A red job on any
 of them blocks the merge — there is no "runs but doesn't gate" tier.
@@ -381,8 +385,8 @@ Railway's `preDeployCommand` (`alembic upgrade head`).
 - Both environments run the same **six** services and are deployed and healthy — production on `f692b0b` since 2026-08-09, all six SUCCESS at 1 replica. `meeting` has been in production since 2026-07-27; the 2026-07-26 and 2026-08-01 release notes below say otherwise and carry corrections.
 - **One gap: `connectors` has no Railway service in either environment.** Promoting `staging → main` ships its *code*; it does not create the Railway service, set its variables, or mint its consumer keys. Those are manual steps — see [`RAILWAY-DEPLOYMENT.md`](RAILWAY-DEPLOYMENT.md) steps 2, 3, and 4b.
 - APIs are **private-only** on Railway (no public domains). Only in-project services reach them, over Railway's internal network. Add a public domain later if an external caller ever needs one — every service already has API-key auth.
-- **Discord commands.** All stable commands (`/link`, `/whoami`, `/seed`, `/team`, `/my-teams`, `/doc`, `/record`, plus the email-verification set `/add-email`, `/verify-email`, `/verify-code`, and `/help`) are registered globally on the production bot; **0 beta commands** remain guild-scoped (every command in `discord-bot/src/commands/index.js` is `beta: false`). To ship a future beta command, add it with `beta: true`, validate it in the staging test guild, then flip `beta: false` in its module + re-run `registerCommands` to promote it globally.
-- **Migrations run automatically** as Railway's `preDeployCommand` on the three DB-backed services (team-tracking, documentation-system, verification) — `alembic upgrade head` against the environment's Neon branch before every deploy. Idempotent. `llm`, `meeting`, and `connectors` have no `preDeployCommand` because they own no schema.
+- **Discord commands.** All stable commands (`/link`, `/whoami`, `/seed`, `/team`, `/my-teams`, `/doc`, `/record`, plus the email-verification set `/add-email`, `/verify-email`, `/verify-code`, and `/help`) are registered globally on the production bot; **0 beta commands** remain guild-scoped (every command in `discord-bot/src/commands/index.js` is `beta: false`). Registration runs as the bot's Railway `preDeployCommand` (`node src/registerCommands.js`), so every deploy to an environment re-registers that environment's bot. To ship a future beta command, add it with `beta: true`, merge to `staging` (the deploy registers it to the test guild), validate it there, then flip `beta: false` and promote to `main` — the production deploy registers it globally.
+- **Migrations run automatically** as Railway's `preDeployCommand` on the three DB-backed services (team-tracking, documentation-system, verification) — `alembic upgrade head` against the environment's Neon branch before every deploy. Idempotent. The bot uses the same hook for slash-command registration. `llm`, `meeting`, and `connectors` have no `preDeployCommand` because they own no schema.
 - **Migration counts:** team-tracking **007**, documentation-system **006**, verification **001**.
 
 ### Known gaps

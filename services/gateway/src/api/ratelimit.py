@@ -27,6 +27,7 @@ replica. A shared store (Redis) is needed only if it is ever scaled past one.
 
 import time
 from collections import OrderedDict
+from threading import Lock
 
 from fastapi import Depends, HTTPException, status
 from platform_auth import AuthedKey
@@ -73,9 +74,16 @@ class FixedWindowCounter:
         self._window = window_s
         self._capacity = capacity
         self._hits: OrderedDict[str, tuple[int, float]] = OrderedDict()
+        self._lock = Lock()
 
     def hit(self, identity: str, now: float | None = None) -> bool:
         """Record a request for `identity`. False means it is over the limit."""
+        # Sync FastAPI dependencies run in a thread pool. One request must finish
+        # its read/update/eviction before the next can inspect the same counter.
+        with self._lock:
+            return self._hit(identity, now)
+
+    def _hit(self, identity: str, now: float | None) -> bool:
         now = time.monotonic() if now is None else now
         entry = self._hits.get(identity)
         if entry is not None:
@@ -92,10 +100,12 @@ class FixedWindowCounter:
         return 1 <= self._limit
 
     def clear(self) -> None:
-        self._hits.clear()
+        with self._lock:
+            self._hits.clear()
 
     def __len__(self) -> int:
-        return len(self._hits)
+        with self._lock:
+            return len(self._hits)
 
 
 def client_identity(request: Request, *, trust_proxy: bool) -> str:
@@ -142,10 +152,8 @@ class ClientRateLimitMiddleware(BaseHTTPMiddleware):
         self._trust_proxy = trust_proxy
 
     async def dispatch(self, request: Request, call_next):
-        # /health is exempt: it is unauthenticated, costs nothing, and Railway's
-        # liveness probe hits it on a fixed interval. Letting the flood guard
-        # 429 the probe would restart a service that is answering fine.
-        if request.url.path == "/health":
+        # Deployment probes must still run after the request budget is exhausted.
+        if request.url.path in {"/health", "/health/ready"}:
             return await call_next(request)
         if not self._counter.hit(client_identity(request, trust_proxy=self._trust_proxy)):
             return JSONResponse(status_code=429, content={"detail": _TOO_MANY})

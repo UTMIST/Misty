@@ -32,10 +32,14 @@ class _FakeFiles:
         self._meta, self._payload = meta, payload
         self._get_error, self._export_error = get_error, export_error
         self.export_mime = None
+        self.metadata_fields = None
+        self.media_calls = 0
 
     def get(self, *, fileId, fields=None, alt=None):
         if alt == "media":
+            self.media_calls += 1
             return _FakeRequest(result=self._payload, error=self._export_error)
+        self.metadata_fields = fields
         return _FakeRequest(result=self._meta, error=self._get_error)
 
     def export(self, *, fileId, mimeType):
@@ -44,11 +48,30 @@ class _FakeFiles:
 
 
 class _FakeService:
-    def __init__(self, files):
+    def __init__(self, files, permissions=None):
         self._files = files
+        self._permissions = _FakePermissions(permissions or {"permissions": []})
 
     def files(self):
         return self._files
+
+    def permissions(self):
+        return self._permissions
+
+
+class _FakePermissions:
+    def __init__(self, response):
+        self._response = response
+        self.calls = []
+
+    def list(self, **kwargs):
+        self.calls.append(kwargs)
+        response = (
+            self._response[len(self.calls) - 1]
+            if isinstance(self._response, list)
+            else self._response
+        )
+        return _FakeRequest(result=response)
 
 
 class _FakeDocsService:
@@ -100,9 +123,11 @@ class _FakeSheetsService:
 
 
 def _source(files, **kwargs):
+    max_file_bytes = kwargs.pop("max_file_bytes", 25 * 1024 * 1024)
     return GoogleSource(
         credentials_json_b64="fake",
         max_content_chars=1000,
+        max_file_bytes=max_file_bytes,
         services={"drive": _FakeService(files)},
         **kwargs,
     )
@@ -116,6 +141,7 @@ def test_google_doc_routes_to_the_native_docs_extractor():
     source = GoogleSource(
         credentials_json_b64="fake",
         max_content_chars=1000,
+        max_file_bytes=25 * 1024 * 1024,
         services={"drive": _FakeService(files), "docs": docs},
     )
     result = source.fetch(DOC_URL)
@@ -131,6 +157,7 @@ def test_slides_routes_to_the_native_slides_extractor():
     source = GoogleSource(
         credentials_json_b64="fake",
         max_content_chars=1000,
+        max_file_bytes=25 * 1024 * 1024,
         services={"drive": _FakeService(files), "slides": slides},
     )
     result = source.fetch(SLIDES_URL)
@@ -146,6 +173,7 @@ def test_sheets_routes_to_the_native_sheets_extractor():
     source = GoogleSource(
         credentials_json_b64="fake",
         max_content_chars=1000,
+        max_file_bytes=25 * 1024 * 1024,
         services={"drive": _FakeService(files), "sheets": sheets},
     )
     result = source.fetch(SHEET_URL)
@@ -157,6 +185,152 @@ def test_plain_text_upload_downloads_via_media():
     files = _FakeFiles(meta={"name": "notes.txt", "mimeType": "text/plain"}, payload=b"raw notes")
     result = _source(files).fetch(DRIVE_URL)
     assert result.content == "raw notes"
+    assert files.metadata_fields == "name,mimeType,size"
+    assert files.media_calls == 1
+
+
+def test_google_fetch_returns_direct_and_inherited_acl_provenance():
+    files = _FakeFiles(meta={"name": "notes.txt", "mimeType": "text/plain"}, payload=b"notes")
+    permissions = {
+        "permissions": [
+            {
+                "id": "p-user",
+                "type": "user",
+                "emailAddress": "Member@Example.com",
+                "role": "reader",
+                "permissionDetails": [{"inherited": False}],
+            },
+            {
+                "id": "p-group",
+                "type": "group",
+                "emailAddress": "team@example.com",
+                "role": "writer",
+                "permissionDetails": [{"inherited": True, "inheritedFrom": "folder-123"}],
+            },
+        ]
+    }
+    result = GoogleSource(
+        credentials_json_b64="fake",
+        max_content_chars=1000,
+        max_file_bytes=1000,
+        services={"drive": _FakeService(files, permissions)},
+    ).fetch(DRIVE_URL)
+
+    assert [(p.principal_type, p.principal) for p in result.permissions] == [
+        ("user", "Member@Example.com"),
+        ("group", "team@example.com"),
+    ]
+    assert result.permissions[1].inherited_from == ("folder-123",)
+    assert result.permissions[1].inherited is True
+
+
+def test_malformed_acl_blocks_content_download():
+    files = _FakeFiles(
+        meta={"name": "notes.txt", "mimeType": "text/plain"},
+        payload=b"must not be downloaded",
+    )
+    drive = _FakeService(
+        files,
+        {"permissions": [{"type": "user", "emailAddress": "x@example.com", "role": "reader"}]},
+    )
+
+    with pytest.raises(SourceUnavailable, match="permission metadata"):
+        GoogleSource(
+            credentials_json_b64="fake",
+            max_content_chars=1000,
+            max_file_bytes=1000,
+            services={"drive": drive},
+        ).fetch(DRIVE_URL)
+
+    assert files.media_calls == 0
+
+
+def test_google_acl_paginates_before_extracting_content():
+    files = _FakeFiles(meta={"name": "notes.txt", "mimeType": "text/plain"}, payload=b"notes")
+    drive = _FakeService(
+        files,
+        [
+            {
+                "permissions": [
+                    {
+                        "id": "p1",
+                        "type": "user",
+                        "emailAddress": "one@example.com",
+                        "role": "reader",
+                    }
+                ],
+                "nextPageToken": "next",
+            },
+            {
+                "permissions": [
+                    {
+                        "id": "p2",
+                        "type": "group",
+                        "emailAddress": "team@example.com",
+                        "role": "reader",
+                    }
+                ]
+            },
+        ],
+    )
+    result = GoogleSource(
+        credentials_json_b64="fake",
+        max_content_chars=1000,
+        max_file_bytes=1000,
+        services={"drive": drive},
+    ).fetch(DRIVE_URL)
+
+    assert [permission.permission_id for permission in result.permissions] == ["p1", "p2"]
+    assert drive._permissions.calls[1]["pageToken"] == "next"
+
+
+@pytest.mark.parametrize(
+    "mime",
+    [
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "text/plain",
+    ],
+)
+def test_oversized_media_file_is_rejected_before_download(mime):
+    files = _FakeFiles(
+        meta={"name": "too-large", "mimeType": mime, "size": "101"},
+        payload=b"must not be downloaded",
+    )
+
+    with pytest.raises(SourceUnsupported, match="MAX_FILE_BYTES"):
+        _source(files, max_file_bytes=100).fetch(DRIVE_URL)
+
+    assert files.media_calls == 0
+
+
+def test_allowed_size_media_file_is_downloaded():
+    files = _FakeFiles(
+        meta={"name": "allowed.txt", "mimeType": "text/plain", "size": "100"},
+        payload=b"allowed",
+    )
+
+    result = _source(files, max_file_bytes=100).fetch(DRIVE_URL)
+
+    assert result.content == "allowed"
+    assert files.media_calls == 1
+
+
+def test_native_google_file_without_size_is_not_rejected():
+    files = _FakeFiles(
+        meta={"name": "Native doc", "mimeType": "application/vnd.google-apps.document"}
+    )
+    docs = _FakeDocsService({"title": "T", "body": {"content": []}})
+    source = GoogleSource(
+        credentials_json_b64="fake",
+        max_content_chars=1000,
+        max_file_bytes=1,
+        services={"drive": _FakeService(files), "docs": docs},
+    )
+
+    source.fetch(DOC_URL)
+
+    assert files.media_calls == 0
 
 
 def test_binary_file_is_unsupported():
@@ -172,7 +346,9 @@ def test_unrecognized_url_is_not_found():
 
 
 def test_missing_credentials_raise_not_configured():
-    source = GoogleSource(credentials_json_b64="", max_content_chars=1000)
+    source = GoogleSource(
+        credentials_json_b64="", max_content_chars=1000, max_file_bytes=25 * 1024 * 1024
+    )
     with pytest.raises(SourceNotConfigured):
         source.fetch(DOC_URL)
 
@@ -187,6 +363,7 @@ def test_content_is_bounded_by_max_content_chars_on_the_media_path():
     source = GoogleSource(
         credentials_json_b64="fake",
         max_content_chars=100,
+        max_file_bytes=25 * 1024 * 1024,
         services={"drive": _FakeService(files)},
     )
     result = source.fetch(DRIVE_URL)
@@ -286,7 +463,9 @@ def test_credentials_are_built_once_but_transports_are_rebuilt_per_fetch():
     # never be shared across concurrent /fetch calls, so it is rebuilt fresh
     # every time — this is what a counting fake for each half proves here.
     files = _FakeFiles(meta={"name": "Doc", "mimeType": "text/plain"}, payload=b"hi")
-    source = GoogleSource(credentials_json_b64="fake", max_content_chars=1000)
+    source = GoogleSource(
+        credentials_json_b64="fake", max_content_chars=1000, max_file_bytes=25 * 1024 * 1024
+    )
 
     creds_calls = {"n": 0}
 
@@ -344,6 +523,7 @@ def test_request_timeout_s_reaches_the_http_transport(monkeypatch):
     source = GoogleSource(
         credentials_json_b64=fake_creds_b64,
         max_content_chars=1000,
+        max_file_bytes=25 * 1024 * 1024,
         request_timeout_s=7.5,
     )
     credentials = source._get_credentials()

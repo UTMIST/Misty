@@ -53,7 +53,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         return 0
     for k in keys:
         active = "yes" if (k.active and k.revoked_at is None) else "no"
-        print(f"{k.name:<25} {k.prefix:<10} {active:<7} {', '.join(k.scopes) or '(none)'}")
+        print(f"{k.id}  {k.name:<25} {k.prefix:<10} {active:<7} {', '.join(k.scopes) or '(none)'}")
     return 0
 
 
@@ -79,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     subs = p.add_subparsers(dest="cmd", required=True)
     pi = subs.add_parser("issue")
     pi.add_argument("--name", required=True)
-    pi.add_argument("--scopes", nargs="*", default=[])
+    pi.add_argument("--scopes", nargs="+", required=True, choices=["resolve:discord"])
     pi.set_defaults(func=cmd_issue)
     pl = subs.add_parser("list")
     pl.add_argument("--active-only", action="store_true")

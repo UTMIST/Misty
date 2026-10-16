@@ -11,6 +11,7 @@ def _build_google(settings: Settings) -> SourceFetcher:
     return GoogleSource(
         credentials_json_b64=settings.google_credentials_json.get_secret_value(),
         max_content_chars=settings.max_content_chars,
+        max_file_bytes=settings.max_file_bytes,
         request_timeout_s=settings.request_timeout_s,
     )
 

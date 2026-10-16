@@ -51,6 +51,12 @@ def test_non_local_accepts_a_real_secret():
     verify_production_secrets(_settings())
 
 
+@pytest.mark.parametrize("secret", ["", "  ", f" {DEFAULT_DEV_API_KEY} "])
+def test_non_local_refuses_blank_or_padded_default(secret):
+    with pytest.raises(RuntimeError, match="DIRECTORY_API_KEY"):
+        verify_production_secrets(_settings(directory_api_key=SecretStr(secret)))
+
+
 def test_directory_key_is_redacted_in_repr():
     s = _settings(directory_api_key=SecretStr("super-secret-value"))
     assert "super-secret-value" not in repr(s)

@@ -1,4 +1,7 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
@@ -39,6 +42,14 @@ def test_window_rolls_over():
     assert c.hit("a", now=100.0) is True
     assert c.hit("a", now=105.0) is False
     assert c.hit("a", now=110.0) is True  # new window
+
+
+def test_concurrent_requests_share_one_quota():
+    counter = FixedWindowCounter(limit=60, window_s=60)
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        allowed = list(pool.map(lambda _: counter.hit("consumer", now=100), range(1000)))
+    assert sum(allowed) == 60
+    assert len(counter) == 1
 
 
 def test_capacity_is_hard():
@@ -117,6 +128,7 @@ def _ip_app(**kwargs) -> TestClient:
         return {"ok": True}
 
     @app.get("/health")
+    @app.get("/health/ready")
     def health():
         return {"status": "ok"}
 
@@ -140,12 +152,13 @@ def test_rotating_the_api_key_does_not_escape_the_ip_limit():
     assert c.get("/x", headers={"X-API-Key": "gw_three"}).status_code == 429
 
 
-def test_health_is_exempt():
+@pytest.mark.parametrize("path", ["/health", "/health/ready"])
+def test_health_is_exempt(path):
     # Railway's liveness probe hits /health on a fixed interval; 429ing it would
     # restart a service that is answering perfectly well.
     c = _ip_app(limit=1, window_s=60)
     for _ in range(5):
-        assert c.get("/health").status_code == 200
+        assert c.get(path).status_code == 200
 
 
 # --- per-key quota ------------------------------------------------------------

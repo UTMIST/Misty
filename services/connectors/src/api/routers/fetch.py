@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from contracts.fetch import FetchRequest, FetchResponse
+from contracts.fetch import FetchRequest, FetchResponse, SourcePermission
 from src.api.auth import require_scope
 from src.api.deps import get_source_registry
 from src.sources.base import (
@@ -15,7 +15,7 @@ from src.sources.base import (
 router = APIRouter()
 
 
-@router.post("/fetch", response_model=FetchResponse)
+@router.post("/fetch", response_model=FetchResponse, response_model_exclude_none=True)
 def fetch(
     body: FetchRequest,
     request: Request,
@@ -39,4 +39,24 @@ def fetch(
     except SourceUnavailable:
         raise HTTPException(status_code=502, detail="source upstream error")
     request.state.audit_extra["warnings"] = len(result.warnings)
-    return FetchResponse(title=result.title, content=result.content, warnings=list(result.warnings))
+    permissions = None
+    if result.permissions is not None:
+        permissions = [
+            SourcePermission(
+                permission_id=p.permission_id,
+                principal_type=p.principal_type,
+                principal=p.principal,
+                role=p.role,
+                inherited=p.inherited,
+                inherited_from=list(p.inherited_from),
+                allow_file_discovery=p.allow_file_discovery,
+                expiration_time=p.expiration_time,
+            )
+            for p in result.permissions
+        ]
+    return FetchResponse(
+        title=result.title,
+        content=result.content,
+        warnings=list(result.warnings),
+        permissions=permissions,
+    )

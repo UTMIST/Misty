@@ -1,41 +1,61 @@
-import { Client, GatewayIntentBits } from 'discord.js';
+import { Client, GatewayIntentBits, Partials } from 'discord.js';
 import { loadConfig } from './config.js';
 import { createAppContext } from './context.js';
 import { commands } from './commands/index.js';
-import {
-  wireDiscordClient,
-  makeAttachmentPoster,
-  makeChannelNotifier,
-} from './adapters/discord.js';
+import { startHealthServer } from './healthServer.js';
+import { wireDiscordClient } from './adapters/discord/index.js';
+import { makeAttachmentPoster, makeChannelNotifier } from './adapters/discord/meetingPosts.js';
+import { runtimeMode } from './runtimeMode.js';
 
 async function main() {
+  const mode = runtimeMode();
+  const enableDiscord = mode !== 'idle' && process.env.ENABLE_DISCORD !== 'false';
+  const enableWeb = process.env.ENABLE_WEB === 'true';
+  if (mode === 'idle' && !enableWeb) {
+    await startHealthServer(null, process.env.PORT || 3002);
+    console.log(
+      'Discord disabled in this Railway environment. Liveness is available; gateway readiness remains unavailable.',
+    );
+    return;
+  }
+  if (mode === 'preview') {
+    // This PR adds the singleton-volume requirement to dev only. Applying it
+    // to existing staging/production needs a coordinated infrastructure change;
+    // their rollout behavior is intentionally outside this preview feature.
+    if (!process.env.RAILWAY_VOLUME_MOUNT_PATH) {
+      throw new Error('dev requires a Railway volume to prevent overlapping bot deployments.');
+    }
+    if (!enableDiscord || enableWeb) {
+      throw new Error('dev requires ENABLE_DISCORD=true and ENABLE_WEB=false.');
+    }
+  }
   const config = loadConfig();
   // Inject the Discord attachment poster here (not inside context.js) so
   // context.js stays surface-agnostic — index.js is one of the few modules
-  // allowed to import from adapters/discord.js.
+  // allowed to import from adapters/discord/.
   const appContext = createAppContext(config, {
     poster: makeAttachmentPoster(),
     notify: makeChannelNotifier(),
   });
 
-  const enableDiscord = process.env.ENABLE_DISCORD !== 'false';
-  const enableWeb = process.env.ENABLE_WEB === 'true';
-
   if (enableDiscord) {
-    // GuildMessages (non-privileged) is enough for the @mention helper: Discord
-    // always delivers message.content for messages that mention the bot, so the
-    // privileged MessageContent intent is intentionally NOT requested.
-    // (Consequence: thread messages that don't re-mention the bot arrive with
-    // empty content and are ignored — matches the "re-mention to follow up" design.)
+    // MessageContent is required to pass full helper-thread history to the LLM.
+    // Discord always exposes content for direct mentions, but otherwise sends
+    // an empty string unless this privileged intent is enabled both here and in
+    // the application's Developer Portal settings.
     const client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.DirectMessages,
         GatewayIntentBits.GuildVoiceStates,
       ],
+      partials: [Partials.Channel],
     });
     wireDiscordClient(client, { commands, appContext });
     client.once('clientReady', (c) => console.log(`Bot ready as ${c.user.tag}`));
+    await startHealthServer(client, process.env.PORT || 3002);
     await client.login(config.discordToken).catch((err) => {
       console.error('Discord login failed:', err.message);
       process.exit(1);
@@ -53,6 +73,9 @@ async function main() {
     const { startWebServer } = await import('./web/server.js');
     const port = Number(process.env.WEB_PORT || 3001);
     await startWebServer({ commands, appContext, port });
+    // Unknown Railway environments disable the gateway only. Expose liveness
+    // after the requested playground and its dev:spoof guard have started.
+    if (mode === 'idle') await startHealthServer(null, process.env.PORT || 3002);
   }
 
   if (!enableDiscord && !enableWeb) {

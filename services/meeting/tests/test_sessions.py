@@ -532,6 +532,23 @@ def test_stop_meta_duration_label_reflects_elapsed_time():
     assert captured_meta["duration_label"] == "5m"
 
 
+def test_stop_meta_includes_caller_title():
+    captured_meta = {}
+
+    def capturing_report_builder(segments, meta):
+        captured_meta.update(meta)
+        return Minutes(summary="s", decisions=[], action_items=[]), b"%PDF-fake"
+
+    deps = _make_deps([])
+    deps["report_builder"] = capturing_report_builder
+    registry = SessionRegistry(deps)
+    session = registry.create("session-title", "guild-1")
+
+    asyncio.run(session.stop("Sponsorship Sync"))
+
+    assert captured_meta["title"] == "Sponsorship Sync"
+
+
 def test_feed_drops_frames_and_logs_once_past_max_meeting_ms():
     # Fix #4: once elapsed time exceeds max_meeting_ms, further frames are
     # dropped to bound how long a single meeting can run. (The separate

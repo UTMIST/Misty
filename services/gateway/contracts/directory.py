@@ -2,7 +2,7 @@ from typing import Protocol
 
 
 class DirectoryUnavailable(Exception):
-    """Raised when team-tracking is unreachable or returns 5xx."""
+    """Raised when team-tracking is unreachable or its response is unusable."""
 
 
 class DirectoryClient(Protocol):

@@ -58,11 +58,12 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
     # so `settings.directory_api_key == DEFAULT_DEV_API_KEY` would silently be
     # False forever and this guard would stop firing without any test noticing.
     # tests/test_config.py pins exactly that.
-    if settings.directory_api_key.get_secret_value() == DEFAULT_DEV_API_KEY:
+    secret = settings.directory_api_key.get_secret_value().strip()
+    if not secret or secret == DEFAULT_DEV_API_KEY:
         insecure.append("DIRECTORY_API_KEY")
     if insecure:
         raise RuntimeError(
             f"Refusing to start in gateway_env={settings.gateway_env!r}: "
-            f"{', '.join(insecure)} still set to the built-in dev default. "
+            f"{', '.join(insecure)} is blank or still set to the built-in dev default. "
             "Set a strong, unique value via environment variables."
         )

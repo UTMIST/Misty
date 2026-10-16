@@ -1,13 +1,18 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import and_, delete, func, insert, or_, select, update
+from sqlalchemy import and_, delete, func, insert, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from contracts.types import (
     ApiKey,
+    ChannelTeams,
+    GoogleGroupStatus,
+    PendingGroupChange,
     Person,
     PersonCreate,
     PersonIdentifier,
@@ -18,6 +23,7 @@ from contracts.types import (
     RoleKind,
     Team,
     TeamCreate,
+    TeamGoogleGroup,
     TeamMembership,
     TeamMembershipCreate,
     TeamMembershipUpdate,
@@ -26,10 +32,12 @@ from contracts.types import (
 from src.storage.errors import UnknownParentTeamError
 from src.storage.schema import (
     api_keys,
+    channel_team_access,
     people,
     person_identifiers,
     providers,
     role_kinds,
+    team_google_groups,
     team_memberships,
     teams,
 )
@@ -177,6 +185,14 @@ class PostgresStorageAdapter:
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+
+    def is_ready(self) -> bool:
+        try:
+            with self._engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+        except SQLAlchemyError:
+            return False
+        return True
 
     # --- People ---
 
@@ -519,6 +535,149 @@ class PostgresStorageAdapter:
                 )
             ).one_or_none()
         return _person_row_to_model(row) if row else None
+
+    # --- Channel team access ---
+
+    @staticmethod
+    def _lock_channel(conn, guild_id: str, channel_id: str) -> None:
+        """Serialize writers to one channel until commit. Row locks can't do this:
+        an unconfigured channel has no rows to lock. A hashtext collision only
+        over-serializes two unrelated channels, never under-serializes."""
+        conn.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"{guild_id}:{channel_id}"))))
+
+    @staticmethod
+    def _read_channel_teams(conn, guild_id: str, channel_id: str) -> ChannelTeams:
+        rows = conn.execute(
+            select(channel_team_access.c.created_by, teams.c.id, teams.c.active)
+            .select_from(
+                channel_team_access.join(teams, channel_team_access.c.team_id == teams.c.id)
+            )
+            .where(
+                channel_team_access.c.guild_id == guild_id,
+                channel_team_access.c.channel_id == channel_id,
+            )
+        ).all()
+        if not rows:
+            return ChannelTeams(guild_id=guild_id, channel_id=channel_id, team_ids=[])
+        return ChannelTeams(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            team_ids=sorted(r.id for r in rows if r.active),
+            updated_by=rows[0].created_by,
+        )
+
+    def get_channel_teams(self, guild_id: str, channel_id: str) -> ChannelTeams:
+        with self._engine.connect() as conn:
+            return self._read_channel_teams(conn, guild_id, channel_id)
+
+    def replace_channel_teams(
+        self, guild_id: str, channel_id: str, team_ids: list[UUID], *, actor: str
+    ) -> ChannelTeams:
+        with self._engine.begin() as conn:
+            self._lock_channel(conn, guild_id, channel_id)
+            if team_ids:
+                # FOR SHARE blocks a concurrent retire until this transaction commits.
+                active = conn.execute(
+                    select(teams.c.id)
+                    .where(teams.c.id.in_(team_ids), teams.c.active.is_(True))
+                    .with_for_update(read=True)
+                ).all()
+                if len(active) != len(set(team_ids)):
+                    raise ValueError("unknown_or_inactive_team")
+            conn.execute(
+                delete(channel_team_access).where(
+                    channel_team_access.c.guild_id == guild_id,
+                    channel_team_access.c.channel_id == channel_id,
+                )
+            )
+            if team_ids:
+                conn.execute(
+                    insert(channel_team_access),
+                    [
+                        {
+                            "guild_id": guild_id,
+                            "channel_id": channel_id,
+                            "team_id": t,
+                            "created_by": actor,
+                        }
+                        for t in team_ids
+                    ],
+                )
+            return self._read_channel_teams(conn, guild_id, channel_id)
+
+    def clear_channel_teams(self, guild_id: str, channel_id: str) -> None:
+        with self._engine.begin() as conn:
+            self._lock_channel(conn, guild_id, channel_id)
+            conn.execute(
+                delete(channel_team_access).where(
+                    channel_team_access.c.guild_id == guild_id,
+                    channel_team_access.c.channel_id == channel_id,
+                )
+            )
+
+    # --- Team Google Groups ---
+
+    def get_team_google_group(self, team_id: UUID) -> TeamGoogleGroup | None:
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                select(team_google_groups).where(team_google_groups.c.team_id == team_id)
+            ).one_or_none()
+        return TeamGoogleGroup(**row._mapping) if row else None
+
+    def list_team_google_groups(self) -> list[TeamGoogleGroup]:
+        with self._engine.connect() as conn:
+            rows = conn.execute(select(team_google_groups)).all()
+        return [TeamGoogleGroup(**r._mapping) for r in rows]
+
+    def put_team_google_group(
+        self,
+        team_id: UUID,
+        *,
+        group_email: str,
+        group_name: str | None,
+        status: GoogleGroupStatus,
+        last_error: str | None,
+        last_synced_at: datetime | None,
+        actor: str,
+        pending_changes: list[PendingGroupChange] | None = None,
+    ) -> TeamGoogleGroup:
+        values = {
+            "group_email": group_email,
+            "group_name": group_name,
+            "status": status,
+            "last_error": last_error,
+            "last_synced_at": last_synced_at,
+            "pending_changes": [p.model_dump() for p in pending_changes or []],
+            "updated_at": _now(),
+            "updated_by": actor,
+        }
+        stmt = pg_insert(team_google_groups).values(team_id=team_id, created_by=actor, **values)
+        try:
+            with self._engine.begin() as conn:
+                row = conn.execute(
+                    stmt.on_conflict_do_update(
+                        index_elements=[team_google_groups.c.team_id], set_=values
+                    ).returning(team_google_groups)
+                ).one()
+        except IntegrityError as e:
+            raise ValueError("team_id not found") from e
+        return TeamGoogleGroup(**row._mapping)
+
+    @contextmanager
+    def lock_team_google_group(self, team_id: UUID) -> Iterator[None]:
+        """Session-level advisory lock on a dedicated connection, so it spans
+        the whole sync and every process. A hashtext collision only
+        over-serializes, never under-serializes. If the connection dies, the
+        server drops the lock with it."""
+        key = func.hashtext(f"google-group:{team_id}")
+        with self._engine.connect() as conn:
+            conn.execute(select(func.pg_advisory_lock(key)))
+            conn.commit()  # don't sit idle in a transaction for the whole sync
+            try:
+                yield
+            finally:
+                conn.execute(select(func.pg_advisory_unlock(key)))
+                conn.commit()
 
     def add_person_email(self, person_id: UUID, email: str, *, actor: str) -> PersonIdentifier:
         addr = _norm_email(email)

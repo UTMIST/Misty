@@ -10,6 +10,7 @@ see each service's own `docs/ARCHITECTURE.md`:
 - [`services/llm/docs/ARCHITECTURE.md`](../services/llm/docs/ARCHITECTURE.md)
 - [`services/meeting/docs/ARCHITECTURE.md`](../services/meeting/docs/ARCHITECTURE.md)
 - [`services/connectors/docs/ARCHITECTURE.md`](../services/connectors/docs/ARCHITECTURE.md)
+- [`services/gateway/docs/ARCHITECTURE.md`](../services/gateway/docs/ARCHITECTURE.md)
 - [`discord-bot/README.md`](../discord-bot/README.md) — the Discord bot doesn't have a
   standalone ARCHITECTURE.md yet; the README covers its neutral command shape (a
   single handler serves both the Discord surface and a browser-based web
@@ -18,9 +19,8 @@ see each service's own `docs/ARCHITECTURE.md`:
 
 ## The services
 
-The platform is **six backend services** — four source-of-truth services, each
-owning one domain, plus the stateful `meeting` processing service and the
-stateless `connectors` outbound adapter — plus the Discord bot as a consumer:
+The platform has **seven backend services**: six internal domain/processing
+services and the public external gateway, plus the Discord bot as a consumer:
 
 | Service | Domain | Key surface |
 |---------|--------|-------------|
@@ -30,6 +30,7 @@ stateless `connectors` outbound adapter — plus the Discord bot as a consumer:
 | [`services/verification`](../services/verification) | Email ownership verification | request/confirm an email code; `verification:write` scope |
 | [`services/meeting`](../services/meeting) | **Stateful** live meeting transcription + minutes | WS audio stream in → rolling transcript → minutes/PDF on stop; `meetings` scope. The one stateful service — see [MEETING-RECORDING.md](MEETING-RECORDING.md) |
 | [`services/connectors`](../services/connectors) | Outbound document fetch | `POST /fetch` returns a Google Doc/Sheet/Slides/Drive file as text; `fetch` scope; no DB/state. Not a gateway and not an authorization boundary — see its [ARCHITECTURE](../services/connectors/docs/ARCHITECTURE.md) |
+| [`services/gateway`](../services/gateway) | Public external API | Curated `/v1` operations; per-consumer scoped keys in its own database; private HTTP calls to the owning services. |
 
 > **Meeting recording** spans two components (the `meeting` service + a Discord *voice surface* in the bot) and is the platform's one stateful service and its one non-neutral-command bot path. Its cross-cutting design — and *why* it breaks both conventions — is documented separately in **[MEETING-RECORDING.md](MEETING-RECORDING.md)**.
 
@@ -51,12 +52,14 @@ The other services are independent and share the conventions below:
 stateless with no database at all; `meeting` has no database either but *is*
 stateful in memory.
 
-There are **two** service-to-service dependencies outside the catalog →
+There are **three** service-to-service dependencies outside the catalog →
 directory pair, and they differ in how hard they are:
 
 - **`meeting` → `llm`** (hard). `meeting` calls `/chat` for minutes generation
   and refuses to boot without `LLM_BASE_URL`/`LLM_API_KEY` outside `local`.
   Deploy `llm` first.
+- **`gateway` → `team-tracking`** (hard for resolver requests). The public
+  resolver requires the private directory and returns 503 when it is unavailable.
 - **`documentation-system` → `connectors`** (soft). The catalog calls `/fetch`
   for Google source content. With connectors unreachable or unconfigured, the
   fetch degrades to a warning on the ingested doc and the catalog works
@@ -252,6 +255,11 @@ The gateway's first (and so far only) endpoint is the resolver,
 linked to the same person in the directory, and nothing else, for #34's reviewer-ping
 GitHub Action. New external use cases get new narrow endpoints on the gateway, not
 broader access to team-tracking itself.
+
+The compute platform will use the same per-consumer gateway contract when its
+required operations are defined. The [gateway architecture](../services/gateway/docs/ARCHITECTURE.md#future-compute-platform-access)
+describes how to add access while preserving service-owned databases and access
+checks; the current permission grants only the Discord resolver.
 
 ## Why the directory is built first
 

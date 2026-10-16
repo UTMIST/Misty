@@ -8,6 +8,14 @@ test('record command is stable with start/status/stop subcommands', () => {
   assert.equal(record.beta, false);
   const names = record.subcommands.map((s) => s.name).sort();
   assert.deepEqual(names, ['start', 'status', 'stop']);
+  const name = record.subcommands.find((s) => s.name === 'start').options[0];
+  assert.deepEqual(name, {
+    name: 'name',
+    type: 'string',
+    required: false,
+    description: 'Name for the meeting minutes',
+    maxLength: 100,
+  });
 });
 
 test('record is registered in the command registry', () => {

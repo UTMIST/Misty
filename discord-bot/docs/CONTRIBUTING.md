@@ -10,8 +10,9 @@ The bot is the platform's only consumer-facing surface. It's Node 20+ with `disc
 - **`router.js` is the single Policy Enforcement Point.** Authenticate → authorize → dispatch, in one place. **Handlers never re-implement auth.** If you find yourself checking `access_level` inside a handler, use the declarative `auth` field instead.
 - **`commands/index.js` is the single source of truth for the command set.** It's consumed by both the router (dispatch) and `registerCommands.js` (Discord registration). Adding a command is one import plus one map entry.
 - **Auth policies fail closed.** `public` / `linked` / `admin` / `superuser`, evaluated in `auth/policy.js`. An unknown policy denies.
+- **Reply rendering lives in `src/messages/`, grouped by feature.** Commands import their renderers directly (for example, `messages/team.js`); keep them pure and surface-neutral. Discord interaction conversion, mentions, recording, and voice events live in `src/adapters/discord/` — see the [README architecture map](../README.md#architecture).
 - **Replies default to ephemeral.** Bot replies carry personal directory and team information. `ephemeral: false` is an explicit, deliberate choice.
-- **Service clients degrade, they don't crash.** Every backend call goes through a client (`directoryClient.js`, `docClient.js`, …) that normalizes failures. A directory outage produces "temporarily unavailable", not a stack trace in a channel.
+- **Service clients degrade, they don't crash.** Every backend call goes through a client (`clients/directoryClient.js`, `clients/docClient.js`, …) that normalizes failures. A directory outage produces "temporarily unavailable", not a stack trace in a channel.
 - **The bot hard-fails at boot on missing config.** `src/config.js` lists ten required env vars and exits with `Missing required env vars: …`. That's deliberate — see `startupGuard.js`.
 
 ## Local setup
@@ -32,6 +33,13 @@ Open `http://127.0.0.1:3001`, paste `100000000000000000` into "Acting as", pick 
 > ⚠️ Port **8001** is also `documentation-system`'s API port. Stop the catalog before running `npm run dev:web`.
 
 `/record` has **no playground equivalent** — voice capture needs the real Discord surface (`npm start`).
+
+For deployed PR recording tests, use the persistent
+[`dev` preview slot](../../docs/pr-previews.md). Its gateway and voice
+handlers run the selected PR directly. Railway PR copies skip Discord
+registration through an explicit no-op PR pre-deploy command, skip gateway
+login, and use a liveness health check. Direct registration in an unknown
+environment fails; never bypass the runtime environment guard to test a PR.
 
 Other modes: `npm run dev:web:plain` (web only, no scratch stack), `npm run dev:discord` (Discord only), `npm run dev` (both).
 
@@ -70,6 +78,7 @@ Other modes: `npm run dev:web:plain` (web only, no scratch stack), `npm run dev:
    | `discordHandle` | The caller's Discord handle |
 
    - `defineCommand` validates the definition and throws on nonsense at import time — an option can't set both `choices` and `autocomplete`, a subcommand can't lack a handler.
+   - Put reply formatting in the matching `src/messages/<feature>.js` module.
    - **Never import `discord.js` here.** If your handler needs something only Discord provides, that's a signal it belongs in an adapter, not a command.
    - Set `beta: true` while iterating — beta commands register **only** to the testing guild and never reach production servers.
    - `identifyCaller: true` gives a `public` command a best-effort identity lookup without making auth mandatory (`/help` uses this to list only the commands you can run).
@@ -80,21 +89,30 @@ Other modes: `npm run dev:web:plain` (web only, no scratch stack), `npm run dev:
 
 4. **Write tests** in `test/commands.test.js` (or a new file) using `node --test`. Test the handler directly with a fake context — that's the payoff of surface-neutral commands. Cover the auth policy too: a `linked` command called with no principal must be denied by the router.
 
-5. **Register with Discord** when you're ready:
+5. **Register with Discord.** For your local test bot:
 
    ```bash
    npm run register                 # local, using your .env
-   npm run register:staging         # via railway run
-   npm run register:production
    ```
 
-   Registration is a separate, manual step — merging does **not** register commands.
+   For the deployed bots you don't do anything: `railway.json` runs
+   `node src/registerCommands.js` as the `preDeployCommand`, so merging to
+   `staging` registers the staging bot and merging to `main` registers
+   production. A registration failure fails the deploy, though a failure
+   after the global overwrite leaves Discord's global set already changed —
+   the runbook covers recovery. The manual `npm run register:staging` /
+   `register:production` scripts still exist for re-registering *without* a
+   deploy — see
+   [RAILWAY-DEPLOYMENT.md §5](../../docs/RAILWAY-DEPLOYMENT.md#5-register-discord-slash-commands).
 
 6. **Update the README's command list** and the root [`README.md`](../../README.md)'s "What you can do with it" section. Both enumerate the live commands, and a new command that isn't listed is invisible to users.
 
 ## Walkthrough: call a new backend service
 
-1. **Add a client** at `src/<name>Client.js`, built on `httpClient.js`. Follow `verificationClient.js` — it's the simplest.
+1. **Add a client** at `src/clients/<name>Client.js`, built on `src/clients/httpClient.js`. Follow `src/clients/verificationClient.js` — it's the simplest.
+   Application orchestration belongs in `src/services/`; wire clients and
+   services in `src/context.js`. The recording client stays in `src/meeting/`
+   alongside its session and recorder code.
 2. **Normalize failures.** Export a named error (`DirectoryUnavailable` is the model) so callers can distinguish "the service said no" from "the service is down". A raw fetch rejection reaching a handler produces an ugly user-facing failure.
 3. **Add its config** to `src/config.js`. Decide whether it's **required** (hard-fails at boot, like `DIRECTORY_*`) or **optional** (degrades, like `MEETING_*`). Optional is right when the platform is still usable without it — `/record` reporting "not configured" is better than the bot refusing to start.
 4. **Add the vars to `.env.example`** with working local defaults where possible.
@@ -132,7 +150,7 @@ CI runs `node-test` (`npm ci` + `npm test`) plus a Docker build with a boot smok
 - **`DIRECTORY_API_KEY` must be issued against main (port 8000), not the playground.** A key issued against the scratch DB dies when that DB is wiped, and the symptom is "directory is temporarily unavailable". Verify with `curl http://localhost:8000/api-keys/self -H "X-API-Key: <key>"`.
 - **Mint directory keys with `uv --project services/team-tracking run team-tracking-keys …`.** A bare invocation can resolve documentation-system's CLI and mint a `doc_`-prefixed key that team-tracking rejects. The token must start with `tt_`.
 - **The bot needs ten env vars to boot** — `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DIRECTORY_BASE_URL`, `DIRECTORY_API_KEY`, `DOC_BASE_URL`, `DOC_API_KEY`, `LLM_BASE_URL`, `LLM_API_KEY`, `VERIFICATION_BASE_URL`, `VERIFICATION_API_KEY`. `MEETING_*` is genuinely optional.
-- **Registering commands is manual and separate from deploying.** A merged command that was never registered doesn't exist to users.
+- **Registering commands happens in the pre-deploy step, not at boot.** `railway.json`'s `preDeployCommand` runs `registerCommands.js` before the new process starts, so a deploy that fails there never starts the new process (Discord's global set may still have been overwritten — [RAILWAY-DEPLOYMENT.md §5](../../docs/RAILWAY-DEPLOYMENT.md#5-register-discord-slash-commands) covers recovery). Don't add a `rest.put(...)` to `index.js` to "make sure" — that would re-register on every restart. And don't tell a release note to run `register:production` by hand; the deploy already did.
 - **Beta commands only appear in the testing guild.** If a `beta: true` command isn't showing up, check `DISCORD_GUILD_ID`.
 
 ## Checklist before you push
