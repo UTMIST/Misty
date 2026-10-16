@@ -102,11 +102,7 @@ class PostgresStorageAdapter:
             )
             .exists()
         )
-        owner = or_(
-            docs.c.owning_person_id == actor.person_id,
-            docs.c.owning_team_id.in_(team_ids),
-        )
-        return or_(owner, grant_exists)
+        return grant_exists
 
     def _grants_for(self, conn, doc_id: UUID) -> list[DocGrant]:
         rows = conn.execute(

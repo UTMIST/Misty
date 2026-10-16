@@ -349,3 +349,42 @@ def test_pg_get_doc_content_meta_scoped_to_requested_doc(adapter):
     # The actor can see `visible` but NOT `secret`. A cross join would leak
     # `secret`'s content metadata because *some* doc is visible to this actor.
     assert adapter.get_doc_content_meta(secret.id, visibility=actor) is None
+
+
+@pytest.mark.parametrize("owner_field", ["owning_person_id", "owning_team_id"])
+def test_ownership_requires_valid_grant_and_source_revocation_hides_doc(adapter, owner_field):
+    doc = _mk(adapter)
+    adapter.update_doc(
+        doc.id, {owner_field: _P1 if owner_field == "owning_person_id" else _T1}, actor="t"
+    )
+    adapter.upsert_doc_content(doc.id, content_text="secret", content_hash="hash", fetched_at=None)
+    actor = Actor(_P1, frozenset({_T1}))
+    assert adapter.get_doc(doc.id, visibility=actor) is None
+    assert adapter.list_docs(visibility=actor) == []
+    assert adapter.get_doc_content(doc.id, visibility=actor) is None
+    assert adapter.get_doc_content_meta(doc.id, visibility=actor) is None
+
+    now = datetime.now(timezone.utc)
+    grant = SourceGrant(
+        grantee_type="person",
+        grantee_id=_P1,
+        source_permission_id="p1",
+        source_principal="one@example.com",
+        source_role="reader",
+    )
+    for grants, visible in [([grant], True), ([], False)]:
+        adapter.replace_source_grants(
+            doc.id,
+            origin="google_drive",
+            grants=grants,
+            synced_at=now,
+            expires_at=now + timedelta(hours=48),
+            actor="sync",
+        )
+        assert (adapter.get_doc(doc.id, visibility=actor) is not None) is visible
+        assert bool(adapter.list_docs(visibility=actor)) is visible
+        assert (adapter.get_doc_content(doc.id, visibility=actor) is not None) is visible
+        assert (adapter.get_doc_content_meta(doc.id, visibility=actor) is not None) is visible
+
+    adapter.add_grant(doc.id, grantee_type="person", grantee_id=_P1, actor="admin")
+    assert adapter.get_doc(doc.id, visibility=actor) is not None

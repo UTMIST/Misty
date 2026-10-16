@@ -78,14 +78,14 @@ expected to pass `X-On-Behalf-Of` with the id of the member who ran the command.
 in-memory adapter calls it directly and the Postgres adapter compiles the same rule to
 SQL, kept in lockstep by parity tests):
 
-1. they personally own it (`owning_person_id` matches), **or**
-2. they're an active member of the owning team (`owning_team_id` ∈ their team ids), **or**
-3. the doc carries a matching grant — manual `org` (everyone), `person` (that person), or
-   manual `team` (a team they're on); a source-derived `team` grant additionally requires
-   Team Tracking to confirm that person's managed Google Group membership is synchronized.
+The doc must carry a valid matching grant — manual `org` (everyone), `person` (that
+person), or manual `team` (a team they're on). Source-derived grants must be unexpired;
+a source-derived `team` grant additionally requires Team Tracking to confirm that person's
+managed Google Group membership is synchronized. Ownership fields provide attribution and
+filtering only; neither personal ownership nor membership in the owning team grants access.
 
 Team membership is resolved live from the directory. **If the directory is unreachable,
-the actor's team set is treated as empty** — a partial fail-closed: personally-owned and
+the actor's team set is treated as empty** — a partial fail-closed: person-granted and
 manual `org`-granted docs still resolve, team-granted ones are withheld rather than leaked.
 
 **Invisible docs return `404`, not `403`**, on every route that takes a `{doc_id}` —
@@ -138,7 +138,7 @@ Every doc-returning endpoint responds with this object:
 | `source_access_attempted_at` | datetime \| null | Last attempted source ACL refresh, successful or not |
 | `active` | bool | `false` = soft-deleted |
 | `tags` | string[] | Lowercased, trimmed |
-| `grants` | DocGrant[] | Who can see this doc beyond its owners — see below |
+| `grants` | DocGrant[] | Who can see this doc — see below |
 | `created_at` / `updated_at` | datetime | |
 | `created_by` / `updated_by` | string | Attested actor |
 
@@ -370,8 +370,8 @@ Scope: `docs:write`. Same request body as `POST`; the grantee is identified in t
 not the path (an `org` grant has no id to put there). Removing a grant that isn't present
 is a no-op. Only the matching manual grant is removed. Returns the updated `Doc`.
 
-Revoking never removes *ownership*-based visibility — an owner keeps access regardless of
-grants.
+After revocation, access requires another valid matching grant. Ownership does not preserve
+access.
 
 ---
 
@@ -406,8 +406,8 @@ same daily drain; run until `attempted` is less than `limit`.
 
 Source grants expire after `SOURCE_ACCESS_MAX_AGE_HOURS` (48 by default). A failed refresh
 does not erase a last-known-good grant immediately, but an extended connector, directory,
-or scheduler outage eventually makes it unusable. Manual grants and ownership remain
-independent and do not expire. `MAX_AGE` must be greater than `REFRESH_AFTER`.
+or scheduler outage eventually makes it unusable. Manual grants remain independent and do
+not expire. Ownership never authorizes access. `MAX_AGE` must be greater than `REFRESH_AFTER`.
 
 ---
 

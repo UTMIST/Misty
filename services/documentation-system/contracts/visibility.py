@@ -38,11 +38,7 @@ def doc_visible(
         return True
     if ctx is DENY:
         return False
-    # ctx is an Actor
-    if owning_person_id is not None and owning_person_id == ctx.person_id:
-        return True
-    if owning_team_id is not None and owning_team_id in ctx.team_ids:
-        return True
+    # Ownership is attribution metadata; only independent grants authorize an Actor.
     for grant in grants:
         grantee_type, grantee_id = grant[:2]
         origin = grant[2] if len(grant) == 3 else "manual"

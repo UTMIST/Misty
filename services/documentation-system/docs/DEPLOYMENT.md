@@ -234,8 +234,8 @@ document independently and reports `{attempted, refreshed, failed}`.
 
 The defaults refresh after 24 hours and expire source-derived grants after 48 hours. A
 connector/directory failure retains the last complete grant set until its existing expiry;
-after that, source grants no longer authorize reads. Manual grants and ownership remain
-available because they are separate, explicit authority. Alert on a non-zero `failed`
+after that, source grants no longer authorize reads. Manual grants remain independent;
+ownership is metadata only and never authorizes access. Alert on a non-zero `failed`
 count or on the scheduler not completing for 24 hours.
 
 Only Drive `user` permissions matching a primary/verified email and Drive `group`

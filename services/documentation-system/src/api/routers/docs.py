@@ -297,7 +297,7 @@ def _refetch_doc_source(
         )
         # Successful zero-grant reconciliation is a revocation. Keep prior
         # bytes at rest but do not refresh them; visibility no longer derives
-        # from the source, and manual/owner access remains explicit.
+        # from the source, and manual grants remain independent.
         if not resolved.grants:
             refreshed = storage.get_doc(doc.id)
             assert refreshed is not None

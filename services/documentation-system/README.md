@@ -171,6 +171,9 @@ The service is built around three swappable Protocols, so no concrete dependency
 
 ## Auth model
 
+Ownership is attribution metadata only. Person-scoped access requires a valid matching
+grant; see the [visibility policy](docs/API.md#visibility-and-x-on-behalf-of).
+
 Auth is **Level 2** (scoped API keys), matching team-tracking:
 
 - Every request needs `X-API-Key`. Keys are either the shared bootstrap env key (`API_KEY`, scope: `admin`) or a per-consumer key issued via the `doc-keys` CLI, stored as an Argon2 hash with a `docs:{read,write}` or `admin` scope set.

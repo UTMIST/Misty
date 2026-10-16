@@ -17,11 +17,13 @@ def test_see_all_and_deny():
     assert _v(DENY, grants=[("org", None)]) is False
 
 
-def test_owner_person_and_team():
+def test_ownership_is_metadata_and_requires_an_independent_grant():
     actor = Actor(person_id=P1, team_ids=frozenset({T1}))
-    assert _v(actor, owner_p=P1) is True
-    assert _v(actor, owner_t=T1) is True
+    assert _v(actor, owner_p=P1) is False
+    assert _v(actor, owner_t=T1) is False
     assert _v(actor, owner_p=P2, owner_t=T2) is False
+    assert _v(actor, owner_p=P1, grants=[("person", P1)]) is True
+    assert _v(actor, owner_t=T1, grants=[("team", T1)]) is True
 
 
 def test_org_grant_visible_to_any_actor():

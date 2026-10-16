@@ -212,9 +212,51 @@ def test_list_docs_visibility():
     hidden = _mk_vis(a, url="https://hidden")
     actor = Actor(person_id=P1, team_ids=frozenset())
     ids = {d.id for d in a.list_docs(visibility=actor)}
+    assert ids == set()
+    a.add_grant(owned.id, grantee_type="person", grantee_id=P1, actor="t")
+    ids = {d.id for d in a.list_docs(visibility=actor)}
     assert owned.id in ids and hidden.id not in ids
     assert a.list_docs(visibility=DENY) == []
     assert len(a.list_docs(visibility=SEE_ALL)) == 2
+
+
+@pytest.mark.parametrize("owner_field", ["owning_person_id", "owning_team_id"])
+def test_ownership_requires_valid_grant_and_source_revocation_hides_doc(store, owner_field):
+    doc = _mk(store)
+    store.update_doc(
+        doc.id, {owner_field: P1 if owner_field == "owning_person_id" else T1}, actor="t"
+    )
+    store.upsert_doc_content(doc.id, content_text="secret", content_hash="hash", fetched_at=None)
+    actor = Actor(P1, frozenset({T1}))
+    assert store.get_doc(doc.id, visibility=actor) is None
+    assert store.list_docs(visibility=actor) == []
+    assert store.get_doc_content(doc.id, visibility=actor) is None
+    assert store.get_doc_content_meta(doc.id, visibility=actor) is None
+
+    now = datetime.now(timezone.utc)
+    grant = SourceGrant(
+        grantee_type="person",
+        grantee_id=P1,
+        source_permission_id="p1",
+        source_principal="one@example.com",
+        source_role="reader",
+    )
+    for grants, visible in [([grant], True), ([], False)]:
+        store.replace_source_grants(
+            doc.id,
+            origin="google_drive",
+            grants=grants,
+            synced_at=now,
+            expires_at=now + timedelta(hours=48),
+            actor="sync",
+        )
+        assert (store.get_doc(doc.id, visibility=actor) is not None) is visible
+        assert bool(store.list_docs(visibility=actor)) is visible
+        assert (store.get_doc_content(doc.id, visibility=actor) is not None) is visible
+        assert (store.get_doc_content_meta(doc.id, visibility=actor) is not None) is visible
+
+    store.add_grant(doc.id, grantee_type="person", grantee_id=P1, actor="admin")
+    assert store.get_doc(doc.id, visibility=actor) is not None
 
 
 def test_upsert_doc_content_round_trips(store):

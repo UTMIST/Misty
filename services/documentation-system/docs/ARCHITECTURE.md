@@ -167,7 +167,7 @@ re-cataloguing the same URL later.
 
 ### `doc_grants`
 
-Who may see a doc, beyond its owners (migrations `003` and `007`). One row per grant:
+Who may see a doc (migrations `003` and `007`). Ownership is metadata only. One row per grant:
 `doc_id` (FK → `docs.id`, `ON DELETE CASCADE`), `grantee_type` (`person` / `team` /
 `org`), `grantee_id` (UUID, **null for `org`**), and `origin` (`manual` or
 `google_drive`). Source rows also retain permission id, normalized principal, role,
@@ -209,11 +209,11 @@ Google is the separate evidence that the Google principal is actually entitled.
 `replace_source_grants` is atomic per document and origin. A successful empty result is a
 revocation; a connector/directory failure keeps the last complete result. Source grants
 expire after the configured maximum age, so a prolonged refresh outage fails closed.
-Manual grants and ownership are independent rows/rules and are never silently created or
-deleted by source reconciliation.
+Manual grants are independent and are never silently created or deleted by source
+reconciliation. Ownership fields are attribution metadata and do not authorize access.
 
 Visibility keeps two team sets in the actor context: ordinary active directory memberships
-for ownership/manual grants, and separately confirmed synchronized Google memberships for
+for manual grants, and separately confirmed synchronized Google memberships for
 source-derived team grants. This prevents a newly added directory member from inheriting a
 Drive document before #237 has actually added them to the Google Group.
 
@@ -272,7 +272,8 @@ Scopes answer "may this key call this endpoint." Visibility answers "which *rows
 see." They compose: a request must pass both.
 
 **One definition, two implementations.** `contracts/visibility.py` holds `doc_visible()`
-— a pure function over (actor context, owning ids, grants). The in-memory adapter calls
+— a pure function over actor context and grants (owning ids never authorize access).
+The in-memory adapter calls
 it directly; the Postgres adapter compiles the *same* rule into SQL so filtering happens
 in the database rather than in Python over a full table scan. That's a genuine duplication
 of logic, and it's held in lockstep by parity tests (`tests/test_visibility.py` plus the
@@ -293,12 +294,12 @@ say *who* they're acting for. The read path additionally **requires** a read sco
 when acting on behalf of someone — least privilege, so a write-only key can't read through
 the on-behalf-of door.
 
-An `Actor` sees a doc if they own it personally, are on the owning team, or a grant
-matches (`org` / their `person` id / one of their teams).
+An `Actor` sees a doc only if a valid grant matches (`org` / their `person` id / one
+of their teams). Ownership remains available for attribution and filtering.
 
 **Team ids are resolved live** from the directory (`get_active_team_ids`). If the
 directory is unreachable the set is treated as **empty** rather than failing the request —
-a partial fail-closed. Personally-owned and `org`-granted docs still resolve; team-granted
+a partial fail-closed. Person-granted and `org`-granted docs still resolve; team-granted
 ones are withheld. Withholding is the safe direction: an outage can hide a doc, never
 expose one.
 
