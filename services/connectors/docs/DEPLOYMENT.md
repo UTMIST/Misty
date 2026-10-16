@@ -25,6 +25,7 @@ Because there is no database and no state, a redeploy is a plain restart — not
 | `CONSUMER_KEYS` | JSON array | See below. Malformed → boot failure. |
 | `GOOGLE_CREDENTIALS_JSON` | base64 of the service-account JSON | May be empty — see [Deploying before Google exists](#deploying-before-google-exists) |
 | `MAX_CONTENT_CHARS` | leave at default | Keep **above** documentation-system's (1,000,000) |
+| `GITHUB_TOKEN` | fine-grained read-only PAT, or empty | Optional. Empty fetches public repositories only; never blocks boot |
 | `MAX_FILE_BYTES` | leave at default (`26214400`) | Pre-download limit for uploaded PDF, `.docx`, and `text/*` files; oversized files return 422 before media download |
 | `REQUEST_TIMEOUT_S` | leave at default (30) | Per-request timeout to Google |
 
@@ -32,7 +33,7 @@ Because there is no database and no state, a redeploy is a plain restart — not
 
 `verify_production_secrets()` runs in `create_app()` outside `local` and refuses to start unless `API_KEY` is overridden. `CONSUMER_KEYS` is separately validated eagerly — `get_key_store()` is called in `create_app()`, so a malformed array kills the container at startup rather than on the first `/fetch`.
 
-`GOOGLE_CREDENTIALS_JSON` is **deliberately excluded** from that check. See below.
+`GOOGLE_CREDENTIALS_JSON` and `GITHUB_TOKEN` are **deliberately excluded** from that check. See below.
 
 ## Consumer keys
 

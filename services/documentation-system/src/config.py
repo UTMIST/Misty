@@ -73,11 +73,11 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
     and must block startup.
 
     `connectors_api_key` is different in kind, not just degree: connectors is
-    a soft dependency. It only backs the four Google-backed sources (`gdocs`,
-    `gsheets`, `gslides`, `gdrive`) — `web` and `github` fetch in-process and
-    never touch it — and `ingest_doc` is designed to turn a connectors
+    a soft dependency. It only backs `github` and the four Google-backed
+    sources (`gdocs`, `gsheets`, `gslides`, `gdrive`) — `web` fetches
+    in-process and never touches it — and `ingest_doc` is designed to turn a connectors
     `FetchError` into a per-doc warning while still cataloguing the doc (see
-    src/ingest.py). Losing connectors means "no Google content," not "broken
+    src/ingest.py). Losing connectors means "no GitHub or Google content," not "broken
     catalog," so a default `connectors_api_key` gets a startup warning
     instead of a boot refusal (see below). This mirrors connectors' own
     `verify_production_secrets` (services/connectors/src/config.py), which

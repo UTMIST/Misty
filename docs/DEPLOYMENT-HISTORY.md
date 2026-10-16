@@ -34,7 +34,7 @@ DB-owning service — each with two branches, one per environment. `llm` and
 **`connectors` has no Railway service in either environment.** Its code ships
 with every promotion and its CI job runs, but nothing is deployed and no
 consumer key has been minted, so production *and* staging documentation-system
-can catalog docs normally but cannot fetch Google source content — each attempt
+can catalog docs normally but cannot fetch GitHub or Google source content — each attempt
 is recorded as a per-doc ingest warning. Standing it up is
 [`RAILWAY-DEPLOYMENT.md`](RAILWAY-DEPLOYMENT.md) steps 2, 3, and 4b.
 

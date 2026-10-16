@@ -52,14 +52,16 @@ which is deliberately non-fatal at ingest: it becomes a warning and never blocks
 - **`WebFetcher`** (`src/fetch/web.py`) — HTTP fetch (5s timeout, follows redirects), parses
   `<title>`, and keeps up to 2000 chars of stripped text as the snapshot. HTTP errors become
   `FetchError`.
-- **`GithubFetcher`** (`src/fetch/github.py`) — network-free: derives an `owner/repo` title
-  from the URL path, no snapshot. (Raw-content fetch is a later enhancement.)
+- **`ConnectorsFetcher`** (`src/fetch/connectors.py`) — calls the connectors service's
+  `POST /fetch`. Backs `github` (repository README or `/blob/` file, titled `owner/repo`)
+  and the four Google sources; the snapshot is derived from the full content returned.
 
 #### The `FetcherRegistry`
 
 `FetcherRegistry` (`src/fetch/registry.py`) maps a `source_id` to a `Fetcher`.
-`default_registry()` registers `{"web": WebFetcher(), "github": GithubFetcher()}` — exactly
-the sources with `content_fetch_enabled`. Any other source raises `FetchUnsupported` (a
+`default_registry()` registers `WebFetcher` for `web` and one `ConnectorsFetcher` each for
+`github`, `gdocs`, `gsheets`, `gslides`, and `gdrive` — exactly the sources with
+`content_fetch_enabled`. Any other source raises `FetchUnsupported` (a
 `FetchError`), which is how auth-gated sources like Google Drive "skip fetching".
 
 ### 3. `DirectoryClient` — ownership validation

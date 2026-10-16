@@ -442,8 +442,8 @@ A **source** describes a kind of URL and how the catalog treats it:
 | `active` | bool | |
 
 The eight seeded sources: `web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`,
-`notion`, `youtube`. Only `web` and `github` currently have a fetcher and
-`content_fetch_enabled: true`.
+`notion`, `youtube`. `web`, `github`, and the four Google sources have a fetcher and
+`content_fetch_enabled: true`; `github` and the Google sources fetch through connectors.
 
 ## `GET /sources/{id}` — get one source
 

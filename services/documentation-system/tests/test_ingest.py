@@ -165,6 +165,34 @@ def test_ingest_fetch_failure_warns_and_falls_back_to_url(store):
     assert any("fetch" in w for w in res.warnings)
 
 
+def test_ingest_github_connectors_failure_still_creates_doc(store):
+    import httpx
+
+    from src.fetch.connectors import ConnectorsFetcher
+    from src.fetch.registry import FetcherRegistry
+
+    def handler(request):
+        return httpx.Response(502, json={"detail": "source upstream error"})
+
+    fetcher = ConnectorsFetcher(
+        source_id="github",
+        base_url="http://connectors",
+        api_key="k",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    res = ingest_doc(
+        DocIngest(url="https://github.com/a/b"),
+        storage=store,
+        fetchers=FetcherRegistry({"github": fetcher}),
+        directory=FakeDirectory(),
+        actor="bot",
+    )
+    assert res.created is True
+    assert res.doc.source_id == "github"
+    assert res.doc.content_snapshot is None
+    assert any("502" in w for w in res.warnings)
+
+
 def test_ingest_auth_source_warns_no_snapshot(store):
     res = ingest_doc(
         DocIngest(url="https://drive.google.com/file/d/z"),
