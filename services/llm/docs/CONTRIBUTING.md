@@ -17,7 +17,9 @@ Read [API.md](API.md#client-executed-tools) before changing structured messages.
 Wire models stay in `contracts/`; provider dataclasses stay in
 `src/providers/base.py`; only the chat router maps between them. Framework-free
 JSON validation helpers may be shared without importing the wire models into
-providers. Update both Bedrock codecs for a supported block or tool field.
+providers. Update every relevant provider codec for a supported block or tool field. OpenAI
+uses Responses and carries encrypted reasoning state; Bedrock carries signed reasoning.
+Provider-specific blocks must fail before inference on incompatible backends.
 History validation exists at the HTTP boundary (`ChatRequest`) and the reusable
 provider boundary (`validate_tool_request`); change and test both together so
 invalid HTTP input stays a 422 instead of becoming a provider-side 502.
@@ -51,8 +53,8 @@ uv sync --extra dev
 uv run pytest          # confirm the environment works — no Docker, no network, no credentials
 ```
 
-Real calls need AWS credentials for `/chat` and `OPENAI_API_KEY` for `/embed`; tests use
-fakes. Keep real values in gitignored `.env`, and placeholders only in `.env.example`.
+Default chat and embeddings share `OPENAI_API_KEY`; optional Bedrock chat needs AWS
+credentials. Tests use fakes. Keep real values in gitignored `.env`, and placeholders only in `.env.example`.
 See [DEPLOYMENT.md](DEPLOYMENT.md#variables) for the non-local credential boot checks.
 
 ## Embedding guards
@@ -63,7 +65,7 @@ Preserve the [batching and timeout guarantees](API.md#batching-and-timeouts).
 
 ## Walkthrough: add a chat provider backend
 
-Say you're adding a direct-to-Anthropic-API backend alongside the two Bedrock chat ones.
+Say you're adding a direct-to-Anthropic-API backend alongside OpenAI and the two Bedrock chat ones.
 
 1. **Implement the Protocol** at `src/providers/anthropic_direct.py`. Copy `bedrock_converse.py` for shape:
 
@@ -98,6 +100,7 @@ Say you're adding a direct-to-Anthropic-API backend alongside the two Bedrock ch
        )
 
    PROVIDERS: dict[str, Callable[[Settings], LLMProvider]] = {
+       "openai": _build_openai,
        "bedrock": _build_bedrock,
        "bedrock-converse": _build_bedrock_converse,
        "anthropic-direct": _build_anthropic_direct,
@@ -105,6 +108,8 @@ Say you're adding a direct-to-Anthropic-API backend alongside the two Bedrock ch
    ```
 
    `get_provider` raises `ValueError` for an unknown `LLM_PROVIDER`, so a typo fails at wiring time.
+   Add the provider's model set to `MODELS_BY_PROVIDER` in `contracts/models.py` too;
+   boot validation checks this catalog before wiring.
 
 3. **Add its config** to `src/config.py` (`SecretStr` for the key) and `.env.example`. Decide whether `verify_production_secrets()` should require it — see the config walkthrough below.
 
@@ -116,9 +121,10 @@ Say you're adding a direct-to-Anthropic-API backend alongside the two Bedrock ch
 
 Model names are an allowlist, not a passthrough.
 
-1. Add it to `ALLOWED_MODELS` in `contracts/chat.py`.
+1. Add it to the appropriate provider set in `contracts/models.py`. The union is
+   the wire allowlist; each provider set also validates boot configuration and overrides.
 2. **Map it in each provider that needs a mapping.** `BedrockConverseProvider` keeps an explicit neutral-name → inference-profile-id table; a name in `ALLOWED_MODELS` with no entry there will fail at call time rather than validation time.
-3. Confirm the AWS account actually has access to it in the configured region — this is the usual cause of a 502 on a newly added model.
+3. Confirm the selected provider account has access (and the AWS region for Bedrock) — this is the usual cause of a 502 on a newly added model.
 4. Add a validation test (the new name is accepted, a bogus one still 422s) and update the `model` row in [API.md](API.md) and the README.
 
 For embeddings, keep `ALLOWED_EMBED_MODELS` in `contracts/embed.py` and the id/dimension
@@ -129,7 +135,8 @@ record model changes and downstream compatibility in [ARCHITECTURE.md](ARCHITECT
 
 1. Add the field to `Settings` in `src/config.py` (`SecretStr` if credential-shaped).
 2. Add it to `.env.example` with a working local default and a comment.
-3. Decide whether `verify_production_secrets()` should require it outside `local`. Ask: *would a deploy missing this be broken in a confusing way at request time?* If yes, add it — a misconfigured deploy should die at boot. `API_KEY`, `AWS_REGION`, and `OPENAI_API_KEY` are required for exactly this reason.
+3. Decide whether `verify_production_secrets()` should require it outside `local`. Ask: *would a deploy missing this be broken in a confusing way at request time?* If yes, add it — a misconfigured deploy should die at boot. `API_KEY` and `OPENAI_API_KEY` are required for exactly this reason; `AWS_REGION`
+   is required only for Bedrock chat.
 4. Add a row to the README's configuration table. New deploy variables also require updates to [DEPLOYMENT.md](DEPLOYMENT.md) and the [platform Railway guide](../../../docs/RAILWAY-DEPLOYMENT.md).
 5. Add a case to `tests/test_config.py` — there are existing ones for both "boot check passes" and "boot check refuses".
 

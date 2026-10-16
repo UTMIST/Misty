@@ -4,6 +4,8 @@ from typing import Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from contracts.models import MODELS_BY_PROVIDER
+
 # Built-in dev secret. Only acceptable when llm_env == "local"; any other
 # environment must override API_KEY (see verify_production_secrets), because the
 # env-bootstrap auth path grants admin scope to whoever presents this value.
@@ -32,12 +34,12 @@ class Settings(BaseSettings):
     # roster of consumers and their scopes. Only src/api/deps.py, which hands
     # the raw JSON to key_store_from_config, should call .get_secret_value().
     consumer_keys: SecretStr = SecretStr("")
-    llm_provider: str = "bedrock-converse"
-    llm_model: str = "claude-sonnet-4-6"
+    llm_provider: str = "openai"
+    llm_model: str = "gpt-6.1-sol"
     # Selected independently of the chat pair above.
     embed_model: str = "openai-embed-3-small"
     # SecretStr for the same reason as api_key above; unwrapped by
-    # registry.get_embedding_provider and verify_production_secrets.
+    # registry's chat/embedding builders and verify_production_secrets.
     openai_api_key: SecretStr = SecretStr("")
     # Aggregate input guard for one /embed request, in characters.
     # Per-input caps in contracts/embed.py multiply across a batch:
@@ -63,6 +65,10 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
     Called from create_app(), so a bad deploy dies at startup, not first request.
     """
     settings = settings or get_settings()
+    if settings.llm_provider not in MODELS_BY_PROVIDER:
+        raise ValueError("unknown LLM_PROVIDER")
+    if settings.llm_model not in MODELS_BY_PROVIDER[settings.llm_provider]:
+        raise ValueError("LLM_MODEL is not supported by LLM_PROVIDER")
     if settings.llm_env == "local":
         return
     insecure: list[str] = []
@@ -71,7 +77,7 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
     # forever and this fail-fast guard would stop firing without any test noticing.
     if settings.api_key.get_secret_value() == DEFAULT_DEV_API_KEY:
         insecure.append("API_KEY")
-    if not settings.aws_region:
+    if settings.llm_provider in {"bedrock", "bedrock-converse"} and not settings.aws_region:
         insecure.append("AWS_REGION")
     if not settings.openai_api_key.get_secret_value():
         insecure.append("OPENAI_API_KEY")

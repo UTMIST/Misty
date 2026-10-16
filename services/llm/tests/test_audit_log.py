@@ -65,7 +65,7 @@ def test_success_line_has_model_and_tokens(env_key, capsys):
     entry = _last_line(capsys)
     assert entry["path"] == "/chat"
     assert entry["status"] == 200
-    assert entry["model"] == "claude-sonnet-4-6"  # neutral default, not the bedrock id
+    assert entry["model"] == "gpt-6.1-sol"  # configured default, not the fake response model
     assert entry["input_tokens"] == 11
     assert entry["output_tokens"] == 7
     assert entry["key_name"] == "env-bootstrap"
@@ -88,7 +88,9 @@ def test_line_omits_prompt_and_key(env_key, capsys):
     assert "env-bootstrap-key-value" not in line  # the raw API key never appears
 
 
-def test_error_line_has_model_no_tokens(env_key, capsys):
+def test_error_line_has_model_no_tokens(env_key, capsys, monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "bedrock-converse")
+    monkeypatch.setenv("LLM_MODEL", "claude-sonnet-4-6")
     client, headers = _client(env_key, _FakeProvider(exc=ProviderUnavailable("boom")))
     resp = client.post(
         "/chat",
