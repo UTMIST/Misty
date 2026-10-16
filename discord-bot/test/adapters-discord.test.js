@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MessageFlags } from 'discord.js';
+import { ChannelType, MessageFlags } from 'discord.js';
 import { defineCommand } from '../src/defineCommand.js';
 import {
   interactionToIntent,
@@ -360,6 +360,41 @@ function fakeRecordInteraction({ subcommand, voiceChannel = null, calls, guildId
 // subcommand auth (start='linked', status/stop='public') straight from metadata.
 const recordCommands = new Map([['record', record]]);
 
+for (const channelType of [ChannelType.GuildVoice, ChannelType.GuildStageVoice]) {
+  for (const subtitles of [true, false]) {
+    test(`/record start refuses voice-channel text chat (${channelType}, subtitles:${subtitles})`, async () => {
+      const calls = [];
+      let started = false;
+      const client = fakeClient();
+      wireDiscordClient(client, {
+        commands: recordCommands,
+        appContext: {
+          directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) },
+          meetingSurface: {
+            start: () => {
+              started = true;
+              return { status: 'recording' };
+            },
+          },
+        },
+      });
+      const interaction = fakeRecordInteraction({
+        subcommand: 'start',
+        voiceChannel: { id: 'vc1' },
+        calls,
+      });
+      interaction.channel.type = channelType;
+      interaction.options.getBoolean = () => subtitles;
+      await client.emit(interaction);
+      assert.equal(started, false);
+      const content = calls.find((c) => c.method === 'editReply').payload.content;
+      assert.match(content, /not supported.*voice.channel.*chat/i);
+      assert.match(content, /text channel/i);
+      assert.match(content, /no recording.*started/i);
+    });
+  }
+}
+
 test('/record start is denied for an UNLINKED caller and never starts recording', async () => {
   const calls = [];
   let startCalled = false;
@@ -404,8 +439,35 @@ test('/record start proceeds for a LINKED caller in a voice channel', async () =
 
   assert.ok(startArgs, 'a linked caller should reach meetingSurface.start');
   assert.equal(startArgs.voiceChannel, voiceChannel);
+  assert.equal(startArgs.subtitles, true);
   const edit = calls.find((c) => c.method === 'editReply');
   assert.match(edit.payload.content, /recording/i);
+});
+
+test('/record start passes an explicit subtitles:false through to the meeting', async () => {
+  let startArgs;
+  const appContext = {
+    directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) },
+    meetingSurface: {
+      start: (args) => {
+        startArgs = args;
+        return { status: 'recording' };
+      },
+    },
+  };
+  const client = fakeClient();
+  wireDiscordClient(client, { commands: recordCommands, appContext });
+  const interaction = fakeRecordInteraction({
+    subcommand: 'start',
+    voiceChannel: { id: 'vc1' },
+    calls: [],
+  });
+  interaction.options.getBoolean = (name) => {
+    assert.equal(name, 'subtitles');
+    return false;
+  };
+  await client.emit(interaction);
+  assert.equal(startArgs.subtitles, false);
 });
 
 test('/record start fails closed (no start) when the directory is unavailable', async () => {
@@ -517,6 +579,29 @@ test('/record status is PUBLIC: works for an unlinked caller without a directory
   const edit = calls.find((c) => c.method === 'editReply');
   assert.match(edit.payload.content, /no recording in progress/i);
 });
+
+for (const hasLocation of [true, false]) {
+  test(`/record status links active subtitles (voice location:${hasLocation})`, async () => {
+    const calls = [];
+    const client = fakeClient();
+    wireDiscordClient(client, {
+      commands: recordCommands,
+      appContext: {
+        meetingSurface: {
+          status: () => ({ status: 'recording', elapsedMs: 12_000, subtitleThreadId: 'sub1' }),
+          activeSession: () =>
+            hasLocation ? { sessionId: 's1', voiceChannel: { id: 'vc1' } } : null,
+        },
+      },
+    });
+    const interaction = fakeRecordInteraction({ subcommand: 'status', calls });
+    interaction.channel.type = ChannelType.GuildVoice;
+    await client.emit(interaction);
+    const content = calls.find((c) => c.method === 'editReply').payload.content;
+    assert.match(content, /Live subtitles: <#sub1>/);
+    assert.match(content, /12s elapsed/);
+  });
+}
 
 test('/record status explains that Misty will join the voice channel when recording starts', async () => {
   const calls = [];

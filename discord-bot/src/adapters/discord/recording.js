@@ -1,4 +1,4 @@
-import { MessageFlags } from 'discord.js';
+import { ChannelType, MessageFlags } from 'discord.js';
 import { authMessages } from '../../messages/auth.js';
 import { resolvePrincipal } from '../../auth/principal.js';
 import { authorize } from '../../auth/policy.js';
@@ -156,6 +156,15 @@ export async function handleRecordInteraction(interaction, appContext, recordCom
   }
 
   if (subcommand === 'start') {
+    if (
+      interaction.channel?.type === ChannelType.GuildVoice ||
+      interaction.channel?.type === ChannelType.GuildStageVoice
+    ) {
+      await reply(
+        'Starting a recording is not supported in voice-channel text chat. Run `/record start` in a server text channel while connected to voice. No recording was started.',
+      );
+      return;
+    }
     const voiceChannel = interaction.member?.voice?.channel;
     if (!voiceChannel) {
       await reply(
@@ -180,6 +189,7 @@ export async function handleRecordInteraction(interaction, appContext, recordCom
         // started the recording, even when auto-stop ends it.
         requesterId: interaction.user.id,
         name: interaction.options.getString?.('name') ?? null,
+        subtitles: interaction.options.getBoolean?.('subtitles') ?? true,
       });
     } catch (e) {
       console.error('meetingSurface.start failed:', e.message);
@@ -215,12 +225,14 @@ export async function handleRecordInteraction(interaction, appContext, recordCom
     if (result.status === 'not-recording') await reply(noRecordingMessage(interaction));
     else {
       const active = activeRecording(appContext.meetingSurface, interaction.guildId);
-      if (active) await reply(activeStatusMessage(interaction, result, active, resolvedBotId));
-      else {
-        await reply(
-          `🔴 Misty is recording (${Math.round((result.elapsedMs ?? 0) / 1000)}s elapsed), but its voice channel location is unavailable.`,
-        );
-      }
+      const content = active
+        ? activeStatusMessage(interaction, result, active, resolvedBotId)
+        : `🔴 Misty is recording (${Math.round((result.elapsedMs ?? 0) / 1000)}s elapsed), but its voice channel location is unavailable.`;
+      await reply(
+        result.subtitleThreadId
+          ? `${content}\nLive subtitles: <#${result.subtitleThreadId}>`
+          : content,
+      );
     }
     return;
   }

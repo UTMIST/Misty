@@ -12,6 +12,7 @@ of any AWS SDK/network/credential dependency.
 import asyncio
 import contextlib
 import logging
+from time import monotonic
 
 LANGUAGE_CODE = "en-US"
 MEDIA_ENCODING = "pcm"
@@ -62,7 +63,8 @@ class _StreamingTranscription:
     so ``send()`` never blocks the ingest path and never touches asyncio state
     from the wrong thread.
 
-    Public contract: ``start`` / ``send`` / ``words`` / ``aclose`` / ``abort``.
+    Public contract: ``start`` / ``send`` / ``words`` / ``aclose`` / ``abort``,
+    plus optional ``set_final_callback`` and the ``incomplete`` flush indicator.
 
     Restarts: AWS ends a streaming session on its own (idle timeout, or the 4h
     per-stream cap). Each session reports word times relative to ITS OWN start,
@@ -82,6 +84,8 @@ class _StreamingTranscription:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task | None = None
         self._words: list[dict] = []
+        self._on_final = None
+        self.incomplete = False
         self._closing = False
         # Distinct from ``_closing``: abort() is a hard teardown, and it can
         # land BEFORE the scheduled _spawn() has run. ``_spawn`` checks this so
@@ -93,6 +97,33 @@ class _StreamingTranscription:
         # what send() accepted; ``_delivered_bytes`` what actually reached AWS).
         self._sent_bytes = 0
         self._delivered_bytes = 0
+        # TEMP_SUBTITLE_LATENCY: temporary measurement state; remove after branch testing.
+        self._latency_started_at: float | None = None
+        self._latency_events: set[str] = set()
+
+    def _measure_latency(self, event: str) -> None:
+        # TEMP_SUBTITLE_LATENCY: removable stub; IDs/timings only, never audio or text.
+        # Remove this helper, its state/import, and its call sites after branch testing.
+        if event in self._latency_events:
+            return
+        now = monotonic()
+        if self._latency_started_at is None:
+            self._latency_started_at = now
+        self._latency_events.add(event)
+        _logger.info(
+            "TEMP_SUBTITLE_LATENCY stream_id=%s event=%s elapsed_ms=%.1f",
+            id(self),
+            event,
+            (now - self._latency_started_at) * 1000,
+        )
+
+    def set_final_callback(self, callback) -> None:
+        """Observe each immutable final result on the pump's event loop.
+
+        The observer must be synchronous/nonblocking. Subtitle delivery never
+        owns the transcript: store words first and isolate observer failures.
+        """
+        self._on_final = callback
 
     def _resolve_client(self):
         if self._client is None:
@@ -131,6 +162,7 @@ class _StreamingTranscription:
             _logger.debug("dropping %s bytes of audio: stream is closing", len(pcm))
             return
         try:
+            self._measure_latency("first_audio_queued")  # TEMP_SUBTITLE_LATENCY
             self._loop.call_soon_threadsafe(self._queue.put_nowait, pcm)
         except RuntimeError:
             pass  # loop already closed; nothing to do
@@ -215,6 +247,7 @@ class _StreamingTranscription:
                 if not (self._aborted and self._task.cancelled()):
                     raise
             except Exception as exc:  # noqa: BLE001 -- finalize must not raise
+                self.incomplete = True
                 _logger.warning("transcription stream ended with an error: %s", exc)
         return list(self._words)
 
@@ -223,6 +256,7 @@ class _StreamingTranscription:
         the pump so the AWS stream is released instead of lingering until its
         idle timeout. Fire-and-forget: no results are collected."""
         self._aborted = True
+        self.incomplete = True
         self._closing = True
         if self._task is not None and not self._task.done():
             self._task.cancel()
@@ -271,6 +305,7 @@ class _StreamingTranscription:
                 # refused, throttled, credentials). Those do count.
                 failures += 1
                 if failures >= _MAX_SESSION_FAILURES:
+                    self.incomplete = True
                     _logger.warning(
                         "transcription failed %s times in a row (%s); giving up on this "
                         "speaker -- words already finalized are kept",
@@ -289,6 +324,7 @@ class _StreamingTranscription:
             if self._delivered_bytes == delivered_before:
                 barren_sessions += 1
                 if barren_sessions >= _MAX_BARREN_SESSIONS:
+                    self.incomplete = True
                     _logger.warning(
                         "%s consecutive Transcribe sessions ended without accepting audio; "
                         "giving up on this speaker",
@@ -319,6 +355,7 @@ class _StreamingTranscription:
         # ``_sent_bytes``, which also counts audio still sitting in the queue
         # and about to go through THIS session at its own relative time zero.
         sent_bytes_at_stream_start = self._delivered_bytes
+        self._measure_latency("aws_connect_started")  # TEMP_SUBTITLE_LATENCY
         stream = await asyncio.wait_for(
             client.start_stream_transcription(
                 language_code=LANGUAGE_CODE,
@@ -327,6 +364,7 @@ class _StreamingTranscription:
             ),
             SESSION_CONNECT_TIMEOUT_S,
         )
+        self._measure_latency("aws_connected")  # TEMP_SUBTITLE_LATENCY
         offset_ms = sent_bytes_at_stream_start // self._bytes_per_ms
 
         async def consume() -> None:
@@ -337,8 +375,17 @@ class _StreamingTranscription:
                 for result in transcript.results or []:
                     # Partials get revised; only finals may reach the transcript.
                     if result.is_partial:
+                        self._measure_latency("first_partial")  # TEMP_SUBTITLE_LATENCY
                         continue
-                    self._words.extend(_words_from_result(result, offset_ms))
+                    words = _words_from_result(result, offset_ms)
+                    self._words.extend(words)
+                    if words:
+                        self._measure_latency("first_final")  # TEMP_SUBTITLE_LATENCY
+                    if words and self._on_final is not None:
+                        try:
+                            self._on_final(words)
+                        except Exception:  # noqa: BLE001 -- subtitles are optional
+                            _logger.warning("subtitle final-result observer failed")
 
         consume_task = asyncio.ensure_future(consume())
         ended = False
@@ -384,6 +431,7 @@ class _StreamingTranscription:
                     try:
                         await asyncio.wait_for(consume_task, FINAL_FLUSH_TIMEOUT_S)
                     except asyncio.TimeoutError:
+                        self.incomplete = True
                         _logger.warning(
                             "timed out waiting %ss for final Transcribe results",
                             FINAL_FLUSH_TIMEOUT_S,

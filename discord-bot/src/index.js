@@ -5,6 +5,7 @@ import { commands } from './commands/index.js';
 import { startHealthServer } from './healthServer.js';
 import { wireDiscordClient } from './adapters/discord/index.js';
 import { makeAttachmentPoster, makeChannelNotifier } from './adapters/discord/meetingPosts.js';
+import { makeSubtitleAdapter } from './adapters/discord/subtitles.js';
 import { runtimeMode } from './runtimeMode.js';
 
 async function main() {
@@ -36,6 +37,7 @@ async function main() {
   const appContext = createAppContext(config, {
     poster: makeAttachmentPoster(),
     notify: makeChannelNotifier(),
+    subtitleAdapter: makeSubtitleAdapter(),
   });
 
   if (enableDiscord) {
