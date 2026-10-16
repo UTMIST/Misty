@@ -387,7 +387,10 @@ class PostgresStorageAdapter:
         actor: str,
     ) -> bool:
         with self._engine.begin() as conn:
-            exists = conn.execute(select(docs.c.id).where(docs.c.id == doc_id)).one_or_none()
+            # Serialize complete replacements even when no grant rows exist yet.
+            exists = conn.execute(
+                select(docs.c.id).where(docs.c.id == doc_id).with_for_update()
+            ).one_or_none()
             if exists is None:
                 return False
             conn.execute(

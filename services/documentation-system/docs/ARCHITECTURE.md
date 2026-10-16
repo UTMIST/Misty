@@ -206,8 +206,11 @@ absent from the catalog's source-backed audience until an explicit supported map
 exists. Email verification identifies the UTMIST person; the permission returned by
 Google is the separate evidence that the Google principal is actually entitled.
 
-`replace_source_grants` is atomic per document and origin. A successful empty result is a
-revocation; a connector/directory failure keeps the last complete result. Source grants
+`replace_source_grants` is atomic per document and origin. Postgres locks the document row
+before deleting grants, holding the lock through insertion and timestamp updates so concurrent
+replacements leave one complete ACL snapshot, even when the prior grant set is empty.
+A successful empty result is a revocation; a connector/directory failure keeps the last
+complete result. Source grants
 expire after the configured maximum age, so a prolonged refresh outage fails closed.
 Manual grants are independent and are never silently created or deleted by source
 reconciliation. Ownership fields are attribution metadata and do not authorize access.

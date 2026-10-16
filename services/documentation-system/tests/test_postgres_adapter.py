@@ -1,9 +1,12 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Event, local
+from time import monotonic, sleep
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 
 from contracts.storage import DuplicateActiveUrl
 from contracts.types import DocIngest, SourceGrant
@@ -180,6 +183,91 @@ def test_org_grant_partial_unique_pg(adapter):
         adapter.add_grant(d.id, grantee_type="org", grantee_id=None, actor="t") is True
     )  # idempotent
     assert len(adapter.list_grants(d.id)) == 1
+
+
+def test_concurrent_source_grant_replacements_never_leave_union_pg(adapter):
+    doc = _mk(adapter, url="https://concurrent-source-grants.com")
+    assert adapter.list_grants(doc.id) == []
+    now = datetime.now(timezone.utc)
+    first_deleted, second_started, second_deleted = Event(), Event(), Event()
+    release_first, release_second = Event(), Event()
+    snapshot = local()
+    second_pid = []
+
+    def before_execute(conn, cursor, statement, parameters, context, executemany):
+        if getattr(snapshot, "name", None) == "second" and not second_pid:
+            second_pid.append(conn.connection.driver_connection.info.backend_pid)
+            second_started.set()
+
+    def after_execute(conn, cursor, statement, parameters, context, executemany):
+        if not context.isdelete or context.compiled.statement.table.name != "doc_grants":
+            return
+        if getattr(snapshot, "name", None) == "first":
+            first_deleted.set()
+            assert release_first.wait(10), "first replacement was not released"
+        elif getattr(snapshot, "name", None) == "second":
+            second_deleted.set()
+            assert release_second.wait(10), "second replacement was not released"
+
+    def replace(name, person_id, synced_at):
+        snapshot.name = name
+        return adapter.replace_source_grants(
+            doc.id,
+            origin="google_drive",
+            grants=[
+                SourceGrant(
+                    grantee_type="person",
+                    grantee_id=person_id,
+                    source_permission_id=name,
+                    source_principal=f"{name}@example.com",
+                    source_role="reader",
+                )
+            ],
+            synced_at=synced_at,
+            expires_at=synced_at + timedelta(hours=48),
+            actor=name,
+        )
+
+    engine = adapter._engine
+    event.listen(engine, "before_cursor_execute", before_execute)
+    event.listen(engine, "after_cursor_execute", after_execute)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(replace, "first", _P1, now)
+            try:
+                assert first_deleted.wait(5)
+                second = executor.submit(replace, "second", UUID(int=2), now + timedelta(minutes=1))
+                assert second_started.wait(5)
+                # Wait until B either blocks on A's document lock or (without the
+                # fix) deletes the empty grant set before A has inserted anything.
+                blocked = False
+                deadline = monotonic() + 5
+                while not second_deleted.is_set() and monotonic() < deadline:
+                    with engine.connect() as conn:
+                        blocked = conn.execute(
+                            text(
+                                "SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"
+                            ),
+                            {"pid": second_pid[0]},
+                        ).scalar_one()
+                    if blocked:
+                        break
+                    sleep(0.01)
+                assert blocked or second_deleted.is_set(), "second replacement never reached DB"
+                release_first.set()
+                assert first.result(timeout=5) is True
+                release_second.set()
+                assert second.result(timeout=5) is True
+            finally:
+                release_first.set()
+                release_second.set()
+    finally:
+        event.remove(engine, "before_cursor_execute", before_execute)
+        event.remove(engine, "after_cursor_execute", after_execute)
+
+    assert [grant.grantee_id for grant in adapter.list_grants(doc.id)] == [UUID(int=2)]
+    assert adapter.get_doc(doc.id).source_access_synced_at == now + timedelta(minutes=1)
+    assert blocked is True
 
 
 def test_replace_source_grants_preserves_manual_and_revokes_old_source_rows_pg(adapter):
