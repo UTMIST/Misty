@@ -252,7 +252,7 @@ team-tracking-backed ownership, tags, soft delete, scoped API keys, and both sto
 **Deferred (per design §3/§11 non-goals):**
 
 - Full-text / semantic search over `content_snapshot` — the snapshot is stored for future indexing but no search endpoint exists yet.
-- An in-process scheduler or queue — Railway (or another external scheduler) calls the bounded refresh endpoint daily.
+- An in-process scheduler or queue — Railway (or another external scheduler) calls the bounded refresh endpoint hourly; see the [refresh schedule](docs/DEPLOYMENT.md#source-access-refresh-schedule).
 - Additional fetchers — Notion and YouTube remain registered sources without fetcher implementations.
 - Bulk import — ingest is one URL per request; no CSV/bulk endpoint.
 - Pagination — list endpoints return all matching rows, adequate for current catalog size.

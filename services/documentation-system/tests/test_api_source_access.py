@@ -8,6 +8,7 @@ from contracts.fetcher import FetchResult, SourcePermission
 from src.api.app import create_app
 from src.api.deps import get_directory, get_fetchers, get_storage
 from src.api.hashing import generate_key
+from src.api.routers import docs as docs_router
 from src.storage.in_memory import InMemoryStorageAdapter
 from tests.conftest import build_seed_sources
 
@@ -162,3 +163,47 @@ def test_scheduled_refresh_skips_fetch_disabled_sources_before_applying_limit(ct
     assert store.get_doc_content(UUID(disabled["id"])) is None
     assert store.get_doc(UUID(disabled["id"])).source_access_attempted_at is None
     assert client.post("/docs/source-access/refresh-due", headers=ADMIN).json()["attempted"] == 0
+
+
+def test_hourly_schedule_refreshes_delayed_document_without_hourly_downloads(ctx, monkeypatch):
+    client, store, fetchers, obo = ctx
+    doc = client.post(
+        "/docs",
+        headers=ADMIN,
+        json={"url": "https://docs.google.com/document/d/delayed/edit"},
+    ).json()["doc"]
+    job_start = datetime.now(timezone.utc)
+    synced_at = job_start + timedelta(minutes=2)
+    store.update_doc(
+        UUID(doc["id"]),
+        {
+            "source_access_synced_at": synced_at,
+            "source_access_attempted_at": synced_at,
+        },
+        actor="test",
+    )
+    clock = [job_start + timedelta(hours=24)]
+
+    class ControlledDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+
+    monkeypatch.setattr(docs_router, "datetime", ControlledDatetime)
+    fetchers.calls.clear()
+    # Next day's midnight job is two minutes too early; the next hourly check is due.
+    assert client.post("/docs/source-access/refresh-due", headers=ADMIN).json()["attempted"] == 0
+    assert fetchers.calls == []
+    clock[0] = job_start + timedelta(hours=25)
+    assert client.post("/docs/source-access/refresh-due", headers=ADMIN).json() == {
+        "attempted": 1,
+        "refreshed": 1,
+        "failed": 0,
+    }
+    refreshed = store.get_doc(UUID(doc["id"]))
+    assert refreshed.source_access_synced_at == clock[0]
+    assert clock[0] < synced_at + timedelta(hours=48)
+    assert len(fetchers.calls) == 1
+    clock[0] = job_start + timedelta(hours=26)
+    assert client.post("/docs/source-access/refresh-due", headers=ADMIN).json()["attempted"] == 0
+    assert len(fetchers.calls) == 1

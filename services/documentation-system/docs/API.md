@@ -410,7 +410,8 @@ older than
 `SOURCE_ACCESS_REFRESH_AFTER_HOURS` (24 by default), refreshes each independently, and
 returns `{ "attempted", "refreshed", "failed" }`. One failed document does not stop the
 batch. Failed rows record their attempt time, so they do not starve later rows during the
-same daily drain; run until `attempted` is less than `limit`. Disabled sources are skipped
+same hourly drain; run until `attempted` is less than `limit`. See the
+[refresh schedule](DEPLOYMENT.md#source-access-refresh-schedule). Disabled sources are skipped
 before applying the batch limit; neither their content nor ACL is fetched automatically.
 
 Source grants expire after `SOURCE_ACCESS_MAX_AGE_HOURS` (48 by default). A failed refresh

@@ -227,9 +227,12 @@ repoints the consumer; the previous key stays active until you revoke it
 manually (`team-tracking-keys revoke <id>`).
 
 Configure a Railway cron/external scheduler to call documentation-system's
-`POST /docs/source-access/refresh-due?limit=10` daily with a `docs:write` key, repeating
+`POST /docs/source-access/refresh-due?limit=10` hourly (`0 * * * *`) with a `docs:write` key, repeating
 until `attempted < limit`. Source-derived grants stop authorizing reads after 48 hours
-without a complete successful refresh.
+without a complete successful refresh. Eligibility still defaults to 24 hours; hourly checks
+avoid skipping a whole day when a document's prior refresh finished after the job started.
+See the service's [refresh schedule](../services/documentation-system/docs/DEPLOYMENT.md#source-access-refresh-schedule)
+for batching and disabled-source behavior.
 
 > **Gotcha — `src` package collision when minting keys.** Both
 > `services/team-tracking` and `services/documentation-system` declare a top-level

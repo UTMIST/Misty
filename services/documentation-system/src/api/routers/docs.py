@@ -105,7 +105,7 @@ def refresh_due_source_access(
     actor: str = Depends(get_actor),
     _: AuthedKey = Depends(require_scope("docs:write")),
 ) -> SourceAccessRefreshResult:
-    """Refresh a bounded batch; intended for the documented daily scheduler."""
+    """Refresh a bounded batch; intended for the documented hourly scheduler."""
     settings = get_settings()
     due_before = datetime.now(timezone.utc) - timedelta(
         hours=settings.source_access_refresh_after_hours
