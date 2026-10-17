@@ -20,6 +20,110 @@ The OpenAPI schema is the authoritative, always-current contract. This page expl
 *semantics* the schema can't — idempotency, degrade behavior, and error meaning — and
 links to the schema rather than restating it.
 
+## Authorized retrieval: `POST /search`
+
+This is the shared contract for member search (#210), helper answers (#71), and
+evaluation (#178). The portable [retrieval fixture](fixtures/retrieval.json)
+contains synthetic seed data, sparse fake vectors, and HTTP exchanges for all
+three consumers. Expand sparse vectors with zeros to 1536 values; never call an
+embedding provider for this fixture. `X-API-Key` values are symbolic fixture keys.
+
+The body is `{"query":"CPSIF", "k":10}`. `query` must be nonblank UTF-8,
+contain no NUL, and be at most 2000 Unicode code points. Surrounding whitespace
+is stripped. `k` is an integer from 1 to 50, default 10. Extra fields are rejected,
+including caller-supplied teams, vectors, models, and identity.
+
+Every request needs `docs:read` (or `docs:read:all`/`admin`) and exactly one
+authenticated context:
+
+- Person/DM: `X-On-Behalf-Of: <person UUID>` and literal `act-as-user` scope.
+- Channel: `X-Guild-ID: <decimal snowflake>` and `X-Channel-ID: <decimal snowflake>`,
+  with literal `act-as-channel` scope. The service resolves the configured teams
+  through the authenticated directory API and checks their synced Google Groups.
+
+The admin wildcard grants neither assertion scope. Consumers assert identity
+from their authenticated event/session, outside model-controlled tool arguments.
+A channel search uses only current source-derived grants to those groups. It
+does not include private person shares, manual team grants, or org grants.
+An unconfigured channel returns `{"results":[]}`. There is no unfiltered search,
+even for administrators. Direct `/docs` endpoints retain their existing person
+visibility behavior; channel headers cannot confer access there.
+
+Example person request:
+
+```http
+POST /search
+X-API-Key: <docs consumer key with docs:read and act-as-user>
+X-On-Behalf-Of: 11111111-1111-1111-1111-111111111111
+Content-Type: application/json
+
+{"query":"CPSIF","k":2}
+```
+
+Example response (one chunk per result; a document may appear more than once):
+
+```json
+{
+  "results": [
+    {
+      "doc_id": "00000000-0000-0000-0000-000000000001",
+      "title": "Personal CPSIF notes",
+      "url": "https://example.test/personal-alice",
+      "source_id": "gdocs",
+      "text": "CPSIF CPSIF CPSIF personal notes",
+      "chunk": {
+        "ordinal": 0,
+        "start_offset": 0,
+        "end_offset": 32,
+        "source_content_hash": "12807ddcb015128e5e64d0c725f80d4545880fc30817d8f18243d7938e8537d8"
+      },
+      "score": 0.03278688524590164
+    }
+  ]
+}
+```
+
+`doc_id` resolves through `/docs/{id}` under the same person's context. The source
+`url` is the original link, not a fabricated deep link. `chunk` identifies the
+half-open Unicode code-point range in the exact content revision named by its
+SHA-256. Use the hash to detect stale citations after replacement; JavaScript
+clients must convert code points to UTF-16 indices. No vectors or grants are
+returned. A channel citation links to the source; it does not create a separate
+channel-authorized direct-document endpoint.
+
+Ranking is hybrid exact cosine plus complete keyword matching, with reciprocal
+rank fusion (`1/(60+vector_rank) + 1/(60+keyword_rank)`). Each branch considers up
+to `max(50,5*k)` eligible chunks, with active-document, grant-expiry, context,
+model, and dimension predicates applied **before** its limit. Ties use document
+UUID and chunk ordinal. Vector candidates must meet `SEARCH_MIN_COSINE` (default
+0.3); complete keyword matches qualify independently. Fused scores are rank
+scores, not confidence or cosine values. Empty results are valid.
+
+Keyword terms are lowercase ASCII letter/digit runs, with punctuation separating
+terms and all distinct query terms required. This preserves acronyms, names,
+email components, and dates without stemming or stop-word removal. Keyword rank
+is matching-term occurrences divided by total term occurrences. Non-ASCII-only
+queries use the vector branch. See [architecture](ARCHITECTURE.md#authorized-retrieval)
+for the portable normalization and database query trade-off.
+
+| Condition | Status / body |
+|---|---|
+| No valid key | 401, standard auth detail |
+| Missing read or literal assertion scope | 403, `{"detail":"missing scope: <scope>"}` |
+| Missing, conflicting, or incomplete context | 400, `{"detail":"provide exactly one person or channel context"}` |
+| Malformed person UUID | 400, `{"detail":"X-On-Behalf-Of must be a UUID"}` |
+| Malformed channel IDs | 400, `{"detail":"channel IDs must be decimal snowflakes"}` |
+| Invalid body | 422, Pydantic detail list (`type`, `loc`, `msg`; input omitted) |
+| Directory unreachable, unauthorized, or malformed | 503, `{"detail":"retrieval scope unavailable"}` |
+| Query embedding failure / malformed or incompatible embedding | 502, `{"detail":"query embedding unavailable"}` |
+| Embedding rate limit or unconfigured dependency | 503, same embedding detail |
+| Embedding timeout | 504, same embedding detail |
+| Storage unavailable | 503, `{"detail":"retrieval storage unavailable"}` |
+
+Retrieval fails closed on scope lookup errors, including person membership errors;
+it does not inherit direct-document reads' partial directory degradation.
+No fallback to keyword-only or unfiltered access occurs on dependency failure.
+
 ## Authentication
 
 Other requests require an `X-API-Key` header. A request with a missing or invalid key is
