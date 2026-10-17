@@ -119,6 +119,13 @@ tool calls, including complete siblings of an incomplete call. Usage is retained
 Errors are normalized without exposing provider response bodies. SDK retries are
 disabled and the existing request timeout is passed to the OpenAI client.
 
+OpenAI chat's catch-all 502 path emits a warning through
+`src.providers.openai_chat` with the failure stage (request, JSON decoding, or
+response validation), exception class, upstream HTTP status when available, and
+function/line locations. These locate schema drift and SDK failures without
+logging exception text, traceback source lines/locals, credentials, or content.
+The client still receives only the normalized 502 message.
+
 GPT-6.1 Sol always reasons: true/false map to medium/low effort. Responses requires
 at least 16 output tokens; smaller limits fail locally with 422. Reasoning shares
 the output budget with visible text. See the [API contract](API.md#thinking-and-continuation)

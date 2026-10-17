@@ -1,4 +1,5 @@
 import json
+import logging
 from contextlib import contextmanager
 from unittest.mock import Mock
 
@@ -321,9 +322,82 @@ def test_duplicate_raw_envelope_fields_rejected(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "patch,exception,location",
+    [
+        ({"PRIVATE-FIELD": "PRIVATE-UPSTREAM"}, "ValueError", "object_fields:"),
+        (
+            {"status": "incomplete", "incomplete_details": {"reason": "PRIVATE-REASON"}},
+            "KeyError",
+            "_result:",
+        ),
+    ],
+)
+def test_schema_failures_log_safe_diagnostics(monkeypatch, caplog, patch, exception, location):
+    with _boundary([_response(**patch)]) as (provider, _):
+        with caplog.at_level(logging.WARNING, logger="src.providers.openai_chat"):
+            response = _route(provider, monkeypatch).post(
+                "/chat", json={"messages": [{"role": "user", "content": "PRIVATE-PROMPT"}]}
+            )
+    assert response.status_code == 502
+    assert response.json() == {"detail": "LLM provider error"}
+    records = [r for r in caplog.records if r.name == "src.providers.openai_chat"]
+    assert len(records) == 1
+    record = records[0]
+    assert record.levelno == logging.WARNING
+    assert "stage=response_validation" in record.message
+    assert f"exception={exception}" in record.message
+    assert "upstream_status=200" in record.message
+    assert location in record.message
+    assert record.exc_info is None
+    assert record.stack_info is None
+    for private in (
+        "PRIVATE-FIELD",
+        "PRIVATE-UPSTREAM",
+        "PRIVATE-REASON",
+        "PRIVATE-PROMPT",
+        "PRIVATE-ENCRYPTED-STATE",
+        "synthetic-openai-key",
+    ):
+        assert private not in caplog.text + response.text
+
+
+def test_invalid_json_logs_decode_location_without_response_body(monkeypatch, caplog):
+    with _boundary(raw='{"PRIVATE-UPSTREAM":') as (provider, _):
+        response = _route(provider, monkeypatch).post(
+            "/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+    assert response.status_code == 502
+    assert response.json() == {"detail": "LLM provider error"}
+    assert "stage=response_decode" in caplog.text
+    assert "exception=JSONDecodeError" in caplog.text
+    assert "decode_json_object:" in caplog.text
+    assert "PRIVATE-UPSTREAM" not in caplog.text + response.text
+
+
+def test_unexpected_exception_logs_no_exception_message(monkeypatch, caplog):
+    with _boundary() as (provider, calls):
+        monkeypatch.setattr(
+            provider._client.responses.with_raw_response,
+            "create",
+            Mock(side_effect=RuntimeError("PRIVATE-PROMPT synthetic-openai-key")),
+        )
+        response = _route(provider, monkeypatch).post(
+            "/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+    assert calls == []
+    assert response.status_code == 502
+    assert response.json() == {"detail": "LLM provider error"}
+    assert "stage=request" in caplog.text
+    assert "exception=RuntimeError" in caplog.text
+    assert "upstream_status=None" in caplog.text
+    assert "PRIVATE-PROMPT" not in caplog.text + response.text
+    assert "synthetic-openai-key" not in caplog.text + response.text
+
+
+@pytest.mark.parametrize(
     "upstream,expected", [(429, 429), (400, 502), (401, 502), (403, 502), (500, 502)]
 )
-def test_upstream_errors_are_normalized_without_retries(monkeypatch, upstream, expected):
+def test_upstream_errors_are_normalized_without_retries(monkeypatch, upstream, expected, caplog):
     with _boundary(
         [{"error": {"message": "PRIVATE-UPSTREAM", "type": "api_error"}}], status=upstream
     ) as (provider, calls):
@@ -331,7 +405,15 @@ def test_upstream_errors_are_normalized_without_retries(monkeypatch, upstream, e
             "/chat", json={"messages": [{"role": "user", "content": "hi"}]}
         )
     assert response.status_code == expected
-    assert "PRIVATE-UPSTREAM" not in response.text
+    assert "PRIVATE-UPSTREAM" not in response.text + caplog.text
+    if expected == 502:
+        assert response.json() == {"detail": "LLM provider error"}
+        assert "stage=request" in caplog.text
+        assert f"upstream_status={upstream}" in caplog.text
+        assert "exception=" in caplog.text
+        assert "locations=chat:" in caplog.text
+    else:
+        assert not [r for r in caplog.records if r.name == "src.providers.openai_chat"]
     assert len(calls) == 1
 
 

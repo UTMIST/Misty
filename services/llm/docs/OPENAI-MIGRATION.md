@@ -29,9 +29,10 @@ rollout; no deployed configuration was changed by this work.
 
 Verification uses the real pinned OpenAI SDK over an offline HTTP mock transport:
 text requests, encrypted-state and parallel-tool replay, result errors, assistant
-phases, truncation, malformed raw responses, auth/scopes, configuration, and
-normalized upstream failures. The full LLM pytest suite, `ruff check`, and
-`ruff format --check` pass, with source paths verified against this checkout.
+phases, truncation, malformed raw responses, auth/scopes, configuration,
+normalized upstream failures, and safe diagnostic logging for schema/SDK failures.
+The full LLM pytest suite, `ruff check`, and `ruff format --check` pass, with source
+paths verified against this checkout.
 Verification made no live model calls or deployment changes. Account access,
 answer quality, and latency still require a deployment smoke check with
 representative bot and minutes prompts, especially at their small output budgets.
@@ -60,7 +61,7 @@ Paths below are relative to `services/llm`.
 
 | Files | Why they change |
 |---|---|
-| `src/providers/openai_chat.py` | Responses adapter, request/result mapping, lazy client, and safe failures. |
+| `src/providers/openai_chat.py` | Responses adapter, request/result mapping, lazy client, safe failures, and content-free diagnostic warnings. |
 | `src/providers/registry.py` | Register and construct the new provider using the existing key. |
 | `src/providers/base.py` | Neutral continuation-state type, assistant phase, and unsupported-request error. |
 | `src/providers/tool_blocks.py` | Validate the new neutral blocks at the reusable provider boundary. |
@@ -72,12 +73,12 @@ Paths below are relative to `services/llm`.
 | `src/api/app.py` | Describe the supported providers accurately in OpenAPI. |
 | `src/config.py`, `.env.example` | OpenAI defaults; validate provider/model pairs and require AWS only for Bedrock. |
 | `pyproject.toml` | Correct the dependency comment; dependency versions do not change. |
-| `tests/test_openai_chat.py` | Offline SDK/HTTP and route regressions for the new provider. |
+| `tests/test_openai_chat.py` | Offline SDK/HTTP and route regressions, including diagnostic usefulness and log redaction. |
 | `tests/test_registry.py` | Provider selection, catalog alignment, and credential unwrapping. |
 | `tests/test_config.py` | Defaults, provider/model boot checks, and conditional AWS requirements. |
 | `tests/conftest.py` | Clear cached chat providers to isolate local credential/config tests. |
 | `tests/test_audit_log.py` | Update the default-model assertion and explicitly configure the Bedrock override case. |
 | `README.md`, `docs/API.md` | Describe defaults, supported models, errors, reasoning, and continuation. |
-| `docs/ARCHITECTURE.md`, `docs/CONTRIBUTING.md` | Explain Responses, stateless replay, and catalog maintenance. |
+| `docs/ARCHITECTURE.md`, `docs/CONTRIBUTING.md` | Explain Responses, stateless replay, catalog maintenance, and safe diagnostic logging. |
 | `docs/DEPLOYMENT.md` | Concrete environment cutover and rollback instructions. |
 | `docs/OPENAI-MIGRATION.md` | Record scope, verification, measured usage estimate, and file rationale. |

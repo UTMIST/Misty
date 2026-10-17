@@ -1,7 +1,9 @@
 """OpenAI Responses behind the existing stateless chat Protocol."""
 
 import json
+import logging
 import threading
+import traceback
 
 from contracts.models import OPENAI_MODELS
 from contracts.tool_validation import validate_reasoning_state
@@ -30,6 +32,8 @@ from src.providers.tool_blocks import (
     validate_response_blocks,
     validate_tool_request,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 def _json(value) -> str:
@@ -269,13 +273,18 @@ class OpenAIChatProvider:
             raise ProviderInvalidRequest("unsupported OpenAI chat request") from None
 
         try:
-            from openai import APIConnectionError, APITimeoutError, RateLimitError
+            from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
         except ImportError:
             raise ProviderUnavailable("the openai package is not installed") from None
 
+        stage = "request"
+        upstream_status = None
         try:
             response = self._get_client().responses.with_raw_response.create(**kwargs)
+            upstream_status = response.http_response.status_code
+            stage = "response_decode"
             payload = decode_json_object(response.http_response.content)
+            stage = "response_validation"
             return _result(payload, structured=structured, tool_names=tool_names, used_ids=used_ids)
         except RateLimitError:
             raise ProviderRateLimited("OpenAI chat rate limited") from None
@@ -283,5 +292,21 @@ class OpenAIChatProvider:
             raise ProviderTimeout("OpenAI chat timeout") from None
         except ProviderError:
             raise
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, APIStatusError):
+                upstream_status = exc.status_code
+            # Exception text, traceback source lines, and locals can contain
+            # prompts, credentials, tool data, or provider bodies. Log only
+            # code locations and diagnostic metadata, never exc_info or str(exc).
+            locations = " > ".join(
+                f"{frame.f_code.co_name}:{lineno}"
+                for frame, lineno in traceback.walk_tb(exc.__traceback__)
+            )
+            _logger.warning(
+                "OpenAI chat request failed: stage=%s exception=%s upstream_status=%s locations=%s",
+                stage,
+                type(exc).__name__,
+                upstream_status,
+                locations,
+            )
             raise ProviderUnavailable("OpenAI chat request failed") from None
