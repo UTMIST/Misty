@@ -7,12 +7,14 @@ from contracts.tool_validation import (
     validate_identifier,
     validate_input_schema,
     validate_json_value,
+    validate_reasoning_state,
     validate_redacted_data,
 )
 from src.providers.base import (
     LLMContentBlock,
     LLMMessage,
     LLMReasoningBlock,
+    LLMReasoningStateBlock,
     LLMRedactedReasoningBlock,
     LLMRequest,
     LLMTextBlock,
@@ -85,7 +87,20 @@ def usage_values(value, input_key: str, output_key: str) -> tuple[int, int]:
 
 def _block_payload(block: LLMContentBlock) -> dict:
     if isinstance(block, LLMTextBlock):
-        return {"type": "text", "text": text_value(block.text, nonempty=True)}
+        result = {"type": "text", "text": text_value(block.text, nonempty=True)}
+        if block.phase is not None:
+            if block.phase not in ("commentary", "final_answer"):
+                raise ValueError("invalid message phase")
+            result["phase"] = block.phase
+        return result
+    if isinstance(block, LLMReasoningStateBlock):
+        if block.provider != "openai":
+            raise ValueError("unsupported reasoning provider")
+        return {
+            "type": "reasoning_state",
+            "provider": block.provider,
+            "data": validate_reasoning_state(block.data),
+        }
     if isinstance(block, LLMReasoningBlock):
         return {
             "type": "reasoning",
@@ -154,6 +169,12 @@ def validate_tool_request(request: LLMRequest) -> tuple[set[str], set[str]]:
         text_seen = False
         for block in blocks:
             payload.append(_block_payload(block))
+            if (
+                isinstance(block, LLMTextBlock)
+                and block.phase is not None
+                and message.role != "assistant"
+            ):
+                raise ValueError("phase requires an assistant message")
             if isinstance(block, LLMToolUseBlock):
                 if (
                     message.role != "assistant"
@@ -172,7 +193,9 @@ def validate_tool_request(request: LLMRequest) -> tuple[set[str], set[str]]:
                 ):
                     raise ValueError("invalid tool result history")
                 results.add(block.tool_use_id)
-            elif isinstance(block, (LLMReasoningBlock, LLMRedactedReasoningBlock)):
+            elif isinstance(
+                block, (LLMReasoningBlock, LLMRedactedReasoningBlock, LLMReasoningStateBlock)
+            ):
                 if message.role != "assistant":
                     raise ValueError("reasoning must be in an assistant message")
             else:

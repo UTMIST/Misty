@@ -20,6 +20,8 @@ def test_defaults_are_local_and_dev():
     assert s.openai_api_key.get_secret_value() == ""
     assert s.embed_max_request_chars == 400_000
     assert s.request_timeout_s == 60.0
+    assert s.llm_provider == "openai"
+    assert s.llm_model == "gpt-6.1-sol"
 
 
 def test_local_env_never_raises():
@@ -55,8 +57,11 @@ def test_dev_api_key_guard_still_fires_after_secretstr_conversion(env):
         verify_production_secrets(s)
 
 
-def test_production_with_empty_region_raises():
+@pytest.mark.parametrize("provider", ["bedrock", "bedrock-converse"])
+def test_bedrock_production_with_empty_region_raises(provider):
     s = Settings(
+        llm_provider=provider,
+        llm_model="claude-sonnet-4-6",
         llm_env="production",
         api_key="strong-unique-key",
         aws_region="",
@@ -68,28 +73,39 @@ def test_production_with_empty_region_raises():
 
 @pytest.mark.parametrize("env", ["staging", "production"])
 def test_non_local_fully_configured_ok(env):
-    # Non-local deploys need OPENAI_API_KEY as well as the chat credentials.
+    # OpenAI chat and embeddings share a credential; AWS is not required.
     s = Settings(
         llm_env=env,
         api_key="strong-unique-key",
-        aws_region="us-east-1",
+        aws_region="",
         openai_api_key="synthetic-openai-key",
     )
     verify_production_secrets(s)  # no raise
 
 
 @pytest.mark.parametrize("env", ["staging", "production"])
-@pytest.mark.parametrize("chat_provider", ["bedrock", "bedrock-converse"])
+@pytest.mark.parametrize("chat_provider", ["openai", "bedrock", "bedrock-converse"])
 def test_non_local_requires_openai_key_with_either_chat_provider(env, chat_provider):
     s = Settings(
         llm_env=env,
         llm_provider=chat_provider,
+        llm_model="gpt-6.1-sol" if chat_provider == "openai" else "claude-sonnet-4-6",
         api_key="strong-unique-key",
         aws_region="us-east-1",
         openai_api_key="",
     )
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         verify_production_secrets(s)
+
+
+@pytest.mark.parametrize("env", ["local", "staging", "production"])
+@pytest.mark.parametrize(
+    "provider,model",
+    [("nope", "gpt-6.1-sol"), ("openai", "claude-sonnet-4-6"), ("bedrock", "gpt-6.1-sol")],
+)
+def test_invalid_chat_configuration_fails_at_boot(env, provider, model):
+    with pytest.raises(ValueError, match="LLM_PROVIDER"):
+        verify_production_secrets(Settings(llm_env=env, llm_provider=provider, llm_model=model))
 
 
 def test_api_key_never_leaks_via_string_conversion():

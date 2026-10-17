@@ -2,6 +2,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from contracts.models import ALLOWED_MODELS
 from contracts.tool_validation import (
     MAX_CONTENT_BLOCKS,
     MAX_JSON_DEPTH,
@@ -19,8 +20,6 @@ from contracts.tools import (
     ToolUseBlock,
 )
 
-ALLOWED_MODELS = {"claude-sonnet-4-6", "claude-opus-4-6"}
-
 
 class Message(BaseModel):
     role: Literal["user", "assistant"]
@@ -36,6 +35,8 @@ class Message(BaseModel):
         if isinstance(self.content, str):
             return self
         for block in self.content:
+            if self.role == "user" and isinstance(block, TextBlock) and block.phase is not None:
+                raise ValueError("phase requires an assistant message")
             if self.role == "user" and not isinstance(block, (TextBlock, ToolResultBlock)):
                 raise ValueError("user messages support only text and tool results")
             if self.role == "assistant" and isinstance(block, ToolResultBlock):

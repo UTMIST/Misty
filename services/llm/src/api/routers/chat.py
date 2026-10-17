@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from contracts.chat import ChatRequest, ChatResponse, Usage
+from contracts.models import MODELS_BY_PROVIDER
 from contracts.tool_validation import (
     MAX_JSON_DEPTH,
     MAX_TOOL_PAYLOAD_BYTES,
@@ -10,6 +11,7 @@ from contracts.tools import (
     AssistantBlock,
     ContentBlock,
     ReasoningBlock,
+    ReasoningStateBlock,
     RedactedReasoningBlock,
     TextBlock,
     ToolResultBlock,
@@ -23,6 +25,7 @@ from src.providers.base import (
     LLMMessage,
     LLMProvider,
     LLMReasoningBlock,
+    LLMReasoningStateBlock,
     LLMRedactedReasoningBlock,
     LLMRequest,
     LLMResult,
@@ -31,8 +34,11 @@ from src.providers.base import (
     LLMToolResultBlock,
     LLMToolUseBlock,
     ProviderError,
+    ProviderInvalidRequest,
+    ProviderNotConfigured,
     ProviderRateLimited,
     ProviderTimeout,
+    ProviderUnsupportedModel,
 )
 from src.providers.tool_blocks import response_blocks
 
@@ -41,7 +47,9 @@ router = APIRouter()
 
 def _to_llm_block(block: ContentBlock) -> LLMContentBlock:
     if isinstance(block, TextBlock):
-        return LLMTextBlock(text=block.text)
+        return LLMTextBlock(text=block.text, phase=block.phase)
+    if isinstance(block, ReasoningStateBlock):
+        return LLMReasoningStateBlock(data=block.data, provider=block.provider)
     if isinstance(block, ReasoningBlock):
         return LLMReasoningBlock(text=block.text, signature=block.signature)
     if isinstance(block, RedactedReasoningBlock):
@@ -57,7 +65,9 @@ def _to_llm_block(block: ContentBlock) -> LLMContentBlock:
 
 def _to_assistant_block(block: LLMContentBlock) -> AssistantBlock:
     if isinstance(block, LLMTextBlock):
-        return TextBlock(text=block.text)
+        return TextBlock(text=block.text, phase=block.phase)
+    if isinstance(block, LLMReasoningStateBlock):
+        return ReasoningStateBlock(data=block.data, provider=block.provider)
     if isinstance(block, LLMReasoningBlock):
         return ReasoningBlock(text=block.text, signature=block.signature)
     if isinstance(block, LLMRedactedReasoningBlock):
@@ -123,6 +133,15 @@ def chat(
     llm: LLMProvider = Depends(get_llm),
 ) -> ChatResponse:
     settings = get_settings()
+    if body.model is not None and body.model not in MODELS_BY_PROVIDER[settings.llm_provider]:
+        raise HTTPException(status_code=422, detail="Model is not supported by the chat provider")
+    if settings.llm_provider != "openai" and any(
+        isinstance(block, ReasoningStateBlock)
+        for message in body.messages
+        if isinstance(message.content, list)
+        for block in message.content
+    ):
+        raise HTTPException(status_code=422, detail="Reasoning state requires the OpenAI provider")
     thinking = body.thinking if body.thinking is not None else settings.thinking_default
     llm_request = LLMRequest(
         messages=[
@@ -146,6 +165,10 @@ def chat(
     request.state.audit_extra = {"model": body.model or settings.llm_model}
     try:
         result = llm.chat(llm_request)
+    except (ProviderInvalidRequest, ProviderUnsupportedModel):
+        raise HTTPException(status_code=422, detail="Request is not supported by the chat provider")
+    except ProviderNotConfigured:
+        raise HTTPException(status_code=503, detail="LLM provider not configured")
     except ProviderRateLimited:
         raise HTTPException(status_code=429, detail="LLM provider rate limited")
     except ProviderTimeout:
