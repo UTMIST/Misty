@@ -248,9 +248,10 @@ export function createDirectoryClient({ baseUrl, apiKey, fetchImpl = fetch }) {
       return getByPath(`/teams/${encodeURIComponent(teamId)}/google-group`);
     },
 
-    async syncTeamGoogleGroup(teamId) {
+    async syncTeamGoogleGroup(teamId, { signal } = {}) {
       const resp = await send(`/teams/${encodeURIComponent(teamId)}/google-group/sync`, {
         method: 'POST',
+        ...(signal ? { signal } : {}),
       });
       if (resp.status === 200) return parseJson(resp);
       if (resp.status === 404) {

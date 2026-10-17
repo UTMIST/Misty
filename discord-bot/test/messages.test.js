@@ -179,6 +179,7 @@ test('renderCreateTeamResult covers outcomes', () => {
       outcome: 'SYNC_RESULT',
       state: {
         group_email: 'ml@utmist.skule.ca',
+        group_name: 'groups/ml',
         status: 'needs_external_members',
         last_error: 'Allow external members',
       },
@@ -198,7 +199,7 @@ test('renderCreateTeamResult covers outcomes', () => {
     team,
     google: {
       outcome: 'SYNC_RESULT',
-      state: { group_email: 'ml@utmist.skule.ca', status: 'synced' },
+      state: { group_email: 'ml@utmist.skule.ca', group_name: 'groups/ml', status: 'synced' },
     },
   }).content;
   assert.match(syncedFresh, /synced/i);
@@ -238,6 +239,7 @@ test('renderGoogleGroupStatusResult covers outcomes', () => {
     team,
     state: {
       group_email: 'ml@utmist.skule.ca',
+      group_name: 'groups/ml',
       status: 'needs_external_members',
       last_error: 'Allow external members',
     },
@@ -269,6 +271,58 @@ test('renderGoogleGroupSyncResult covers outcomes', () => {
   assert.match(renderGoogleGroupSyncResult({ outcome: 'RETIRED_NO_GROUP' }).content, /retired/i);
 });
 
+test('google-status provides setup for an older empty synced group using its stored address', () => {
+  const content = renderGoogleGroupStatusResult({
+    outcome: 'STATUS',
+    team: { slug: 'renamed', label: 'Renamed' },
+    state: {
+      group_email: 'original@utmist.skule.ca',
+      group_name: 'groups/123',
+      status: 'synced',
+    },
+  }).content;
+  assert.match(content, /not proof/i);
+  assert.match(content, /infrastructure@utmist\.skule\.ca/);
+  assert.match(content, /\/g\/original\/settings/);
+  assert.match(content, /Allow external members/);
+  assert.match(content, /Who can add external members/);
+  assert.match(content, /Super Admin/);
+  assert.match(content, /not yet verified/);
+  assert.match(content, /google-sync/);
+});
+
+test('unconfirmed group creation never offers settings actions on any reply path', () => {
+  const team = { slug: 'ml', label: 'ML' };
+  const state = {
+    group_email: 'ml@utmist.skule.ca',
+    group_name: null,
+    status: 'failed',
+    last_error: 'create group: ml@utmist.skule.ca is already in use by another group',
+  };
+  const replies = [
+    renderCreateTeamResult({ outcome: 'CREATED', team, google: { outcome: 'SYNC_RESULT', state } }),
+    renderGoogleGroupStatusResult({ outcome: 'STATUS', team, state }),
+    renderGoogleGroupSyncResult({ outcome: 'SYNC_RESULT', team, state }),
+  ];
+  for (const { content } of replies) {
+    assert.match(content, /already in use/);
+    assert.match(content, /google-sync/);
+    assert.doesNotMatch(content, /groups\.google\.com|Allow external members/);
+  }
+});
+
+test('a timed-out create probe preserves team success and directs the user to status', () => {
+  const { content } = renderCreateTeamResult({
+    outcome: 'CREATED',
+    team: { slug: 'ml', label: 'ML' },
+    google: { outcome: 'PENDING' },
+  });
+  assert.match(content, /Created team/);
+  assert.match(content, /provisioning.*progress/i);
+  assert.match(content, /google-status/);
+  assert.doesNotMatch(content, /groups\.google\.com|is \*\*synced\*\*/);
+});
+
 // #272 Done checklist — offline cases for Google Group setup / recovery replies.
 test('Google Group offline cases: in-progress, disabled, setup, empty synced, failed, recovery', () => {
   const team = { slug: 'ml', label: 'ML' };
@@ -297,6 +351,7 @@ test('Google Group offline cases: in-progress, disabled, setup, empty synced, fa
     team,
     state: {
       group_email: 'ml@utmist.skule.ca',
+      group_name: 'groups/ml',
       status: 'needs_external_members',
       last_error: 'Allow external members',
     },
@@ -327,6 +382,7 @@ test('Google Group offline cases: in-progress, disabled, setup, empty synced, fa
     team,
     state: {
       group_email: 'ml@utmist.skule.ca',
+      group_name: 'groups/ml',
       status: 'failed',
       last_error: 'group rejects external members',
     },

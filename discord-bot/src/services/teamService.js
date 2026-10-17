@@ -11,13 +11,18 @@ export const llmSafe = true;
 
 const isoDateToday = () => new Date().toISOString().slice(0, 10);
 
-export function createTeamService({ directory, now = isoDateToday } = {}) {
+export function createTeamService({
+  directory,
+  now = isoDateToday,
+  googleProbeTimeoutMs = 2000,
+} = {}) {
   async function createTeam({ slug, label, description }, _opts) {
     try {
       const team = await directory.createTeam({ slug, label, description });
       // Directory create already schedules a background sync. Calling sync here
       // is the only way to tell "Google Groups off" (503) from "still
       // provisioning" (GET 404) without a new API, and returns the real mapping.
+      // Bound the wait: this retry can queue behind the background sync.
       return { outcome: 'CREATED', team, google: await probeGoogleGroup(team.id) };
     } catch (e) {
       if (e instanceof TeamExists) return { outcome: 'SLUG_EXISTS', detail: e.detail };
@@ -27,16 +32,22 @@ export function createTeamService({ directory, now = isoDateToday } = {}) {
   }
 
   async function probeGoogleGroup(teamId) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), googleProbeTimeoutMs);
     try {
-      const state = await directory.syncTeamGoogleGroup(teamId);
+      const state = await directory.syncTeamGoogleGroup(teamId, { signal: controller.signal });
       return { outcome: 'SYNC_RESULT', state };
     } catch (e) {
+      // httpClient maps abort to DirectoryUnavailable; prefer PENDING while our signal is aborted.
+      if (controller.signal.aborted) return { outcome: 'PENDING' };
       if (e instanceof GoogleGroupsNotConfigured) return { outcome: 'NOT_CONFIGURED' };
       if (e instanceof GoogleGroupSyncConflict) {
         return { outcome: 'RETIRED_NO_GROUP', detail: e.detail };
       }
       if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
       throw e;
+    } finally {
+      clearTimeout(timer);
     }
   }
 

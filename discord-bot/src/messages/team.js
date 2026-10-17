@@ -29,58 +29,55 @@ function externalMembersSetupHint(slugOrEmail) {
   ].join('\n');
 }
 
-function renderGoogleGroupState(team, state) {
+function renderGoogleGroupState(team, state, { includeSetup = false } = {}) {
   const email = state.group_email ?? `${team.slug}@${GOOGLE_GROUPS_DOMAIN}`;
   const header = `Google Group for **${team.label}** (\`${email}\`)`;
+  let content;
   switch (state.status) {
     case 'synced':
-      return [
+      content = [
         `✅ ${header} is **synced**.`,
-        '_Note: an empty group can show synced before any external member has been tried. That is not proof external membership is enabled — complete the Group settings steps below (or via `/team google-status`) before relying on adds._',
+        '_Note: an empty group can show synced before any external member has been tried. That is not proof external membership is enabled. Run `/team google-status` for setup instructions._',
       ].join('\n');
+      break;
     case 'needs_external_members':
-      return [
+      content = [
         `⚠️ ${header} needs external-member settings.`,
-        externalMembersSetupHint(email),
         state.last_error ? `_Directory note:_ ${state.last_error}` : null,
       ]
         .filter(Boolean)
         .join('\n');
+      break;
     case 'failed':
-      return [
+      content = [
         `❌ ${header} sync **failed**.`,
         state.last_error ? `_${state.last_error}_` : null,
-        /external members/i.test(state.last_error ?? '')
-          ? externalMembersSetupHint(email)
-          : 'Re-run `/team google-sync` after fixing the issue, or ask infrastructure for help.',
+        'Re-run `/team google-sync` after fixing the issue, or ask infrastructure for help.',
       ]
         .filter(Boolean)
         .join('\n');
+      break;
     default:
-      return `${header}: status \`${state.status}\`.`;
+      content = `${header}: status \`${state.status}\`.`;
   }
+  // A recorded email alone can be an attempted address belonging to another group.
+  if (
+    state.group_name &&
+    (includeSetup ||
+      state.status === 'needs_external_members' ||
+      /external members/i.test(state.last_error ?? ''))
+  ) {
+    return [content, '', externalMembersSetupHint(email)].join('\n');
+  }
+  return content;
 }
 
 function renderGoogleAfterCreate(team, google) {
   switch (google?.outcome) {
-    case 'SYNC_RESULT': {
-      const state = google.state;
-      const email = state.group_email ?? `${team.slug}@${GOOGLE_GROUPS_DOMAIN}`;
-      const statusBlock = renderGoogleGroupState(team, state);
-      // needs_external_members / external-failed already include the setup hint.
-      const hintAlreadyIncluded =
-        state.status === 'needs_external_members' ||
-        /external members/i.test(state.last_error ?? '');
-      if (hintAlreadyIncluded) return statusBlock;
-      // Fresh groups often report synced before any external add was tried —
-      // that is not proof the switch is on. Always give setup instructions on create.
-      return [
-        statusBlock,
-        '',
-        `Most members use external emails, so complete this before relying on the group:`,
-        externalMembersSetupHint(email),
-      ].join('\n');
-    }
+    case 'SYNC_RESULT':
+      return renderGoogleGroupState(team, google.state, { includeSetup: true });
+    case 'PENDING':
+      return 'Google Group provisioning may still be in progress. Run `/team google-status` in a moment for status and setup instructions.';
     case 'NOT_CONFIGURED':
       return 'Google Groups is not configured on the directory, so no group was created. The team exists in Misty only.';
     case 'RETIRED_NO_GROUP':
@@ -117,7 +114,7 @@ export function renderGoogleGroupStatusResult(result) {
   const content = (() => {
     switch (result.outcome) {
       case 'STATUS':
-        return renderGoogleGroupState(result.team, result.state);
+        return renderGoogleGroupState(result.team, result.state, { includeSetup: true });
       case 'NO_MAPPING':
         return [
           `No Google Group mapping yet for **${result.team.label}** (\`${result.team.slug}\`).`,

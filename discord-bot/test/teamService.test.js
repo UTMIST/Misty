@@ -7,6 +7,7 @@ import {
   DirectoryUnavailable,
   GoogleGroupsNotConfigured,
   GoogleGroupSyncConflict,
+  createDirectoryClient,
 } from '../src/clients/directoryClient.js';
 
 const admin = { id: 'a', display_name: 'A', access_level: 'admin' };
@@ -96,6 +97,32 @@ test('createTeam returns SLUG_EXISTS on TeamExists', async () => {
   const res = await svc.createTeam({ slug: 'ml', label: 'ML' }, { caller: admin });
   assert.equal(res.outcome, 'SLUG_EXISTS');
   assert.equal(res.detail, 'slug already exists');
+});
+
+test('createTeam aborts a queued Google probe and still reports directory success', async () => {
+  const team = { id: 't1', slug: 'ml', label: 'ML' };
+  let probeSignal;
+  const directory = createDirectoryClient({
+    baseUrl: 'http://directory.test',
+    apiKey: 'offline-test-key',
+    fetchImpl: async (url, options) => {
+      if (url.endsWith('/teams')) {
+        return new Response(JSON.stringify(team), { status: 201 });
+      }
+      assert.match(url, /\/teams\/t1\/google-group\/sync$/);
+      assert.equal(options.method, 'POST');
+      probeSignal = options.signal;
+      return new Promise((_resolve, reject) => {
+        probeSignal.addEventListener('abort', () => reject(new Error('aborted')));
+      });
+    },
+  });
+  const service = createTeamService({ directory, googleProbeTimeoutMs: 5 });
+  const result = await service.createTeam({ slug: 'ml', label: 'ML' }, { caller: admin });
+  assert.equal(probeSignal.aborted, true);
+  assert.equal(result.outcome, 'CREATED');
+  assert.deepEqual(result.team, team);
+  assert.equal(result.google.outcome, 'PENDING');
 });
 
 test('createTeam returns DIRECTORY_DOWN on DirectoryUnavailable', async () => {
