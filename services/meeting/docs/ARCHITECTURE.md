@@ -174,6 +174,12 @@ Near-matches should quote the actual transcript spelling and state uncertainty.
 Offline tests check the prompt contract, evidence transport, and citation parsing;
 they do not establish the live model's semantic answer quality.
 
+Parsing accepts plain JSON or a single complete JSON Markdown code block, then
+applies the same strict schema and citation validation. It does not repair
+truncation or extract answers from surrounding prose. Rejections log only a
+fixed category (`schema`, `sources`, `unsupported_sources`, or `missing_evidence`),
+never the question, transcript, completion, or validation exception.
+
 ## Live-verify caveats
 
 Several integration assumptions are unit-tested against fakes but **not yet confirmed against real Discord audio or a real AWS account**:

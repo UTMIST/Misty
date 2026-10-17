@@ -108,6 +108,35 @@ def test_provider_failures_are_not_converted_to_unsupported_answers():
         answer_question([seg(0)], 1, "When?", FakeLlm(error=LlmUnavailable("private detail")))
 
 
+@pytest.mark.parametrize("language", ["json", "JSON", ""])
+def test_complete_fenced_json_answer_retains_strict_citations(language):
+    content = json.dumps({"supported": True, "answer": "Friday.", "source_ids": ["s1"]})
+    result = answer_question([seg(12)], 20, "When?", FakeLlm(f"```{language}\n{content}\n```"))
+    assert result.answer == "Friday."
+    assert result.references[0].start_ms == 12
+
+
+@pytest.mark.parametrize(
+    "content,reason",
+    [
+        ("PRIVATE not JSON", "schema"),
+        (
+            '```json\n{"supported":true,"answer":"PRIVATE","source_ids":["invented"]}\n```',
+            "sources",
+        ),
+        ('{"supported":false,"answer":"PRIVATE","source_ids":["s1"]}', "unsupported_sources"),
+        ('{"supported":true,"answer":"PRIVATE","source_ids":[]}', "missing_evidence"),
+        ("PRIVATE preface\n```json\n{}\n```", "schema"),
+        ("```json\n{}\n```\nPRIVATE trailing text", "schema"),
+    ],
+)
+def test_rejection_logs_only_safe_category(content, reason, caplog):
+    with pytest.raises(QnaInvalidResponse):
+        answer_question([seg(0, "PRIVATE transcript")], 1, "PRIVATE question", FakeLlm(content))
+    assert f"Q&A output rejected: {reason}" in caplog.text
+    assert "PRIVATE" not in caplog.text
+
+
 def test_question_is_a_task_and_transcript_is_evidence_in_model_instructions():
     llm = FakeLlm()
     answer_question([seg(0)], 1, "Summarize the meeting", llm)
