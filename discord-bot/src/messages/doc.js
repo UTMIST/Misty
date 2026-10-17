@@ -3,10 +3,11 @@ import { FALLBACK, DIRECTORY_DOWN_MSG } from './common.js';
 const DOC_DOWN_MSG =
   'The documentation service is temporarily unavailable. Please try again shortly.';
 
-function docLine(doc) {
+function docLine(doc, isAdmin) {
   const title = doc.title || doc.url;
   const src = doc.source_id ? ` · ${doc.source_id}` : '';
-  return `• **${title}**${src} — \`${doc.id}\``;
+  const id = isAdmin ? ` · \`${doc.id}\`` : '';
+  return `• **${title}**${src} — <${doc.url}>${id}`;
 }
 
 export function renderDocAddResult(result) {
@@ -38,12 +39,14 @@ export function renderDocAddResult(result) {
   return { content, ephemeral: true };
 }
 
-export function renderDocListResult(result) {
+// `isAdmin` appends each doc's id to its line — only admins can act on an id,
+// via /doc remove. Defaults to false so a caller that omits it under-discloses.
+export function renderDocListResult(result, { isAdmin = false } = {}) {
   const content = (() => {
     switch (result.outcome) {
       case 'LISTED':
         if (result.docs.length === 0) return 'There are no docs matching that.';
-        return result.docs.map(docLine).join('\n');
+        return result.docs.map((d) => docLine(d, isAdmin)).join('\n');
       case 'TEAM_NOT_FOUND':
         return "There's no team with that slug.";
       case 'DOC_DOWN':
@@ -56,30 +59,6 @@ export function renderDocListResult(result) {
   })();
   // Public: shared reference. Visibility is locked at defer time in the Discord
   // adapter (see doc.js `list` subcommand); this keeps the neutral payload consistent.
-  return { content, ephemeral: false };
-}
-
-export function renderDocShowResult(result) {
-  const content = (() => {
-    switch (result.outcome) {
-      case 'SHOWN': {
-        const d = result.doc;
-        const lines = [`**${d.title || d.url}**`, d.url];
-        if (d.description) lines.push(d.description);
-        if (d.owning_team_label) lines.push(`Owner: ${d.owning_team_label}`);
-        if (d.tags && d.tags.length > 0) lines.push(`Tags: ${d.tags.join(', ')}`);
-        if (d.source_id) lines.push(`Source: ${d.source_id}`);
-        lines.push(`id: \`${d.id}\``);
-        return lines.join('\n');
-      }
-      case 'NOT_FOUND':
-        return "There's no doc with that id.";
-      case 'DOC_DOWN':
-        return DOC_DOWN_MSG;
-      default:
-        return FALLBACK;
-    }
-  })();
   return { content, ephemeral: false };
 }
 
