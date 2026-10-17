@@ -52,6 +52,12 @@ Resolve a document URL to plain text.
 | `title` | string \| null | The Drive file name |
 | `content` | string \| null | Extracted text, truncated at `MAX_CONTENT_CHARS` (default 1,200,000) |
 | `warnings` | string[] | Non-fatal information loss. Empty on a clean fetch. |
+| `permissions` | object[] \| omitted | Complete effective Google Drive ACL. Omitted only for sources without an ACL contract. |
+
+Each permission carries `permission_id`, `principal_type` (`user`, `group`, `domain`, or
+`anyone`), `principal` (email/domain when applicable), `role`, `inherited`, `inherited_from` (folder or
+shared-drive ids), `expiration_time`, and `allow_file_discovery`. The ACL is fetched before content extraction;
+if it cannot be read completely the request fails and no content is exported/downloaded.
 
 **Example:**
 

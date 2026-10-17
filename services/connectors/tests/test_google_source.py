@@ -48,11 +48,30 @@ class _FakeFiles:
 
 
 class _FakeService:
-    def __init__(self, files):
+    def __init__(self, files, permissions=None):
         self._files = files
+        self._permissions = _FakePermissions(permissions or {"permissions": []})
 
     def files(self):
         return self._files
+
+    def permissions(self):
+        return self._permissions
+
+
+class _FakePermissions:
+    def __init__(self, response):
+        self._response = response
+        self.calls = []
+
+    def list(self, **kwargs):
+        self.calls.append(kwargs)
+        response = (
+            self._response[len(self.calls) - 1]
+            if isinstance(self._response, list)
+            else self._response
+        )
+        return _FakeRequest(result=response)
 
 
 class _FakeDocsService:
@@ -168,6 +187,101 @@ def test_plain_text_upload_downloads_via_media():
     assert result.content == "raw notes"
     assert files.metadata_fields == "name,mimeType,size"
     assert files.media_calls == 1
+
+
+def test_google_fetch_returns_direct_and_inherited_acl_provenance():
+    files = _FakeFiles(meta={"name": "notes.txt", "mimeType": "text/plain"}, payload=b"notes")
+    permissions = {
+        "permissions": [
+            {
+                "id": "p-user",
+                "type": "user",
+                "emailAddress": "Member@Example.com",
+                "role": "reader",
+                "permissionDetails": [{"inherited": False}],
+            },
+            {
+                "id": "p-group",
+                "type": "group",
+                "emailAddress": "team@example.com",
+                "role": "writer",
+                "permissionDetails": [{"inherited": True, "inheritedFrom": "folder-123"}],
+            },
+        ]
+    }
+    result = GoogleSource(
+        credentials_json_b64="fake",
+        max_content_chars=1000,
+        max_file_bytes=1000,
+        services={"drive": _FakeService(files, permissions)},
+    ).fetch(DRIVE_URL)
+
+    assert [(p.principal_type, p.principal) for p in result.permissions] == [
+        ("user", "Member@Example.com"),
+        ("group", "team@example.com"),
+    ]
+    assert result.permissions[1].inherited_from == ("folder-123",)
+    assert result.permissions[1].inherited is True
+
+
+def test_malformed_acl_blocks_content_download():
+    files = _FakeFiles(
+        meta={"name": "notes.txt", "mimeType": "text/plain"},
+        payload=b"must not be downloaded",
+    )
+    drive = _FakeService(
+        files,
+        {"permissions": [{"type": "user", "emailAddress": "x@example.com", "role": "reader"}]},
+    )
+
+    with pytest.raises(SourceUnavailable, match="permission metadata"):
+        GoogleSource(
+            credentials_json_b64="fake",
+            max_content_chars=1000,
+            max_file_bytes=1000,
+            services={"drive": drive},
+        ).fetch(DRIVE_URL)
+
+    assert files.media_calls == 0
+
+
+def test_google_acl_paginates_before_extracting_content():
+    files = _FakeFiles(meta={"name": "notes.txt", "mimeType": "text/plain"}, payload=b"notes")
+    drive = _FakeService(
+        files,
+        [
+            {
+                "permissions": [
+                    {
+                        "id": "p1",
+                        "type": "user",
+                        "emailAddress": "one@example.com",
+                        "role": "reader",
+                    }
+                ],
+                "nextPageToken": "next",
+            },
+            {
+                "permissions": [
+                    {
+                        "id": "p2",
+                        "type": "group",
+                        "emailAddress": "team@example.com",
+                        "role": "reader",
+                    }
+                ]
+            },
+        ],
+    )
+    result = GoogleSource(
+        credentials_json_b64="fake",
+        max_content_chars=1000,
+        max_file_bytes=1000,
+        services={"drive": drive},
+    ).fetch(DRIVE_URL)
+
+    assert [permission.permission_id for permission in result.permissions] == ["p1", "p2"]
+    assert drive._permissions.calls[1]["pageToken"] == "next"
 
 
 @pytest.mark.parametrize(

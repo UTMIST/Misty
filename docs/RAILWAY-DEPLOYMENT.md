@@ -19,6 +19,12 @@ Railway + Neon dashboards / CLIs.
 All seven are **private** — no public domains. They reach each other over
 Railway's internal network as `<service>.railway.internal:<PORT>`.
 
+For the optional persistent `dev` environment used to test one PR at a
+time with a dedicated Discord bot, see [PR previews](pr-previews.md). That
+runbook covers the dev application's variables, database isolation, singleton
+bot volume, and selection command. The existing staging and production
+deployment flow is unchanged.
+
 ## Prerequisites
 - A Railway account + the `railway` CLI (`railway login`).
 - A Neon account.
@@ -60,6 +66,11 @@ from main). Copy the six connection strings (3 projects × 2 branches). Use the
 `postgresql+psycopg://…` form (append `?sslmode=require` if not present).
 
 `llm`, `meeting`, and `connectors` have no database — nothing to provision for them here.
+
+The documentation-system database also requires the `vector` extension for chunk
+storage. Its pre-deploy migration enables it; verify availability and the migration
+role's permissions on the target Neon branch as described in the service's
+[Postgres prerequisites](../services/documentation-system/docs/DEPLOYMENT.md#postgres).
 
 ## 2. Railway: project, environments, services
 1. Create a Railway project; it starts with a `production` environment — add a
@@ -103,10 +114,12 @@ Set these per environment (staging vs production) per service.
 | `DIRECTORY_API_KEY` | — | *(set by the provisioning script — step 4)* | — |
 | `CONNECTORS_BASE_URL` | — | `http://${{connectors.RAILWAY_PRIVATE_DOMAIN}}:${{connectors.PORT}}` | — |
 | `CONNECTORS_API_KEY` | — | a `connectors` consumer key with the `fetch` scope — see step 4b | — |
+| source ACL cadence | — | `SOURCE_ACCESS_REFRESH_AFTER_HOURS=24`, `SOURCE_ACCESS_MAX_AGE_HOURS=48` | — |
 | `CODE_HMAC_SECRET` | — | — | a strong random secret |
 | `EMAIL_BACKEND` | — | — | `resend` (or `gmail`) — **not** `fake` |
 | `EMAIL_FROM` | — | — | `UTMIST <noreply@utmist.ca>` |
 | `RESEND_API_KEY` | — | — | from Resend |
+| `GOOGLE_GROUPS_CUSTOMER_ID`, `GOOGLE_GROUPS_DOMAIN`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` | optional, all-or-nothing; enables managed team Google Groups, plus a daily `team-tracking-groups sync` cron — see [team-tracking DEPLOYMENT.md](../services/team-tracking/docs/DEPLOYMENT.md#managed-google-groups) | — | — |
 
 > **documentation-system boots fine without `CONNECTORS_API_KEY`.** Unlike
 > `API_KEY`/`DIRECTORY_API_KEY`, `verify_production_secrets()` only logs a
@@ -155,6 +168,7 @@ Set these per environment (staging vs production) per service.
 | `DISCORD_CLIENT_ID` | per app |
 | `DISCORD_GUILD_ID` | test guild (staging) / blank (prod) |
 | `ENABLE_DISCORD` / `ENABLE_WEB` | `true` / `false` |
+| `HELPER_USER_MAX_REQUESTS` / `HELPER_USER_WINDOW_SECONDS` | optional helper allowance overrides; see [bot configuration and reset semantics](../discord-bot/README.md#helper-bot-request-limits) |
 | `PORT` | Railway-injected port for the Discord readiness listener; defaults to `3002` locally |
 | `DIRECTORY_BASE_URL` / `DIRECTORY_API_KEY` | team-tracking; key set by the provisioning script |
 | `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system |
@@ -219,9 +233,19 @@ and sets each service's `DIRECTORY_API_KEY`. The discord-bot key's scopes
 include `people:elevate` (alongside its `people:*`/`teams:*`/`memberships:*`
 scopes) so its `/seed` can promote people to `admin`/`superuser` — plain
 `people:write` cannot set a non-`member` `access_level`. The
-documentation-system key stays read-only (`people:read teams:read`). Re-running issues a fresh key and
+documentation-system key stays read-only (`people:read teams:read memberships:read
+identifiers:read`) so it can resolve verified emails, active memberships, and the synced-group
+mapping supplied by team-tracking. Re-running issues a fresh key and
 repoints the consumer; the previous key stays active until you revoke it
 manually (`team-tracking-keys revoke <id>`).
+
+Configure a Railway cron/external scheduler to call documentation-system's
+`POST /docs/source-access/refresh-due?limit=10` hourly (`0 * * * *`) with a `docs:write` key, repeating
+until `attempted < limit`. Source-derived grants stop authorizing reads after 48 hours
+without a complete successful refresh. Eligibility still defaults to 24 hours; hourly checks
+avoid skipping a whole day when a document's prior refresh finished after the job started.
+See the service's [refresh schedule](../services/documentation-system/docs/DEPLOYMENT.md#source-access-refresh-schedule)
+for batching and disabled-source behavior.
 
 > **Gotcha — `src` package collision when minting keys.** Both
 > `services/team-tracking` and `services/documentation-system` declare a top-level

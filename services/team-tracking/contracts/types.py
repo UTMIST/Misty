@@ -4,7 +4,7 @@ from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, computed_field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 
 AccessLevel = Literal["member", "admin", "superuser"]
@@ -204,6 +204,35 @@ class ChannelTeamsReplace(BaseModel):
         if len(set(v)) != len(v):
             raise ValueError("team_ids must not contain duplicates")
         return v
+
+
+GoogleGroupStatus = Literal["synced", "needs_external_members", "failed"]
+
+
+class PendingGroupChange(BaseModel):
+    """A membership write whose outcome is not yet confirmed."""
+
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["add", "remove"]
+    email: str
+    membership_name: str | None = None  # exact resource being removed
+    operation_name: str | None = None  # diagnostic, when Google returned one
+
+
+class TeamGoogleGroup(DirectoryBase):
+    """A team's managed Google Group and the outcome of its last sync.
+
+    `group_name` is the Cloud Identity resource (`groups/{id}`); it is None
+    until creation succeeds, and `group_email` is fixed once it is set.
+    """
+
+    team_id: UUID
+    group_email: str
+    group_name: str | None = None
+    status: GoogleGroupStatus
+    last_error: str | None = None
+    last_synced_at: datetime | None = None
+    pending_changes: list[PendingGroupChange] = Field(default_factory=list)
 
 
 class ApiKey(DirectoryBase):

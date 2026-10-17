@@ -9,7 +9,7 @@ Consumers like documentation-system want the text of a Google Doc (or, later, ot
 Two things this service deliberately is **not**:
 
 - **Not a gateway.** It does not sit in front of other UTMIST services or route traffic to them.
-- **Not an authorization boundary.** It authenticates the *caller* (via a scoped API key) but never learns *who the caller is fetching on behalf of* — there is no per-end-user identity in the request. Access control for the underlying document is whatever the source system enforces (for Google, Drive's own sharing settings on the service account's email). A consumer that needs to enforce "can this particular user see this doc" must do that itself before calling `/fetch`.
+- **Not the final authorization boundary.** It authenticates the *calling service*, not an end user. For Google sources it returns the complete effective Drive ACL with the text; documentation-system resolves that evidence to verified people and membership-synced team groups before storing or disclosing content. The ACL is read before export/download, and an ACL-read failure blocks the content fetch.
 
 Like `llm`, it is stateless — no database, no migrations, no persisted key store. API keys are seeded from a config env var at boot.
 
@@ -118,7 +118,11 @@ Every endpoint except `/health` requires `X-API-Key`.
 
 Legacy `.doc` (`application/msword`, the pre-2007 binary Word format) is a different format from `.docx` and stays unsupported — `python-docx` cannot read it.
 
-**Response** (`FetchResponse`): `{ "title", "content", "warnings": [] }`.
+**Response** (`FetchResponse`): `{ "title", "content", "warnings": [], "permissions": [...] }`.
+Each Google permission includes its opaque permission id, principal type and email/domain,
+role, inherited parent/shared-drive ids, source expiration, and link-discovery flag. Non-Google sources may
+omit `permissions`; an omitted Google ACL is an authorization failure to consumers, never
+evidence that the file is public.
 
 ### Error → status table
 

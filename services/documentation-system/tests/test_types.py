@@ -1,9 +1,27 @@
 import pytest
 from pydantic import ValidationError
 
-from contracts.types import Doc, DocIngest, Source
+from contracts.types import MAX_CHUNK_CHARS, Doc, DocChunk, DocIngest, Source
 from datetime import datetime, timezone
 from uuid import uuid4
+
+from tests.chunk_storage_cases import make_chunk
+
+
+def test_doc_chunk_is_immutable_hashable_and_accepts_json_arrays():
+    chunk = make_chunk()
+    assert len({chunk, make_chunk()}) == 1
+    with pytest.raises(TypeError):
+        chunk.embedding[0] = 1.0
+    with pytest.raises(ValidationError):
+        chunk.embedding = (1.0,) * 1536
+    assert isinstance(chunk.model_dump(mode="json")["embedding"], list)
+    assert DocChunk.model_validate_json(chunk.model_dump_json()) == chunk
+
+
+def test_doc_chunk_rejects_oversized_text_at_construction():
+    with pytest.raises(ValidationError, match="String should have at most"):
+        make_chunk(text="a" * (MAX_CHUNK_CHARS + 1))
 
 
 def _audit():
@@ -60,10 +78,27 @@ def test_doc_grants_table_shape():
     from src.storage.schema import doc_grants
 
     cols = set(doc_grants.c.keys())
-    assert cols == {"id", "doc_id", "grantee_type", "grantee_id", "created_at", "created_by"}
+    assert cols == {
+        "id",
+        "doc_id",
+        "grantee_type",
+        "grantee_id",
+        "created_at",
+        "created_by",
+        "origin",
+        "source_permission_id",
+        "source_principal",
+        "source_role",
+        "source_inherited",
+        "source_expires_at",
+        "source_inherited_from",
+        "expires_at",
+    }
     constraint_names = {c.name for c in doc_grants.constraints if c.name}
     assert "ck_doc_grants_grantee_shape" in constraint_names
-    assert "uq_doc_grants_grantee" in constraint_names
+    index_names = {i.name for i in doc_grants.indexes}
+    assert "uq_doc_grants_manual_grantee" in index_names
+    assert "uq_doc_grants_source_permission" in index_names
 
 
 def test_doc_grant_input_org_rejects_id():
