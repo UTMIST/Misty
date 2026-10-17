@@ -58,7 +58,7 @@ def _merge_into_existing(
         storage.add_tag(existing.id, tag)
     _apply_grants(storage, existing.id, payload.grants, actor=actor)
     refreshed = storage.get_doc(existing.id)
-    warnings = [f"already catalogued (added by {existing.created_by})"]
+    warnings = [f"already catalogued (added by {existing.created_by})", *(warnings or [])]
     if storage.get_doc_content_meta(existing.id) is None:
         warnings.append("no content is stored for this doc")
     return IngestResult(doc=refreshed, created=False, warnings=warnings)

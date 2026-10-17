@@ -303,8 +303,9 @@ def test_list_docs_has_content_composes_with_visibility():
     escaping it: a contentless doc the actor cannot see must stay hidden, or
     the filter becomes a way to enumerate the catalog."""
     a = InMemoryStorageAdapter()
-    mine = _mk_vis(a, url="https://mine", owner_p=P1)
+    mine = _mk_vis(a, url="https://mine")
     _mk_vis(a, url="https://not-mine")
+    a.add_grant(mine.id, grantee_type="person", grantee_id=P1, actor="t")
     actor = Actor(person_id=P1, team_ids=frozenset())
     assert [d.id for d in a.list_docs(has_content=False, visibility=actor)] == [mine.id]
     assert a.list_docs(has_content=False, visibility=DENY) == []
