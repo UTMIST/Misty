@@ -8,6 +8,7 @@ from contracts.storage import StorageAdapter
 from src.api.deps import get_storage
 from src.api.middleware import AuditLogMiddleware
 from src.api.ratelimit import ClientRateLimitMiddleware
+from src.api.readiness import ReadinessProbe
 from src.api.routers import resolve
 from src.config import get_settings, verify_production_secrets
 
@@ -32,6 +33,7 @@ def create_app() -> FastAPI:
         trust_proxy=get_settings().trust_proxy_headers,
     )
     app.add_middleware(AuditLogMiddleware, logger_name="gateway.audit")
+    readiness_probe = ReadinessProbe()
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -39,7 +41,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health/ready")
     def readiness(storage: StorageAdapter = Depends(get_storage)) -> dict[str, str]:
-        if not storage.is_ready():
+        if not readiness_probe.is_ready(storage):
             raise HTTPException(status_code=503, detail="gateway database unavailable")
         return {"status": "ok"}
 

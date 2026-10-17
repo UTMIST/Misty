@@ -71,7 +71,7 @@ schema is at `http://localhost:8006/openapi.json`.
 | `DIRECTORY_BASE_URL` | team-tracking's base URL — where the gateway makes its **outbound** call. |
 | `DIRECTORY_API_KEY` | The gateway's **one internal** team-tracking key, scoped `identifiers:read`. Issued on team-tracking via `team-tracking-keys issue --name gateway --scopes identifiers:read`. |
 | `GATEWAY_ENV` | `local` / `staging` / `production`. In non-`local` envs, startup refuses to boot if `DIRECTORY_API_KEY` is blank or still the built-in dev default. |
-| `TRUST_PROXY_HEADERS` | Whether a proxy in front of the gateway sets `X-Forwarded-For` / `X-Real-IP`. **Set this to `true` on Railway.** Left `false`, the per-IP flood guard buckets every caller behind the proxy together; set `true` where no proxy exists, and a caller can forge their own source address. |
+| `TRUST_PROXY_HEADERS` | Trust a single valid `X-Real-IP` supplied by an ingress that overwrites that header. **Set this to `true` behind Railway's public edge.** `X-Forwarded-For` is ignored. Missing/invalid/duplicate `X-Real-IP` falls back to the socket peer. Leave `false` for direct/private-network callers. |
 
 **There is deliberately no `API_KEY`.** Every other service in this repo carries
 one to feed `platform_auth`'s env-bootstrap path, which authenticates you as a
@@ -161,6 +161,11 @@ Per-key limiting can't bound that — an attacker just varies the key — so
 something in front of auth has to. Its limit is loose on purpose; it is a
 floodgate, not a quota.
 
+With proxy trust enabled, client buckets use Railway's `X-Real-IP`, not a shared
+proxy hop from `X-Forwarded-For`; equivalent IPv6 spellings share a bucket.
+Health probes remain available after quota exhaustion. Readiness bounds database
+work with a short cache and one in-flight probe; see [health behavior](docs/API.md#health).
+
 Both are in-memory and process-local, with synchronized updates across request
 threads. Run one replica and one worker. A
 shared store (Redis) is needed only if the gateway is ever scaled past one.
@@ -212,6 +217,7 @@ gateway/
 │   │   ├── hashing.py         Thin shim over `platform_auth`: argon2 key hashing + gw_<prefix>_<secret> generation
 │   │   ├── middleware.py      Thin shim over `platform_auth`: AuditLogMiddleware
 │   │   ├── ratelimit.py       Bounded fixed-window counter; per-key quota + per-IP flood guard
+│   │   ├── readiness.py       Cached database readiness; one nonblocking probe at a time
 │   │   ├── deps.py            get_storage() / get_directory() dependencies (pooled directory client)
 │   │   └── routers/resolve.py `GET /v1/resolve/discord/{github_login}`
 │   │

@@ -32,10 +32,9 @@ class Settings(BaseSettings):
 
     gateway_env: Literal["local", "staging", "production"] = "local"
 
-    # Whether an upstream proxy sets X-Forwarded-For / X-Real-IP. Off by default
-    # so a direct deploy can't be fed a spoofed client IP; the Railway deploy
-    # sets TRUST_PROXY_HEADERS=true. Read by the per-IP rate limiter, which is
-    # only as good as its notion of "who is calling" (see src/api/ratelimit.py).
+    # Trust only an ingress that overwrites X-Real-IP, such as Railway's public
+    # edge. X-Forwarded-For is ignored. Keep false for direct access or internal
+    # callers, whose headers are not sanitized by Railway's public edge.
     trust_proxy_headers: bool = False
 
 

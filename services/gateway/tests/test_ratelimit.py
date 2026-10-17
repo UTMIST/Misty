@@ -100,21 +100,29 @@ def test_untrusted_proxy_headers_are_ignored():
     assert client_identity(r, trust_proxy=False) == "10.0.0.1"
 
 
-def test_trusted_proxy_takes_the_rightmost_hop():
-    """The rightmost entry is the only one the client could not have written.
-
-    A client that sends `X-Forwarded-For: 1.2.3.4` gets the proxy's observed
-    address appended after it. Reading the leftmost value — the usual "original
-    client" convention — would let anyone rotate their own bucket per request
-    and walk straight through this layer.
-    """
-    r = _request({"X-Forwarded-For": "1.2.3.4, 9.9.9.9"})
-    assert client_identity(r, trust_proxy=True) == "9.9.9.9"
+def test_trusted_proxy_uses_real_ip_instead_of_the_forwarded_chain():
+    # Railway supplies the client in X-Real-IP; XFF may include a shared proxy hop.
+    r = _request({"X-Real-IP": "203.0.113.1", "X-Forwarded-For": "203.0.113.1, 100.64.0.2"})
+    assert client_identity(r, trust_proxy=True) == "203.0.113.1"
 
 
-def test_trusted_proxy_falls_back_to_real_ip_then_peer():
-    assert client_identity(_request({"X-Real-IP": "5.6.7.8"}), trust_proxy=True) == "5.6.7.8"
-    assert client_identity(_request({}), trust_proxy=True) == "10.0.0.1"
+@pytest.mark.parametrize("real_ip", [None, "", "not-an-ip", "1.2.3.4, 5.6.7.8"])
+def test_missing_or_invalid_real_ip_falls_back_to_peer(real_ip):
+    headers = {"X-Forwarded-For": "1.2.3.4"}
+    if real_ip is not None:
+        headers["X-Real-IP"] = real_ip
+    assert client_identity(_request(headers), trust_proxy=True) == "10.0.0.1"
+
+
+def test_duplicate_real_ip_headers_fall_back_to_peer():
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"x-real-ip", b"203.0.113.1"), (b"x-real-ip", b"203.0.113.2")],
+            "client": ("10.0.0.1", 1234),
+        }
+    )
+    assert client_identity(request, trust_proxy=True) == "10.0.0.1"
 
 
 # --- per-IP middleware --------------------------------------------------------
@@ -152,10 +160,28 @@ def test_rotating_the_api_key_does_not_escape_the_ip_limit():
     assert c.get("/x", headers={"X-API-Key": "gw_three"}).status_code == 429
 
 
+def test_clients_behind_the_same_proxy_have_independent_budgets():
+    c = _ip_app(limit=2, window_s=60, trust_proxy=True)
+    first = {"X-Real-IP": "203.0.113.1", "X-Forwarded-For": "203.0.113.1, 100.64.0.2"}
+    second = {"X-Real-IP": "203.0.113.2", "X-Forwarded-For": "203.0.113.2, 100.64.0.2"}
+    for headers in (first, second):
+        assert c.get("/x", headers=headers).status_code == 200
+        assert c.get("/x", headers=headers).status_code == 200
+        assert c.get("/x", headers=headers).status_code == 429
+    # A changing forwarded chain must not refresh the first client's budget.
+    first["X-Forwarded-For"] = "198.51.100.1, 100.64.0.3"
+    assert c.get("/x", headers=first).status_code == 429
+
+
+def test_equivalent_ipv6_addresses_share_a_budget():
+    c = _ip_app(limit=1, window_s=60, trust_proxy=True)
+    assert c.get("/x", headers={"X-Real-IP": "2001:0db8:0000::1"}).status_code == 200
+    assert c.get("/x", headers={"X-Real-IP": "2001:db8::1"}).status_code == 429
+
+
 @pytest.mark.parametrize("path", ["/health", "/health/ready"])
 def test_health_is_exempt(path):
-    # Railway's liveness probe hits /health on a fixed interval; 429ing it would
-    # restart a service that is answering perfectly well.
+    # Deployment probes stay available; readiness bounds its DB work separately.
     c = _ip_app(limit=1, window_s=60)
     for _ in range(5):
         assert c.get(path).status_code == 200

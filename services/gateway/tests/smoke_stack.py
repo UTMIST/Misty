@@ -134,7 +134,8 @@ def main():
         assert docker("exec", gateway, "id", "-u") != "0", "gateway must run as non-root"
         assert http(gateway_url, "/health/ready")[0] == 503
         docker("exec", gateway, "alembic", "upgrade", "head")
-        assert http(gateway_url, "/health/ready")[0] == 200
+        # Failed readiness checks are cached briefly; recovery appears on refresh.
+        wait_for(lambda: http(gateway_url, "/health/ready")[0] == 200)
         print("PASS: non-root runtime and migrations; readiness requires the key table", flush=True)
 
         status, person = http(

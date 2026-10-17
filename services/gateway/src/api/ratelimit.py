@@ -27,6 +27,7 @@ replica. A shared store (Redis) is needed only if it is ever scaled past one.
 
 import time
 from collections import OrderedDict
+from ipaddress import ip_address
 from threading import Lock
 
 from fastapi import Depends, HTTPException, status
@@ -111,27 +112,18 @@ class FixedWindowCounter:
 def client_identity(request: Request, *, trust_proxy: bool) -> str:
     """Best available identifier for the caller, for per-IP limiting.
 
-    With `trust_proxy`, take the *rightmost* X-Forwarded-For entry. A proxy
-    appends the address it actually saw, so the rightmost hop is the one value
-    in that header the client could not have written itself. Taking the leftmost
-    — the usual "original client" reading — would let anyone reset their own
-    bucket by sending a fresh X-Forwarded-For on every request, which defeats
-    the whole layer.
-
-    Without `trust_proxy` the headers are ignored entirely and the socket peer
-    is used. Behind an unacknowledged proxy that collapses every caller into one
-    bucket, which is why IP_LIMIT is set loose enough not to bite a real
-    consumer.
+    Railway overwrites X-Real-IP with the client address. X-Forwarded-For can
+    include an internal proxy hop, so never use it as the client's identity.
+    Enable trust only behind an ingress that overwrites X-Real-IP. Otherwise,
+    or when that header is absent/invalid/duplicated, use the socket peer.
     """
     if trust_proxy:
-        forwarded = request.headers.get("X-Forwarded-For")
-        if forwarded:
-            hops = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
-            if hops:
-                return hops[-1]
-        real_ip = request.headers.get("X-Real-IP")
-        if real_ip and real_ip.strip():
-            return real_ip.strip()
+        real_ips = request.headers.getlist("X-Real-IP")
+        if len(real_ips) == 1:
+            try:
+                return str(ip_address(real_ips[0].strip()))
+            except ValueError:
+                pass
     return request.client.host if request.client else "unknown"
 
 
@@ -152,7 +144,8 @@ class ClientRateLimitMiddleware(BaseHTTPMiddleware):
         self._trust_proxy = trust_proxy
 
     async def dispatch(self, request: Request, call_next):
-        # Deployment probes must still run after the request budget is exhausted.
+        # Probes stay available after quota exhaustion; readiness caches DB work
+        # separately and permits only one in-flight check (see readiness.py).
         if request.url.path in {"/health", "/health/ready"}:
             return await call_next(request)
         if not self._counter.hit(client_identity(request, trust_proxy=self._trust_proxy)):

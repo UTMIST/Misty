@@ -17,8 +17,12 @@ access will require additional explicit operations; see [architecture](ARCHITECT
 - Scope rejection precedes construction of the upstream client.
 - Malformed upstream JSON/shapes and transport errors produce a static 503.
 - Concurrent quota updates are synchronized; deployment remains one replica.
+- Railway client buckets use validated `X-Real-IP`, ignoring shared proxy hops in
+  `X-Forwarded-For`; direct deployments use the socket peer.
 - Readiness requires the migrated key table, matching the current platform's
-  distinction between process liveness and database readiness.
+  distinction between process liveness and database readiness. A per-app cache
+  retains both outcomes for five seconds and allows only one database probe at a
+  time; concurrent requests never block on it or receive expired success.
 - Revocation preserves the first timestamp/actor, and both adapters withhold
   revoked hashes. CLI listing exposes the identifier needed for revocation.
 - Key issuance requires a supported scope; blank/default internal secrets fail
@@ -41,7 +45,7 @@ means the repository root. This covers the complete PR delta from staging.
 | `/.github/CODEOWNERS`, `/.github/PULL_REQUEST_TEMPLATE.md`, `/.github/labeler.yml`, `/.github/workflows/pr-zone-check.yml`, `/docs/CODE-OWNERSHIP.md` | Register the gateway ownership zone in the existing five-file convention. |
 | `/.github/workflows/ci.yml` | Gate gateway lint/tests, isolated wheel imports, disposable Postgres migrations, container build, and cross-service HTTP compatibility; restrict the gateway job's checkout credentials. |
 | `/Makefile` | Include gateway in repository fast tests and lint/format checks. |
-| `/AGENTS.md` | Add the gateway inventory, database head, public-access rules, and local port conflict. |
+| `/AGENTS.md` | Add the gateway inventory, database head, public-access rules, proxy/readiness invariants, and local port conflict. |
 | `/README.md`, `/docs/ARCHITECTURE.md`, `/docs/RAILWAY-DEPLOYMENT.md` | Integrate the public entry point, database ownership, and deployment exception into platform documentation. |
 | `/uv.lock`, `pyproject.toml` | Register and install the gateway workspace member using the current shared dependency lock, including both runtime Python packages in its wheel. |
 | `.dockerignore`, `Dockerfile`, `railway.json`, `docker-compose.yml`, `.env.example` | Package the service with an unprivileged runtime user, supply local defaults/Postgres, and configure migrations, readiness, and one replica. |
@@ -55,6 +59,7 @@ means the repository root. This covers the complete PR delta from staging.
 | `src/api/auth.py`, `src/api/hashing.py`, `src/api/middleware.py` | Bind shared authentication, the `gw_` envelope, and audit behavior without implementing another auth system. |
 | `src/api/deps.py` | Wire the Postgres adapter and pooled directory client at one dependency injection point. |
 | `src/api/ratelimit.py` | Bound per-IP and per-consumer request counts, including concurrent request handling. |
+| `src/api/readiness.py` | Bound public readiness database work with a per-app cache and a nonblocking probe lock. |
 | `src/api/routers/resolve.py` | Expose the scoped, one-field resolver with indistinguishable missing-link responses. |
 | `src/cli.py`, `src/config.py` | Manage scoped external keys and configure/redact the internal credential with startup validation. |
 | `src/directory/http_client.py` | Authenticate private HTTP calls, encode path inputs, validate responses, and map failures to the domain error. |
@@ -62,7 +67,7 @@ means the repository root. This covers the complete PR delta from staging.
 | `tests/conftest.py` | Isolate process-wide quota state between tests. |
 | `tests/test_auth.py`, `tests/test_cli.py`, `tests/test_config.py` | Verify authentication/revocation, permitted key issuance, CLI operator behavior, and startup secret handling. |
 | `tests/test_directory.py`, `tests/test_resolve.py` | Cover HTTP boundaries, malformed upstream responses, curated data, scope ordering, and lookup errors. |
-| `tests/test_health.py`, `tests/test_ratelimit.py` | Verify readiness versus liveness, quota behavior, proxy identity handling, and audit coverage. |
+| `tests/test_health.py`, `tests/test_ratelimit.py` | Verify bounded readiness work under repeated/concurrent requests, cache expiry/recovery, independent Railway client quotas, proxy validation, and audit coverage. |
 | `tests/storage_cases.py`, `tests/test_storage.py`, `tests/test_postgres_adapter.py` | Run shared storage semantics against both adapters and verify persisted CLI keys through HTTP authentication. |
 | `tests/smoke_stack.py` | Exercise the current built directory and gateway over real HTTP with isolated databases and disposable keys, verifying the gateway runs and migrates as non-root. |
 

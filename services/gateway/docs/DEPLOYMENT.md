@@ -34,7 +34,7 @@ Add `gateway` to the existing Misty project. Configure each environment:
 | `DIRECTORY_API_KEY` | Issued internal `tt_` key above |
 | `GATEWAY_ENV` | `staging` or `production` |
 | `PORT` | `8000` |
-| `TRUST_PROXY_HEADERS` | `true` behind Railway's edge proxy |
+| `TRUST_PROXY_HEADERS` | `true` behind Railway's public edge, which overwrites `X-Real-IP` |
 | Replicas / workers | One replica, one Uvicorn worker |
 
 Ensure team-tracking explicitly sets `PORT=8000` so the variable reference resolves.
@@ -44,8 +44,10 @@ an unavailable or unmigrated gateway key database fails readiness.
 The image runs the API, migrations, and key CLI as the unprivileged `gateway` user.
 
 Generate a public HTTPS domain for **gateway only**, targeting port 8000. Private
-services retain private networking. Enable proxy-header trust only when requests
-arrive through the configured proxy. Do not configure `API_KEY`: it is ignored.
+services retain private networking. Enable proxy-header trust only for ingress
+that overwrites `X-Real-IP`. The limiter ignores `X-Forwarded-For`; private-network
+requests bypass Railway's header sanitization. See [proxy trust](ARCHITECTURE.md).
+Do not configure `API_KEY`: it is ignored.
 
 The local commands pin the service directory and invoke its Python module because
 workspace console scripts share the `src.cli` import name. In the isolated deployed
@@ -79,6 +81,8 @@ see [future compute access](ARCHITECTURE.md#future-compute-platform-access).
 ## Verify the deployment
 
 Check that the deployment reports success and that `/health/ready` returns 200.
+Readiness caches successes and failures for five seconds; retry after that window
+following a migration or recovery. See the [health contract](API.md#health).
 From a test client or the intended consumer, call the resolver with its external
 key and a synthetic or approved linked login; expect only `discord_id`. Verify a
 missing key returns 401 and an unknown login returns the generic 404. Confirm the
