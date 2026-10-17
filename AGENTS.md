@@ -4,7 +4,7 @@ Instructions for AI coding agents working in this repository. Humans should read
 
 ## What this repo is
 
-The UTMIST ops platform: six Python HTTP services, a Node Discord bot, and one shared auth library, in a single uv workspace. It's deployed and running in production — **changes here reach a live system.** Merges to `staging` auto-deploy to Railway staging; merges to `main` auto-deploy to production.
+The UTMIST ops platform: seven Python HTTP services, a Node Discord bot, and one shared auth library, in a single uv workspace. It's deployed and running in production — **changes here reach a live system.** Merges to `staging` auto-deploy to Railway staging; merges to `main` auto-deploy to production.
 
 ```
 services/team-tracking/         directory (people/teams/roles) — 8000, Postgres 5433
@@ -13,6 +13,7 @@ services/llm/                   Bedrock /chat proxy            — 8002, no DB
 services/verification/          email one-time codes           — 8003, Postgres 5434 ⚠
 services/meeting/               live transcription → minutes   — 8004, no DB, STATEFUL
 services/connectors/            Google doc fetch adapter       — 8005, no DB
+services/gateway/               public external API            — 8006, Postgres 5435
 packages/auth/                  platform_auth — shared API-key auth library
 discord-bot/                    Discord frontend + web playground
 ```
@@ -56,7 +57,7 @@ Violating any of these is a bug even if tests pass.
 - **Change `src/storage/schema.py` first** — the SQLAlchemy Core tables are the schema source of truth.
 - **`down_revision` points at the current head**, and `downgrade()` must actually reverse `upgrade()`. Verify the round trip: `upgrade head` → `downgrade -1` → `upgrade head`.
 - **New columns on existing tables are nullable or have a `server_default`**, mirrored in the Pydantic model and both adapters.
-- Current heads: team-tracking **010**, documentation-system **008**, verification **001**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
+- Current heads: team-tracking **010**, documentation-system **008**, verification **001**, gateway **001**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
 
 ### Configuration
 
@@ -84,7 +85,7 @@ Violating any of these is a bug even if tests pass.
 
 ### Run before you push
 
-`make check` from the repo root runs lint, format checks, and the fast suites across all seven Python directories plus the bot. **It is not CI-equivalent** — it skips the Postgres-adapter suites, so after touching storage, an adapter, or a migration use `make test-full` with Postgres up. `make help` lists the rest. It's a wrapper over the commands below — `ci.yml` is still authoritative, and a disagreement between the two means the Makefile is wrong.
+`make check` from the repo root runs lint, format checks, and the fast suites across all eight Python directories plus the bot. **It is not CI-equivalent** — it skips the Postgres-adapter suites, so after touching storage, an adapter, or a migration use `make test-full` with Postgres up. `make help` lists the rest. It's a wrapper over the commands below — `ci.yml` is still authoritative, and a disagreement between the two means the Makefile is wrong.
 
 For a single DB-backed service (team-tracking, documentation-system, verification):
 
@@ -111,7 +112,10 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 
 - **Cross-worktree tests need source-path verification.** Pytest can prepend a historical tests checkout to `sys.path` and import its `contracts` instead of the edited code. Pin the target `src` and `contracts` packages before collection and verify imported modules' `__file__` paths; passing against the wrong checkout is not verification.
 - **`uv --project` is mandatory for the key CLIs.** Both `services/team-tracking` and `services/documentation-system` declare a top-level `src` package with a console script at `src.cli:main`. In the shared workspace venv they collide, so a bare `team-tracking-keys …` can resolve documentation-system's CLI and mint a `doc_`-envelope key that team-tracking rejects. Always `uv --project services/<service> run <service>-keys …`, and verify the token's prefix. The same applies to every other team-tracking console script (`team-tracking-seed`, `team-tracking-groups`).
-- **documentation-system and verification both bind host port 5434.** They cannot run locally at the same time. Remap one (`-p 5435:5432`) and update its `DATABASE_URL`. If Alembic reports an unknown revision, you're almost certainly pointed at the other service's database.
+- **Gateway provisioning must pin the import path too.** After installing all workspace members, `uv --project` alone can still import another service's `src.cli`. From the repo root use `uv --directory services/gateway --project . run python -m src.cli ...` (and the team-tracking directory for its internal key). The isolated containers can use their installed key CLI directly.
+- **Gateway is the public entry point.** It accepts only issued `gw_` keys, has no env-bootstrap `API_KEY`, and owns only its key database. Compute-platform data access must use explicit scoped HTTP operations; see `services/gateway/docs/ARCHITECTURE.md`. Run one replica/worker for its process-local rate limits.
+- **Gateway proxy trust is specific to `X-Real-IP`.** Railway's public edge overwrites it; `X-Forwarded-For` may include a shared proxy hop and is ignored. Health probes skip the IP quota, so preserve the per-app readiness cache and nonblocking probe lock; see `services/gateway/docs/API.md#health`.
+- **documentation-system and verification both bind host port 5434.** They cannot run locally at the same time. Remap one to an unused port (gateway uses 5435 by default) and update its `DATABASE_URL`. If Alembic reports an unknown revision, you're almost certainly pointed at the other service's database.
 - **documentation-system's Swagger is at `/swagger`, not `/docs`** — `/docs` is a real docs-resource router on that service.
 - **`npm run dev:web` occupies port 8001 and 5433**, and needs Docker. Stop documentation-system first.
 - **`meeting` is stateful.** One process must own a session end-to-end. Its sessions live in memory and a restart drops every in-flight meeting.
