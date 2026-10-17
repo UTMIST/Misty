@@ -181,7 +181,7 @@ def _detail(resp: httpx.Response) -> str:
 
 
 def _missing_scopes(scopes: set[str], *, dry_run: bool) -> list[str]:
-    if ADMIN_SCOPE in scopes: 
+    if ADMIN_SCOPE in scopes:
         return []
     needed = [READ_SCOPE, READ_ALL_SCOPE] + ([] if dry_run else [WRITE_SCOPE])
     return [s for s in needed if s not in scopes]
