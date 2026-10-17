@@ -15,7 +15,7 @@ test('llmSafe is true', () => {
   assert.equal(llmSafe, true);
 });
 
-test('createTeam returns CREATED on success', async () => {
+test('createTeam returns CREATED on success with Google probe', async () => {
   const svc = createTeamService({
     directory: {
       createTeam: async (args) => {
@@ -23,6 +23,10 @@ test('createTeam returns CREATED on success', async () => {
         assert.equal(args.label, 'ML');
         assert.equal(args.description, 'Machine Learning');
         return { id: 't1', slug: 'ml', label: 'ML' };
+      },
+      syncTeamGoogleGroup: async (id) => {
+        assert.equal(id, 't1');
+        return { group_email: 'ml@utmist.skule.ca', status: 'synced' };
       },
     },
   });
@@ -32,6 +36,53 @@ test('createTeam returns CREATED on success', async () => {
   );
   assert.equal(res.outcome, 'CREATED');
   assert.equal(res.team.id, 't1');
+  assert.equal(res.google.outcome, 'SYNC_RESULT');
+  assert.equal(res.google.state.status, 'synced');
+});
+
+test('createTeam still succeeds when Google Groups is not configured', async () => {
+  const svc = createTeamService({
+    directory: {
+      createTeam: async () => ({ id: 't1', slug: 'ml', label: 'ML' }),
+      syncTeamGoogleGroup: async () => {
+        throw new GoogleGroupsNotConfigured('off');
+      },
+    },
+  });
+  const res = await svc.createTeam({ slug: 'ml', label: 'ML' }, { caller: admin });
+  assert.equal(res.outcome, 'CREATED');
+  assert.equal(res.google.outcome, 'NOT_CONFIGURED');
+});
+
+test('createTeam still succeeds when Google probe cannot reach the directory', async () => {
+  const svc = createTeamService({
+    directory: {
+      createTeam: async () => ({ id: 't1', slug: 'ml', label: 'ML' }),
+      syncTeamGoogleGroup: async () => {
+        throw new DirectoryUnavailable('down');
+      },
+    },
+  });
+  const res = await svc.createTeam({ slug: 'ml', label: 'ML' }, { caller: admin });
+  assert.equal(res.outcome, 'CREATED');
+  assert.equal(res.google.outcome, 'DIRECTORY_DOWN');
+});
+
+test('createTeam surfaces needs_external_members from the Google probe', async () => {
+  const svc = createTeamService({
+    directory: {
+      createTeam: async () => ({ id: 't1', slug: 'ml', label: 'ML' }),
+      syncTeamGoogleGroup: async () => ({
+        group_email: 'ml@utmist.skule.ca',
+        status: 'needs_external_members',
+        last_error: 'Allow external members',
+      }),
+    },
+  });
+  const res = await svc.createTeam({ slug: 'ml', label: 'ML' }, { caller: admin });
+  assert.equal(res.outcome, 'CREATED');
+  assert.equal(res.google.outcome, 'SYNC_RESULT');
+  assert.equal(res.google.state.status, 'needs_external_members');
 });
 
 test('createTeam returns SLUG_EXISTS on TeamExists', async () => {
@@ -540,6 +591,35 @@ test('syncGoogleGroup returns SYNC_RESULT and maps configuration errors', async 
   assert.equal(res.outcome, 'SYNC_RESULT');
   assert.equal(res.state.status, 'synced');
 
+  const needsSetup = createTeamService({
+    directory: {
+      getTeamBySlug: async () => ({ id: 't1', slug: 'ml', label: 'ML' }),
+      syncTeamGoogleGroup: async () => ({
+        group_email: 'ml@utmist.skule.ca',
+        status: 'needs_external_members',
+      }),
+    },
+  });
+  assert.equal(
+    (await needsSetup.syncGoogleGroup({ teamSlug: 'ml' }, { caller: admin })).state.status,
+    'needs_external_members',
+  );
+
+  const failed = createTeamService({
+    directory: {
+      getTeamBySlug: async () => ({ id: 't1', slug: 'ml', label: 'ML' }),
+      syncTeamGoogleGroup: async () => ({
+        group_email: 'ml@utmist.skule.ca',
+        status: 'failed',
+        last_error: 'boom',
+      }),
+    },
+  });
+  assert.equal(
+    (await failed.syncGoogleGroup({ teamSlug: 'ml' }, { caller: admin })).state.status,
+    'failed',
+  );
+
   const unconfigured = createTeamService({
     directory: {
       getTeamBySlug: async () => ({ id: 't1', slug: 'ml', label: 'ML' }),
@@ -564,5 +644,15 @@ test('syncGoogleGroup returns SYNC_RESULT and maps configuration errors', async 
   assert.equal(
     (await retired.syncGoogleGroup({ teamSlug: 'ml' }, { caller: admin })).outcome,
     'RETIRED_NO_GROUP',
+  );
+
+  const missingTeam = createTeamService({
+    directory: {
+      getTeamBySlug: async () => null,
+    },
+  });
+  assert.equal(
+    (await missingTeam.syncGoogleGroup({ teamSlug: 'nope' }, { caller: admin })).outcome,
+    'TEAM_NOT_FOUND',
   );
 });

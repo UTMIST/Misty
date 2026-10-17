@@ -231,7 +231,14 @@ test('/team create dispatches teamService.createTeam with options and caller', a
     teamService: {
       createTeam: async (args, opts) => {
         seen = { args, opts };
-        return { outcome: 'CREATED', team: { slug: 'ml', label: 'ML' } };
+        return {
+          outcome: 'CREATED',
+          team: { slug: 'ml', label: 'ML' },
+          google: {
+            outcome: 'SYNC_RESULT',
+            state: { group_email: 'ml@utmist.skule.ca', status: 'synced' },
+          },
+        };
       },
     },
   };
@@ -356,7 +363,7 @@ test('/team google-sync dispatches syncGoogleGroup', async () => {
     ctx,
   });
   assert.deepEqual(seen, { teamSlug: 'ml' });
-  assert.match(payload.content, /external-members/i);
+  assert.match(payload.content, /external-member/i);
   assert.equal(payload.ephemeral, true);
 });
 

@@ -171,15 +171,51 @@ test('renderSeedResult covers outcomes', () => {
 });
 
 test('renderCreateTeamResult covers outcomes', () => {
-  const created = renderCreateTeamResult({
+  const team = { slug: 'ml', label: 'ML' };
+  const needsSetup = renderCreateTeamResult({
     outcome: 'CREATED',
-    team: { slug: 'ml', label: 'ML' },
+    team,
+    google: {
+      outcome: 'SYNC_RESULT',
+      state: {
+        group_email: 'ml@utmist.skule.ca',
+        status: 'needs_external_members',
+        last_error: 'Allow external members',
+      },
+    },
   }).content;
-  assert.match(created, /ML|ml/);
-  assert.match(created, /infrastructure@utmist\.skule\.ca/);
-  assert.match(created, /https:\/\/groups\.google\.com\/a\/utmist\.skule\.ca\/g\/ml\/settings/);
-  assert.match(created, /Allow external members/);
-  assert.match(created, /google-sync/);
+  assert.match(needsSetup, /Created team.*ML/s);
+  assert.match(needsSetup, /infrastructure@utmist\.skule\.ca/);
+  assert.match(needsSetup, /https:\/\/groups\.google\.com\/a\/utmist\.skule\.ca\/g\/ml\/settings/);
+  assert.match(needsSetup, /Allow external members/);
+  assert.match(needsSetup, /Who can add external members/);
+  assert.match(needsSetup, /Super Admin/);
+  assert.match(needsSetup, /not yet verified/i);
+
+  // Empty/fresh groups often report synced — create must still show manual setup.
+  const syncedFresh = renderCreateTeamResult({
+    outcome: 'CREATED',
+    team,
+    google: {
+      outcome: 'SYNC_RESULT',
+      state: { group_email: 'ml@utmist.skule.ca', status: 'synced' },
+    },
+  }).content;
+  assert.match(syncedFresh, /synced/i);
+  assert.match(syncedFresh, /infrastructure@utmist\.skule\.ca/);
+  assert.match(syncedFresh, /groups\.google\.com/);
+  assert.match(syncedFresh, /Allow external members/);
+  assert.match(syncedFresh, /Who can add external members/);
+
+  const unconfigured = renderCreateTeamResult({
+    outcome: 'CREATED',
+    team,
+    google: { outcome: 'NOT_CONFIGURED' },
+  }).content;
+  assert.match(unconfigured, /Created team/);
+  assert.match(unconfigured, /not configured/i);
+  assert.doesNotMatch(unconfigured, /groups\.google\.com/);
+
   assert.match(renderCreateTeamResult({ outcome: 'SLUG_EXISTS', detail: 'x' }).content, /already/i);
   assert.match(
     renderCreateTeamResult({ outcome: 'DIRECTORY_DOWN' }).content,
@@ -206,7 +242,8 @@ test('renderGoogleGroupStatusResult covers outcomes', () => {
       last_error: 'Allow external members',
     },
   }).content;
-  assert.match(needs, /external-members/i);
+  assert.match(needs, /external-member/i);
+  assert.match(needs, /Who can add external members/);
   assert.match(needs, /groups\.google\.com/);
   assert.match(
     renderGoogleGroupStatusResult({ outcome: 'NO_MAPPING', team }).content,
@@ -230,6 +267,91 @@ test('renderGoogleGroupSyncResult covers outcomes', () => {
     /not configured/i,
   );
   assert.match(renderGoogleGroupSyncResult({ outcome: 'RETIRED_NO_GROUP' }).content, /retired/i);
+});
+
+// #272 Done checklist — offline cases for Google Group setup / recovery replies.
+test('Google Group offline cases: in-progress, disabled, setup, empty synced, failed, recovery', () => {
+  const team = { slug: 'ml', label: 'ML' };
+
+  // Provisioning still in progress (no mapping yet).
+  const inProgress = renderGoogleGroupStatusResult({ outcome: 'NO_MAPPING', team }).content;
+  assert.match(inProgress, /No Google Group mapping/i);
+  assert.match(inProgress, /google-sync|Provisioning/i);
+
+  // Disabled integration — create must not present a settings link.
+  const disabled = renderCreateTeamResult({
+    outcome: 'CREATED',
+    team,
+    google: { outcome: 'NOT_CONFIGURED' },
+  }).content;
+  assert.match(disabled, /not configured/i);
+  assert.doesNotMatch(disabled, /groups\.google\.com/);
+  assert.match(
+    renderGoogleGroupSyncResult({ outcome: 'NOT_CONFIGURED' }).content,
+    /not configured/i,
+  );
+
+  // Setup required.
+  const setup = renderGoogleGroupSyncResult({
+    outcome: 'SYNC_RESULT',
+    team,
+    state: {
+      group_email: 'ml@utmist.skule.ca',
+      status: 'needs_external_members',
+      last_error: 'Allow external members',
+    },
+  }).content;
+  assert.match(setup, /Allow external members/);
+  assert.match(setup, /Who can add external members/);
+  assert.match(setup, /groups\.google\.com/);
+
+  // Empty-group synced is not proof external membership works.
+  const emptySynced = renderGoogleGroupStatusResult({
+    outcome: 'STATUS',
+    team,
+    state: { group_email: 'ml@utmist.skule.ca', status: 'synced' },
+  }).content;
+  assert.match(emptySynced, /synced/i);
+  assert.match(emptySynced, /empty group|not proof|before any external/i);
+
+  // Failed sync (generic + external-members flavored).
+  const failed = renderGoogleGroupSyncResult({
+    outcome: 'SYNC_RESULT',
+    team,
+    state: { group_email: 'ml@utmist.skule.ca', status: 'failed', last_error: 'timeout' },
+  }).content;
+  assert.match(failed, /failed/i);
+  assert.match(failed, /timeout/);
+  const failedExternal = renderGoogleGroupSyncResult({
+    outcome: 'SYNC_RESULT',
+    team,
+    state: {
+      group_email: 'ml@utmist.skule.ca',
+      status: 'failed',
+      last_error: 'group rejects external members',
+    },
+  }).content;
+  assert.match(failedExternal, /Allow external members/);
+  assert.match(failedExternal, /groups\.google\.com/);
+
+  // Successful recovery after settings + sync.
+  const recovered = renderGoogleGroupSyncResult({
+    outcome: 'SYNC_RESULT',
+    team,
+    state: { group_email: 'ml@utmist.skule.ca', status: 'synced' },
+  }).content;
+  assert.match(recovered, /synced/i);
+  assert.match(recovered, /Google Group for \*\*ML\*\*/);
+
+  // Create-time probe could not reach Google — team still created, no fake ready group.
+  const probeDown = renderCreateTeamResult({
+    outcome: 'CREATED',
+    team,
+    google: { outcome: 'DIRECTORY_DOWN' },
+  }).content;
+  assert.match(probeDown, /Created team/);
+  assert.match(probeDown, /could not be checked|google-status/i);
+  assert.doesNotMatch(probeDown, /is \*\*synced\*\*/);
 });
 
 test('renderListTeamsResult covers outcomes', () => {
