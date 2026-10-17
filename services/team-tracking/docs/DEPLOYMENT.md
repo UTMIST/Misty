@@ -218,12 +218,20 @@ Cloud Identity exposes no operation-polling endpoint. A pending write whose effe
 
 ### Onboarding each new group (manual step)
 
-API-created groups reject members outside `utmist.skule.ca`, and most members use personal addresses. After a team's group is created, its mapping shows `status: needs_external_members` as soon as someone external is added:
+API-created groups reject members outside `utmist.skule.ca`, and most members use personal addresses. After a team's group is created, its mapping shows `status: needs_external_members` as soon as someone external is added. An empty group's `synced` status is **not** proof that external membership is enabled.
 
-1. Open [Google Groups](https://groups.google.com/) as a group owner (`infrastructure@utmist.skule.ca`), select the group, open **Group settings**, enable **Allow external members**, and save.
-2. Re-sync: `POST /teams/{team_id}/google-group/sync` with a `teams:write` key, or `team-tracking-groups sync --team <slug>`. The status should become `synced`.
+As `infrastructure@utmist.skule.ca` (group owner), open the group's **Group settings** and set:
 
-Find teams waiting on this step with `GET /teams/google-groups` and filter on `status`. Giving a team lead Google-side ownership is a Google Groups action; a Misty team role doesn't grant it.
+1. **Allow external members** (`allowExternalMembers`) — on.
+2. **Who can add external members** (`whoCanAddExternalMembers`) — end users / members can add (e.g. `END_USERS_CAN_ADD_EXTERNAL_MEMBERS`), not “only admins”.
+
+Save, then re-sync: Misty `/team google-sync`, or `POST /teams/{team_id}/google-group/sync` with a `teams:write` key, or `team-tracking-groups sync --team <slug>`. The status should become `synced` once an external add can succeed.
+
+If (1) is already on but adds still fail and (2) is administrator-only, do **not** keep toggling (1). Escalate to a Workspace Super Admin (via infrastructure). Misty admins and team leads are not Google Group owners unless granted that in Google.
+
+**Unverified (as of #272):** a one-off Super Admin edit confirmed both fields on a test group, but we have not yet recorded a fresh-group check of whether the **owner** (`infrastructure@`) can change (2) in the Groups UI on every new team group. Treat owner success on (2) as unverified until that is done; the bot copy says the same.
+
+Find teams waiting on this step with `GET /teams/google-groups` and filter on `status`, or Misty `/team google-status`.
 
 ### Existing groups and Drive shares
 
