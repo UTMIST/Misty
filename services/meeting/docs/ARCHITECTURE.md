@@ -167,6 +167,13 @@ segment IDs before speaker/timestamp metadata is returned. The exact window,
 size guard, and error contract live in [API.md](API.md#post-meetingssession_idqna).
 As with minutes generation, collaborator wiring belongs only in `wiring.py`.
 
+The question defines the task; only the transcript is treated as evidence rather
+than instructions. The prompt explicitly supports summarizing the available
+discussion and cautiously recognizing contextual speech-recognition near-matches.
+Near-matches should quote the actual transcript spelling and state uncertainty.
+Offline tests check the prompt contract, evidence transport, and citation parsing;
+they do not establish the live model's semantic answer quality.
+
 ## Live-verify caveats
 
 Several integration assumptions are unit-tested against fakes but **not yet confirmed against real Discord audio or a real AWS account**:

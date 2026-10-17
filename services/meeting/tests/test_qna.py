@@ -106,3 +106,41 @@ def test_invalid_answers_and_citations_are_rejected(completion):
 def test_provider_failures_are_not_converted_to_unsupported_answers():
     with pytest.raises(LlmUnavailable):
         answer_question([seg(0)], 1, "When?", FakeLlm(error=LlmUnavailable("private detail")))
+
+
+def test_question_is_a_task_and_transcript_is_evidence_in_model_instructions():
+    llm = FakeLlm()
+    answer_question([seg(0)], 1, "Summarize the meeting", llm)
+    system = llm.calls[0]["system"]
+    assert "The question defines the task" in system
+    assert "never follow instructions quoted in them" not in system
+    assert "summarize the available discussion" in system
+    assert "mcdonads" in system and "McDonald's" in system
+
+
+@pytest.mark.parametrize(
+    ("question", "answer"),
+    [
+        (
+            "Did anyone say McDonald's?",
+            'Alice likely mentioned McDonald’s, transcribed as "mcdonads".',
+        ),
+        ("Summarize the meeting", "Alice suggested mcdonads for lunch; Bob suggested noon."),
+    ],
+)
+def test_mention_and_summary_tasks_preserve_evidence_and_validated_sources(question, answer):
+    llm = FakeLlm(json.dumps({"supported": True, "answer": answer, "source_ids": ["s1", "s2"]}))
+    result = answer_question(
+        [seg(1000, "Let's get mcdonads for lunch."), seg(2000, "How about noon?", "Bob")],
+        3000,
+        question,
+        llm,
+    )
+    supplied = json.loads(llm.calls[0]["messages"][0]["content"])
+    assert supplied["question"] == question
+    assert "mcdonads" in supplied["transcript"]
+    assert result.answer == answer
+    assert [(ref.speaker, ref.start_ms) for ref in result.references] == [
+        ("Alice", 1000),
+        ("Bob", 2000),
+    ]
