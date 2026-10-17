@@ -55,6 +55,22 @@ export class EmailAlreadyRegistered extends Error {
   }
 }
 
+export class GoogleGroupsNotConfigured extends Error {
+  constructor(detail) {
+    super(detail);
+    this.name = 'GoogleGroupsNotConfigured';
+    this.detail = detail;
+  }
+}
+
+export class GoogleGroupSyncConflict extends Error {
+  constructor(detail) {
+    super(detail);
+    this.name = 'GoogleGroupSyncConflict';
+    this.detail = detail;
+  }
+}
+
 export function createDirectoryClient({ baseUrl, apiKey, fetchImpl = fetch }) {
   const headers = { 'X-API-Key': apiKey, 'Content-Type': 'application/json' };
   const { send, parseJson } = createHttpClient({
@@ -225,6 +241,31 @@ export function createDirectoryClient({ baseUrl, apiKey, fetchImpl = fetch }) {
       });
       if (resp.status === 200) return parseJson(resp);
       if (resp.status === 404) return null;
+      throw new DirectoryUnavailable(`directory returned ${resp.status}`);
+    },
+
+    getTeamGoogleGroup(teamId) {
+      return getByPath(`/teams/${encodeURIComponent(teamId)}/google-group`);
+    },
+
+    async syncTeamGoogleGroup(teamId, { signal } = {}) {
+      const resp = await send(`/teams/${encodeURIComponent(teamId)}/google-group/sync`, {
+        method: 'POST',
+        ...(signal ? { signal } : {}),
+      });
+      if (resp.status === 200) return parseJson(resp);
+      if (resp.status === 404) {
+        const body = await resp.json().catch(() => ({}));
+        throw new TeamNotFound(body.detail ?? 'team not found');
+      }
+      if (resp.status === 409) {
+        const body = await resp.json().catch(() => ({}));
+        throw new GoogleGroupSyncConflict(body.detail ?? 'google group sync conflict');
+      }
+      if (resp.status === 503) {
+        const body = await resp.json().catch(() => ({}));
+        throw new GoogleGroupsNotConfigured(body.detail ?? 'google groups not configured');
+      }
       throw new DirectoryUnavailable(`directory returned ${resp.status}`);
     },
   };

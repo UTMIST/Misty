@@ -222,6 +222,11 @@ and skips them.
 - `/team add user:<@mention> team:<slug> [role:<...>] [team_admin:<bool>]` (admin) — add a member. The mentioned user must have already run `/link`.
 - `/team remove user:<@mention> team:<slug>` (admin) — soft-end a membership as of today.
 - `/team roster team:<slug> [as_of:<YYYY-MM-DD>]` (linked) — show a team's current roster.
+- `/team google-status team:<slug>` (admin) — show the team's managed Google Group sync status and, once the managed group exists, instructions for both external-member settings. Instructions are included even for an empty `synced` group; Misty cannot verify those settings.
+- `/team google-sync team:<slug>` (admin) — retry Google Group sync after someone with `infrastructure@utmist.skule.ca` sets **Allow external members** and **Who can add external members** in Group settings (see team-tracking [DEPLOYMENT.md](../services/team-tracking/docs/DEPLOYMENT.md#onboarding-each-new-group-manual-step)).
+  - `/team create` probes sync after directory create so the reply can separate “team created” from Google status (including “Google Groups not configured” — no settings link). The probe waits at most two seconds before reporting that provisioning may still be in progress; use `/team google-status` afterward. Aborting the probe does not cancel backend provisioning. Settings links appear only after the backend records a managed group resource, never for a failed creation with only an attempted address.
+  - `synced` is not proof external membership works (empty groups can sync before any external add). Clicking the settings link is not verification; only a later successful external sync is.
+  - Misty cannot read Group settings from Google; if **Who can add external members** is admin-only, escalate via infrastructure rather than re-toggling **Allow external members**. Owner ability to change that second field on fresh groups is still unverified — see the DEPLOYMENT note above.
 - `/my-teams` (linked) — list your active memberships.
 - `/doc <add|list|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
 

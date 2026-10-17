@@ -9,6 +9,8 @@ import {
   TeamNotFound,
   MembershipInvalid,
   EmailAlreadyRegistered,
+  GoogleGroupsNotConfigured,
+  GoogleGroupSyncConflict,
 } from '../src/clients/directoryClient.js';
 
 function fakeFetch(responses) {
@@ -438,4 +440,52 @@ test('addEmailIdentifier throws DirectoryUnavailable on 500', async () => {
   const fetchImpl = fakeFetch([{ status: 500, body: {} }]);
   const client = createDirectoryClient({ baseUrl: BASE, apiKey: KEY, fetchImpl });
   await assert.rejects(() => client.addEmailIdentifier('p1', 'a@b.com'), DirectoryUnavailable);
+});
+
+test('getTeamGoogleGroup returns body on 200 and null on 404', async () => {
+  const ok = fakeFetch([
+    { status: 200, body: { group_email: 'ml@utmist.skule.ca', status: 'synced' } },
+  ]);
+  const client = createDirectoryClient({ baseUrl: BASE, apiKey: KEY, fetchImpl: ok });
+  const state = await client.getTeamGoogleGroup('t1');
+  assert.equal(state.status, 'synced');
+  assert.match(ok.calls[0].url, /\/teams\/t1\/google-group$/);
+
+  const miss = fakeFetch([{ status: 404, body: { detail: 'google group not found' } }]);
+  const missClient = createDirectoryClient({ baseUrl: BASE, apiKey: KEY, fetchImpl: miss });
+  assert.equal(await missClient.getTeamGoogleGroup('t1'), null);
+});
+
+test('syncTeamGoogleGroup posts and returns body on 200', async () => {
+  const fetchImpl = fakeFetch([
+    { status: 200, body: { group_email: 'ml@utmist.skule.ca', status: 'needs_external_members' } },
+  ]);
+  const client = createDirectoryClient({ baseUrl: BASE, apiKey: KEY, fetchImpl });
+  const state = await client.syncTeamGoogleGroup('t1');
+  assert.equal(state.status, 'needs_external_members');
+  assert.match(fetchImpl.calls[0].url, /\/teams\/t1\/google-group\/sync$/);
+  assert.equal(fetchImpl.calls[0].opts.method, 'POST');
+});
+
+test('syncTeamGoogleGroup maps 404/409/503', async () => {
+  const notFound = createDirectoryClient({
+    baseUrl: BASE,
+    apiKey: KEY,
+    fetchImpl: fakeFetch([{ status: 404, body: { detail: 'missing' } }]),
+  });
+  await assert.rejects(() => notFound.syncTeamGoogleGroup('t1'), TeamNotFound);
+
+  const conflict = createDirectoryClient({
+    baseUrl: BASE,
+    apiKey: KEY,
+    fetchImpl: fakeFetch([{ status: 409, body: { detail: 'retired' } }]),
+  });
+  await assert.rejects(() => conflict.syncTeamGoogleGroup('t1'), GoogleGroupSyncConflict);
+
+  const unconfigured = createDirectoryClient({
+    baseUrl: BASE,
+    apiKey: KEY,
+    fetchImpl: fakeFetch([{ status: 503, body: { detail: 'google groups not configured' } }]),
+  });
+  await assert.rejects(() => unconfigured.syncTeamGoogleGroup('t1'), GoogleGroupsNotConfigured);
 });

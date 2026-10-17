@@ -429,8 +429,8 @@ Syncing happens after the response, never inside it: `POST`/`PATCH /teams`, `POS
 
 `status` meanings:
 
-- `synced`: Google matches Team Tracking as of `last_synced_at`.
-- `needs_external_members`: the group exists but refuses addresses outside the managed domain. A group owner must enable **Allow external members** in Google Groups, then call the sync endpoint below. Internal addresses and removals were still applied.
+- `synced`: Google matches Team Tracking as of `last_synced_at`. An empty group can be `synced` before any external address has been tried — that is not proof external-member Group settings are enabled (see [DEPLOYMENT.md](DEPLOYMENT.md#onboarding-each-new-group-manual-step)).
+- `needs_external_members`: the group exists but refuses addresses outside the managed domain. A group owner must set **Allow external members** and **Who can add external members** (end users / members, not only admins) in Google Groups, then call the sync endpoint below (or Misty `/team google-sync`). Internal addresses and removals were still applied.
 - `failed`: the group could not be created or read, or at least one member add/remove failed or hadn't finished on Google's side. Every other change was still attempted, so one bad address never blocks another member's removal. `last_error` lists each failure, separated by `; `. Retry with the sync endpoint.
 
 An unfinished or uncertain membership write stays in `pending_changes` across retries and restarts. A pending addition is not replayed until Google shows its effect. A pending removal can retry against the same membership resource while the person remains unwanted; if they rejoin, sync waits for the original removal to finish before adding them again. The sync then reconciles against current directory membership. An empty Google group alone cannot clear a pending addition or make its mapping `synced`. See [pending-change recovery](DEPLOYMENT.md#pending-membership-changes).
