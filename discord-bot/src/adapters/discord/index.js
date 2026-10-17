@@ -15,6 +15,7 @@ import {
   handleDirectMessage,
 } from './mentions.js';
 import { handleRecordInteraction } from './recording.js';
+import { handleQnaInteraction } from './qna.js';
 import { createAutoStop, createMeetingPrompt } from './voice.js';
 
 // Discord event wiring. Conversion, mentions, recording, and voice events live
@@ -49,6 +50,15 @@ export function wireDiscordClient(client, { commands, appContext }) {
     }
 
     if (!interaction.isChatInputCommand()) return;
+
+    if (interaction.commandName === 'qna' && commands.has('qna')) {
+      try {
+        await handleQnaInteraction(interaction, appContext);
+      } catch {
+        console.error('Could not deliver private /qna reply');
+      }
+      return;
+    }
 
     // `/record` is a dedicated adapter path (live voice I/O has no neutral
     // equivalent) — intercept it BEFORE the neutral dispatch below so the
