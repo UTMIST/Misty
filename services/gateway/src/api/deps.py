@@ -1,7 +1,11 @@
+from contextlib import asynccontextmanager
 from functools import lru_cache
+from threading import Lock
 
+from fastapi import FastAPI, Request
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
+from starlette.concurrency import run_in_threadpool
 
 from contracts.directory import DirectoryClient
 from contracts.storage import StorageAdapter
@@ -13,8 +17,7 @@ def _default_engine() -> Engine:
     return create_engine(get_settings().database_url, future=True, pool_pre_ping=True)
 
 
-@lru_cache(maxsize=1)
-def _default_directory() -> DirectoryClient:
+def _build_directory() -> DirectoryClient:
     from src.directory.http_client import HttpDirectoryClient
 
     s = get_settings()
@@ -31,7 +34,22 @@ def get_storage() -> StorageAdapter:
     return PostgresStorageAdapter(_default_engine())
 
 
-def get_directory() -> DirectoryClient:
-    # Cached, not per-request: the client owns a connection pool (see
-    # HttpDirectoryClient), which is worthless if it is rebuilt every request.
-    return _default_directory()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.directory = None
+    app.state.directory_lock = Lock()
+    try:
+        yield
+    finally:
+        if app.state.directory is not None:
+            await run_in_threadpool(app.state.directory.close)
+            app.state.directory = None
+
+
+def get_directory(request: Request) -> DirectoryClient:
+    # Construct lazily after scope checks, once even for concurrent first calls.
+    # The app owns the pool and closes it after in-flight requests have drained.
+    with request.app.state.directory_lock:
+        if request.app.state.directory is None:
+            request.app.state.directory = _build_directory()
+        return request.app.state.directory

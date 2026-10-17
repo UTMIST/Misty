@@ -191,6 +191,10 @@ In the shared workspace, use the module commands above: `uv --project` alone
 does not resolve collisions between services named `src`. The isolated gateway
 container can use `gateway-keys` directly.
 
+Listing includes creation/update timestamps and actors as well as the key ID,
+name, prefix, status, and scopes. See the [deployment runbook](docs/DEPLOYMENT.md#external-consumer-keys)
+for recording an operator name with `--actor` and preserving revocation history.
+
 Scopes recognized today:
 
 - `resolve:discord` — the only external-facing scope, and the only one to issue.

@@ -15,7 +15,7 @@ class HttpDirectoryClient:
     Holds one pooled httpx.Client for its whole lifetime. The resolver makes two
     directory calls per request, so a client built (and closed) per call would
     mean two fresh TCP + TLS handshakes on the hot path. Construct this once —
-    src/api/deps.py caches the instance — rather than per request.
+    src/api/deps.py owns one instance per app lifespan — rather than per request.
     """
 
     def __init__(self, base_url: str, api_key: str, client: httpx.Client | None = None) -> None:
@@ -24,6 +24,9 @@ class HttpDirectoryClient:
         # accidentally logged) per call. It is never read back out.
         self._client = client or httpx.Client(timeout=_TIMEOUT)
         self._client.headers["X-API-Key"] = api_key
+
+    def close(self) -> None:
+        self._client.close()
 
     def _get(self, path: str):
         try:

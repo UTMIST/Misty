@@ -56,3 +56,20 @@ def test_list_exposes_id_for_revoke_but_no_key_material(monkeypatch, capsys):
     assert store.get_api_key_hash(key.prefix) not in output
     assert cli.main(["revoke", str(key.id)]) == 0
     assert store.list_api_keys(active_only=True) == []
+
+
+def test_list_exposes_creation_and_revocation_audit_metadata(monkeypatch, capsys):
+    store = InMemoryStorageAdapter()
+    monkeypatch.setattr(cli, "_adapter", lambda: store)
+    cli.main(["--actor", "issuer", "issue", "--name", "consumer", "--scopes", "resolve:discord"])
+    capsys.readouterr()
+    key = store.list_api_keys()[0]
+    cli.main(["--actor", "revoker", "revoke", str(key.id)])
+    capsys.readouterr()
+    cli.main(["list"])
+    output = capsys.readouterr().out
+    revoked = store.list_api_keys()[0]
+    assert f"created_at={key.created_at.isoformat()}" in output
+    assert "created_by=issuer" in output
+    assert f"updated_at={revoked.updated_at.isoformat()}" in output
+    assert "updated_by=revoker" in output

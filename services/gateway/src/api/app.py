@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 
 from contracts.directory import DirectoryUnavailable
 from contracts.storage import StorageAdapter
-from src.api.deps import get_storage
+from src.api.deps import get_storage, lifespan
 from src.api.middleware import AuditLogMiddleware
 from src.api.ratelimit import ClientRateLimitMiddleware
 from src.api.readiness import ReadinessProbe
@@ -22,6 +22,7 @@ def create_app() -> FastAPI:
         version="0.1.0",
         description="External API gateway.",
         docs_url="/docs",
+        lifespan=lifespan,
     )
     # Order matters, and add_middleware prepends: the last one added is the
     # outermost. Audit must be outermost so it still records the requests the

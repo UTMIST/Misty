@@ -8,6 +8,8 @@ The steps below provision a new service; the repository alone does not create it
 1. Provision a separate Neon project for `gateway`, with independent staging and
    production branches. It holds only external API keys. Use the matching branch's
    `postgresql+psycopg://` URL with `sslmode=require` as `DATABASE_URL`.
+   Keep any URL-encoded credentials as supplied (for example `%40` for `@`).
+   The migration runner handles Alembic's interpolation escaping internally.
 2. Issue a team-tracking key against the matching environment's directory DB.
    With that service's `DATABASE_URL` loaded securely, run from the repo root:
 
@@ -69,7 +71,11 @@ uv --directory services/gateway --project . run python -m src.cli revoke <key-id
 ```
 
 Store the one-time `gw_` token in the consumer's secret store. `list` includes the
-ID needed to revoke and never shows key material. Revocation takes effect on the
+ID needed to revoke plus `created_at`, `updated_at`, `created_by`, and `updated_by`;
+it never shows key material. To record the operator, put `--actor <operator-name>`
+before `issue` or `revoke`; otherwise the actor is `cli`. This is operator-supplied
+metadata for a CLI that already requires direct database access, not HTTP identity.
+Revocation takes effect on the
 next request and preserves the original revocation audit metadata on repeat calls.
 To rotate, issue a new uniquely named key, update the consumer, then revoke the old
 key. The CLI rejects missing scopes, unknown scopes, and `admin`.

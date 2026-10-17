@@ -13,7 +13,11 @@ key is accepted, and the CLI allows only explicitly supported external scopes.
 
 The request path is audit middleware → IP limit → authentication → consumer quota
 → endpoint scope → upstream client → curated response. `deps.py` supplies the
-pooled HTTP client through the `DirectoryClient` Protocol. JSON and response-shape
+pooled HTTP client through the `DirectoryClient` Protocol. Each app lifespan owns
+its client, constructed lazily after scope checks under a lock so concurrent first
+requests share one pool. Shutdown closes that pool after requests drain; an unused
+app creates no client, and separate apps never share or close each other's pool.
+JSON and response-shape
 failures become `DirectoryUnavailable`, mapped to a static 503 without upstream
 content. Authentication failures never construct the directory dependency.
 

@@ -23,6 +23,10 @@ def _api_key_row_to_model(row) -> ApiKey:
         prefix=row.prefix,
         scopes=list(row.scopes),
         active=row.active,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        created_by=row.created_by,
+        updated_by=row.updated_by,
         revoked_at=row.revoked_at,
         last_used_at=row.last_used_at,
     )

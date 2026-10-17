@@ -11,6 +11,10 @@ class ApiKey(BaseModel):
     prefix: str
     scopes: list[str]
     active: bool = True
+    created_at: datetime
+    updated_at: datetime
+    created_by: str
+    updated_by: str
     revoked_at: datetime | None = None
     last_used_at: datetime | None = None
 

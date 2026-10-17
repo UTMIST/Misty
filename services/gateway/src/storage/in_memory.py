@@ -25,7 +25,18 @@ class InMemoryStorageAdapter:
             raise ValueError(f"api key name already exists: {name}")
         if any(k.prefix == prefix for k in self._api_keys.values()):
             raise ValueError(f"api key prefix already exists: {prefix}")
-        key = ApiKey(id=uuid4(), name=name, prefix=prefix, scopes=list(scopes), active=True)
+        now = _now()
+        key = ApiKey(
+            id=uuid4(),
+            name=name,
+            prefix=prefix,
+            scopes=list(scopes),
+            active=True,
+            created_at=now,
+            updated_at=now,
+            created_by=actor,
+            updated_by=actor,
+        )
         self._api_keys[key.id] = key
         self._hashes[key.id] = key_hash
         return key
@@ -52,7 +63,10 @@ class InMemoryStorageAdapter:
             return None
         if key.revoked_at is not None:
             return key
-        updated = key.model_copy(update={"active": False, "revoked_at": _now()})
+        now = _now()
+        updated = key.model_copy(
+            update={"active": False, "revoked_at": now, "updated_at": now, "updated_by": actor}
+        )
         self._api_keys[api_key_id] = updated
         return updated
 

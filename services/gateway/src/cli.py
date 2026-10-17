@@ -54,6 +54,8 @@ def cmd_list(args: argparse.Namespace) -> int:
     for k in keys:
         active = "yes" if (k.active and k.revoked_at is None) else "no"
         print(f"{k.id}  {k.name:<25} {k.prefix:<10} {active:<7} {', '.join(k.scopes) or '(none)'}")
+        print(f"  created_at={k.created_at.isoformat()} created_by={k.created_by}")
+        print(f"  updated_at={k.updated_at.isoformat()} updated_by={k.updated_by}")
     return 0
 
 

@@ -15,6 +15,8 @@ access will require additional explicit operations; see [architecture](ARCHITECT
 ## Integration fixes
 
 - Scope rejection precedes construction of the upstream client.
+- Each app lifespan owns one lazily constructed directory pool, shared across
+  concurrent requests and closed at shutdown without affecting other app instances.
 - Malformed upstream JSON/shapes and transport errors produce a static 503.
 - Concurrent quota updates are synchronized; deployment remains one replica.
 - Railway client buckets use validated `X-Real-IP`, ignoring shared proxy hops in
@@ -24,7 +26,10 @@ access will require additional explicit operations; see [architecture](ARCHITECT
   retains both outcomes for five seconds and allows only one database probe at a
   time; concurrent requests never block on it or receive expired success.
 - Revocation preserves the first timestamp/actor, and both adapters withhold
-  revoked hashes. CLI listing exposes the identifier needed for revocation.
+  revoked hashes. Both adapters return creation/update audit metadata; CLI listing
+  exposes that metadata and the identifier needed for revocation.
+- Migration configuration escapes URL percent signs for Alembic interpolation,
+  accepting encoded credentials without printing the connection URL in an error.
 - Key issuance requires a supported scope; blank/default internal secrets fail
   startup outside local mode.
 - Local provisioning commands pin the service directory and use its Python module
@@ -52,12 +57,12 @@ means the repository root. This covers the complete PR delta from staging.
 | `README.md` | Service overview, configuration, resolver contract, key management, and reproducible validation commands. |
 | `docs/API.md`, `docs/ARCHITECTURE.md`, `docs/CONTRIBUTING.md`, `docs/DEPLOYMENT.md` | Document health/API behavior, future consumer extension, contribution checks, and concrete environment/key provisioning. |
 | `docs/CHANGE-AUDIT.md` | Explain the integration decisions, verification, and necessity of each changed file. |
-| `alembic.ini`, `migrations/env.py`, `migrations/script.py.mako`, `migrations/versions/001_api_keys.py` | Supply the migration runner and reversible initial key-registry schema. |
+| `alembic.ini`, `migrations/env.py`, `migrations/script.py.mako`, `migrations/versions/001_api_keys.py` | Supply the migration runner, safely handle encoded connection URLs, and define the reversible initial key-registry schema. |
 | `contracts/__init__.py`, `src/__init__.py`, `src/api/__init__.py`, `src/api/routers/__init__.py`, `src/directory/__init__.py`, `src/storage/__init__.py` | Define the service's Python packages using existing repository conventions. |
 | `contracts/directory.py`, `contracts/storage.py`, `contracts/types.py` | Define injectable directory/storage interfaces and key metadata without importing implementations. |
 | `src/api/app.py` | Assemble routes, middleware, health/readiness, and the static upstream-error response. |
 | `src/api/auth.py`, `src/api/hashing.py`, `src/api/middleware.py` | Bind shared authentication, the `gw_` envelope, and audit behavior without implementing another auth system. |
-| `src/api/deps.py` | Wire the Postgres adapter and pooled directory client at one dependency injection point. |
+| `src/api/deps.py` | Wire the Postgres adapter and lazy directory client at one dependency injection point; own and close each app's HTTP pool. |
 | `src/api/ratelimit.py` | Bound per-IP and per-consumer request counts, including concurrent request handling. |
 | `src/api/readiness.py` | Bound public readiness database work with a per-app cache and a nonblocking probe lock. |
 | `src/api/routers/resolve.py` | Expose the scoped, one-field resolver with indistinguishable missing-link responses. |
@@ -67,6 +72,8 @@ means the repository root. This covers the complete PR delta from staging.
 | `tests/conftest.py` | Isolate process-wide quota state between tests. |
 | `tests/test_auth.py`, `tests/test_cli.py`, `tests/test_config.py` | Verify authentication/revocation, permitted key issuance, CLI operator behavior, and startup secret handling. |
 | `tests/test_directory.py`, `tests/test_resolve.py` | Cover HTTP boundaries, malformed upstream responses, curated data, scope ordering, and lookup errors. |
+| `tests/test_lifespan.py` | Verify lazy creation, concurrent pool reuse, per-app ownership, and shutdown cleanup. |
+| `tests/test_migrations.py` | Exercise offline upgrade/downgrade with encoded credentials and check that output omits the connection URL. |
 | `tests/test_health.py`, `tests/test_ratelimit.py` | Verify bounded readiness work under repeated/concurrent requests, cache expiry/recovery, independent Railway client quotas, proxy validation, and audit coverage. |
 | `tests/storage_cases.py`, `tests/test_storage.py`, `tests/test_postgres_adapter.py` | Run shared storage semantics against both adapters and verify persisted CLI keys through HTTP authentication. |
 | `tests/smoke_stack.py` | Exercise the current built directory and gateway over real HTTP with isolated databases and disposable keys, verifying the gateway runs and migrates as non-root. |
