@@ -24,7 +24,6 @@ const titles = {
   'team:add': 'Add a teammate',
   'team:remove': 'Remove a teammate',
   'doc:list': 'Browse documents',
-  'doc:show': 'View a document',
   'doc:add': 'Add a document',
   'doc:remove': 'Remove a document',
   'record:start': 'Start a recording',

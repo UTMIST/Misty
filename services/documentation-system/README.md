@@ -96,6 +96,18 @@ uv run doc-keys revoke <api_key_id>
 
 Scopes: `docs:{read,write}`, `admin` (wildcard). See the auth model section below for how attested actors and audit fields work.
 
+A doc whose source fetch failed at ingest is catalogued without content (the failure is only a warning). Find and repair those with the `doc-backfill` CLI, which talks to this service over HTTP — so it needs a scoped key, not `DATABASE_URL`:
+
+```bash
+# What is missing, without fetching anything
+DOCS_API_KEY=doc_<prefix>_<secret> uv run doc-backfill --dry-run
+
+# Repair it; exits non-zero if any doc still fails
+DOCS_API_KEY=doc_<prefix>_<secret> uv run doc-backfill
+```
+
+Sources with `content_fetch_enabled=false` (`notion`, `youtube`) can never have content, so they are reported as skipped rather than failed. A refetch that succeeds but extracts nothing (a title-only `github` doc, an empty page) is reported as `empty`, not `repaired` — a 200 from the refetch endpoint means the fetch ran, not that content was stored, so the run re-lists `has_content=false` to confirm. The tool checks its own scopes (`GET /api-keys/self`) before trusting any listing: without `docs:read:all` the catalog lists as empty rather than 403, which would otherwise read as "nothing to repair". See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli).
+
 **Ports:** this service runs on **8001** (team-tracking uses 8000) and its Postgres container is exposed on **5434** — both chosen to avoid colliding with team-tracking's defaults when running both services locally.
 
 ## Folder tour
@@ -137,7 +149,8 @@ documentation-system/
 │   ├── indexing.py             index_doc(): chunk, embed, and replace a doc's chunk set
 │   ├── url_norm.py             URL normalization + source derivation from patterns
 │   ├── config.py               Settings (DATABASE_URL, API_KEY, DIRECTORY_*, LLM_*)
-│   └── cli.py                  doc-keys CLI (issue/list/revoke)
+│   ├── cli.py                  doc-keys CLI (issue/list/revoke)
+│   └── backfill.py             doc-backfill CLI — repairs docs missing content
 │
 ├── migrations/                 Alembic migrations
 │   ├── env.py
@@ -217,7 +230,7 @@ All endpoints require `X-API-Key` with the appropriate scope.
 | Method | Path | Scope | Description |
 |--------|------|-------|-------------|
 | POST | `/docs` | `docs:write` | Ingest a URL (idempotent; 200 if already catalogued, 201 if new) |
-| GET | `/docs` | `docs:read` | List docs (`?owning_team_id=&owning_person_id=&source_id=&tag=&active_only=true`) |
+| GET | `/docs` | `docs:read` | List docs (`?owning_team_id=&owning_person_id=&source_id=&tag=&has_content=&active_only=true`) |
 | GET | `/docs/{id}` | `docs:read` | Get one doc (backfills owner labels if previously unresolved) |
 | PATCH | `/docs/{id}` | `docs:write` | Update a doc (title, description, owner ids, active flag) |
 | POST | `/docs/{id}/tags` | `docs:write` | Add a tag |
@@ -227,6 +240,7 @@ All endpoints require `X-API-Key` with the appropriate scope.
 | POST | `/docs/index` | `docs:index` | (Re-)index stored content; retry path for indexing failures |
 | GET | `/sources` | `docs:read` | List sources (`?active_only=false`) |
 | GET | `/sources/{id}` | `docs:read` | Get one source |
+| GET | `/api-keys/self` | *(any valid key)* | The calling key's own name and scopes |
 
 Machine-readable OpenAPI schema: `GET /openapi.json`. Interactive Swagger UI: `GET /swagger`.
 

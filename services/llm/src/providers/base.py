@@ -21,6 +21,13 @@ class LLMTool:
 @dataclass
 class LLMTextBlock:
     text: str
+    phase: str | None = None
+
+
+@dataclass
+class LLMReasoningStateBlock:
+    data: dict[str, JsonValue]
+    provider: str = "openai"
 
 
 @dataclass
@@ -52,6 +59,7 @@ LLMContentBlock = (
     LLMTextBlock
     | LLMReasoningBlock
     | LLMRedactedReasoningBlock
+    | LLMReasoningStateBlock
     | LLMToolUseBlock
     | LLMToolResultBlock
 )
@@ -127,7 +135,7 @@ def validate_vector(vector, index: int, dimensions: int) -> None:
 
 class EmbeddingProvider(Protocol):
     """A second Protocol rather than an `embed` method on LLMProvider: both chat
-    providers are Claude models with no notion of embeddings, and LLM_MODEL
+    and embedding providers expose independent capabilities, and LLM_MODEL
     cannot name a chat model and an embedding model at once. Same layering and
     ProviderError hierarchy — a separate capability, not a second pattern."""
 
@@ -165,3 +173,7 @@ class ProviderUnsupportedModel(ProviderError):
 
     A client mistake, not a provider fault, so the router maps it to 422 rather
     than 502 — mirroring connectors' SourceUnsupported."""
+
+
+class ProviderInvalidRequest(ProviderError):
+    """Input cannot be represented by the selected provider; reject before inference."""

@@ -1,11 +1,7 @@
 import { defineCommand } from '../defineCommand.js';
 import { myTeamsAutocomplete as teamAutocomplete } from './teamAutocomplete.js';
-import {
-  renderDocAddResult,
-  renderDocListResult,
-  renderDocShowResult,
-  renderDocRemoveResult,
-} from '../messages/doc.js';
+import { renderDocAddResult, renderDocListResult, renderDocRemoveResult } from '../messages/doc.js';
+import { ACCESS_RANK, rankOf } from '../auth/policy.js';
 
 // Re-exported for callers/tests that reference /doc's autocomplete budget. The
 // implementation now lives in the shared teamAutocomplete module.
@@ -88,23 +84,10 @@ export default defineCommand({
         // Read as the linked caller so the doc service filters to what they can see.
         args.onBehalfOf = principal?.person?.id;
         const result = await ctx.docService.listDocs(args);
-        return renderDocListResult(result);
-      },
-    },
-    {
-      name: 'show',
-      description: 'Show full detail for one doc',
-      auth: 'linked',
-      ephemeral: false,
-      options: [
-        { name: 'id', type: 'string', required: true, description: 'Doc id (from /doc list)' },
-      ],
-      async handler({ options, ctx, principal }) {
-        const result = await ctx.docService.showDoc({
-          id: options.id,
-          onBehalfOf: principal?.person?.id,
-        });
-        return renderDocShowResult(result);
+        // Only admins can act on a doc id (/doc remove), so only they see it.
+        // rankOf(undefined) is 0, so an unlinked caller never gets ids.
+        const isAdmin = rankOf(principal?.person?.access_level) >= ACCESS_RANK.admin;
+        return renderDocListResult(result, { isAdmin });
       },
     },
     {

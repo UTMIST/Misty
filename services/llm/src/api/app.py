@@ -21,7 +21,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="UTMIST llm",
         version="0.1.0",
-        description="Shared internal LLM API (Bedrock chat and OpenAI embeddings).",
+        description="Shared internal LLM API (OpenAI or Bedrock chat and OpenAI embeddings).",
     )
     app.add_middleware(AuditLogMiddleware, logger_name="llm.audit")
 

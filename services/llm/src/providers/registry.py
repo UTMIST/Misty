@@ -6,6 +6,7 @@ from src.config import Settings
 from src.providers.base import EmbeddingProvider, LLMProvider
 from src.providers.bedrock import BedrockClaudeProvider
 from src.providers.bedrock_converse import BedrockConverseProvider
+from src.providers.openai_chat import OpenAIChatProvider
 from src.providers.openai_embed import OpenAIEmbeddingProvider
 
 
@@ -25,7 +26,16 @@ def _build_bedrock_converse(settings: Settings) -> LLMProvider:
     )
 
 
+def _build_openai(settings: Settings) -> LLMProvider:
+    return OpenAIChatProvider(
+        api_key=settings.openai_api_key.get_secret_value(),
+        default_model=settings.llm_model,
+        timeout_s=settings.request_timeout_s,
+    )
+
+
 PROVIDERS: dict[str, Callable[[Settings], LLMProvider]] = {
+    "openai": _build_openai,
     "bedrock": _build_bedrock,  # Anthropic Messages/Mantle endpoint (needs global model access)
     "bedrock-converse": _build_bedrock_converse,  # bedrock-runtime Converse (US-regional profiles)
 }

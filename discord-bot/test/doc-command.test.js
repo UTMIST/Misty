@@ -10,7 +10,7 @@ function findSub(name) {
 test('doc command is stable with four subcommands', () => {
   assert.equal(doc.name, 'doc');
   assert.equal(doc.beta, false);
-  assert.deepEqual(doc.subcommands.map((s) => s.name).sort(), ['add', 'list', 'remove', 'show']);
+  assert.deepEqual(doc.subcommands.map((s) => s.name).sort(), ['add', 'list', 'remove']);
 });
 
 test('add and list have an autocomplete team option; remove is admin', () => {
@@ -129,23 +129,30 @@ test('list handler passes the caller person id as onBehalfOf', async () => {
   assert.equal(received.onBehalfOf, 'p1');
 });
 
-test('show handler passes the caller person id as onBehalfOf', async () => {
-  let received;
+test('list handler renders doc ids for admins and withholds them otherwise', async () => {
   const ctx = {
     docService: {
-      showDoc: async (args) => {
-        received = args;
-        return { outcome: 'NOT_FOUND' };
-      },
+      listDocs: async () => ({
+        outcome: 'LISTED',
+        docs: [{ title: 'Onboarding', id: 'd1', url: 'https://x.com', source_id: 'gdocs' }],
+      }),
     },
   };
-  await findSub('show').handler({
-    options: { id: 'd1' },
-    principal: { person: { id: 'p1' } },
-    ctx,
-  });
-  assert.equal(received.id, 'd1');
-  assert.equal(received.onBehalfOf, 'p1');
+  const base = { options: { team: null, tag: null, source: null }, ctx };
+  const run = (access_level) =>
+    findSub('list').handler({
+      ...base,
+      principal: access_level === null ? null : { person: { id: 'p1', access_level } },
+    });
+
+  for (const level of ['admin', 'superuser']) {
+    assert.match((await run(level)).content, /`d1`/, `${level} should see the id`);
+  }
+  // A member has no /doc remove, so the id is noise; an unlinked caller is
+  // fail-closed (rankOf(undefined) === 0).
+  for (const level of ['member', undefined, null]) {
+    assert.doesNotMatch((await run(level)).content, /d1/, `${level} should not see the id`);
+  }
 });
 
 test('list handler omits onBehalfOf when the caller is not linked (fail-closed)', async () => {
@@ -163,25 +170,6 @@ test('list handler omits onBehalfOf when the caller is not linked (fail-closed)'
     principal: null,
     ctx,
   });
-  assert.equal(received.onBehalfOf, undefined);
-});
-
-test('show handler omits onBehalfOf when the caller is not linked (fail-closed)', async () => {
-  let received;
-  const ctx = {
-    docService: {
-      showDoc: async (args) => {
-        received = args;
-        return { outcome: 'NOT_FOUND' };
-      },
-    },
-  };
-  await findSub('show').handler({
-    options: { id: 'd1' },
-    principal: null,
-    ctx,
-  });
-  assert.equal(received.id, 'd1');
   assert.equal(received.onBehalfOf, undefined);
 });
 

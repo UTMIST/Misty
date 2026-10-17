@@ -61,7 +61,7 @@ test('search finds friendly labels, slash commands, and categories', () => {
   );
   assert.ok(
     matchesSearch(
-      flat.find((entry) => entry.key === 'doc:show'),
+      flat.find((entry) => entry.key === 'doc:list'),
       'documents',
     ),
   );
