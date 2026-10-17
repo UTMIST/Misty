@@ -27,11 +27,14 @@ about the service in a real (staging / production) environment.
   both at request time and at *boot* — a connectors outage or a missing
   `CONNECTORS_API_KEY` degrades Google-source fetches but never blocks
   startup (see `verify_production_secrets()` below).
+- **A reachable llm service** — embeds stored content so it can be searched.
+  Soft as well: see "The llm (embedding) dependency" below. Without it docs
+  are catalogued and their content stored, just not indexed.
 
 ## Environment variables
 
 All configuration is env-driven (`src/config.py`, loaded from the process environment or a
-`.env` file). Eight variables:
+`.env` file). Twelve variables:
 
 | Env var | Setting | Default | Purpose |
 |---------|---------|---------|---------|
@@ -41,6 +44,10 @@ All configuration is env-driven (`src/config.py`, loaded from the process enviro
 | `DIRECTORY_API_KEY` | `directory_api_key` | `dev-api-key-change-me` | API key this service uses to call the directory |
 | `CONNECTORS_BASE_URL` | `connectors_base_url` | `http://localhost:8005` | Base URL of the connectors service (fetches Google source content) |
 | `CONNECTORS_API_KEY` | `connectors_api_key` | `dev-api-key-change-me` | API key this service uses to call connectors. **Should be overridden outside `local`**, but it's a soft dependency — `verify_production_secrets()` only logs a startup warning on the dev default, it does not refuse to boot (see [`src/config.py`](../src/config.py)). |
+| `LLM_BASE_URL` | `llm_base_url` | `http://localhost:8002` | Base URL of the llm service, whose `POST /embed` indexes stored content |
+| `LLM_API_KEY` | `llm_api_key` | `dev-api-key-change-me` | llm key with the `embed` scope. Soft dependency like `CONNECTORS_API_KEY`: the dev default outside `local` logs a startup warning, not a boot refusal. |
+| `EMBED_MODEL` | `embed_model` | unset | llm-side embedding alias (e.g. `openai-embed-3-small`); unset uses the llm service's `EMBED_MODEL`. Changing models means re-embedding everything (#209). |
+| `EMBED_MAX_REQUEST_CHARS` | `embed_max_request_chars` | `400000` | Characters per `/embed` request. Keep at or below the llm service's own `EMBED_MAX_REQUEST_CHARS`, or large docs fail to index. |
 | `SOURCE_ACCESS_REFRESH_AFTER_HOURS` | `source_access_refresh_after_hours` | `24` | A Google doc becomes due for ACL/content refresh after this interval. |
 | `SOURCE_ACCESS_MAX_AGE_HOURS` | `source_access_max_age_hours` | `48` | Source-derived grants expire and stop authorizing reads after this interval without a complete successful sync. Must exceed the refresh interval. |
 
@@ -116,8 +123,8 @@ Downgrading `008` removes the chunk table/index, preserving catalog records and 
 content. The database-level `vector` extension remains installed, even if `008`
 enabled it: it may belong to another role or support unrelated tables. Extension
 removal is an administrator's separate decision after checking all dependencies.
-Re-upgrading restores an empty chunk table; index contents must be rebuilt later
-through #175's indexing flow. This migration does not call `/embed`.
+Re-upgrading restores an empty chunk table; rebuild it by draining `POST /docs/index`
+(see "The llm (embedding) dependency"). This migration does not call `/embed`.
 
 > **`004` is a data migration, not just a schema one.** It first collapses any
 > pre-existing duplicate active rows for the same `url_normalized` (keeping the
@@ -165,6 +172,9 @@ uv run doc-keys issue --name discord-bot --scopes docs:read docs:write
 
 # Issue a read-only key for a dashboard.
 uv run doc-keys issue --name dashboard --scopes docs:read
+
+# Issue a key for an operator or job that retries/re-runs indexing (POST /docs/index).
+uv run doc-keys issue --name index-admin --scopes docs:index
 
 # List keys (metadata only — never plaintext).
 uv run doc-keys list --active-only
@@ -270,7 +280,9 @@ exit 0 means the corpus is complete, not merely that every request returned 200.
 
 Notes:
 
-- Scopes are `docs:read`, `docs:write`, and `admin` (wildcard). Grant the minimum needed.
+- Scopes are `docs:read`, `docs:read:all`, `docs:write`, `docs:index`, and `admin`
+  (wildcard). Grant the minimum needed. `docs:index` is separate from `docs:write`
+  because a forced re-index spends embedding-provider budget on every doc.
 - Human-readable metadata (name, prefix, scopes, id) is printed to **stderr**; only the
   plaintext key goes to **stdout**, so `... issue ... > key.txt` captures just the key.
 - `--actor` (global flag, default `cli`) is stamped on `created_by` / `updated_by`.
@@ -339,6 +351,27 @@ a runtime dependency with **two different failure modes** depending on when it's
   the same `FetchError` is instead surfaced to the caller as an HTTP 502 (see
   `src/api/routers/docs.py`): refetch is an explicit user-initiated action, so it fails
   loudly rather than silently leaving stale content in place.
+
+## The llm (embedding) dependency
+
+Stored content is indexed for retrieval by calling the [llm](../../llm/) service's
+`POST /embed` (see "Indexing (#175)" in [ARCHITECTURE.md](ARCHITECTURE.md)). It is a soft
+dependency everywhere:
+
+- **At boot:** a dev-default `LLM_API_KEY` outside `local` logs a warning; the service starts.
+- **At request time:** indexing runs inline after ingest, refetch, scheduled refresh, and
+  `PATCH active`. If the llm service is down, rate-limited, or rejects the request, the
+  triggering request still succeeds and nothing is written to the index: ingest returns an
+  `indexing failed (...)` warning, refresh-due counts `index_failed`, and refetch/`PATCH`
+  log it. The doc's previous chunks (if any) stay intact.
+- **Retry:** call `POST /docs/index` with a `docs:index` key. With no body it pages through
+  every doc whose chunks are missing, stale, or orphaned; repeat with `after: next_after`
+  until `next_after` is null. Nothing schedules this — run it after an llm outage or from
+  the same scheduler as refresh-due if failures are routine. Re-embedding after a model
+  change uses `{"stale_only": false, "force": true}`.
+
+Embedding cost is per changed document: unchanged content is never re-embedded. Ingest and
+refetch get slower by the `/embed` round trips (about one request per 96 chunks).
 
 **Deploy order:** recommended (not required) is connectors first, then set
 `CONNECTORS_BASE_URL` / `CONNECTORS_API_KEY` on documentation-system, then deploy

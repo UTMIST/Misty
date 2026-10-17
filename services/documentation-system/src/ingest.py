@@ -4,7 +4,7 @@ concerns — takes injected storage/fetchers/directory and an actor string."""
 from datetime import datetime, timezone
 
 from contracts.directory import DirectoryClient, DirectoryUnavailable
-from contracts.fetcher import FetchError
+from contracts.fetcher import FetchError, SourceGone
 from contracts.storage import DuplicateActiveUrl, StorageAdapter
 from contracts.types import DocIngest, IngestResult
 from src.content import clamp_content, content_hash
@@ -91,6 +91,11 @@ def _refresh_existing_source_access(
             {"source_access_attempted_at": _now()},
             actor=actor,
         )
+        if isinstance(e, SourceGone):
+            # Same rule as refetch: a confirmed deletion drops the stored text
+            # and its chunks so nothing re-indexes it.
+            storage.delete_doc_content(existing.id)
+            return [f"source file not found ({e}); stored content and search index removed"]
         return [f"source access refresh failed ({e}); prior source grants retained"]
 
     warnings.extend(result.warnings)

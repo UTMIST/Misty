@@ -2,7 +2,16 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from contracts.types import ApiKey, Doc, DocChunk, DocContentMeta, DocGrant, Source, SourceGrant
+from contracts.types import (
+    ApiKey,
+    Doc,
+    DocChunk,
+    DocContentMeta,
+    DocGrant,
+    DocIndexState,
+    Source,
+    SourceGrant,
+)
 from contracts.visibility import ActorContext, SEE_ALL
 
 
@@ -159,6 +168,46 @@ class StorageAdapter(Protocol):
         values are immutable, with tuple embeddings, and the returned list is
         detached from persisted data.
         Like get_doc_content, this does not filter on the doc's active flag.
+        """
+        ...
+
+    def replace_doc_chunks_if_current(
+        self, doc_id: UUID, expected_content_hash: str, chunks: list[DocChunk]
+    ) -> bool:
+        """replace_doc_chunks, but only while the chunks still describe the
+        doc's current content: the doc exists and is active, and its stored
+        doc_content hash equals `expected_content_hash`. Checked and written in
+        one transaction, so an indexer that read older text can never replace
+        a set built from newer text. Every chunk's source_content_hash must
+        equal `expected_content_hash` (ValueError otherwise, before storage is
+        touched). False, writing nothing, when the condition does not hold.
+        """
+        ...
+
+    def delete_doc_content(self, doc_id: UUID) -> bool:
+        """Delete a doc's stored text and its chunks together, in one
+        transaction; the catalog row (and its snapshot) stays. For a source
+        confirmed gone: with no content there is nothing to re-index, so the
+        removal sticks until a later successful fetch stores text again.
+        False when the doc does not exist; idempotent otherwise."""
+        ...
+
+    def get_doc_index_state(self, doc_id: UUID) -> DocIndexState | None:
+        """The current chunk set's source hash, model, and size; None when the
+        doc has no chunks (or does not exist). Internal indexing state: no
+        visibility predicate, never returned to API callers."""
+        ...
+
+    def list_docs_for_indexing(
+        self, *, stale_only: bool = True, after: UUID | None = None, limit: int = 100
+    ) -> list[UUID]:
+        """Doc ids whose index may need work, ascending by id, ids > `after`.
+
+        Always includes docs that have chunks but should not (inactive, or no
+        stored content), so a failed cleanup is retryable. With stale_only,
+        adds active docs with content whose chunks are missing or were built
+        from a different content hash; without it, adds every active doc with
+        content (a forced full pass, e.g. after an embedding-model change).
         """
         ...
 
