@@ -147,7 +147,7 @@ its injected asynchronous `qna_runner`. The runner owns a bounded dedicated
 executor; it never submits Q&A to the default executor shared by WebSocket audio
 feeding and report generation. Otherwise concurrent slow questions could starve
 those workers and make `/stop` discard the queued audio tail. Pool capacity is
-half the runtime's default shared executor size, rounded down (minimum one), so
+one quarter of the runtime's default shared executor size, rounded down (minimum one), so
 Q&A concurrency stays below audio/report capacity. Admission fails immediately
 when full,
 and actual worker completion releases capacity even if its waiter is cancelled.

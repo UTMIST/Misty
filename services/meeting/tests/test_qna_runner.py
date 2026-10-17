@@ -17,12 +17,12 @@ async def wait_for_event(event):
     await asyncio.wait_for(wait(), 2)
 
 
-def test_qna_pool_is_half_the_shared_default_and_strictly_smaller():
+def test_qna_pool_is_quarter_the_shared_default_and_strictly_smaller():
     with ThreadPoolExecutor() as shared_default:
         assert default_worker_count() == shared_default._max_workers
     runner = QnaRunner(lambda: None)
     try:
-        assert runner.max_workers == max(1, default_worker_count() // 2)
+        assert runner.max_workers == max(1, default_worker_count() // 4)
         assert 0 < runner.max_workers < default_worker_count()
     finally:
         runner.close()

@@ -29,7 +29,7 @@ class QnaRunner:
     def __init__(self, builder, *, max_workers: int | None = None):
         # Keep Q&A concurrency below the shared audio/report executor capacity.
         self.max_workers = (
-            max(1, default_worker_count() // 2) if max_workers is None else max_workers
+            max(1, default_worker_count() // 4) if max_workers is None else max_workers
         )
         self._executor = ThreadPoolExecutor(
             max_workers=self.max_workers, thread_name_prefix="meeting-qna"

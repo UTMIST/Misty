@@ -157,11 +157,11 @@ Timestamps at one hour or more use `HH:MM:SS`.
 Non-empty requests call the existing LLM `/chat` once with `thinking=false` and
 `max_tokens=1024`. They use `REQUEST_TIMEOUT_S`, not a separate timeout setting.
 Q&A has a dedicated process-wide worker pool, separate from audio ingestion and
-minutes generation. Its maximum concurrency is **half the default shared
+minutes generation. Its maximum concurrency is **one quarter of the default shared
 executor size, rounded down** (minimum one). The shared default is
 `min(32, (os.cpu_count() or 1) + 4)` on Python 3.11/3.12, using
 `os.process_cpu_count()` instead on 3.13+. For example, a shared maximum of 14
-gives Q&A 7 workers; the shared maximum of 32 gives Q&A 16. It starts once with
+gives Q&A 3 workers; the shared maximum of 32 gives Q&A 8. It starts once with
 the application;
 the actual capacity is logged at startup. Excess requests fail immediately with
 429 rather than waiting in an unbounded queue. Cancelling a request does not
