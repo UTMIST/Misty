@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+psycopg://docs:dev_password@localhost:5434/docs"
-    # The three credentials below are SecretStr, not str: a plain str field
+    # The credentials below are SecretStr, not str: a plain str field
     # prints in full on any repr/diff/traceback. That is not hypothetical —
     # an identically-shaped plain-str credential in services/connectors leaked
     # a real Google service-account private key into a terminal and a session
@@ -34,13 +34,22 @@ class Settings(BaseSettings):
     # "simplify" these back to str. Only the boundaries that hand the raw
     # value to something that needs a str should call .get_secret_value():
     # src/api/auth.py (env-bootstrap key comparison), src/api/deps.py (the
-    # directory HTTP client), src/fetch/registry.py (the connectors fetchers),
-    # and verify_production_secrets below.
+    # directory and llm HTTP clients), src/fetch/registry.py (the connectors
+    # fetchers), and verify_production_secrets below.
     api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
     directory_base_url: str = "http://localhost:8000"
     directory_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
     connectors_base_url: str = "http://localhost:8005"
     connectors_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
+    # The llm service's POST /embed, used to index stored content (#175). The
+    # key needs the llm `embed` scope. EMBED_MODEL is an llm-side alias
+    # (e.g. openai-embed-3-small); unset means the llm service's default.
+    llm_base_url: str = "http://localhost:8002"
+    llm_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
+    embed_model: str | None = None
+    # Characters per /embed request. Keep at or below the llm service's own
+    # EMBED_MAX_REQUEST_CHARS, or every large document fails to index.
+    embed_max_request_chars: int = Field(default=400_000, gt=0)
     docs_env: Literal["local", "staging", "production"] = "local"
     # A scheduler should call the source-access refresh endpoint after the
     # first interval. Source-derived grants expire at the second interval so
@@ -115,5 +124,15 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
             "real connectors service and be recorded as per-doc ingest "
             "warnings rather than content. Set a strong, unique value via "
             "environment variables to enable Google-source content.",
+            settings.docs_env,
+        )
+    if settings.llm_api_key.get_secret_value() == DEFAULT_DEV_API_KEY:
+        # Soft dependency, like connectors: without the llm service the
+        # catalog still works, and content is stored but not indexed. Ingest
+        # and refetch report that as a warning; POST /docs/index retries.
+        logger.warning(
+            "LLM_API_KEY is still set to the built-in dev default in docs_env=%r. "
+            "This service will still start, but stored content will not be "
+            "indexed for retrieval until a valid llm `embed`-scoped key is set.",
             settings.docs_env,
         )

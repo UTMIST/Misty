@@ -148,6 +148,15 @@ class DocContentMeta(BaseModel):
     fetched_at: datetime | None = None
 
 
+class DocIndexState(BaseModel):
+    """Provenance of a doc's current chunk set (one hash and model per set)."""
+
+    model_config = ConfigDict(extra="forbid")
+    source_content_hash: str
+    embedding_model: str
+    chunk_count: int
+
+
 class DocChunk(BaseModel):
     """An embedded slice of a document, identified within its replacement set.
 

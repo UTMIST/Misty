@@ -223,3 +223,99 @@ class ChunkStorageCases:
     def test_invalid_chunks_are_validated_even_for_missing_doc(self, adapter):
         with pytest.raises(ValueError):
             adapter.replace_doc_chunks(uuid4(), [make_chunk(2)])
+
+    # --- Indexing support (#175) ---
+
+    def _with_content(self, adapter, text="UTMIST CPSIF"):
+        doc = make_doc(adapter)
+        adapter.upsert_doc_content(
+            doc.id, content_text=text, content_hash=content_hash(text), fetched_at=None
+        )
+        return doc
+
+    def test_index_state_reports_the_current_set(self, adapter):
+        doc = self._with_content(adapter)
+        assert adapter.get_doc_index_state(doc.id) is None
+        assert adapter.get_doc_index_state(uuid4()) is None
+        adapter.replace_doc_chunks(doc.id, [make_chunk(0), make_chunk(1)])
+        state = adapter.get_doc_index_state(doc.id)
+        assert state.source_content_hash == content_hash("UTMIST CPSIF")
+        assert state.embedding_model == "text-embedding-3-small"
+        assert state.chunk_count == 2
+        adapter.replace_doc_chunks(doc.id, [])
+        assert adapter.get_doc_index_state(doc.id) is None
+
+    def test_conditional_replace_writes_only_for_current_active_content(self, adapter):
+        doc = self._with_content(adapter)
+        current = content_hash("UTMIST CPSIF")
+        chunks = [make_chunk(0), make_chunk(1)]
+        assert adapter.replace_doc_chunks_if_current(doc.id, current, chunks) is True
+        assert adapter.list_doc_chunks(doc.id) == chunks
+
+        # Content changed after the indexer read it: the stale set is refused
+        # and the existing set is left alone.
+        adapter.upsert_doc_content(
+            doc.id, content_text="newer", content_hash=content_hash("newer"), fetched_at=None
+        )
+        assert adapter.replace_doc_chunks_if_current(doc.id, current, [make_chunk()]) is False
+        assert adapter.list_doc_chunks(doc.id) == chunks
+
+    def test_conditional_replace_refuses_missing_inactive_and_contentless_docs(self, adapter):
+        current = content_hash("UTMIST CPSIF")
+        assert adapter.replace_doc_chunks_if_current(uuid4(), current, [make_chunk()]) is False
+        no_content = make_doc(adapter)
+        assert (
+            adapter.replace_doc_chunks_if_current(no_content.id, current, [make_chunk()]) is False
+        )
+        retired = self._with_content(adapter)
+        adapter.update_doc(retired.id, {"active": False}, actor="test")
+        assert adapter.replace_doc_chunks_if_current(retired.id, current, [make_chunk()]) is False
+        assert adapter.list_doc_chunks(retired.id) == []
+
+    def test_conditional_replace_rejects_chunks_from_other_content(self, adapter):
+        doc = self._with_content(adapter)
+        original = [make_chunk()]
+        adapter.replace_doc_chunks(doc.id, original)
+        with pytest.raises(ValueError):
+            adapter.replace_doc_chunks_if_current(
+                doc.id, content_hash("UTMIST CPSIF"), [make_chunk(source_text="other")]
+            )
+        assert adapter.list_doc_chunks(doc.id) == original
+
+    def test_docs_for_indexing(self, adapter):
+        current = self._with_content(adapter)
+        adapter.replace_doc_chunks(current.id, [make_chunk()])
+        unindexed = self._with_content(adapter)
+        stale = self._with_content(adapter)
+        adapter.replace_doc_chunks(stale.id, [make_chunk(source_text="older text")])
+        no_content = make_doc(adapter)
+        retired_indexed = self._with_content(adapter)
+        adapter.replace_doc_chunks(retired_indexed.id, [make_chunk()])
+        adapter.update_doc(retired_indexed.id, {"active": False}, actor="test")
+        retired_clean = self._with_content(adapter)
+        adapter.update_doc(retired_clean.id, {"active": False}, actor="test")
+        orphaned = make_doc(adapter)
+        adapter.replace_doc_chunks(orphaned.id, [make_chunk()])
+
+        stale_ids = sorted([unindexed.id, stale.id, retired_indexed.id, orphaned.id])
+        assert adapter.list_docs_for_indexing() == stale_ids
+        assert adapter.list_docs_for_indexing(stale_only=False) == sorted([current.id, *stale_ids])
+        assert no_content.id not in adapter.list_docs_for_indexing(stale_only=False)
+        assert retired_clean.id not in adapter.list_docs_for_indexing(stale_only=False)
+
+    def test_docs_for_indexing_pages_by_id(self, adapter):
+        ids = sorted(self._with_content(adapter).id for _ in range(5))
+        assert adapter.list_docs_for_indexing(limit=2) == ids[:2]
+        assert adapter.list_docs_for_indexing(after=ids[1], limit=2) == ids[2:4]
+        assert adapter.list_docs_for_indexing(after=ids[4]) == []
+
+    def test_delete_doc_content_removes_text_and_chunks_but_keeps_the_doc(self, adapter):
+        doc = self._with_content(adapter)
+        adapter.replace_doc_chunks(doc.id, [make_chunk()])
+        assert adapter.delete_doc_content(doc.id) is True
+        assert adapter.get_doc_content(doc.id) is None
+        assert adapter.list_doc_chunks(doc.id) == []
+        assert adapter.get_doc(doc.id) is not None
+        assert adapter.delete_doc_content(doc.id) is True
+        assert adapter.delete_doc_content(uuid4()) is False
+        assert doc.id not in adapter.list_docs_for_indexing(stale_only=False)

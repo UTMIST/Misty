@@ -14,3 +14,10 @@ def validate_doc_chunks(chunks: list[DocChunk]) -> list[DocChunk]:
     if len({(chunk.source_content_hash, chunk.embedding_model) for chunk in validated}) > 1:
         raise ValueError("chunks must share one source content hash and embedding model")
     return validated
+
+
+def validate_chunks_for_content(chunks: list[DocChunk], content_hash: str) -> list[DocChunk]:
+    validated = validate_doc_chunks(chunks)
+    if any(chunk.source_content_hash != content_hash for chunk in validated):
+        raise ValueError("chunks must be built from the expected content hash")
+    return validated
