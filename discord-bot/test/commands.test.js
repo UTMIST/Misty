@@ -460,12 +460,9 @@ test('registry includes team and my-teams', () => {
   assert.equal(commands.get('my-teams'), myTeamsCmd);
 });
 
-test('every command is stable (registered globally); none are beta', () => {
+test('all commands including in-progress qna register globally', () => {
   const { stable, beta } = partitionCommands([...commands.values()]);
   assert.ok(stable.some((c) => c.name === 'doc'));
-  // `record` was promoted off the beta channel in the staging → main release, so
-  // the beta partition is now empty. registerCommands still sends the (empty)
-  // beta body to the testing guild, which clears the stale guild-scoped copy.
   assert.deepEqual(
     beta.map((c) => c.name),
     [],

@@ -9,3 +9,4 @@ def test_openapi_includes_meeting_paths():
     assert "get" in paths["/meetings/{session_id}/transcript"]
     assert "/meetings/{session_id}/stop" in paths
     assert "post" in paths["/meetings/{session_id}/stop"]
+    assert "post" in paths["/meetings/{session_id}/qna"]

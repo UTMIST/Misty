@@ -77,6 +77,7 @@ export function createAppContext(config, { poster, notify } = {}) {
       start: () => ({ status: 'unconfigured' }),
       status: () => ({ status: 'not-recording' }),
       stop: async () => ({ status: 'not-recording' }),
+      qna: async () => ({ status: 'unconfigured' }),
     };
   }
 

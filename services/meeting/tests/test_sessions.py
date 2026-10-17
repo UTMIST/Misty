@@ -945,3 +945,128 @@ def test_discard_reports_drops_too(caplog):
 
     joined = " ".join(r.message for r in caplog.records)
     assert "undecodable_frame" in joined, f"an abrupt teardown reported nothing: {joined}"
+
+
+def test_qna_freezes_snapshot_and_does_not_block_ingestion_or_stop():
+    from datetime import timedelta
+    from src.contracts import QnaResponse
+    from src.pipeline.qna_runner import QnaRunner
+
+    async def scenario():
+        clock = [datetime(2026, 7, 25, 18, 0, tzinfo=timezone.utc)]
+        stream = FakeTranscriptionStream([{"text": "original", "start_ms": 0}])
+        deps = _make_deps([stream], now=lambda: clock[0])
+        entered, release = threading.Event(), threading.Event()
+        captured = []
+
+        def builder(segments, elapsed_ms, question):
+            captured.append((segments, elapsed_ms, question))
+            entered.set()
+            assert release.wait(3)
+            return QnaResponse(answer="answer", window_start_ms=0, window_end_ms=elapsed_ms)
+
+        runner = QnaRunner(builder, max_workers=1)
+        deps["qna_runner"] = runner.run
+        registry = SessionRegistry(deps)
+        session = registry.create("qna", "g1")
+        session.feed("a", "Alice", b"\0\0" * 480, 0)
+        clock[0] += timedelta(seconds=123)
+        task = asyncio.create_task(session.qna("What?"))
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            stream._words.append({"text": "later", "start_ms": 100})
+            session.feed("a", "Alice", b"\0\0" * 480, 123_000)
+            session.mark_audio_complete()
+            await asyncio.wait_for(session.stop(), 1)
+            assert registry.get("qna") is None
+        finally:
+            release.set()
+            runner.close()
+        result = await task
+        assert result.answer == "answer"
+        assert captured[0][1:] == (123_000, "What?")
+        assert captured[0][0][0].text == "original"
+
+    asyncio.run(scenario())
+
+
+def test_qna_refuses_a_stopping_or_discarded_session():
+    from src.sessions import MeetingNotActiveError
+
+    session = SessionRegistry(_make_deps([])).create("s", "g")
+    session._stopping = True
+    with pytest.raises(MeetingNotActiveError):
+        asyncio.run(session.qna("What?"))
+    session.discard()
+    with pytest.raises(MeetingNotActiveError):
+        asyncio.run(session.qna("What?"))
+
+
+def test_qna_refuses_questions_while_stop_waits_for_audio_tail():
+    from src.sessions import MeetingNotActiveError
+
+    async def scenario():
+        session = SessionRegistry(_make_deps([])).create("s", "g")
+        stop = asyncio.create_task(session.stop())
+        await asyncio.sleep(0)
+        try:
+            with pytest.raises(MeetingNotActiveError):
+                await session.qna("What?")
+        finally:
+            session.mark_audio_complete()
+            await stop
+
+    asyncio.run(scenario())
+
+
+def test_saturated_qna_pool_keeps_real_audio_dispatch_and_stop_responsive():
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import timedelta
+    from src.contracts import QnaResponse
+    from src.pipeline.qna_runner import QnaBusy, QnaRunner
+
+    async def scenario():
+        # Q&A used to occupy this same executor, starving the real WS feed path.
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+        release = threading.Event()
+        entered = [threading.Event(), threading.Event()]
+
+        def builder(segments, elapsed_ms, question):
+            entered[int(question)].set()
+            assert release.wait(3)
+            return QnaResponse(answer="answer", window_start_ms=0, window_end_ms=elapsed_ms)
+
+        runner = QnaRunner(builder, max_workers=2)
+        stream = FakeTranscriptionStream([{"text": "original", "start_ms": 0}])
+        clock = [datetime(2026, 7, 25, 18, 0, tzinfo=timezone.utc)]
+        deps = _make_deps([stream], now=lambda: clock[0])
+        deps["qna_runner"] = runner.run
+        session = SessionRegistry(deps).create("saturated", "g")
+        session.feed("a", "Alice", b"\0\0" * 480, 0)
+        clock[0] += timedelta(seconds=1)
+        pending = [asyncio.create_task(session.qna(str(i))) for i in range(2)]
+        try:
+
+            async def wait_entered():
+                while not all(event.is_set() for event in entered):
+                    await asyncio.sleep(0.001)
+
+            await asyncio.wait_for(wait_entered(), 2)
+            with pytest.raises(QnaBusy):
+                await session.qna("extra")
+            await asyncio.wait_for(
+                asyncio.to_thread(session.feed, "a", "Alice", b"\0\0" * 480, 100), 0.5
+            )
+            stream._words.append({"text": "tail", "start_ms": 100})
+            session.mark_audio_complete()
+            report = await asyncio.wait_for(session.stop(), 0.5)
+            assert len(stream.sent) == 2
+            assert "tail" in report.transcript
+            assert not session.drop_summary()
+            assert not release.is_set()
+        finally:
+            release.set()
+            await asyncio.gather(*pending, return_exceptions=True)
+            runner.close()
+
+    asyncio.run(scenario())

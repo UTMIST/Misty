@@ -114,6 +114,7 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 - **documentation-system and verification both bind host port 5434.** They cannot run locally at the same time. Remap one (`-p 5435:5432`) and update its `DATABASE_URL`. If Alembic reports an unknown revision, you're almost certainly pointed at the other service's database.
 - **documentation-system's Swagger is at `/swagger`, not `/docs`** — `/docs` is a real docs-resource router on that service.
 - **`npm run dev:web` occupies port 8001 and 5433**, and needs Docker. Stop documentation-system first.
+- **Q&A workers must stay isolated (`meeting`).** Use the injected `qna_runner`, not `asyncio.to_thread`: audio ingestion and `/stop` share the default executor, so slow Q&A can otherwise starve them and lose the audio tail. Admission capacity stays occupied until the actual worker finishes, including after request cancellation.
 - **`meeting` is stateful.** One process must own a session end-to-end. Its sessions live in memory and a restart drops every in-flight meeting.
 - **Discord PR testing uses one persistent `dev` slot.** Automatic Railway
   PR copies must skip gateway login and command registration. The selected PR
