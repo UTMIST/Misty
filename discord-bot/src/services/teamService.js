@@ -15,9 +15,26 @@ export function createTeamService({ directory, now = isoDateToday } = {}) {
   async function createTeam({ slug, label, description }, _opts) {
     try {
       const team = await directory.createTeam({ slug, label, description });
-      return { outcome: 'CREATED', team };
+      // Directory create already schedules a background sync. Calling sync here
+      // is the only way to tell "Google Groups off" (503) from "still
+      // provisioning" (GET 404) without a new API, and returns the real mapping.
+      return { outcome: 'CREATED', team, google: await probeGoogleGroup(team.id) };
     } catch (e) {
       if (e instanceof TeamExists) return { outcome: 'SLUG_EXISTS', detail: e.detail };
+      if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
+      throw e;
+    }
+  }
+
+  async function probeGoogleGroup(teamId) {
+    try {
+      const state = await directory.syncTeamGoogleGroup(teamId);
+      return { outcome: 'SYNC_RESULT', state };
+    } catch (e) {
+      if (e instanceof GoogleGroupsNotConfigured) return { outcome: 'NOT_CONFIGURED' };
+      if (e instanceof GoogleGroupSyncConflict) {
+        return { outcome: 'RETIRED_NO_GROUP', detail: e.detail };
+      }
       if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
       throw e;
     }

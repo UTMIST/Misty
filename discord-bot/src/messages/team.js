@@ -16,7 +16,17 @@ function googleGroupSettingsUrl(slugOrEmail) {
 
 function externalMembersSetupHint(slugOrEmail) {
   const settingsUrl = googleGroupSettingsUrl(slugOrEmail);
-  return `Ask someone with access to \`${INFRA_OWNER_EMAIL}\` to open [Group settings](${settingsUrl}) and enable **Allow external members**, then save. After that, run \`/team google-sync\` for this team.`;
+  // Both Groups Settings fields matter. Owner ability to change the second on a
+  // fresh group is unverified (#272); if it is admin-only, escalate instead of
+  // looping on Allow external members.
+  return [
+    `Ask someone with access to \`${INFRA_OWNER_EMAIL}\` to open [Group settings](${settingsUrl}) and set:`,
+    `1. **Allow external members** — on`,
+    `2. **Who can add external members** — end users / members can add (not “only admins”)`,
+    `Save, then run \`/team google-sync\` for this team.`,
+    `If (1) is already on but sync still needs external members and (2) is locked to administrators only, stop toggling (1) — ask infrastructure to escalate to a Workspace Super Admin.`,
+    `_Note: whether a group owner can change (2) on every new group is not yet verified._`,
+  ].join('\n');
 }
 
 function renderGoogleGroupState(team, state) {
@@ -26,11 +36,11 @@ function renderGoogleGroupState(team, state) {
     case 'synced':
       return [
         `✅ ${header} is **synced**.`,
-        '_Note: an empty group can show synced before any external member has been tried. If adds later fail, flip Allow external members and re-run `/team google-sync`._',
+        '_Note: an empty group can show synced before any external member has been tried. That is not proof external membership is enabled — complete the Group settings steps below (or via `/team google-status`) before relying on adds._',
       ].join('\n');
     case 'needs_external_members':
       return [
-        `⚠️ ${header} needs the external-members switch.`,
+        `⚠️ ${header} needs external-member settings.`,
         externalMembersSetupHint(email),
         state.last_error ? `_Directory note:_ ${state.last_error}` : null,
       ]
@@ -51,6 +61,37 @@ function renderGoogleGroupState(team, state) {
   }
 }
 
+function renderGoogleAfterCreate(team, google) {
+  switch (google?.outcome) {
+    case 'SYNC_RESULT': {
+      const state = google.state;
+      const email = state.group_email ?? `${team.slug}@${GOOGLE_GROUPS_DOMAIN}`;
+      const statusBlock = renderGoogleGroupState(team, state);
+      // needs_external_members / external-failed already include the setup hint.
+      const hintAlreadyIncluded =
+        state.status === 'needs_external_members' ||
+        /external members/i.test(state.last_error ?? '');
+      if (hintAlreadyIncluded) return statusBlock;
+      // Fresh groups often report synced before any external add was tried —
+      // that is not proof the switch is on. Always give setup instructions on create.
+      return [
+        statusBlock,
+        '',
+        `Most members use external emails, so complete this before relying on the group:`,
+        externalMembersSetupHint(email),
+      ].join('\n');
+    }
+    case 'NOT_CONFIGURED':
+      return 'Google Groups is not configured on the directory, so no group was created. The team exists in Misty only.';
+    case 'RETIRED_NO_GROUP':
+      return 'Google Group sync was skipped (retired team with no group).';
+    case 'DIRECTORY_DOWN':
+      return 'The team was created, but Google Group status could not be checked. Try `/team google-status` in a moment.';
+    default:
+      return 'The team was created, but Google Group status was not returned. Try `/team google-status`.';
+  }
+}
+
 export function renderCreateTeamResult(result) {
   const content = (() => {
     switch (result.outcome) {
@@ -58,7 +99,7 @@ export function renderCreateTeamResult(result) {
         return [
           `✅ Created team **${result.team.label}** (\`${result.team.slug}\`).`,
           '',
-          `Google Group setup: ${externalMembersSetupHint(result.team.slug)} Most members use external emails, so the group won't accept them until this is done.`,
+          renderGoogleAfterCreate(result.team, result.google),
         ].join('\n');
       }
       case 'SLUG_EXISTS':
