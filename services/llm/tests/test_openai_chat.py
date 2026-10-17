@@ -280,15 +280,22 @@ def test_empty_filtered_and_refusal_responses(monkeypatch, output, fields, stop,
 
 
 @pytest.mark.parametrize("structured", [False, True])
-def test_live_response_metadata_preserves_answer_and_usage(monkeypatch, structured):
-    # Metadata observed in a successful GPT-6.1 Sol response on 2026-10-17.
+def test_added_response_properties_preserve_answer_and_usage(monkeypatch, structured, caplog):
+    message = _message("OK")
+    message["future_message_property"] = "PRIVATE-METADATA"
+    message["content"][0].update(
+        future_text_property="PRIVATE-METADATA",
+        annotations=[{"type": "future_annotation", "data": "PRIVATE-METADATA"}],
+    )
     payload = _response(
-        [_message("OK")],
+        [message],
         billing={"payer": "developer"},
         frequency_penalty=0.0,
         presence_penalty=0.0,
         tool_usage={},
+        future_envelope_property={"data": ["PRIVATE-METADATA"]},
     )
+    payload["usage"]["future_usage_property"] = "PRIVATE-METADATA"
     content = [{"type": "text", "text": "hi"}] if structured else "hi"
     with _boundary([payload]) as (provider, _):
         response = _route(provider, monkeypatch).post(
@@ -304,6 +311,88 @@ def test_live_response_metadata_preserves_answer_and_usage(monkeypatch, structur
     if structured:
         expected["content_blocks"] = [{"type": "text", "text": "OK"}]
     assert response.json() == expected
+    assert "PRIVATE-METADATA" not in caplog.text + response.text
+
+
+def test_added_reasoning_properties_survive_tool_replay(monkeypatch, caplog):
+    state = {
+        **_STATE,
+        "future_state_property": {"data": "PRIVATE-METADATA"},
+        "summary": [{"type": "summary_text", "text": "", "future_summary_property": True}],
+        "content": [{"type": "reasoning_text", "text": "", "future_content_property": True}],
+    }
+    call = {
+        **_CALL,
+        "async": False,
+        "namespace": "",
+        "caller": {"type": "direct", "future_caller_property": True},
+        "future_call_property": "PRIVATE-METADATA",
+    }
+    prompt = {"role": "user", "content": "hi"}
+    with _boundary([_response([state, call]), _response([_message("OK")])]) as (provider, calls):
+        client = _route(provider, monkeypatch)
+        first = client.post("/chat", json={"messages": [prompt], "tools": [_TOOL]})
+        assert first.status_code == 200
+        blocks = first.json()["content_blocks"]
+        assert blocks == [
+            {"type": "reasoning_state", "provider": "openai", "data": state},
+            {"type": "tool_use", "id": "call_1", "name": "lookup", "input": {"q": "PRIVATE-QUERY"}},
+        ]
+        second = client.post(
+            "/chat",
+            json={
+                "messages": [
+                    prompt,
+                    {"role": "assistant", "content": blocks},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "call_1", "content": "x"}
+                        ],
+                    },
+                ],
+                "tools": [_TOOL],
+            },
+        )
+    assert second.status_code == 200
+    assert second.json()["content"] == "OK"
+    assert calls[1]["input"][1] == state
+    assert "future_call_property" not in calls[1]["input"][2]
+    assert "PRIVATE-METADATA" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "details,stop",
+    [
+        ({"reason": "max_messages"}, "incomplete"),
+        ({"reason": "steered"}, "incomplete"),
+        ({"reason": "PRIVATE-NEW-REASON"}, "incomplete"),
+        ({}, "incomplete"),
+        (None, "incomplete"),
+        ({"reason": "max_output_tokens", "future_detail": "PRIVATE-METADATA"}, "max_tokens"),
+        ({"reason": "content_filter"}, "content_filtered"),
+    ],
+)
+def test_incomplete_responses_never_expose_executable_calls(monkeypatch, caplog, details, stop):
+    payload = _response(
+        [_message("Partial"), _CALL, {**_CALL, "call_id": "call_2", "arguments": '{"q":'}],
+        status="incomplete",
+        incomplete_details=details,
+    )
+    with _boundary([payload]) as (provider, _):
+        response = _route(provider, monkeypatch).post(
+            "/chat", json={"messages": [{"role": "user", "content": "hi"}], "tools": [_TOOL]}
+        )
+    assert response.status_code == 200
+    assert response.json() == {
+        "content": "Partial",
+        "content_blocks": [{"type": "text", "text": "Partial"}],
+        "model": _MODEL,
+        "stop_reason": stop,
+        "usage": {"input_tokens": 11, "output_tokens": 7},
+    }
+    assert "PRIVATE-NEW-REASON" not in response.text + caplog.text
+    assert "PRIVATE-METADATA" not in response.text + caplog.text
 
 
 @pytest.mark.parametrize(
@@ -317,13 +406,24 @@ def test_live_response_metadata_preserves_answer_and_usage(monkeypatch, structur
         {"output": [{**_CALL, "name": "undeclared"}]},
         {"output": [_CALL, _CALL]},
         {"output": [{**_CALL, "call_id": True}]},
-        {"output": [{**_CALL, "unknown": True}]},
         {"output": [{**_CALL, "status": "incomplete"}]},
+        {"output": [{**_CALL, "namespace": "unconfigured"}]},
+        {"output": [{**_CALL, "async": True}]},
+        {"output": [{**_CALL, "async": 0}]},
+        {"output": [{**_CALL, "caller": {"type": "program", "caller_id": "pc_1"}}]},
+        {"output": [{**_CALL, "caller": "direct"}]},
         {"usage": {"input_tokens": True, "output_tokens": 7}},
         {"usage": {"input_tokens": 11, "output_tokens": "7"}},
         {"status": "failed", "error": {"message": "PRIVATE-UPSTREAM"}},
         {"model": "unrequested-model"},
-        {"unknown": "PRIVATE-UPSTREAM"},
+        {"status": "in_progress"},
+        {"status": "future_status"},
+        {"status": "completed", "incomplete_details": {"reason": "max_messages"}},
+        {"output": [{**_message(), "role": "user"}]},
+        {"output": [{**_message(), "phase": "future_phase"}]},
+        {"output": [{**_STATE, "summary": [{"type": "unknown", "text": ""}]}]},
+        {"output": [{**_STATE, "future_property": float("nan")}]},
+        {"future_property": float("nan")},
     ],
 )
 def test_malformed_raw_outputs_fail_closed(monkeypatch, patch, capsys):
@@ -351,11 +451,15 @@ def test_duplicate_raw_envelope_fields_rejected(monkeypatch):
 @pytest.mark.parametrize(
     "patch,exception,location",
     [
-        ({"PRIVATE-FIELD": "PRIVATE-UPSTREAM"}, "ValueError", "object_fields:"),
         (
-            {"status": "incomplete", "incomplete_details": {"reason": "PRIVATE-REASON"}},
-            "KeyError",
-            "_result:",
+            {"output": [{"type": "message", "PRIVATE-FIELD": "PRIVATE-UPSTREAM"}]},
+            "ValueError",
+            "_response_object:",
+        ),
+        (
+            {"status": "incomplete", "incomplete_details": {"reason": ["PRIVATE-REASON"]}},
+            "ValueError",
+            "text_value:",
         ),
     ],
 )
@@ -480,7 +584,7 @@ def test_connection_failures_are_504(monkeypatch, error):
                 {
                     "role": "assistant",
                     "content": [
-                        {"type": "reasoning_state", "data": {**_STATE, "unknown": "private"}}
+                        {"type": "reasoning_state", "data": {**_STATE, "encrypted_content": None}}
                     ],
                 }
             ]

@@ -25,7 +25,6 @@ from src.providers.base import (
 from src.providers.raw_responses import decode_json_object
 from src.providers.tool_blocks import (
     content_list,
-    object_fields,
     text_value,
     tool_mode,
     usage_values,
@@ -84,50 +83,16 @@ def _input(request: LLMRequest) -> list[dict]:
     return items
 
 
+def _response_object(value, required: set[str]) -> dict:
+    # OpenAI treats added JSON properties as backward-compatible. Validate the
+    # fields we consume; decode_json_object still bounds/validates the whole body.
+    if not isinstance(value, dict) or not required <= value.keys():
+        raise ValueError("missing response fields or invalid object")
+    return value
+
+
 def _result(payload: dict, *, structured: bool, tool_names: set[str], used_ids: set[str]):
-    # Validate the raw envelope and output items before SDK coercion. These are
-    # the supported response metadata fields; unknown fields fail closed.
-    object_fields(
-        payload,
-        {"id", "object", "created_at", "model", "status", "output", "usage"},
-        {
-            "error",
-            "incomplete_details",
-            "instructions",
-            "max_output_tokens",
-            "metadata",
-            "parallel_tool_calls",
-            "temperature",
-            "tool_choice",
-            "tools",
-            "top_p",
-            "background",
-            "completed_at",
-            "conversation",
-            "max_tool_calls",
-            "previous_response_id",
-            "prompt",
-            "prompt_cache_key",
-            "prompt_cache_retention",
-            "reasoning",
-            "safety_identifier",
-            "service_tier",
-            "store",
-            "text",
-            "top_logprobs",
-            "truncation",
-            "user",
-            "context_management",
-            "prompt_cache_options",
-            "access_programs",
-            "moderation",
-            "retention",
-            "billing",
-            "frequency_penalty",
-            "presence_penalty",
-            "tool_usage",
-        },
-    )
+    _response_object(payload, {"id", "object", "created_at", "model", "status", "output", "usage"})
     if payload["object"] != "response" or payload.get("error") is not None:
         raise ValueError("invalid response")
     model = text_value(payload["model"], nonempty=True)
@@ -137,10 +102,15 @@ def _result(payload: dict, *, structured: bool, tool_names: set[str], used_ids: 
     if status == "completed" and payload.get("incomplete_details") is None:
         stop_reason = "end_turn"
     elif status == "incomplete":
-        details = object_fields(payload.get("incomplete_details"), {"reason"})
-        stop_reason = {"max_output_tokens": "max_tokens", "content_filter": "content_filtered"}[
-            details["reason"]
-        ]
+        details = payload.get("incomplete_details")
+        reason = None if details is None else _response_object(details, set()).get("reason")
+        if reason is not None:
+            text_value(reason, nonempty=True)
+        # New or absent reasons still mean incomplete, never a completed answer.
+        stop_reason = {
+            "max_output_tokens": "max_tokens",
+            "content_filter": "content_filtered",
+        }.get(reason, "incomplete")
     else:
         raise ValueError("unexpected response status")
     blocks = []
@@ -154,7 +124,7 @@ def _result(payload: dict, *, structured: bool, tool_names: set[str], used_ids: 
             # responses expose it for consumer-managed replay.
             blocks.append(LLMReasoningStateBlock(validate_reasoning_state(item)))
         elif kind == "message":
-            object_fields(item, {"id", "type", "role", "status", "content"}, {"phase"})
+            _response_object(item, {"id", "type", "role", "status", "content"})
             if item["role"] != "assistant" or item["status"] not in ("completed", "incomplete"):
                 raise ValueError("invalid response message")
             if status == "completed" and item["status"] != "completed":
@@ -166,12 +136,12 @@ def _result(payload: dict, *, structured: bool, tool_names: set[str], used_ids: 
                 if not isinstance(part, dict):
                     raise ValueError("invalid message content")
                 if part.get("type") == "output_text":
-                    object_fields(part, {"type", "text", "annotations"}, {"logprobs"})
-                    if part["annotations"] != []:
-                        raise ValueError("unsupported message annotations")
+                    _response_object(part, {"type", "text", "annotations"})
+                    if not isinstance(part["annotations"], list):
+                        raise ValueError("invalid message annotations")
                     text = text_value(part["text"])
                 elif part.get("type") == "refusal":
-                    object_fields(part, {"type", "refusal"})
+                    _response_object(part, {"type", "refusal"})
                     text = text_value(part["refusal"])
                     refused = True
                 else:
@@ -179,13 +149,20 @@ def _result(payload: dict, *, structured: bool, tool_names: set[str], used_ids: 
                 if text:
                     blocks.append(LLMTextBlock(text, phase=phase))
         elif kind == "function_call":
-            object_fields(item, {"type", "call_id", "name", "arguments"}, {"id", "status"})
-            # Withhold the entire truncated parallel batch, without attempting
-            # to parse partial arguments as executable JSON.
-            if stop_reason == "max_tokens":
+            _response_object(item, {"type", "call_id", "name", "arguments"})
+            # No incomplete response authorizes execution, even if one sibling
+            # call looks complete. Partial arguments need not be executable JSON.
+            if status == "incomplete":
                 continue
             if status != "completed" or item.get("status") not in (None, "completed"):
                 raise ValueError("incomplete executable call")
+            # Only ordinary, direct, synchronous functions are offered by this
+            # service. These known fields change execution semantics, not metadata.
+            if item.get("namespace") not in (None, "") or item.get("async", False) is not False:
+                raise ValueError("unsupported function execution mode")
+            caller = item.get("caller")
+            if caller is not None and _response_object(caller, {"type"})["type"] != "direct":
+                raise ValueError("unsupported function caller")
             arguments = text_value(item["arguments"])
             blocks.append(
                 LLMToolUseBlock(

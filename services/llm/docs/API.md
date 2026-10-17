@@ -112,7 +112,9 @@ The schema must have `"type": "object"`; schema references are not fetched or
 resolved by this service. Structural validation is not a complete JSON Schema or
 model-specific schema-compatibility check. Tool definitions and structured blocks
 reject unknown fields and coercion; the legacy chat/message wrappers keep their
-existing extra-field behavior.
+existing extra-field behavior. The native OpenAI item inside `reasoning_state.data`
+allows bounded additional properties for forward-compatible replay; its known
+fields and the surrounding block remain validated.
 
 ```json
 {
@@ -222,13 +224,23 @@ and the API's `max_tokens` cap. Do not append the truncated assistant turn or
 fabricate tool results. The service does not automatically retry a successful
 truncated response. Only `stop_reason: "tool_use"` permits the tool-result exchange.
 
+For OpenAI, **all** incomplete responses withhold function calls. Token exhaustion
+maps to `max_tokens` and filtering to `content_filtered`; other or absent incomplete
+reasons map to `incomplete`. These return **200** with partial text and usage, and
+never authorize tool execution or imply a complete answer. Unsupported output types
+and invalid known fields still return **502**. Additional metadata properties on
+known upstream objects are tolerated and omitted from the public response, except
+for the native reasoning state retained for replay below.
+
 #### Thinking and continuation
 
 OpenAI uses Responses with `store=false`. Its encrypted reasoning items are returned
 as `reasoning_state` blocks with `provider: "openai"` and `data` containing the native
 reasoning item. Replay these blocks unchanged with tool results; never render or log
-them. They are assistant-only, strictly validated, and covered by the aggregate payload
-limits. Text blocks may carry an assistant `phase`; replay it too. OpenAI requests
+them. They are assistant-only and covered by the aggregate payload limits. Known
+reasoning fields are validated; additional native properties are preserved unchanged
+so new metadata does not break continuation. Text blocks may carry an assistant
+`phase`; replay it too. OpenAI requests
 containing Bedrock signed/redacted blocks, and Bedrock requests containing OpenAI
 state, return **422** before inference. Start a fresh conversation when switching providers.
 
