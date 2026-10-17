@@ -7,9 +7,13 @@ that should never see the internal `team-tracking` API directly.
 ## What this service does
 
 team-tracking is the internal source of truth for the org, but not every consumer of
-that data is inside the org's trust boundary. A GitHub Action, for instance, needs to
+that data is inside the org's trust boundary. A future GitHub Action could
 turn a GitHub login into a Discord id (to @-mention a reviewer) without holding a
 team-tracking key or seeing anything else in the directory.
+
+The resolver is a working example for future gateway operations. No current
+integration consumes it: the existing Discord notifications display GitHub
+reviewer logins, but do not call the gateway or mention reviewers on Discord.
 
 The gateway exists for exactly that shape of consumer:
 
@@ -81,7 +85,7 @@ None`, and `tests/test_auth.py` pins that it stays that way.
 
 ## The resolver endpoint
 
-```
+```http
 GET /v1/resolve/discord/{github_login}
 ```
 
@@ -167,8 +171,8 @@ The gateway keeps its own key registry, separate from team-tracking's. Manage it
 the bundled CLI from the repository root, with the gateway database configured:
 
 ```bash
-# Issue an external key for a consumer (e.g. a GitHub Action)
-uv --directory services/gateway --project . run python -m src.cli issue --name reviewer-ping --scopes resolve:discord
+# Issue a key for a test consumer; replace the name when integrating a real consumer
+uv --directory services/gateway --project . run python -m src.cli issue --name example-consumer --scopes resolve:discord
 # Prints: gw_<prefix>_<secret>  (shown ONCE — capture it now)
 
 # List existing keys (IDs and metadata only, never plaintext)
@@ -194,7 +198,7 @@ key to exactly the endpoint its consumer calls.
 
 ## Repo layout
 
-```
+```text
 gateway/
 ├── contracts/               The domain boundary — no framework imports
 │   ├── types.py              Pydantic ApiKey type
@@ -252,9 +256,12 @@ python3 services/gateway/tests/smoke_stack.py
 ```
 
 The smoke script creates and removes its own Docker network, containers, and
-separate databases, using generated test keys and synthetic records. CI runs both
-the Postgres suite and this HTTP check. `make check` includes the fast gateway
-suite; `make test-full` includes Postgres when the test variables above are set.
+separate databases, using generated test keys and synthetic records. It verifies
+that the gateway runs the API, migrations, and key CLI as an unprivileged user.
+[CI](../../.github/workflows/ci.yml) runs both the Postgres suite and this HTTP check,
+plus an isolated wheel install outside the checkout to catch missing runtime
+packages. `make check` includes the fast gateway suite; `make test-full` includes
+Postgres when the test variables above are set.
 
 Lint and format with ruff:
 

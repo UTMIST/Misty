@@ -5,7 +5,9 @@ COPY pyproject.toml uv.lock ./
 COPY packages/ ./packages/
 COPY services/gateway/ ./services/gateway/
 RUN uv sync --frozen --no-dev --package gateway
+RUN groupadd --system gateway && useradd --system --gid gateway --create-home gateway
 ENV PATH="/app/.venv/bin:$PATH"
 WORKDIR /app/services/gateway
+USER gateway
 EXPOSE 8000
 CMD ["uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8000"]

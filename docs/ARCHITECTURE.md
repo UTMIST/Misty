@@ -252,9 +252,12 @@ callers go through a gateway at all.
 
 The gateway's first (and so far only) endpoint is the resolver,
 `GET /v1/resolve/discord/{github_login}` — it turns a GitHub login into the Discord id
-linked to the same person in the directory, and nothing else, for #34's reviewer-ping
-GitHub Action. New external use cases get new narrow endpoints on the gateway, not
-broader access to team-tracking itself.
+linked to the same person in the directory, and nothing else. It is a working
+example for future gateway operations; no current integration consumes it.
+The Discord notifications implemented for #34 display GitHub reviewer logins,
+but do not call the resolver or ping reviewers' Discord accounts. New external
+use cases get new narrow endpoints on the gateway, not broader access to
+team-tracking itself.
 
 The compute platform will use the same per-consumer gateway contract when its
 required operations are defined. The [gateway architecture](../services/gateway/docs/ARCHITECTURE.md#future-compute-platform-access)

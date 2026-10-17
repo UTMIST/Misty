@@ -41,6 +41,7 @@ Ensure team-tracking explicitly sets `PORT=8000` so the variable reference resol
 Deploy in the same region as the directory. `railway.json` runs migrations before
 starting and checks `/health/ready`. Empty/default internal keys fail startup;
 an unavailable or unmigrated gateway key database fails readiness.
+The image runs the API, migrations, and key CLI as the unprivileged `gateway` user.
 
 Generate a public HTTPS domain for **gateway only**, targeting port 8000. Private
 services retain private networking. Enable proxy-header trust only when requests
@@ -52,11 +53,15 @@ container, `gateway-keys` and `team-tracking-keys` work directly.
 
 ## External consumer keys
 
-With the gateway environment's `DATABASE_URL` loaded securely, run:
+No current integration consumes the resolver. For a deployment check, use a
+temporary test consumer and revoke its key afterward. When integrating a real
+consumer, replace `example-consumer` with its name. With the gateway environment's
+`DATABASE_URL` loaded securely, use these key-management commands (revoke only
+after verification):
 
 ```bash
 uv --directory services/gateway --project . run python -m src.cli issue \
-  --name reviewer-ping --scopes resolve:discord
+  --name example-consumer --scopes resolve:discord
 uv --directory services/gateway --project . run python -m src.cli list --active-only
 uv --directory services/gateway --project . run python -m src.cli revoke <key-id>
 ```
@@ -74,10 +79,10 @@ see [future compute access](ARCHITECTURE.md#future-compute-platform-access).
 ## Verify the deployment
 
 Check that the deployment reports success and that `/health/ready` returns 200.
-From the intended consumer, call the resolver with its external key and a synthetic
-or approved linked login; expect only `discord_id`. Verify a missing key returns
-401 and an unknown login returns the generic 404. Confirm the audit records the
-consumer name and status without response data or key material.
+From a test client or the intended consumer, call the resolver with its external
+key and a synthetic or approved linked login; expect only `discord_id`. Verify a
+missing key returns 401 and an unknown login returns the generic 404. Confirm the
+audit records the consumer name and status without response data or key material.
 
 Readiness verifies only the gateway DB. A resolver 503 means the private URL,
 internal key, directory availability, or upstream response needs investigation.
