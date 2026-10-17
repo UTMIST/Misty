@@ -5,6 +5,8 @@ import {
   TeamExists,
   MembershipInvalid,
   DirectoryUnavailable,
+  GoogleGroupsNotConfigured,
+  GoogleGroupSyncConflict,
 } from '../src/clients/directoryClient.js';
 
 const admin = { id: 'a', display_name: 'A', access_level: 'admin' };
@@ -496,4 +498,71 @@ test('getMyTeams returns DIRECTORY_DOWN on outage', async () => {
   });
   const res = await svc.getMyTeams({ personId: 'p1' }, { caller: admin });
   assert.equal(res.outcome, 'DIRECTORY_DOWN');
+});
+
+test('getGoogleGroupStatus returns STATUS or NO_MAPPING', async () => {
+  const withState = createTeamService({
+    directory: {
+      getTeamBySlug: async () => ({ id: 't1', slug: 'ml', label: 'ML' }),
+      getTeamGoogleGroup: async () => ({
+        group_email: 'ml@utmist.skule.ca',
+        status: 'needs_external_members',
+      }),
+    },
+  });
+  const status = await withState.getGoogleGroupStatus({ teamSlug: 'ml' }, { caller: admin });
+  assert.equal(status.outcome, 'STATUS');
+  assert.equal(status.state.status, 'needs_external_members');
+
+  const missing = createTeamService({
+    directory: {
+      getTeamBySlug: async () => ({ id: 't1', slug: 'ml', label: 'ML' }),
+      getTeamGoogleGroup: async () => null,
+    },
+  });
+  assert.equal(
+    (await missing.getGoogleGroupStatus({ teamSlug: 'ml' }, { caller: admin })).outcome,
+    'NO_MAPPING',
+  );
+});
+
+test('syncGoogleGroup returns SYNC_RESULT and maps configuration errors', async () => {
+  const ok = createTeamService({
+    directory: {
+      getTeamBySlug: async () => ({ id: 't1', slug: 'ml', label: 'ML' }),
+      syncTeamGoogleGroup: async (id) => {
+        assert.equal(id, 't1');
+        return { group_email: 'ml@utmist.skule.ca', status: 'synced' };
+      },
+    },
+  });
+  const res = await ok.syncGoogleGroup({ teamSlug: 'ml' }, { caller: admin });
+  assert.equal(res.outcome, 'SYNC_RESULT');
+  assert.equal(res.state.status, 'synced');
+
+  const unconfigured = createTeamService({
+    directory: {
+      getTeamBySlug: async () => ({ id: 't1', slug: 'ml', label: 'ML' }),
+      syncTeamGoogleGroup: async () => {
+        throw new GoogleGroupsNotConfigured('off');
+      },
+    },
+  });
+  assert.equal(
+    (await unconfigured.syncGoogleGroup({ teamSlug: 'ml' }, { caller: admin })).outcome,
+    'NOT_CONFIGURED',
+  );
+
+  const retired = createTeamService({
+    directory: {
+      getTeamBySlug: async () => ({ id: 't1', slug: 'ml', label: 'ML' }),
+      syncTeamGoogleGroup: async () => {
+        throw new GoogleGroupSyncConflict('retired');
+      },
+    },
+  });
+  assert.equal(
+    (await retired.syncGoogleGroup({ teamSlug: 'ml' }, { caller: admin })).outcome,
+    'RETIRED_NO_GROUP',
+  );
 });

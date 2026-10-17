@@ -3,6 +3,8 @@ import {
   TeamNotFound,
   MembershipInvalid,
   DirectoryUnavailable,
+  GoogleGroupsNotConfigured,
+  GoogleGroupSyncConflict,
 } from '../clients/directoryClient.js';
 
 export const llmSafe = true;
@@ -148,6 +150,36 @@ export function createTeamService({ directory, now = isoDateToday } = {}) {
     }
   }
 
+  async function getGoogleGroupStatus({ teamSlug }, _opts) {
+    try {
+      const team = await directory.getTeamBySlug(teamSlug);
+      if (!team) return { outcome: 'TEAM_NOT_FOUND' };
+      const state = await directory.getTeamGoogleGroup(team.id);
+      if (!state) return { outcome: 'NO_MAPPING', team };
+      return { outcome: 'STATUS', team, state };
+    } catch (e) {
+      if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
+      throw e;
+    }
+  }
+
+  async function syncGoogleGroup({ teamSlug }, _opts) {
+    try {
+      const team = await directory.getTeamBySlug(teamSlug);
+      if (!team) return { outcome: 'TEAM_NOT_FOUND' };
+      const state = await directory.syncTeamGoogleGroup(team.id);
+      return { outcome: 'SYNC_RESULT', team, state };
+    } catch (e) {
+      if (e instanceof TeamNotFound) return { outcome: 'TEAM_NOT_FOUND' };
+      if (e instanceof GoogleGroupsNotConfigured) return { outcome: 'NOT_CONFIGURED' };
+      if (e instanceof GoogleGroupSyncConflict) {
+        return { outcome: 'RETIRED_NO_GROUP', detail: e.detail };
+      }
+      if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
+      throw e;
+    }
+  }
+
   return {
     createTeam,
     listTeams,
@@ -156,6 +188,8 @@ export function createTeamService({ directory, now = isoDateToday } = {}) {
     removeMember,
     getRoster,
     getMyTeams,
+    getGoogleGroupStatus,
+    syncGoogleGroup,
     _now: now,
   };
 }

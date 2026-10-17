@@ -219,6 +219,8 @@ test('/team is stable and its subcommands carry per-subcommand auth', () => {
   assert.equal(authFor('add'), 'admin');
   assert.equal(authFor('remove'), 'admin');
   assert.equal(authFor('rename'), 'admin');
+  assert.equal(authFor('google-status'), 'admin');
+  assert.equal(authFor('google-sync'), 'admin');
   assert.equal(authFor('list'), 'linked');
   assert.equal(authFor('roster'), 'linked');
 });
@@ -302,6 +304,60 @@ test('/team rename dispatches renameTeam', async () => {
   });
   assert.deepEqual(seen, { slug: 'ml', newLabel: 'New ML' });
   assert.match(payload.content, /New ML/);
+});
+
+test('/team google-status dispatches getGoogleGroupStatus', async () => {
+  let seen = null;
+  const ctx = {
+    teamService: {
+      getGoogleGroupStatus: async (args) => {
+        seen = args;
+        return {
+          outcome: 'STATUS',
+          team: { slug: 'ml', label: 'ML' },
+          state: { group_email: 'ml@utmist.skule.ca', status: 'synced' },
+        };
+      },
+    },
+  };
+  const payload = await teamCmd.handler({
+    subcommand: 'google-status',
+    options: { team: 'ml' },
+    principal: { person: { access_level: 'admin' } },
+    ctx,
+  });
+  assert.deepEqual(seen, { teamSlug: 'ml' });
+  assert.match(payload.content, /synced/i);
+  assert.equal(payload.ephemeral, true);
+});
+
+test('/team google-sync dispatches syncGoogleGroup', async () => {
+  let seen = null;
+  const ctx = {
+    teamService: {
+      syncGoogleGroup: async (args) => {
+        seen = args;
+        return {
+          outcome: 'SYNC_RESULT',
+          team: { slug: 'ml', label: 'ML' },
+          state: {
+            group_email: 'ml@utmist.skule.ca',
+            status: 'needs_external_members',
+            last_error: 'Allow external members',
+          },
+        };
+      },
+    },
+  };
+  const payload = await teamCmd.handler({
+    subcommand: 'google-sync',
+    options: { team: 'ml' },
+    principal: { person: { access_level: 'admin' } },
+    ctx,
+  });
+  assert.deepEqual(seen, { teamSlug: 'ml' });
+  assert.match(payload.content, /external-members/i);
+  assert.equal(payload.ephemeral, true);
 });
 
 test('/team add dispatches addMember using the mentioned user snowflake', async () => {

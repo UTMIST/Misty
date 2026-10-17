@@ -222,6 +222,8 @@ and skips them.
 - `/team add user:<@mention> team:<slug> [role:<...>] [team_admin:<bool>]` (admin) — add a member. The mentioned user must have already run `/link`.
 - `/team remove user:<@mention> team:<slug>` (admin) — soft-end a membership as of today.
 - `/team roster team:<slug> [as_of:<YYYY-MM-DD>]` (linked) — show a team's current roster.
+- `/team google-status team:<slug>` (admin) — show the team's managed Google Group sync status (including whether **Allow external members** is still needed).
+- `/team google-sync team:<slug>` (admin) — retry Google Group sync after someone with `infrastructure@utmist.skule.ca` enables **Allow external members** in Group settings.
 - `/my-teams` (linked) — list your active memberships.
 - `/doc <add|list|show|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
 

@@ -11,6 +11,8 @@ import {
   renderRemoveMemberResult,
   renderRosterResult,
   renderMyTeamsResult,
+  renderGoogleGroupStatusResult,
+  renderGoogleGroupSyncResult,
 } from '../src/messages/team.js';
 import {
   renderDocAddResult,
@@ -169,15 +171,65 @@ test('renderSeedResult covers outcomes', () => {
 });
 
 test('renderCreateTeamResult covers outcomes', () => {
-  assert.match(
-    renderCreateTeamResult({ outcome: 'CREATED', team: { slug: 'ml', label: 'ML' } }).content,
-    /ML|ml/,
-  );
+  const created = renderCreateTeamResult({
+    outcome: 'CREATED',
+    team: { slug: 'ml', label: 'ML' },
+  }).content;
+  assert.match(created, /ML|ml/);
+  assert.match(created, /infrastructure@utmist\.skule\.ca/);
+  assert.match(created, /https:\/\/groups\.google\.com\/a\/utmist\.skule\.ca\/g\/ml\/settings/);
+  assert.match(created, /Allow external members/);
+  assert.match(created, /google-sync/);
   assert.match(renderCreateTeamResult({ outcome: 'SLUG_EXISTS', detail: 'x' }).content, /already/i);
   assert.match(
     renderCreateTeamResult({ outcome: 'DIRECTORY_DOWN' }).content,
     /unavailable|try again/i,
   );
+});
+
+test('renderGoogleGroupStatusResult covers outcomes', () => {
+  const team = { slug: 'ml', label: 'ML' };
+  assert.match(
+    renderGoogleGroupStatusResult({
+      outcome: 'STATUS',
+      team,
+      state: { group_email: 'ml@utmist.skule.ca', status: 'synced' },
+    }).content,
+    /synced/i,
+  );
+  const needs = renderGoogleGroupStatusResult({
+    outcome: 'STATUS',
+    team,
+    state: {
+      group_email: 'ml@utmist.skule.ca',
+      status: 'needs_external_members',
+      last_error: 'Allow external members',
+    },
+  }).content;
+  assert.match(needs, /external-members/i);
+  assert.match(needs, /groups\.google\.com/);
+  assert.match(
+    renderGoogleGroupStatusResult({ outcome: 'NO_MAPPING', team }).content,
+    /No Google Group mapping/i,
+  );
+  assert.match(renderGoogleGroupStatusResult({ outcome: 'TEAM_NOT_FOUND' }).content, /no team/i);
+});
+
+test('renderGoogleGroupSyncResult covers outcomes', () => {
+  const team = { slug: 'ml', label: 'ML' };
+  assert.match(
+    renderGoogleGroupSyncResult({
+      outcome: 'SYNC_RESULT',
+      team,
+      state: { group_email: 'ml@utmist.skule.ca', status: 'failed', last_error: 'boom' },
+    }).content,
+    /failed|boom/i,
+  );
+  assert.match(
+    renderGoogleGroupSyncResult({ outcome: 'NOT_CONFIGURED' }).content,
+    /not configured/i,
+  );
+  assert.match(renderGoogleGroupSyncResult({ outcome: 'RETIRED_NO_GROUP' }).content, /retired/i);
 });
 
 test('renderListTeamsResult covers outcomes', () => {
@@ -323,6 +375,8 @@ test('personal/admin render functions return ReplyPayload with ephemeral: true',
     renderAddMemberResult({ outcome: 'DIRECTORY_DOWN' }),
     renderRemoveMemberResult({ outcome: 'DIRECTORY_DOWN' }),
     renderMyTeamsResult({ outcome: 'DIRECTORY_DOWN' }),
+    renderGoogleGroupStatusResult({ outcome: 'DIRECTORY_DOWN' }),
+    renderGoogleGroupSyncResult({ outcome: 'DIRECTORY_DOWN' }),
   ];
   for (const p of payloads) {
     assert.equal(typeof p.content, 'string');
