@@ -114,6 +114,8 @@ Set these per environment (staging vs production) per service.
 | `DIRECTORY_API_KEY` | — | *(set by the provisioning script — step 4)* | — |
 | `CONNECTORS_BASE_URL` | — | `http://${{connectors.RAILWAY_PRIVATE_DOMAIN}}:${{connectors.PORT}}` | — |
 | `CONNECTORS_API_KEY` | — | a `connectors` consumer key with the `fetch` scope — see step 4b | — |
+| `LLM_BASE_URL` | — | `http://${{llm.RAILWAY_PRIVATE_DOMAIN}}:${{llm.PORT}}` | — |
+| `LLM_API_KEY` | — | an `llm` consumer key with the `embed` scope — see step 4b | — |
 | source ACL cadence | — | `SOURCE_ACCESS_REFRESH_AFTER_HOURS=24`, `SOURCE_ACCESS_MAX_AGE_HOURS=48` | — |
 | `CODE_HMAC_SECRET` | — | — | a strong random secret |
 | `EMAIL_BACKEND` | — | — | `resend` (or `gmail`) — **not** `fake` |
@@ -295,15 +297,19 @@ stderr**. Wire them like this:
 Then redeploy the service whose `CONSUMER_KEYS` you changed — the store is
 built at boot, so the new key isn't live until it restarts.
 
-For an **approved internal embedding caller**, mint an additional key from the repo root:
+documentation-system indexes stored content through llm's `/embed`, so mint it an
+embedding key from the repo root:
 
 ```bash
-uv --project services/llm run llm-keys --name embedding-caller --scopes embed
+uv --project services/llm run llm-keys --name documentation-system --scopes embed
 ```
 
-Install it using [llm's consumer-key steps](../services/llm/docs/DEPLOYMENT.md#consumer-keys).
-`chat` does not grant `embed`; grant both only when needed. This provisions access,
-not a documentation-system indexing pipeline.
+Append the JSON entry to `llm`'s `CONSUMER_KEYS` and set the plaintext key as
+`documentation-system`'s `LLM_API_KEY` (see
+[llm's consumer-key steps](../services/llm/docs/DEPLOYMENT.md#consumer-keys)).
+`chat` does not grant `embed`; grant both only when needed. Like `CONNECTORS_API_KEY`,
+a missing key only logs a warning: docs are catalogued but not indexed until it is set,
+then `POST /docs/index` backfills them.
 
 **Revocation is a redeploy.** There is no `revoke` command; drop the entry from
 `CONSUMER_KEYS` and redeploy. `CONSUMER_KEYS` must stay a JSON **array** —

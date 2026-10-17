@@ -37,6 +37,16 @@ Configure the dependency with `CONNECTORS_BASE_URL` and `CONNECTORS_API_KEY`.
 
 Connectors reachability at request time is soft for ingest but hard for refetch: a connectors outage during `POST /docs` is caught and turned into a per-doc warning (the doc is still catalogued, just without a content snapshot) — see the `FetchError` handling in `src/ingest.py`. During `POST /docs/{id}/refetch`, the same `FetchError` is instead surfaced as an HTTP 502 — see `src/api/routers/docs.py` — because refetch is an explicit user-initiated action rather than a batch ingest. It is also a soft dependency at *boot* in staging/production: `verify_production_secrets()` (`src/config.py`) logs a startup warning, not a boot refusal, if `CONNECTORS_API_KEY` is still the built-in dev default — this service still starts and catalogues docs, it just can't fetch Google-source content. See `docs/DEPLOYMENT.md` for the recommended (not required) deploy order (connectors before documentation-system, so Google fetches work from the start).
 
+## Dependency on the llm service
+
+Stored content is indexed for retrieval by embedding it through the [llm](../llm/) service's
+`POST /embed`. Configure it with `LLM_BASE_URL` and `LLM_API_KEY` (an llm key with the
+`embed` scope). Indexing runs inline after ingest, refetch, scheduled refresh, and
+`PATCH active`; it is a soft dependency, so an llm outage never fails those requests. The
+doc stays catalogued with its content, ingest returns an `indexing failed` warning, and
+`POST /docs/index` (scope `docs:index`) retries. See "Indexing (#175)" in
+`docs/ARCHITECTURE.md`.
+
 ## Quick start
 
 Prerequisites: Docker, Python 3.11+, [uv](https://github.com/astral-sh/uv).
@@ -120,9 +130,13 @@ documentation-system/
 │   ├── directory/
 │   │   └── http_client.py     HttpDirectoryClient — calls team-tracking over HTTP
 │   │
+│   ├── embed/
+│   │   └── http_client.py     HttpEmbedder — batches chunk text to the llm service's /embed
+│   │
 │   ├── ingest.py               ingest_doc(): normalize, dedup, source, fetch, own, persist
+│   ├── indexing.py             index_doc(): chunk, embed, and replace a doc's chunk set
 │   ├── url_norm.py             URL normalization + source derivation from patterns
-│   ├── config.py               Settings (DATABASE_URL, API_KEY, DIRECTORY_*)
+│   ├── config.py               Settings (DATABASE_URL, API_KEY, DIRECTORY_*, LLM_*)
 │   └── cli.py                  doc-keys CLI (issue/list/revoke)
 │
 ├── migrations/                 Alembic migrations
@@ -148,6 +162,10 @@ documentation-system/
 │   ├── test_fetchers.py
 │   ├── test_in_memory_adapter.py
 │   ├── chunk_storage_cases.py    Shared chunk-storage assertions for both adapters
+│   ├── fake_embedder.py          Offline /embed stand-in (autouse `fake_embedder` fixture)
+│   ├── test_indexing.py          index_doc lifecycle: unchanged, replace, clear, failure, races
+│   ├── test_api_indexing.py      Triggers, source deletion, and POST /docs/index
+│   ├── test_embed_client.py      HttpEmbedder batching and error mapping
 │   ├── test_migration_007.py     Source-access migration round trip
 │   ├── test_migration_008.py     pgvector migration, constraints, and round trip
 │   ├── test_ingest.py
@@ -183,7 +201,7 @@ Auth is **Level 2** (scoped API keys), matching team-tracking:
 
 - Every request needs `X-API-Key`. Keys are either the shared bootstrap env key (`API_KEY`, scope: `admin`) or a per-consumer key issued via the `doc-keys` CLI, stored as an Argon2 hash with a `docs:{read,write}` or `admin` scope set.
 - There is **no `X-Actor` header** — the actor stamped on `created_by`/`updated_by`/audit log entries is always the authenticated key's own name (`AuthedKey.name`). A caller cannot claim to be someone else; this is the "attested actor" model.
-- `require_scope("docs:read")` / `require_scope("docs:write")` gate each route; `admin` is a wildcard scope that satisfies any check.
+- `require_scope("docs:read")` / `require_scope("docs:write")` gate each route (`POST /docs/index` needs `docs:index`); `admin` is a wildcard scope that satisfies any check.
 - `AuditLogMiddleware` (imported from `platform_auth` directly, wired in `src/api/app.py`) logs every request with the resolved actor.
 - Manage keys with the CLI:
   ```bash
@@ -206,6 +224,7 @@ All endpoints require `X-API-Key` with the appropriate scope.
 | DELETE | `/docs/{id}/tags/{tag}` | `docs:write` | Remove a tag |
 | POST | `/docs/{id}/refetch` | `docs:write` | Re-run content fetch for an existing doc |
 | POST | `/docs/source-access/refresh-due` | `docs:write` | Refresh a bounded batch whose Google ACL is due |
+| POST | `/docs/index` | `docs:index` | (Re-)index stored content; retry path for indexing failures |
 | GET | `/sources` | `docs:read` | List sources (`?active_only=false`) |
 | GET | `/sources/{id}` | `docs:read` | Get one source |
 
@@ -268,14 +287,16 @@ v1 covers the docs + sources registry, DB-enforced dedup, source-ACL reconciliat
 revocation and fail-closed expiry, best-effort content fetching with SSRF protection,
 team-tracking-backed ownership, tags, soft delete, scoped API keys, and both storage adapters.
 
-Embedded chunk persistence is available through the storage Protocol, with pgvector,
-source offsets, model/dimension metadata, and keyword-search metadata. See the
+Stored content is indexed for retrieval: chunked, embedded through the llm service, and
+persisted with pgvector, source offsets, model/dimension metadata, and keyword-search
+metadata. Ingest, refetch, refresh, and retirement keep the index current, and
+`POST /docs/index` retries failures (#175). See the
 [storage contract](docs/ARCHITECTURE.md#doc_chunks) and
 [database prerequisites](docs/DEPLOYMENT.md#postgres).
 
 **Deferred (per design §3/§11 non-goals):**
 
-- Indexing full stored content (#175) and hybrid chunk retrieval (#176) — chunking and storage exist, but ingest does not yet generate embeddings and no search endpoint exists.
+- Hybrid chunk retrieval (#176) — chunks are indexed, but no search endpoint exists yet.
 - An in-process scheduler or queue — Railway (or another external scheduler) calls the bounded refresh endpoint hourly; see the [refresh schedule](docs/DEPLOYMENT.md#source-access-refresh-schedule).
 - Additional fetchers — Notion and YouTube remain registered sources without fetcher implementations.
 - Bulk import — ingest is one URL per request; no CSV/bulk endpoint.

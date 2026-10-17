@@ -46,7 +46,8 @@ Two kinds of key are accepted:
 |-------|--------|
 | `docs:read` | Read endpoints (`GET`) — but see visibility below: **alone, it returns nothing** |
 | `docs:read:all` | Read endpoints, bypassing per-doc visibility (sees every doc) |
-| `docs:write` | All mutating endpoints (`POST`, `PATCH`, `DELETE`) |
+| `docs:write` | All mutating endpoints (`POST`, `PATCH`, `DELETE`) except `POST /docs/index` |
+| `docs:index` | `POST /docs/index` — admin (re-)indexing, which spends embedding-provider budget |
 | `admin` | Wildcard — satisfies any scope check |
 
 A request with a valid key but the wrong scope is rejected with **403 Forbidden**
@@ -113,6 +114,7 @@ lacking a read scope is `403`. Neither falls through to `SEE_ALL`.
 | `DELETE` | `/docs/{id}/grants` | `docs:write` | Revoke a grant |
 | `POST` | `/docs/{id}/refetch` | `docs:write` | Re-run the content fetch |
 | `POST` | `/docs/source-access/refresh-due` | `docs:write` | Refresh due Google ACLs/content in a bounded batch |
+| `POST` | `/docs/index` | `docs:index` | (Re-)index stored content for retrieval; retry path |
 | `GET` | `/sources` | `docs:read` | List source kinds |
 | `GET` | `/sources/{id}` | `docs:read` | Get one source |
 
@@ -195,7 +197,15 @@ Ingest returns an **envelope**, not a bare doc:
 - **`created`** — `true` if a new doc was created, `false` if the URL was already
   catalogued.
 - **`warnings`** — a list of non-fatal, human-readable strings (e.g. a failed content
-  fetch, a deferred owner label). An empty list means everything resolved cleanly.
+  fetch, a deferred owner label, a failed indexing run). An empty list means everything
+  resolved cleanly.
+
+After the catalog write, ingest [indexes](#post-docsindex--re-index-stored-content) the doc's stored content — on the
+idempotent path too, since a repeated Google ingest may store new text. If embedding or
+storing the chunks fails, the doc and its content are still saved and `warnings` contains
+`indexing failed (<reason>); retry with POST /docs/index`. A repeated Google ingest that
+finds the file gone (connectors' `404 file not found for this url`) removes the stored
+content and its chunks and warns `source file not found (...)`.
 
 ### Status codes
 
@@ -300,7 +310,7 @@ Patch a doc. Scope: `docs:write`. Send only the fields you want to change (`DocU
 | `description` | string \| null | |
 | `owning_team_id` | UUID \| null | Re-validated + label re-resolved |
 | `owning_person_id` | UUID \| null | Re-validated + label re-resolved |
-| `active` | bool \| null | Set `false` to soft-delete, `true` to restore |
+| `active` | bool \| null | Set `false` to soft-delete (removes the doc's search chunks), `true` to restore (re-indexes stored content) |
 
 Tags are **not** patched here — use the tag endpoints below.
 
@@ -405,13 +415,23 @@ available even when the source's automatic content fetching is disabled.
 Note the contrast with ingest: at ingest a fetch failure degrades to a warning, but an
 explicit `refetch` surfaces the failure as **502** so the caller knows it didn't work.
 
+A successful refetch [indexes](#post-docsindex--re-index-stored-content) the new content. An indexing failure does not
+change the response (the `Doc` has no warnings field); it is logged, and the doc is listed
+as stale by `POST /docs/index`. When connectors confirms the file is gone (`404 file not
+found for this url`), the route still returns **502**, and also deletes the stored content
+and its chunks so the doc stops being searchable; the catalog row stays. Any other failure
+(timeouts, 5xx, 403, a different 404) leaves content and chunks untouched.
+
 ## `POST /docs/source-access/refresh-due` — scheduled reconciliation
 
 Scope: `docs:write`. Query parameter `limit` defaults to 10 and is constrained to 1–100.
 Selects active Google docs with `content_fetch_enabled=true` whose latest sync or attempt is
 older than
 `SOURCE_ACCESS_REFRESH_AFTER_HOURS` (24 by default), refreshes each independently, and
-returns `{ "attempted", "refreshed", "failed" }`. One failed document does not stop the
+returns `{ "attempted", "refreshed", "failed", "index_failed" }`. Each refreshed doc is
+re-indexed; `index_failed` counts those whose new content could not be indexed (their prior
+chunks remain until `POST /docs/index` succeeds). A confirmed-gone file is handled as in
+refetch and counts as `failed`. One failed document does not stop the
 batch. Failed rows record their attempt time, so they do not starve later rows during the
 same hourly drain; run until `attempted` is less than `limit`. See the
 [refresh schedule](DEPLOYMENT.md#source-access-refresh-schedule). Disabled sources are skipped
@@ -421,6 +441,56 @@ Source grants expire after `SOURCE_ACCESS_MAX_AGE_HOURS` (48 by default). A fail
 does not erase a last-known-good grant immediately, but an extended connector, directory,
 or scheduler outage eventually makes it unusable. Manual grants remain independent and do
 not expire. Ownership never authorizes access. `MAX_AGE` must be greater than `REFRESH_AFTER`.
+
+## `POST /docs/index` — (re-)index stored content
+
+Scope: `docs:index` (or `admin`). Builds each doc's search index from its **stored**
+`doc_content` — it never fetches. A doc's text is split by the chunker, embedded through the
+llm service's `/embed`, and its whole chunk set is replaced in one transaction. Ingest,
+refetch, scheduled refresh, and `PATCH active` run the same step inline; this endpoint is
+the retry path for their failures and the entry point for re-embedding after a model
+change (#209). Synchronous and bounded.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `doc_ids` | UUID[] \| null | null | 1–100 docs to index. Every id must exist (else **404** before any work) |
+| `stale_only` | bool | `true` | Listing mode (no `doc_ids`): only docs whose chunks are missing, built from older content, or should not exist (retired or no content). `false` lists every doc with content |
+| `force` | bool | `false` | Re-embed even when the content is unchanged (e.g. a new embedding model) |
+| `after` | UUID \| null | null | Listing-mode cursor: the previous response's `next_after`. Not allowed with `doc_ids` |
+| `limit` | int | 25 | 1–100 docs per call in listing mode |
+
+The response counts each doc's outcome and lists them:
+
+```json
+{
+  "attempted": 2, "indexed": 1, "unchanged": 0, "cleared": 0, "skipped": 0, "failed": 1,
+  "results": [
+    {"doc_id": "…", "status": "indexed", "chunk_count": 7, "detail": null},
+    {"doc_id": "…", "status": "failed", "chunk_count": 0,
+     "detail": "embedding service unavailable: llm service returned 503"}
+  ],
+  "next_after": null
+}
+```
+
+| `status` | Meaning |
+|----------|---------|
+| `indexed` | A new chunk set replaced the old one |
+| `unchanged` | Chunks already match the stored content; no embedding call, no write (unless `force`) |
+| `cleared` | The doc is retired, missing, or has no indexable text; its chunks were removed |
+| `skipped` | The content changed while embedding; nothing written (the newer write re-indexes) |
+| `failed` | Embedding or storage failed; nothing written, the previous chunk set is intact |
+
+To drain, repeat with `after: next_after` until `next_after` is null. A failing doc is
+reported and passed over rather than blocking the batch. Reindexing never creates
+duplicates, and a shorter text never leaves chunks from the longer one behind.
+
+| Status | Meaning |
+|--------|---------|
+| **200 OK** | Ran; see per-doc `results` |
+| **404 Not Found** | A `doc_ids` entry does not exist (nothing was indexed) |
+| **401 / 403** | Auth failure / missing `docs:index` — checked before any provider call |
+| **422** | Malformed body — also rejected before any provider call |
 
 ---
 
