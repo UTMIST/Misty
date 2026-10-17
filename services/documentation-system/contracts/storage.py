@@ -49,9 +49,17 @@ class StorageAdapter(Protocol):
         owning_person_id: UUID | None = None,
         source_id: str | None = None,
         tag: str | None = None,
+        has_content: bool | None = None,
         active_only: bool = True,
         visibility: ActorContext = SEE_ALL,
-    ) -> list[Doc]: ...
+    ) -> list[Doc]:
+        """Docs matching every supplied filter, oldest first, grants omitted.
+
+        `has_content` selects on the presence of a `doc_content` ROW: None (the
+        default) does not filter, False returns only docs with no content row,
+        True only docs with one."""
+        ...
+
     def update_doc(self, doc_id: UUID, values: dict, *, actor: str) -> Doc | None:
         """Patch scalar columns (title, description, active, owning_* ids/labels,
         content_snapshot, fetched_at). `values` holds already-resolved columns.
