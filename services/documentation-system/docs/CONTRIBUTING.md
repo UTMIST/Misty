@@ -5,7 +5,7 @@ team with mixed FastAPI/Postgres experience: if a step feels obvious, skip it; i
 doesn't, it's spelled out.
 
 Read [`ARCHITECTURE.md`](ARCHITECTURE.md) first — the walkthroughs below assume you know
-the three Protocol boundaries.
+the Protocol boundaries.
 
 ## Conventions (read once)
 

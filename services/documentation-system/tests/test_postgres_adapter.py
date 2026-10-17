@@ -15,6 +15,7 @@ from src.config import get_settings
 from src.ingest import ingest_doc
 from src.storage.postgres import PostgresStorageAdapter
 from tests.chunk_storage_cases import ChunkStorageCases, make_chunk, make_doc
+from tests.retrieval_cases import RetrievalCases
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_PG_TESTS") != "1", reason="set RUN_PG_TESTS=1 to run Postgres tests"
@@ -23,6 +24,28 @@ pytestmark = pytest.mark.skipif(
 
 class TestDocChunks(ChunkStorageCases):
     pass
+
+
+class TestRetrieval(RetrievalCases):
+    pass
+
+
+@pytest.mark.parametrize("visibility", [SEE_ALL, DENY, None])
+def test_retrieval_context_validation_precedes_database_access(adapter, monkeypatch, visibility):
+    from tests.retrieval_cases import embedding
+
+    def unexpected_connection():
+        pytest.fail("unscoped retrieval must fail before opening a database connection")
+
+    monkeypatch.setattr(adapter._engine, "connect", unexpected_connection)
+    with pytest.raises(ValueError):
+        adapter.search_chunks(
+            query="CPSIF",
+            embedding=embedding(),
+            visibility=visibility,
+            k=1,
+            min_cosine=0.3,
+        )
 
 
 @pytest.mark.parametrize(

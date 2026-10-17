@@ -22,6 +22,28 @@ def test_settings_defaults():
     assert s.connectors_api_key.get_secret_value()
 
 
+def test_retrieval_settings_and_secret_boundary():
+    settings = Settings(llm_api_key="embedding-secret")
+    assert settings.search_embed_model == "openai-embed-3-small"
+    assert settings.search_min_cosine == 0.3
+    assert settings.llm_api_key.get_secret_value() == "embedding-secret"
+    assert "embedding-secret" not in repr(settings)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"search_min_cosine": 0},
+        {"search_min_cosine": 1.1},
+        {"search_min_cosine": float("nan")},
+        {"search_embed_model": "unlisted"},
+    ],
+)
+def test_invalid_retrieval_configuration_fails_at_settings_validation(changes):
+    with pytest.raises(ValueError):
+        Settings(**changes)
+
+
 # --- docs_env -----------------------------------------------------------------
 
 
