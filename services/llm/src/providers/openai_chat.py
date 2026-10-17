@@ -86,7 +86,7 @@ def _input(request: LLMRequest) -> list[dict]:
 
 def _result(payload: dict, *, structured: bool, tool_names: set[str], used_ids: set[str]):
     # Validate the raw envelope and output items before SDK coercion. These are
-    # the documented response metadata fields; unknown fields fail closed.
+    # the supported response metadata fields; unknown fields fail closed.
     object_fields(
         payload,
         {"id", "object", "created_at", "model", "status", "output", "usage"},
@@ -122,6 +122,10 @@ def _result(payload: dict, *, structured: bool, tool_names: set[str], used_ids: 
             "access_programs",
             "moderation",
             "retention",
+            "billing",
+            "frequency_penalty",
+            "presence_penalty",
+            "tool_usage",
         },
     )
     if payload["object"] != "response" or payload.get("error") is not None:

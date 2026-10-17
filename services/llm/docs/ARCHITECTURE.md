@@ -116,6 +116,8 @@ rejected by OpenAI, and OpenAI state is rejected by Bedrock, before inference.
 Raw response JSON rejects duplicate keys, non-finite values, unknown item fields,
 and invalid tool calls before SDK coercion. A token-limited response withholds all
 tool calls, including complete siblings of an incomplete call. Usage is retained.
+The envelope accepts observed OpenAI metadata (`billing`, `frequency_penalty`,
+`presence_penalty`, and `tool_usage`) without exposing it in the chat response.
 Errors are normalized without exposing provider response bodies. SDK retries are
 disabled and the existing request timeout is passed to the OpenAI client.
 

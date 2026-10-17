@@ -279,6 +279,33 @@ def test_empty_filtered_and_refusal_responses(monkeypatch, output, fields, stop,
     assert response.json()["content"] == content
 
 
+@pytest.mark.parametrize("structured", [False, True])
+def test_live_response_metadata_preserves_answer_and_usage(monkeypatch, structured):
+    # Metadata observed in a successful GPT-6.1 Sol response on 2026-10-17.
+    payload = _response(
+        [_message("OK")],
+        billing={"payer": "developer"},
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+        tool_usage={},
+    )
+    content = [{"type": "text", "text": "hi"}] if structured else "hi"
+    with _boundary([payload]) as (provider, _):
+        response = _route(provider, monkeypatch).post(
+            "/chat", json={"messages": [{"role": "user", "content": content}]}
+        )
+    assert response.status_code == 200
+    expected = {
+        "content": "OK",
+        "model": _MODEL,
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 11, "output_tokens": 7},
+    }
+    if structured:
+        expected["content_blocks"] = [{"type": "text", "text": "OK"}]
+    assert response.json() == expected
+
+
 @pytest.mark.parametrize(
     "patch",
     [
