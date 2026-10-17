@@ -104,19 +104,20 @@ Sources with `content_fetch_enabled=false` (`notion`, `youtube`) can never have 
 
 ```
 documentation-system/
-├── contracts/               Domain models (Pydantic) + the three boundary Protocols
+├── contracts/               Domain models (Pydantic) + boundary Protocols
 │   ├── types.py             Source, Doc, DocIngest/DocUpdate, IngestResult, ApiKey
 │   ├── storage.py           StorageAdapter Protocol — docs, sources, API keys
 │   ├── fetcher.py           Fetcher Protocol — fetch(url) -> FetchResult
+│   ├── retrieval.py         Search DTOs and EmbeddingClient Protocol
 │   └── directory.py         DirectoryClient Protocol — team/person label lookups
 │
 ├── src/
 │   ├── api/                 FastAPI application
 │   │   ├── app.py           App factory (create_app); docs_url="/swagger"
 │   │   ├── auth.py          Thin shim over the shared `platform_auth` package: require_api_key / require_scope / get_actor
-│   │   ├── deps.py          get_storage / get_fetchers / get_directory
+│   │   ├── deps.py          get_storage / get_fetchers / get_directory / get_embeddings
 │   │   ├── hashing.py       Thin shim over `platform_auth`: Argon2 API key hashing + prefix parsing
-│   │   └── routers/         docs.py, sources.py
+│   │   └── routers/         docs.py, sources.py, search.py
 │   │
 │   ├── storage/              Concrete StorageAdapter implementations
 │   │   ├── schema.py         SQLAlchemy Core table definitions
@@ -133,6 +134,8 @@ documentation-system/
 │   │   └── http_client.py     HttpDirectoryClient — calls team-tracking over HTTP
 │   │
 │   ├── ingest.py               ingest_doc(): normalize, dedup, source, fetch, own, persist
+│   ├── retrieval.py            Shared keyword normalization, validation, and rank fusion
+│   ├── embedding.py            Authenticated LLM /embed client
 │   ├── url_norm.py             URL normalization + source derivation from patterns
 │   ├── config.py               Settings (DATABASE_URL, API_KEY, DIRECTORY_*)
 │   ├── cli.py                  doc-keys CLI (issue/list/revoke)
@@ -211,6 +214,7 @@ All endpoints require `X-API-Key` with the appropriate scope.
 
 | Method | Path | Scope | Description |
 |--------|------|-------|-------------|
+| POST | `/search` | `docs:read` + literal `act-as-user` or `act-as-channel` | Authorized hybrid chunk search; [contract and portable fixture](docs/API.md#authorized-retrieval-post-search) |
 | POST | `/docs` | `docs:write` | Ingest a URL (idempotent; 200 if already catalogued, 201 if new) |
 | GET | `/docs` | `docs:read` | List docs (`?owning_team_id=&owning_person_id=&source_id=&tag=&has_content=&active_only=true`) |
 | GET | `/docs/{id}` | `docs:read` | Get one doc (backfills owner labels if previously unresolved) |
@@ -224,6 +228,19 @@ All endpoints require `X-API-Key` with the appropriate scope.
 | GET | `/api-keys/self` | *(any valid key)* | The calling key's own name and scopes |
 
 Machine-readable OpenAPI schema: `GET /openapi.json`. Interactive Swagger UI: `GET /swagger`.
+
+### Retrieval configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LLM_BASE_URL` | `http://localhost:8002` | Platform LLM service for query embeddings |
+| `LLM_API_KEY` | empty | Secret consumer key with `embed`; missing key makes search return 503 |
+| `SEARCH_EMBED_MODEL` | `openai-embed-3-small` | Neutral embedding alias; `openai-embed-3-large` is also supported at 1536 dimensions |
+| `SEARCH_MIN_COSINE` | `0.3` | Absolute vector relevance floor, greater than 0 and at most 1; complete keyword matches qualify independently |
+
+The directory key additionally needs `channels:read` for channel search. See
+[deployment](docs/DEPLOYMENT.md#authorized-retrieval) for provisioning, model
+compatibility, and the catalog-preserving boot behavior.
 
 ## Testing
 
@@ -289,7 +306,9 @@ source offsets, model/dimension metadata, and keyword-search metadata. See the
 
 **Deferred (per design §3/§11 non-goals):**
 
-- Indexing full stored content (#175) and hybrid chunk retrieval (#176) — chunking and storage exist, but ingest does not yet generate embeddings and no search endpoint exists.
+- Indexing full stored content (#175) — chunking, vector storage, and authorized
+  hybrid retrieval exist; retrieval can use seeded chunks while ingest integration
+  is completed and verified separately in #277. Bot/DM/channel integration is #278.
 - An in-process scheduler or queue — Railway (or another external scheduler) calls the bounded refresh endpoint hourly; see the [refresh schedule](docs/DEPLOYMENT.md#source-access-refresh-schedule).
 - Additional fetchers — Notion and YouTube remain registered sources without fetcher implementations.
 - Bulk import — ingest is one URL per request; no CSV/bulk endpoint.

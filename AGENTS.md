@@ -49,6 +49,7 @@ Violating any of these is a bug even if tests pass.
 - **Errors map by convention.** Storage raises `ValueError` for rule violations; routers translate: duplicate → `409`, bad FK / unknown provider → `400`, `None` return → `404`. Pydantic gives `422`; auth gives `401`/`403`.
 - **Route order matters.** FastAPI matches in declaration order — a literal path (`/by-slug/{slug}`) must be declared **before** a `/{id}` catch-all in the same router, or the literal segment gets parsed as an id.
 - **Pick the right scope** on `require_scope(...)`: reads use `<domain>:read`, writes `<domain>:write`. Privileged operations get their own scope (`people:elevate` — plain `people:write` cannot escalate access level).
+- **Retrieval always has a person or channel context.** `POST /search` must not use the direct-read `SEE_ALL` fallback. Person assertions need literal `act-as-user`; channel assertions need literal `act-as-channel`, including for admins. Resolve channel teams from the authenticated directory API, never model arguments; filter both ranking paths before their candidate limits. See the documentation-system [retrieval contract](services/documentation-system/docs/API.md#authorized-retrieval-post-search).
 
 ### Migrations
 

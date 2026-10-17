@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+psycopg://docs:dev_password@localhost:5434/docs"
-    # The three credentials below are SecretStr, not str: a plain str field
+    # Credentials below are SecretStr, not str: a plain str field
     # prints in full on any repr/diff/traceback. That is not hypothetical —
     # an identically-shaped plain-str credential in services/connectors leaked
     # a real Google service-account private key into a terminal and a session
@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     directory_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
     connectors_base_url: str = "http://localhost:8005"
     connectors_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
+    llm_base_url: str = "http://localhost:8002"
+    llm_api_key: SecretStr = SecretStr("")
+    search_embed_model: Literal["openai-embed-3-small", "openai-embed-3-large"] = (
+        "openai-embed-3-small"
+    )
+    search_min_cosine: float = Field(default=0.3, gt=0, le=1, allow_inf_nan=False)
     docs_env: Literal["local", "staging", "production"] = "local"
     # A scheduler should call the source-access refresh endpoint after the
     # first interval. Source-derived grants expire at the second interval so
@@ -107,6 +113,10 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
             f"{', '.join(insecure)} still set to the built-in dev default. "
             "Set a strong, unique value via environment variables."
         )
+    # Retrieval is a separate capability: keep catalog reads/writes available
+    # during rollout, but fail search closed when its embedding key is absent.
+    if not settings.llm_api_key.get_secret_value():
+        logger.warning("LLM_API_KEY is unset; authorized search will return 503")
     if settings.connectors_api_key.get_secret_value() == DEFAULT_DEV_API_KEY:
         logger.warning(
             "CONNECTORS_API_KEY is still set to the built-in dev default in "

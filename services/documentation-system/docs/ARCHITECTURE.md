@@ -10,9 +10,9 @@ thing it is (its *source*), tries to fetch a title and snapshot, validates the o
 the [team-tracking](../../team-tracking/) directory, and stores it — deduplicated, so the same
 URL never appears twice. Everything below keeps that flow testable and swappable.
 
-## The three Protocol boundaries
+## The Protocol boundaries
 
-No concrete dependency — database, URL fetching, or directory service — leaks into the
+No concrete dependency — database, URL fetching, directory, or embeddings — leaks into the
 ingest logic or the HTTP layer. Each sits behind a **Protocol** (a structural interface in
 `contracts/`). The ingest orchestrator and routers depend only on the Protocols; concrete
 implementations are wired in one place (`src/api/deps.py`).
@@ -25,6 +25,7 @@ network, or Postgres, and swapping in Postgres required zero changes to ingest o
 | `StorageAdapter` | `contracts/storage.py` | Persist/query docs, content, embedded chunks, tags, sources, API keys |
 | `Fetcher` | `contracts/fetcher.py` | `fetch(url) -> FetchResult` (title + snapshot) |
 | `DirectoryClient` | `contracts/directory.py` | Resolve team/person ids to labels |
+| `EmbeddingClient` | `contracts/retrieval.py` | Resolve query text to a validated model-specific vector |
 
 `contracts/` imports nothing from `src/`. That dependency direction keeps the boundaries
 honest: the domain types and Protocols don't know FastAPI, Postgres, or httpx exist.
@@ -34,7 +35,7 @@ honest: the domain types and Protocols don't know FastAPI, Postgres, or httpx ex
 Defines every persistence operation with identical semantics across implementations:
 `create_doc`, `get_doc`, `get_doc_by_normalized_url`, `list_docs`, `update_doc`,
 `add_tag`, `remove_tag`, grant operations, `upsert_doc_content`, `get_doc_content`,
-`get_doc_content_meta`, `replace_doc_chunks`, `list_doc_chunks`, the two source reads,
+`get_doc_content_meta`, `replace_doc_chunks`, `list_doc_chunks`, `search_chunks`, the two source reads,
 API-key operations, and the readiness query. See `contracts/storage.py` for the
 complete signatures.
 
@@ -261,7 +262,8 @@ or trigger indexing. #175 owns retirement, replacement triggers, and retry polic
 `search_vector` is a stored generated `tsvector` from the same `chunk_text`, with a
 GIN index. It uses the explicit `simple` text-search configuration to preserve names
 and acronyms without stemming or stop-word removal. Future keyword queries must use
-that same configuration. There is no keyword or vector retrieval endpoint yet.
+that same configuration. Authorized retrieval applies explicit portable token
+normalization before `simple` parsing; see [Authorized retrieval](#authorized-retrieval).
 See [Index type](#index-type) for why vectors initially use exact scans.
 
 ### Seeded sources
@@ -309,7 +311,7 @@ of logic, and it's held in lockstep by parity tests (`tests/test_visibility.py` 
 adapter parity suite). **If you change the rule, change both and extend those tests** —
 this is the file where a divergence becomes a silent data leak.
 
-**The actor context** is one of three things (`src/api/authz.py` builds it):
+**The direct-document actor context** is one of three things (`src/api/authz.py` builds it):
 
 | Context | When | Meaning |
 |---|---|---|
@@ -423,11 +425,10 @@ index described above.
 
 ### Retrieval constraints and open decisions
 
-- **Relevance floor: choose in #176, calibrate on #178.** An absolute cosine floor is
-  unmeasured; more candidates shift the score distribution, and a relative-to-top-hit floor
-  can admit an irrelevant best hit. Evaluate abstention, define how the floor interacts with
-  lexical-only matches and fusion (fused ranks aren't cosine scores), and recalibrate when the
-  corpus or model changes materially.
+- **Relevance floor: absolute cosine, implemented in #176; calibrate on #178.**
+  `SEARCH_MIN_COSINE` starts at 0.3. Complete keyword matches qualify independently;
+  RRF ranks never determine eligibility. The starting threshold is uncalibrated,
+  and evaluation must measure abstention as well as hit-rate.
 - **Visibility follows the explicit person or channel context in #77/#176.** Direct search
   and DMs preserve the person's access. Shared-channel answers use the configured teams'
   Google Group entitlement (#238 maps channels to teams) — never the asker's private grants
@@ -550,6 +551,62 @@ cases (connector shapes, Unicode, repeated text, boundaries) and 200 seeded rand
   policy using #178; no unfiltered fallback.
 - **#178 (evaluation):** build the question set and measure hit-rate@k, including
   exact-name/acronym/date queries, before treating the starting parameters as final.
+
+## Authorized retrieval
+
+`POST /search` uses the [shared API contract and fixture](API.md#authorized-retrieval-post-search).
+The fixture is the consumer handoff for #71/#210 and the shared offline/Postgres
+adapter test source. It uses synthetic chunks, not the unfinished indexing path.
+Agreement with the two consumer owners remains a handoff step; local implementation
+does not constitute their sign-off. #277 and #278 remain release gates.
+
+The request body controls only query and k. Trusted headers select either an
+`Actor` or a `Channel(source_team_ids)`; literal assertion scopes are required,
+including for admins. Channel context is created only by search. Existing direct
+document routes continue to construct their existing person/sentinel contexts.
+`StorageAdapter.search_chunks` requires a person or channel and rejects `SEE_ALL`,
+`DENY`, and missing context before opening a database connection.
+
+Person retrieval resolves both directory membership and confirmed source-group
+membership live, retaining the complete grant rule. Lookup failure returns 503
+instead of partial scope. Channel retrieval calls authenticated
+`/channels/{guild}/{channel}/teams` and `/teams/google-groups`, intersects active
+configured teams with healthy synced groups, and permits only unexpired
+`google_drive` team grants. It never includes private shares, manual team grants,
+or org grants. Empty configuration yields no candidates and no embedding call.
+Neither resolved scope nor results are cached, so grant removal, expiration,
+membership changes, channel reconfiguration, and group sync failure affect the
+next request.
+
+The Postgres adapter runs one SQL statement: a materialized eligible-chunk CTE
+applies current visibility, document active flag, and exact embedding model/width
+before either candidate path sorts and limits. Exact pgvector cosine and keyword
+density each contribute at most `max(50,5*k)` candidates. Cosine is rounded to six
+decimals to keep float32 implementations stable at ranking ties. Each branch
+breaks ties by document UUID and ordinal. RRF with constant 60 combines their
+one-based ranks; final ties use that same identity. Citations carry source URLs,
+document IDs, original chunk offsets, and source hashes; no embedding or grant
+metadata crosses the response boundary.
+
+**Keyword portability trade-off.** Both adapters tokenize ASCII letter/digit runs
+and lowercase them. All query terms must occur; density is matching occurrences
+divided by all occurrences. Postgres uses `to_tsvector('simple', normalized_text)`
+and `plainto_tsquery('simple', normalized_query)`. Normalization separates email
+components and hyphenated dates identically offline and in SQL. Unicode-only
+queries use vectors. Runtime normalization currently scans the eligible corpus
+and does **not** use #174's raw-text GIN index: the raw Postgres parser treats
+emails and hyphens differently from these portable tokens. At the small starting
+corpus this is deliberate. A future indexed normalized column must preserve
+these semantics and pass the same parity cases; do not silently substitute the
+raw index. No schema migration is needed for retrieval.
+
+Query embeddings use an `EmbeddingClient` Protocol, wired to authenticated HTTP
+`/embed` in `deps.py`. The adapter checks response indices, exact resolved model,
+width, finite nonzero float32 values, and duplicate JSON fields before querying
+storage. Equal vector widths never make models interchangeable. Both candidate
+paths exclude stored chunks from other models. HTTP clients are pooled; calls
+are synchronous worker-thread operations, with timeouts and no retries.
+Dependency errors never trigger broader or keyword-only fallback.
 
 ## SSRF protection in the web fetcher
 

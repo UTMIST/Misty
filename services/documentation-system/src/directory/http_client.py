@@ -2,10 +2,25 @@ from uuid import UUID
 from urllib.parse import quote
 
 import httpx
+from pydantic import BaseModel, Field, TypeAdapter
+from typing import Literal
 
 from contracts.directory import DirectoryUnavailable
 
 _TIMEOUT = httpx.Timeout(5.0)
+
+
+class _ChannelTeams(BaseModel):
+    guild_id: str
+    channel_id: str
+    team_ids: list[UUID]
+
+
+class _GroupState(BaseModel):
+    team_id: UUID
+    group_email: str = Field(min_length=1)
+    group_name: str | None = None
+    status: Literal["synced", "needs_external_members", "failed"]
 
 
 class HttpDirectoryClient:
@@ -102,3 +117,36 @@ class HttpDirectoryClient:
             return frozenset(UUID(item["team_id"]) for item in resp.json())
         except (KeyError, ValueError, TypeError) as e:
             raise DirectoryUnavailable(f"malformed synced Google teams response: {e}") from e
+
+    def get_channel_source_team_ids(self, guild_id: str, channel_id: str) -> frozenset[UUID]:
+        try:
+            response = self._client.get(
+                f"{self._base_url}/channels/{guild_id}/{channel_id}/teams",
+                headers={"X-API-Key": self._api_key},
+            )
+            # 404 is not the unconfigured contract (#238 returns 200 + []).
+            if response.status_code != 200:
+                raise DirectoryUnavailable("channel scope unavailable")
+            channel = _ChannelTeams.model_validate(response.json())
+            if channel.guild_id != guild_id or channel.channel_id != channel_id:
+                raise ValueError("wrong channel scope")
+            if not channel.team_ids:
+                return frozenset()
+            response = self._client.get(
+                f"{self._base_url}/teams/google-groups",
+                headers={"X-API-Key": self._api_key},
+            )
+            if response.status_code != 200:
+                raise DirectoryUnavailable("channel groups unavailable")
+            groups = TypeAdapter(list[_GroupState]).validate_python(response.json())
+            if len({group.team_id for group in groups}) != len(groups):
+                raise ValueError("duplicate group state")
+            return frozenset(
+                group.team_id
+                for group in groups
+                if group.team_id in channel.team_ids
+                and group.status == "synced"
+                and group.group_name
+            )
+        except (httpx.HTTPError, ValueError, TypeError, KeyError):
+            raise DirectoryUnavailable("channel scope unavailable") from None

@@ -114,6 +114,7 @@ Set these per environment (staging vs production) per service.
 | `DIRECTORY_API_KEY` | — | *(set by the provisioning script — step 4)* | — |
 | `CONNECTORS_BASE_URL` | — | `http://${{connectors.RAILWAY_PRIVATE_DOMAIN}}:${{connectors.PORT}}` | — |
 | `CONNECTORS_API_KEY` | — | a `connectors` consumer key with the `fetch` scope — see step 4b | — |
+| retrieval embeddings | — | `LLM_BASE_URL` = environment's private `llm` URL, `LLM_API_KEY` = `embed`-scoped key; `SEARCH_EMBED_MODEL=openai-embed-3-small`, `SEARCH_MIN_COSINE=0.3` — see [retrieval rollout](../services/documentation-system/docs/DEPLOYMENT.md#authorized-retrieval) | — |
 | source ACL cadence | — | `SOURCE_ACCESS_REFRESH_AFTER_HOURS=24`, `SOURCE_ACCESS_MAX_AGE_HOURS=48` | — |
 | `CODE_HMAC_SECRET` | — | — | a strong random secret |
 | `EMAIL_BACKEND` | — | — | `resend` (or `gmail`) — **not** `fake` |
@@ -234,7 +235,7 @@ include `people:elevate` (alongside its `people:*`/`teams:*`/`memberships:*`
 scopes) so its `/seed` can promote people to `admin`/`superuser` — plain
 `people:write` cannot set a non-`member` `access_level`. The
 documentation-system key stays read-only (`people:read teams:read memberships:read
-identifiers:read`) so it can resolve verified emails, active memberships, and the synced-group
+identifiers:read channels:read`) so it can resolve verified emails, active memberships, channel configuration, and the synced-group
 mapping supplied by team-tracking. Re-running issues a fresh key and
 repoints the consumer; the previous key stays active until you revoke it
 manually (`team-tracking-keys revoke <id>`).
