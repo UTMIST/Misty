@@ -27,7 +27,7 @@ import base64
 import logging
 import threading
 
-from src.contracts import Segment, StopResponse
+from src.contracts import QnaResponse, Segment, StopResponse
 from src.pipeline.transcript import assemble_transcript
 
 _logger = logging.getLogger("meeting.audit")
@@ -53,6 +53,10 @@ AUDIO_DRAIN_TIMEOUT_S = 5.0
 
 class SessionAlreadyExistsError(ValueError):
     """Raised by ``SessionRegistry.create`` when the session_id is already active."""
+
+
+class MeetingNotActiveError(ValueError):
+    """A new question cannot be accepted once finalization has begun."""
 
 
 def words_to_segments(
@@ -271,6 +275,9 @@ class MeetingSession:
         except RuntimeError:
             self._loop = None
         self._finalized = False
+        # Separate from _stopping: the audio tail must still be accepted while
+        # stop waits for end-of-audio, but new questions must already be refused.
+        self._stop_requested = False
         # Set the instant finalization begins. stop() snapshots the buffers and
         # then awaits transcription + report building, during which the WS
         # ingest loop is still live (the bot only closes the socket after /stop
@@ -367,6 +374,16 @@ class MeetingSession:
         segments.sort(key=lambda s: s.start_ms)
         return segments
 
+    async def qna(self, question: str) -> QnaResponse:
+        if self._stop_requested or self._stopping or self._finalized:
+            raise MeetingNotActiveError
+        elapsed_ms = max(0, int((self._deps["now"]() - self._started_at).total_seconds() * 1000))
+        # transcript_view does not yield: the clock and finalized speech are
+        # captured together before any network work. Never retain live buffers
+        # in the builder; a concurrent stop can safely clean them up afterwards.
+        segments = await self.transcript_view()
+        return await self._deps["qna_runner"](segments, elapsed_ms, question)
+
     def _meta(self, title: str | None = None) -> dict:
         elapsed_s = (self._deps["now"]() - self._started_at).total_seconds()
         minutes = max(0, int(elapsed_s // 60))
@@ -421,6 +438,7 @@ class MeetingSession:
             )
 
     async def stop(self, title: str | None = None) -> StopResponse:
+        self._stop_requested = True
         # Wait for the tail BEFORE quiescing: the last frames may still be in
         # flight on the WS, and refusing them is exactly how the transcript lost
         # its ending. Stream them in, THEN cut.

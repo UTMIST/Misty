@@ -35,6 +35,8 @@ UTMIST is a student org with rotating leadership and mixed technical fluency. Ev
 
 There are currently no beta commands.
 
+**In progress (available globally):** `/qna question:<text>` privately answers questions about the current recording’s last 15 minutes. Run it in the text channel where recording started. Replies include speaker/timestamp references and disclose any shortened window. See the [bot command documentation](discord-bot/README.md#commands).
+
 ### As an admin (in Discord)
 
 - **`/seed`** — create or promote a person in the directory (member / admin / superuser). Requires admin+. Stable (visible globally). You can only grant a level at or below your own.

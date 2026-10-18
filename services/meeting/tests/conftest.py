@@ -28,11 +28,13 @@ def _no_dotenv(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clear_settings_cache(_no_dotenv):
-    from src.api import deps
+    from src.api import deps, wiring
     from src.config import get_settings
 
     get_settings.cache_clear()
     deps._key_store.cache_clear()
+    wiring.shutdown_qna_runner()
     yield
     get_settings.cache_clear()
     deps._key_store.cache_clear()
+    wiring.shutdown_qna_runner()

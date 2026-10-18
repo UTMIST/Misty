@@ -97,9 +97,12 @@ from src.api.auth import require_scope
 from src.api.deps import get_key_store
 from src.api.wiring import get_session_registry
 from src.config import get_settings
-from src.contracts import StopRequest, StopResponse, TranscriptView
+from src.contracts import QnaRequest, QnaResponse, StopRequest, StopResponse, TranscriptView
 from src.key_store import InMemoryKeyStore
-from src.sessions import SessionAlreadyExistsError, SessionRegistry
+from src.pipeline.llm_client import LlmTimeout, LlmUnavailable
+from src.pipeline.qna import QnaInvalidResponse, QnaWindowTooLarge
+from src.pipeline.qna_runner import QnaBusy, QnaRunnerClosed
+from src.sessions import MeetingNotActiveError, SessionAlreadyExistsError, SessionRegistry
 
 router = APIRouter()
 
@@ -225,6 +228,36 @@ async def get_transcript(
         raise HTTPException(status_code=404, detail="unknown session")
     segments = await session.transcript_view()
     return TranscriptView(segments=segments)
+
+
+@router.post("/meetings/{session_id}/qna", response_model=QnaResponse)
+async def ask_meeting(
+    session_id: str,
+    request: QnaRequest,
+    _key=Depends(require_scope(MEETINGS_SCOPE)),
+    registry: SessionRegistry = Depends(get_session_registry),
+) -> QnaResponse:
+    if not _valid_session_id(session_id):
+        raise HTTPException(status_code=400, detail="invalid session_id")
+    session = registry.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="unknown session")
+    try:
+        return await session.qna(request.question)
+    except MeetingNotActiveError:
+        raise HTTPException(status_code=409, detail="meeting is stopping") from None
+    except QnaBusy:
+        raise HTTPException(status_code=429, detail="Q&A busy") from None
+    except QnaWindowTooLarge:
+        raise HTTPException(
+            status_code=413, detail="latest transcript segment is too large"
+        ) from None
+    except QnaInvalidResponse:
+        raise HTTPException(status_code=502, detail="invalid Q&A response") from None
+    except LlmTimeout:
+        raise HTTPException(status_code=504, detail="Q&A timed out") from None
+    except (LlmUnavailable, QnaRunnerClosed):
+        raise HTTPException(status_code=503, detail="Q&A temporarily unavailable") from None
 
 
 @router.post("/meetings/{session_id}/stop", response_model=StopResponse)
