@@ -58,7 +58,9 @@ Only once you're past local development.
 | Push a branch, open a PR | GitHub write on `UTMIST/Misty` | @qiuethan (step 1 of [`ONBOARDING.md`](ONBOARDING.md)) |
 | Run a **real** Discord bot (not the playground) | Your own bot token + client id | Nobody — [make your own app](https://discord.com/developers/applications). See below |
 | Test slash commands in a shared server | Invite to the testing guild + its `DISCORD_GUILD_ID` | @qiuethan — he'll invite you and give you the guild id |
-| Exercise `/chat` or live transcription | AWS creds with **Bedrock** and **Transcribe** enabled | @qiuethan — there's a shared UTMIST AWS account, and he issues scoped IAM credentials per dev. Expect to need this if you own the `services/llm` or `services/meeting` zone |
+| Exercise `/chat` with the default OpenAI backend, or `/embed` | `OPENAI_API_KEY` on `llm` | @qiuethan — say which service and environment you need access for; see [`llm` configuration](../services/llm/docs/DEPLOYMENT.md#variables) |
+| Exercise live transcription | AWS credentials with **Transcribe** access, plus a reachable `llm` service | @qiuethan — he issues scoped IAM credentials per dev from the shared UTMIST AWS account; include your AWS region and environment |
+| Exercise `/chat` with an explicitly selected Bedrock backend | AWS credentials with **Bedrock** access | @qiuethan — request scoped IAM credentials for the AWS region and environment you're testing; select the Bedrock provider/model pair per [`llm` configuration](../services/llm/docs/DEPLOYMENT.md) |
 | Send real verification email | A Resend API key, or Gmail service-account JSON | @qiuethan — rarely needed; `EMAIL_BACKEND=fake` covers local work |
 | View logs, restart, or set variables on a deploy | Railway project member | @qiuethan — added on request; say what you're debugging |
 | Inspect or branch a database | Neon project member | @qiuethan — added on request; say what you're debugging |
