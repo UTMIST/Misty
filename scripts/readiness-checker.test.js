@@ -89,3 +89,82 @@ test('respects the configured polling interval between scheduled runs', () => {
   assert.equal(shouldPoll(state, new Date('2026-10-17T18:04:59.000Z'), 300), false);
   assert.equal(shouldPoll(state, new Date('2026-10-17T18:05:00.000Z'), 300), true);
 });
+
+test('continues checking later services and retains a failed alert for retry', async () => {
+  const checked = [];
+  const failed = await runChecks(
+    {
+      endpoints: {
+        first: 'https://first.example.test/health/ready',
+        second: 'https://second.example.test/health/ready',
+      },
+      failureThreshold: 1,
+      timeoutMs: 100,
+    },
+    {
+      fetchImpl: async (url) => {
+        checked.push(url);
+        return { ok: false, status: 503 };
+      },
+      sendNotification: async () => {
+        throw new Error('webhook unavailable');
+      },
+    },
+  );
+
+  assert.deepEqual(checked, [
+    'https://first.example.test/health/ready',
+    'https://second.example.test/health/ready',
+  ]);
+  assert.equal(failed.notifications.length, 0);
+  assert.equal(failed.state.services.first.alertedDown, false);
+  assert.equal(failed.state.services.first.pendingNotification.type, 'down');
+});
+
+test('retries an outage alert after the webhook is configured', async () => {
+  const first = await runChecks(
+    { ...config, failureThreshold: 1 },
+    {
+      fetchImpl: fetchSequence([{ ok: false, status: 503 }]),
+    },
+  );
+  assert.equal(first.notifications.length, 0);
+  assert.equal(first.state.services.bot.alertedDown, false);
+  assert.equal(first.state.services.bot.pendingNotification.type, 'down');
+
+  const notifications = [];
+  const second = await runChecks(
+    { ...config, failureThreshold: 1, webhook: 'https://discord.example.test/webhook' },
+    {
+      state: first.state,
+      fetchImpl: fetchSequence([{ ok: false, status: 503 }]),
+      sendNotification: async (content) => notifications.push(content),
+    },
+  );
+  assert.equal(notifications.length, 1);
+  assert.match(notifications[0], /Service outage/);
+  assert.equal(second.state.services.bot.alertedDown, true);
+  assert.equal(second.state.services.bot.pendingNotification, undefined);
+});
+
+test('retains a failed recovery alert for retry', async () => {
+  const down = await runChecks(
+    { ...config, failureThreshold: 1 },
+    {
+      fetchImpl: fetchSequence([{ ok: false, status: 503 }]),
+      sendNotification: async () => {},
+    },
+  );
+  const recovered = await runChecks(
+    { ...config, failureThreshold: 1 },
+    {
+      state: { ...down.state, services: { bot: { ...down.state.services.bot, alertedDown: true } } },
+      fetchImpl: fetchSequence([{ ok: true, status: 200 }]),
+      sendNotification: async () => {
+        throw new Error('webhook unavailable');
+      },
+    },
+  );
+  assert.equal(recovered.state.services.bot.alertedDown, true);
+  assert.equal(recovered.state.services.bot.pendingNotification.type, 'recovery');
+});

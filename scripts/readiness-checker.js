@@ -100,19 +100,28 @@ function notification(service, state, result, timestamp) {
   };
 }
 
+async function deliverNotification(sendNotification, alert) {
+  try {
+    return (await sendNotification(alert.content)) !== false;
+  } catch {
+    return false;
+  }
+}
+
 export async function runChecks(
   config,
   {
     state = { services: {} },
     fetchImpl = fetch,
     sendNotification = async (content) => {
-      if (!config.webhook) return;
+      if (!config.webhook) return false;
       const response = await fetchImpl(config.webhook, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content }),
       });
       if (!response.ok) throw new Error(`Discord webhook returned HTTP ${response.status}`);
+      return true;
     },
     now = () => new Date(),
   } = {},
@@ -130,23 +139,47 @@ export async function runChecks(
     const current = { ...previous, lastCheckedAt: timestamp, lastStatus: result.status };
 
     if (result.ok) {
-      if (previous.alertedDown) {
+      if (previous.pendingNotification?.type === 'recovery') {
+        if (await deliverNotification(sendNotification, previous.pendingNotification)) {
+          notifications.push(previous.pendingNotification);
+          delete current.pendingNotification;
+          current.alertedDown = false;
+        }
+      } else if (previous.alertedDown) {
         const alert = notification(service, current, result, timestamp);
-        await sendNotification(alert.content);
-        notifications.push(alert);
+        if (await deliverNotification(sendNotification, alert)) {
+          notifications.push(alert);
+          current.alertedDown = false;
+          delete current.pendingNotification;
+        } else {
+          current.pendingNotification = alert;
+        }
+      } else {
+        delete current.pendingNotification;
       }
       current.consecutiveFailures = 0;
-      current.alertedDown = false;
+      if (!current.pendingNotification) {
+        current.alertedDown = false;
+      }
     } else {
       current.consecutiveFailures = previous.consecutiveFailures + 1;
-      if (
+      if (previous.pendingNotification) {
+        if (await deliverNotification(sendNotification, previous.pendingNotification)) {
+          notifications.push(previous.pendingNotification);
+          delete current.pendingNotification;
+          current.alertedDown = true;
+        }
+      } else if (
         current.consecutiveFailures >= config.failureThreshold &&
         !previous.alertedDown
       ) {
         const alert = notification(service, current, result, timestamp);
-        await sendNotification(alert.content);
-        notifications.push(alert);
-        current.alertedDown = true;
+        if (await deliverNotification(sendNotification, alert)) {
+          notifications.push(alert);
+          current.alertedDown = true;
+        } else {
+          current.pendingNotification = alert;
+        }
       }
     }
     nextState.services[service] = current;
