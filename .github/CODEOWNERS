@@ -49,6 +49,7 @@
 /packages/auth/                  @qiuethan
 /services/connectors/            @michelle-yl
 /services/documentation-system/  @angelayzheng
+/services/gateway/               @qiuethan
 /services/llm/                   @Williamzhibo
 /services/meeting/               @andrei-akopian
 /services/team-tracking/         @michelle-yl

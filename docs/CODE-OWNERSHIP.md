@@ -15,7 +15,7 @@ or a runtime concept. They exist only for review scope.
 
 ## The canonical list
 
-Fourteen buckets. Every tracked file lands in exactly one.
+Fifteen buckets. Every tracked file lands in exactly one.
 
 | Zone | What it covers | Owner | `pr-zone-check` pattern | CODEOWNERS line |
 |---|---|---|---|---|
@@ -24,6 +24,7 @@ Fourteen buckets. Every tracked file lands in exactly one.
 | `packages/other` | Any package with no zone of its own yet. Transitional — see below. | @qiuethan | `packages/*` | `/packages/` |
 | `services/connectors` | Stateless `POST /fetch` — returns document text from external sources (Google Drive/Docs) so consumers never hold source credentials. [README](../services/connectors/README.md) | @michelle-yl | `services/connectors/*` | `/services/connectors/` |
 | `services/documentation-system` | Catalog API for the org's links — docs, sheets, repos, videos — with owners, tags, and content snapshots. [README](../services/documentation-system/README.md) | @angelayzheng | `services/documentation-system/*` | `/services/documentation-system/` |
+| `services/gateway` | Public API with scoped consumer keys, rate limits, and curated reads from private services. [README](../services/gateway/README.md) | @qiuethan | `services/gateway/*` | `/services/gateway/` |
 | `services/llm` | Stateless `POST /chat` fronting Claude on Bedrock. The single choke point for credentials, model catalog, and provider quirks. [README](../services/llm/README.md) | @Williamzhibo | `services/llm/*` | `/services/llm/` |
 | `services/meeting` | Stateful HTTP + WebSocket service: live Discord voice audio to Amazon Transcribe, then a rolling transcript, minutes, and a PDF. [README](../services/meeting/README.md) | @andrei-akopian | `services/meeting/*` | `/services/meeting/` |
 | `services/team-tracking` | Source of truth for the directory — people, teams, roles, memberships, external identity mapping. [README](../services/team-tracking/README.md) | @michelle-yl | `services/team-tracking/*` | `/services/team-tracking/` |
