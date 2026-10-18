@@ -117,24 +117,20 @@ def test_complete_fenced_json_answer_retains_strict_citations(language):
 
 
 @pytest.mark.parametrize(
-    "content,reason",
+    "content",
     [
-        ("PRIVATE not JSON", "schema"),
-        (
-            '```json\n{"supported":true,"answer":"PRIVATE","source_ids":["invented"]}\n```',
-            "sources",
-        ),
-        ('{"supported":false,"answer":"PRIVATE","source_ids":["s1"]}', "unsupported_sources"),
-        ('{"supported":true,"answer":"PRIVATE","source_ids":[]}', "missing_evidence"),
-        ("PRIVATE preface\n```json\n{}\n```", "schema"),
-        ("```json\n{}\n```\nPRIVATE trailing text", "schema"),
+        "PRIVATE not JSON",
+        '```json\n{"supported":true,"answer":"PRIVATE","source_ids":["invented"]}\n```',
+        '{"supported":false,"answer":"PRIVATE","source_ids":["s1"]}',
+        '{"supported":true,"answer":"PRIVATE","source_ids":[]}',
+        "PRIVATE preface\n```json\n{}\n```",
+        "```json\n{}\n```\nPRIVATE trailing text",
     ],
 )
-def test_rejection_logs_only_safe_category(content, reason, caplog):
+def test_invalid_answers_are_rejected_without_logging(content, caplog):
     with pytest.raises(QnaInvalidResponse):
         answer_question([seg(0, "PRIVATE transcript")], 1, "PRIVATE question", FakeLlm(content))
-    assert f"Q&A output rejected: {reason}" in caplog.text
-    assert "PRIVATE" not in caplog.text
+    assert not caplog.records
 
 
 def test_question_is_a_task_and_transcript_is_evidence_in_model_instructions():

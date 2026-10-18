@@ -176,9 +176,8 @@ they do not establish the live model's semantic answer quality.
 
 Parsing accepts plain JSON or a single complete JSON Markdown code block, then
 applies the same strict schema and citation validation. It does not repair
-truncation or extract answers from surrounding prose. Rejections log only a
-fixed category (`schema`, `sources`, `unsupported_sources`, or `missing_evidence`),
-never the question, transcript, completion, or validation exception.
+truncation or extract answers from surrounding prose. Invalid responses are
+rejected without logging.
 
 ## Live-verify caveats
 

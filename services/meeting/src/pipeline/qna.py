@@ -1,7 +1,6 @@
 """Request-local Q&A over finalized transcript segments; no index or history."""
 
 import json
-import logging
 import re
 from dataclasses import dataclass
 
@@ -14,7 +13,6 @@ QNA_WINDOW_MS = 15 * 60 * 1000
 # Coarse character guard, not a tokenizer or a provider context-window guarantee.
 MAX_QNA_TRANSCRIPT_CHARS = 60_000
 QNA_MAX_TOKENS = 1024
-_logger = logging.getLogger(__name__)
 
 QNA_SYSTEM_PROMPT = (
     "You answer questions about an ongoing meeting using the supplied transcript as evidence. "
@@ -143,21 +141,17 @@ def answer_question(segments, elapsed_ms: int, question: str, llm_client) -> Qna
     try:
         completion = _Completion.model_validate_json(content)
     except (ValidationError, ValueError, TypeError):
-        _logger.warning("Q&A output rejected: schema")
         raise QnaInvalidResponse from None
     sources = {f"s{i}": segment for i, segment in enumerate(window.segments, 1)}
     ids = completion.source_ids
     if len(set(ids)) != len(ids) or any(source_id not in sources for source_id in ids):
-        _logger.warning("Q&A output rejected: sources")
         raise QnaInvalidResponse
     if not completion.supported:
         if ids:
-            _logger.warning("Q&A output rejected: unsupported_sources")
             raise QnaInvalidResponse
         response.answer = f"Not discussed in the transcript available for {range_label}."
         return response
     if not completion.answer.strip() or not ids:
-        _logger.warning("Q&A output rejected: missing_evidence")
         raise QnaInvalidResponse
     response.answer = completion.answer.strip()
     response.references = [

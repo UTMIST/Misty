@@ -287,8 +287,9 @@ and skips them.
 - `/bug` (public) — where to report a bug (GitHub issue link and optional
   infrastructure contact).
 
-All current commands register globally in every server the bot is in, including
-`/qna`. Its **in progress** label is informational. The handler uses the invoking
+Every command is on the **stable** channel (`beta = false`), so they all register
+globally in every server the bot is in. There are currently no beta commands.
+This includes `/qna`; its **in progress** label is informational. The handler uses the invoking
 server's active meeting and exact recording text channel, with no testing-guild
 restriction or user-level permission check.
 
