@@ -28,13 +28,14 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .readiness-state.json
-          key: readiness-state-${{ github.run_id }}
+          key: readiness-state-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: readiness-state-
       - name: Poll readiness and notify Discord
         env:
           READINESS_ENDPOINTS: ${{ vars.READINESS_ENDPOINTS }}
           READINESS_FAILURE_THRESHOLD: ${{ vars.READINESS_FAILURE_THRESHOLD || '2' }}
           READINESS_POLL_INTERVAL_SECONDS: ${{ vars.READINESS_POLL_INTERVAL_SECONDS || '300' }}
+          READINESS_NOTIFICATION_TIMEOUT_MS: ${{ vars.READINESS_NOTIFICATION_TIMEOUT_MS || '10000' }}
           READINESS_STATE_FILE: .readiness-state.json
           DISCORD_READINESS_WEBHOOK: ${{ secrets.DISCORD_READINESS_WEBHOOK }}
         run: node scripts/readiness-checker.js
@@ -42,4 +43,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .readiness-state.json
-          key: readiness-state-${{ github.run_id }}
+          key: readiness-state-${{ github.run_id }}-${{ github.run_attempt }}

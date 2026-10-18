@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 const DEFAULT_FAILURE_THRESHOLD = 2;
 const DEFAULT_POLL_INTERVAL_SECONDS = 300;
 const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_NOTIFICATION_TIMEOUT_MS = 10_000;
 
 function positiveInteger(value, name, fallback) {
   if (value === undefined || value === '') return fallback;
@@ -43,6 +44,11 @@ export function loadConfig(env = process.env) {
       DEFAULT_POLL_INTERVAL_SECONDS,
     ),
     timeoutMs: positiveInteger(env.READINESS_TIMEOUT_MS, 'READINESS_TIMEOUT_MS', DEFAULT_TIMEOUT_MS),
+    notificationTimeoutMs: positiveInteger(
+      env.READINESS_NOTIFICATION_TIMEOUT_MS,
+      'READINESS_NOTIFICATION_TIMEOUT_MS',
+      DEFAULT_NOTIFICATION_TIMEOUT_MS,
+    ),
     stateFile: env.READINESS_STATE_FILE || '.readiness-state.json',
     webhook: env.DISCORD_READINESS_WEBHOOK || undefined,
   };
@@ -100,11 +106,18 @@ function notification(service, state, result, timestamp) {
   };
 }
 
-async function deliverNotification(sendNotification, alert) {
+async function deliverNotification(sendNotification, alert, timeoutMs) {
+  let timeout;
   try {
-    return (await sendNotification(alert.content)) !== false;
+    const delivery = sendNotification(alert.content);
+    const timedOut = new Promise((resolve) => {
+      timeout = setTimeout(() => resolve(false), timeoutMs);
+    });
+    return (await Promise.race([delivery, timedOut])) !== false;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -124,6 +137,7 @@ export async function runChecks(
       return true;
     },
     now = () => new Date(),
+    notificationTimeoutMs = config.notificationTimeoutMs ?? DEFAULT_NOTIFICATION_TIMEOUT_MS,
   } = {},
 ) {
   const timestamp = now().toISOString();
@@ -140,14 +154,14 @@ export async function runChecks(
 
     if (result.ok) {
       if (previous.pendingNotification?.type === 'recovery') {
-        if (await deliverNotification(sendNotification, previous.pendingNotification)) {
+        if (await deliverNotification(sendNotification, previous.pendingNotification, notificationTimeoutMs)) {
           notifications.push(previous.pendingNotification);
           delete current.pendingNotification;
           current.alertedDown = false;
         }
       } else if (previous.alertedDown) {
         const alert = notification(service, current, result, timestamp);
-        if (await deliverNotification(sendNotification, alert)) {
+        if (await deliverNotification(sendNotification, alert, notificationTimeoutMs)) {
           notifications.push(alert);
           current.alertedDown = false;
           delete current.pendingNotification;
@@ -163,18 +177,23 @@ export async function runChecks(
       }
     } else {
       current.consecutiveFailures = previous.consecutiveFailures + 1;
-      if (previous.pendingNotification) {
-        if (await deliverNotification(sendNotification, previous.pendingNotification)) {
+      if (previous.pendingNotification?.type === 'recovery') {
+        delete current.pendingNotification;
+        current.alertedDown = false;
+      } else if (previous.pendingNotification) {
+        if (await deliverNotification(sendNotification, previous.pendingNotification, notificationTimeoutMs)) {
           notifications.push(previous.pendingNotification);
           delete current.pendingNotification;
           current.alertedDown = true;
         }
-      } else if (
+      }
+      if (
         current.consecutiveFailures >= config.failureThreshold &&
-        !previous.alertedDown
+        !current.alertedDown &&
+        !current.pendingNotification
       ) {
         const alert = notification(service, current, result, timestamp);
-        if (await deliverNotification(sendNotification, alert)) {
+        if (await deliverNotification(sendNotification, alert, notificationTimeoutMs)) {
           notifications.push(alert);
           current.alertedDown = true;
         } else {

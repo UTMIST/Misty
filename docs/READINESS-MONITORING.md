@@ -18,6 +18,7 @@ Actions**:
 | `READINESS_ENDPOINTS` | variable | `{}` | JSON object such as `{"team-tracking":"https://.../health/ready","documentation-system":"https://.../health/ready","discord-bot":"https://.../health/ready"}` |
 | `READINESS_POLL_INTERVAL_SECONDS` | variable | `300` | Expected check cadence; the workflow schedule is five minutes and should be changed with this value if a different cadence is needed. |
 | `READINESS_FAILURE_THRESHOLD` | variable | `2` | Consecutive failed checks before the down alert (ten minutes with defaults). |
+| `READINESS_NOTIFICATION_TIMEOUT_MS` | variable | `10000` | Maximum time to wait for one Discord webhook delivery before retaining it for retry. |
 | `DISCORD_READINESS_WEBHOOK` | secret | unset | Dedicated Discord operations/outages channel webhook. |
 
 The services are private on Railway by default. The selected readiness
@@ -45,10 +46,14 @@ alerted.
 
 1. Temporarily point one entry in `READINESS_ENDPOINTS` at an approved test
    endpoint that returns `503`.
-2. Run **Actions → Monitor service readiness → Run workflow** twice. With the
-   defaults, the first run is silent and the second sends one down alert.
-3. Restore the real readiness URL and run the workflow once. It sends one
-   recovery alert.
+2. Run **Actions → Monitor service readiness → Run workflow** once. Wait at
+   least `READINESS_POLL_INTERVAL_SECONDS` after the completed probe, then run
+   it a second time. With the defaults, the first run is silent and the second
+   sends one down alert. Account for scheduled runs, which also count as
+   probes, when deciding when to dispatch.
+3. Restore the real readiness URL. Wait at least the configured polling
+   interval after the last completed probe, then run the workflow once. It
+   sends one recovery alert.
 4. Remove any test endpoint and confirm the next run reports only the real
    services.
 

@@ -168,3 +168,68 @@ test('retains a failed recovery alert for retry', async () => {
   assert.equal(recovered.state.services.bot.alertedDown, true);
   assert.equal(recovered.state.services.bot.pendingNotification.type, 'recovery');
 });
+
+test('discards a pending recovery when the latest probe is down', async () => {
+  const notifications = [];
+  let state = { services: {} };
+  for (let i = 0; i < 2; i += 1) {
+    ({ state } = await runChecks(
+      config,
+      {
+        state,
+        fetchImpl: fetchSequence([{ ok: false, status: 503 }]),
+        sendNotification: async (content) => notifications.push(content),
+      },
+    ));
+  }
+  const recoveryFailed = await runChecks(
+    config,
+    {
+      state,
+      fetchImpl: fetchSequence([{ ok: true, status: 200 }]),
+      sendNotification: async () => {
+        throw new Error('webhook unavailable');
+      },
+    },
+  );
+  let downAgain = await runChecks(config, {
+    state: recoveryFailed.state,
+    fetchImpl: fetchSequence([{ ok: false, status: 503 }]),
+    sendNotification: async (content) => notifications.push(content),
+  });
+  downAgain = await runChecks(config, {
+    state: downAgain.state,
+    fetchImpl: fetchSequence([{ ok: false, status: 503 }]),
+    sendNotification: async (content) => notifications.push(content),
+  });
+  assert.equal(notifications.filter((message) => message.includes('recovered')).length, 0);
+  assert.equal(notifications.filter((message) => message.includes('outage')).length, 2);
+  assert.equal(downAgain.state.services.bot.pendingNotification, undefined);
+  assert.equal(downAgain.state.services.bot.alertedDown, true);
+});
+
+test('times out a stalled notification and continues polling later services', async () => {
+  const checked = [];
+  const result = await runChecks(
+    {
+      endpoints: {
+        first: 'https://first.example.test/health/ready',
+        second: 'https://second.example.test/health/ready',
+      },
+      failureThreshold: 1,
+      notificationTimeoutMs: 5,
+    },
+    {
+      fetchImpl: async (url) => {
+        checked.push(url);
+        return { ok: false, status: 503 };
+      },
+      sendNotification: async () => new Promise(() => {}),
+    },
+  );
+  assert.deepEqual(checked, [
+    'https://first.example.test/health/ready',
+    'https://second.example.test/health/ready',
+  ]);
+  assert.equal(result.state.services.first.pendingNotification.type, 'down');
+});
