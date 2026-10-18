@@ -1,4 +1,5 @@
 import { MessageFlags } from 'discord.js';
+import { safeReply } from './interactions.js';
 import { MeetingQnaError } from '../../meeting/meetingClient.js';
 import { renderQnaAnswer } from '../../messages/qna.js';
 
@@ -25,7 +26,8 @@ function backendMessage(status) {
 /** Dedicated meeting adapter: channel context, no directory/user scoping. */
 export async function handleQnaInteraction(interaction, appContext) {
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  const reply = (content) => interaction.editReply({ content, allowedMentions: { parse: [] } });
+  const reply = (content) =>
+    safeReply(interaction, { content, ephemeral: true, allowedMentions: { parse: [] } });
   if (!interaction.guildId) {
     return reply('Use /qna in the server text channel where the meeting’s recording was started.');
   }
@@ -57,7 +59,7 @@ export async function handleQnaInteraction(interaction, appContext) {
     }
     if (result.status !== 'answered') return reply(backendMessage(503));
     const { content, allowedMentions } = renderQnaAnswer(result.response, result.meetingName);
-    return await interaction.editReply({ content, allowedMentions });
+    return await safeReply(interaction, { content, allowedMentions, ephemeral: true });
   } catch (error) {
     // Never log provider errors, questions, or generated/document content.
     return reply(backendMessage(error instanceof MeetingQnaError ? error.status : 503));

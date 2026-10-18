@@ -349,6 +349,8 @@ function fakeRecordInteraction({ subcommand, voiceChannel = null, calls, guildId
     options: { getSubcommand: () => subcommand },
     async deferReply(opts) {
       calls.push({ method: 'deferReply', opts });
+      this.deferred = true;
+      this.ephemeral = Boolean(opts.flags & MessageFlags.Ephemeral);
     },
     async editReply(payload) {
       calls.push({ method: 'editReply', payload });

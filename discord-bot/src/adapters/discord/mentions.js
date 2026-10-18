@@ -1,6 +1,5 @@
 import { answerHelperTurns, resolveHelperCaller } from '../../helperFlow.js';
-
-const DISCORD_MAX_MESSAGE = 2000;
+import { sendDiscordMessage } from './messages.js';
 
 export function startsWithBotMention(content, botId) {
   const trimmed = (content ?? '').trimStart();
@@ -74,19 +73,6 @@ export function threadHistoryToTurns(fetched, botId) {
     }, []);
 }
 
-export function chunkForDiscord(text) {
-  const chunks = [];
-  let remaining = text ?? '';
-  while (remaining.length > DISCORD_MAX_MESSAGE) {
-    let cut = remaining.lastIndexOf('\n', DISCORD_MAX_MESSAGE);
-    if (cut <= 0) cut = DISCORD_MAX_MESSAGE; // no newline → hard split
-    chunks.push(remaining.slice(0, cut));
-    remaining = remaining.slice(cut).replace(/^\n/, '');
-  }
-  if (remaining.length > 0) chunks.push(remaining);
-  return chunks;
-}
-
 const HISTORY_LIMIT = 100; // Discord's messages.fetch maximum; no pagination
 const THREAD_UNAVAILABLE =
   "I couldn't open a thread for that — please try again. (I may be missing the 'Create Public Threads' or 'Read Message History' permission.)";
@@ -152,7 +138,7 @@ export async function handleMention(message, { appContext, botId }) {
 
   const caller = await resolveHelperCaller(appContext, message.author.id);
   if (!caller.ok) {
-    await message.reply(caller.content).catch(() => {});
+    await sendDiscordMessage((part) => message.reply(part), caller.content).catch(() => {});
     return;
   }
 
@@ -160,11 +146,10 @@ export async function handleMention(message, { appContext, botId }) {
   // Reserve before any more awaits; even concurrent mentions share this limit.
   const allowance = appContext.helperRequestLimiter.tryConsume(message.author.id);
   if (!allowance.allowed) {
-    await message
-      .reply(
-        `Please slow down a little so everyone can use the helper. Try again in ${allowance.retryAfterSeconds} seconds.`,
-      )
-      .catch(() => {});
+    await sendDiscordMessage(
+      (part) => message.reply(part),
+      `Please slow down a little so everyone can use the helper. Try again in ${allowance.retryAfterSeconds} seconds.`,
+    ).catch(() => {});
     return;
   }
 
@@ -192,16 +177,16 @@ export async function handleMention(message, { appContext, botId }) {
     }
   } catch (e) {
     console.error('thread create/fetch failed:', e.message);
-    await message.reply(THREAD_UNAVAILABLE).catch(() => {});
+    await sendDiscordMessage((part) => message.reply(part), THREAD_UNAVAILABLE).catch(() => {});
     return;
   }
   if (!turns.length) return;
 
   await target.sendTyping().catch(() => {});
   const content = await answerHelperTurns(appContext, turns, caller.principal);
-  for (const chunk of chunkForDiscord(content)) {
-    await target.send(chunk).catch((e) => console.error('helper reply failed:', e.message));
-  }
+  await sendDiscordMessage((part) => target.send(part), content).catch(() =>
+    console.error('Could not deliver helper reply'),
+  );
 }
 
 export async function handleDirectMessage(message, { appContext, botId }) {
@@ -210,16 +195,15 @@ export async function handleDirectMessage(message, { appContext, botId }) {
 
   const caller = await resolveHelperCaller(appContext, message.author.id);
   if (!caller.ok) {
-    await message.reply(caller.content).catch(() => {});
+    await sendDiscordMessage((part) => message.reply(part), caller.content).catch(() => {});
     return;
   }
   const allowance = appContext.helperRequestLimiter.tryConsume(message.author.id);
   if (!allowance.allowed) {
-    await message
-      .reply(
-        `Please slow down a little so everyone can use the helper. Try again in ${allowance.retryAfterSeconds} seconds.`,
-      )
-      .catch(() => {});
+    await sendDiscordMessage(
+      (part) => message.reply(part),
+      `Please slow down a little so everyone can use the helper. Try again in ${allowance.retryAfterSeconds} seconds.`,
+    ).catch(() => {});
     return;
   }
 
@@ -235,16 +219,14 @@ export async function handleDirectMessage(message, { appContext, botId }) {
     turns = directMessageHistoryToTurns(ordered, message.author.id, botId);
   } catch (e) {
     console.error('DM history fetch failed:', e.message);
-    await message.reply(DM_HISTORY_UNAVAILABLE).catch(() => {});
+    await sendDiscordMessage((part) => message.reply(part), DM_HISTORY_UNAVAILABLE).catch(() => {});
     return;
   }
   if (!turns.length) return;
 
   await message.channel.sendTyping().catch(() => {});
   const content = await answerHelperTurns(appContext, turns, caller.principal);
-  for (const chunk of chunkForDiscord(content)) {
-    await message.channel
-      .send(chunk)
-      .catch((e) => console.error('helper DM reply failed:', e.message));
-  }
+  await sendDiscordMessage((part) => message.channel.send(part), content).catch(() =>
+    console.error('Could not deliver helper DM reply'),
+  );
 }

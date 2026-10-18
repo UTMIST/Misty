@@ -1,4 +1,5 @@
 import { MessageFlags } from 'discord.js';
+import { DELIVERY_ERROR, discordMessageParts } from './messages.js';
 
 function extractOptions(interaction, activeOptions) {
   const options = {};
@@ -50,6 +51,7 @@ export function payloadToDiscordReply(payload) {
   const out = {};
   if (payload.content !== undefined) out.content = payload.content;
   if (payload.embeds) out.embeds = payload.embeds;
+  if (payload.allowedMentions) out.allowedMentions = payload.allowedMentions;
   if (payload.ephemeral) out.flags = MessageFlags.Ephemeral;
   return out;
 }
@@ -74,15 +76,32 @@ export async function safeReply(interaction, payload) {
     return;
   }
 
-  // After deferReply(), the first response must edit the deferred message.
-  // Ephemerality was already locked in at defer time, so editReply ignores the
-  // ephemeral flag — strip it to avoid passing an unsupported option.
-  if (interaction.deferred && !interaction.replied) {
-    const { flags, ...editable } = dpayload;
-    await interaction.editReply(editable).catch((e) => console.error('reply failed:', e.message));
-    return;
+  // Discord locks visibility at defer time. Follow-ups must explicitly keep it.
+  const privateReply = interaction.ephemeral ?? Boolean(dpayload.flags & MessageFlags.Ephemeral);
+  const flags = privateReply ? MessageFlags.Ephemeral : undefined;
+  let first = true;
+  const send = async (part) => {
+    const { flags: _flags, ...editable } = part;
+    if (first && interaction.deferred && !interaction.replied) {
+      await interaction.editReply(editable);
+    } else {
+      const method = first && !interaction.replied ? 'reply' : 'followUp';
+      await interaction[method]({ ...editable, ...(flags !== undefined && { flags }) });
+    }
+    first = false;
+  };
+  try {
+    for (const part of discordMessageParts(dpayload)) await send(part);
+  } catch {
+    // Discord errors can contain the rejected payload. Never log reply content.
+    console.error('Could not deliver Discord reply');
+    try {
+      await send({ content: DELIVERY_ERROR, embeds: [], allowedMentions: { parse: [] } });
+    } catch {
+      // If editing the deferred reply also fails, try clearing its spinner.
+      if (first && interaction.deferred && !interaction.replied) {
+        await interaction.deleteReply?.().catch(() => {});
+      }
+    }
   }
-
-  const method = interaction.replied ? 'followUp' : 'reply';
-  await interaction[method](dpayload).catch((e) => console.error('reply failed:', e.message));
 }
