@@ -400,7 +400,7 @@ def test_revoke_and_touch_pg(adapter):
 
 
 def test_pg_provider_seed_present(adapter):
-    assert {p.id for p in adapter.list_providers()} >= {"discord", "github", "notion", "uoft_email"}
+    assert {p.id for p in adapter.list_providers()} == {"discord", "github", "uoft_email", "email"}
     assert adapter.get_provider("discord").label == "Discord"
 
 

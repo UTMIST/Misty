@@ -140,7 +140,7 @@ class DocsApiClient:
     def fetch_enabled_source_ids(self) -> set[str]:
         """Source ids the catalog will actually attempt a fetch for. Read from
         the service rather than hardcoding the disabled ones, so enabling a new
-        source (a Notion fetcher, say) needs no change here."""
+        source (a YouTube fetcher, say) needs no change here."""
         return {
             s["id"]
             for s in self._get_json("/sources", {"active_only": "true"})

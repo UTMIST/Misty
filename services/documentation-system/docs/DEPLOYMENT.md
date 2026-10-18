@@ -134,7 +134,8 @@ Migration history:
 
 - **`001_initial_schema`** — creates `sources`, `docs`, `doc_tags`, `api_keys`
   and their indexes.
-- **`002_seed_sources`** — seeds the initial built-in sources.
+- **`002_seed_sources`** — seeds the initial built-in sources; migration `009`
+  removes the retired source, leaving seven.
 - **`003_doc_grants`** — adds the `doc_grants` table behind per-doc visibility,
   with the grantee-shape CHECK and both uniqueness constraints (including the
   partial index that catches duplicate `org` grants, which the plain unique
@@ -408,3 +409,9 @@ permissions matching an active, membership-synced Team Tracking mapping become g
 Domain/link-wide shares, external or unknown users, unmapped groups, and pre-migration
 legacy groups are intentionally ignored. Add legacy group mappings through Team Tracking's
 managed-group migration; never infer access from an ordinary team membership.
+
+## Registry cleanup (migration `009`)
+
+Reassigns documents from the retired source to `web` before removing its registry row.
+Downgrade restores only the registry entry; it does not undo the data cleanup.
+Use a database backup to recover the previous assignments.

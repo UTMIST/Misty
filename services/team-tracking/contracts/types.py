@@ -70,7 +70,7 @@ class TeamMembership(DirectoryBase):
 
 
 class Provider(DirectoryBase):
-    id: str  # slug PK, e.g. "discord", "github", "notion", "uoft_email"
+    id: str  # slug PK, e.g. "discord", "github", "uoft_email"
     label: str
     description: str | None = None
     active: bool = True
