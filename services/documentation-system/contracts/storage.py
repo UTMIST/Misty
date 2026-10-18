@@ -3,7 +3,8 @@ from typing import Protocol
 from uuid import UUID
 
 from contracts.types import ApiKey, Doc, DocChunk, DocContentMeta, DocGrant, Source, SourceGrant
-from contracts.visibility import ActorContext, SEE_ALL
+from contracts.retrieval import QueryEmbedding, SearchHit
+from contracts.visibility import ActorContext, RetrievalContext, SEE_ALL
 
 
 class DuplicateActiveUrl(Exception):
@@ -20,6 +21,27 @@ class StorageAdapter(Protocol):
 
     def is_ready(self) -> bool:
         """Return whether the backing store can answer a trivial query."""
+        ...
+
+    def search_chunks(
+        self,
+        *,
+        query: str,
+        embedding: QueryEmbedding,
+        visibility: RetrievalContext,
+        k: int,
+        min_cosine: float,
+    ) -> list[SearchHit]:
+        """Hybrid RRF search; no default/unfiltered visibility is allowed.
+
+        Both branches filter current grants, active documents, and the query's
+        resolved model/dimensions before their max(50,5*k) candidate limits.
+        Cosine is rounded to six decimals; keyword rank is term density.
+        A chunk qualifies at the absolute cosine floor OR by matching all
+        ASCII alphanumeric query terms. RRF constant 60; ties use doc id and
+        ordinal. Return at most k citations, possibly none. Invalid arguments
+        raise ValueError before I/O; storage errors raise RetrievalUnavailable.
+        """
         ...
 
     # Docs

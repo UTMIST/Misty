@@ -1,0 +1,618 @@
+{
+  "version": 1,
+  "model": "text-embedding-3-small",
+  "dimensions": 1536,
+  "query_embedding_prefix": [
+    1,
+    0
+  ],
+  "empty_query_embedding_prefix": [
+    0,
+    -1
+  ],
+  "keys": {
+    "person-reader": [
+      "docs:read",
+      "act-as-user"
+    ],
+    "channel-reader": [
+      "docs:read",
+      "act-as-channel"
+    ],
+    "read-only": [
+      "docs:read"
+    ],
+    "admin": [
+      "admin"
+    ]
+  },
+  "people": {
+    "11111111-1111-1111-1111-111111111111": {
+      "team_ids": [
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+      ],
+      "source_team_ids": [
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+      ]
+    },
+    "22222222-2222-2222-2222-222222222222": {
+      "team_ids": [
+        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+      ],
+      "source_team_ids": [
+        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+      ]
+    },
+    "33333333-3333-3333-3333-333333333333": {
+      "team_ids": [],
+      "source_team_ids": []
+    }
+  },
+  "channel": {
+    "guild_id": "100",
+    "channel_id": "200",
+    "team_ids": [
+      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    ]
+  },
+  "synced_team_ids": [
+    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+  ],
+  "documents": [
+    {
+      "doc_id": "00000000-0000-0000-0000-000000000001",
+      "key": "personal-alice",
+      "title": "Personal CPSIF notes",
+      "url": "https://example.test/personal-alice",
+      "source_id": "gdocs",
+      "text": "CPSIF CPSIF CPSIF personal notes",
+      "embedding_prefix": [
+        0.9,
+        0.4358898943540673
+      ],
+      "grants": [
+        [
+          "person",
+          "11111111-1111-1111-1111-111111111111",
+          "google_drive"
+        ]
+      ],
+      "active": true
+    },
+    {
+      "doc_id": "00000000-0000-0000-0000-000000000002",
+      "key": "personal-bob",
+      "title": "Private CPSIF plan",
+      "url": "https://example.test/personal-bob",
+      "source_id": "gdocs",
+      "text": "CPSIF CPSIF CPSIF CPSIF plan",
+      "embedding_prefix": [
+        1.0,
+        0.0
+      ],
+      "grants": [
+        [
+          "person",
+          "22222222-2222-2222-2222-222222222222",
+          "google_drive"
+        ]
+      ],
+      "active": true
+    },
+    {
+      "doc_id": "00000000-0000-0000-0000-000000000003",
+      "key": "team-a",
+      "title": "Team A guide",
+      "url": "https://example.test/team-a",
+      "source_id": "gdocs",
+      "text": "CPSIF team A guide",
+      "embedding_prefix": [
+        0.8,
+        0.5999999999999999
+      ],
+      "grants": [
+        [
+          "team",
+          "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "google_drive"
+        ]
+      ],
+      "active": true
+    },
+    {
+      "doc_id": "00000000-0000-0000-0000-000000000004",
+      "key": "team-b",
+      "title": "Team B guide",
+      "url": "https://example.test/team-b",
+      "source_id": "gdocs",
+      "text": "CPSIF team B project guide",
+      "embedding_prefix": [
+        0.7,
+        0.714142842854285
+      ],
+      "grants": [
+        [
+          "team",
+          "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+          "google_drive"
+        ]
+      ],
+      "active": true
+    },
+    {
+      "doc_id": "00000000-0000-0000-0000-000000000005",
+      "key": "manual-team",
+      "title": "Manual team notes",
+      "url": "https://example.test/manual-team",
+      "source_id": "gdocs",
+      "text": "CPSIF manual team project notes",
+      "embedding_prefix": [
+        0.6,
+        0.8
+      ],
+      "grants": [
+        [
+          "team",
+          "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          "manual"
+        ]
+      ],
+      "active": true
+    },
+    {
+      "doc_id": "00000000-0000-0000-0000-000000000006",
+      "key": "org",
+      "title": "Organization notes",
+      "url": "https://example.test/org",
+      "source_id": "gdocs",
+      "text": "CPSIF organization project budget planning notes",
+      "embedding_prefix": [
+        0.5,
+        0.8660254037844386
+      ],
+      "grants": [
+        [
+          "org",
+          null,
+          "manual"
+        ]
+      ],
+      "active": true
+    },
+    {
+      "doc_id": "00000000-0000-0000-0000-000000000007",
+      "key": "hidden",
+      "title": "Hidden highest hit",
+      "url": "https://example.test/hidden",
+      "source_id": "gdocs",
+      "text": "CPSIF",
+      "embedding_prefix": [
+        1.0,
+        0.0
+      ],
+      "grants": [],
+      "active": true
+    },
+    {
+      "doc_id": "00000000-0000-0000-0000-000000000008",
+      "key": "irrelevant",
+      "title": "Orchids",
+      "url": "https://example.test/irrelevant",
+      "source_id": "gdocs",
+      "text": "Orchid growing guide",
+      "embedding_prefix": [
+        0.0,
+        1.0
+      ],
+      "grants": [
+        [
+          "org",
+          null,
+          "manual"
+        ]
+      ],
+      "active": true
+    },
+    {
+      "doc_id": "00000000-0000-0000-0000-000000000009",
+      "key": "retired",
+      "title": "Retired hit",
+      "url": "https://example.test/retired",
+      "source_id": "gdocs",
+      "text": "CPSIF",
+      "embedding_prefix": [
+        1.0,
+        0.0
+      ],
+      "grants": [
+        [
+          "org",
+          null,
+          "manual"
+        ]
+      ],
+      "active": false
+    }
+  ],
+  "cases": [
+    {
+      "name": "alice",
+      "request": {
+        "method": "POST",
+        "path": "/search",
+        "headers": {
+          "X-API-Key": "person-reader",
+          "X-On-Behalf-Of": "11111111-1111-1111-1111-111111111111"
+        },
+        "json": {
+          "query": "CPSIF",
+          "k": 10
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "results": [
+            {
+              "doc_id": "00000000-0000-0000-0000-000000000001",
+              "title": "Personal CPSIF notes",
+              "url": "https://example.test/personal-alice",
+              "source_id": "gdocs",
+              "text": "CPSIF CPSIF CPSIF personal notes",
+              "chunk": {
+                "ordinal": 0,
+                "start_offset": 0,
+                "end_offset": 32,
+                "source_content_hash": "12807ddcb015128e5e64d0c725f80d4545880fc30817d8f18243d7938e8537d8"
+              },
+              "score": 0.03278688524590164
+            },
+            {
+              "doc_id": "00000000-0000-0000-0000-000000000003",
+              "title": "Team A guide",
+              "url": "https://example.test/team-a",
+              "source_id": "gdocs",
+              "text": "CPSIF team A guide",
+              "chunk": {
+                "ordinal": 0,
+                "start_offset": 0,
+                "end_offset": 18,
+                "source_content_hash": "6db6019cd49a8955fd2b8714c70be561ef066e9fbf13113d7ee1786c6d1969b2"
+              },
+              "score": 0.03225806451612903
+            },
+            {
+              "doc_id": "00000000-0000-0000-0000-000000000005",
+              "title": "Manual team notes",
+              "url": "https://example.test/manual-team",
+              "source_id": "gdocs",
+              "text": "CPSIF manual team project notes",
+              "chunk": {
+                "ordinal": 0,
+                "start_offset": 0,
+                "end_offset": 31,
+                "source_content_hash": "20131d3e7f81a6ec83773c46f5079b83ae457c2db766700c4567b7230537ba51"
+              },
+              "score": 0.031746031746031744
+            },
+            {
+              "doc_id": "00000000-0000-0000-0000-000000000006",
+              "title": "Organization notes",
+              "url": "https://example.test/org",
+              "source_id": "gdocs",
+              "text": "CPSIF organization project budget planning notes",
+              "chunk": {
+                "ordinal": 0,
+                "start_offset": 0,
+                "end_offset": 48,
+                "source_content_hash": "4abc89cb50507176763c0fa5367ec3f714ad78ded211dfd429942260696cdc46"
+              },
+              "score": 0.03125
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "bob",
+      "request": {
+        "method": "POST",
+        "path": "/search",
+        "headers": {
+          "X-API-Key": "person-reader",
+          "X-On-Behalf-Of": "22222222-2222-2222-2222-222222222222"
+        },
+        "json": {
+          "query": "CPSIF",
+          "k": 10
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "results": [
+            {
+              "doc_id": "00000000-0000-0000-0000-000000000002",
+              "title": "Private CPSIF plan",
+              "url": "https://example.test/personal-bob",
+              "source_id": "gdocs",
+              "text": "CPSIF CPSIF CPSIF CPSIF plan",
+              "chunk": {
+                "ordinal": 0,
+                "start_offset": 0,
+                "end_offset": 28,
+                "source_content_hash": "6b96969546f3be68cd8d7003ccb8978d87fd512d96dea67ee52186539e1a1b64"
+              },
+              "score": 0.03278688524590164
+            },
+            {
+              "doc_id": "00000000-0000-0000-0000-000000000004",
+              "title": "Team B guide",
+              "url": "https://example.test/team-b",
+              "source_id": "gdocs",
+              "text": "CPSIF team B project guide",
+              "chunk": {
+                "ordinal": 0,
+                "start_offset": 0,
+                "end_offset": 26,
+                "source_content_hash": "cbd73a1e6e7cbdfa6f754a2f728018ed77336a5701b5f4cbc6bf2ad4faeea2fd"
+              },
+              "score": 0.03225806451612903
+            },
+            {
+              "doc_id": "00000000-0000-0000-0000-000000000006",
+              "title": "Organization notes",
+              "url": "https://example.test/org",
+              "source_id": "gdocs",
+              "text": "CPSIF organization project budget planning notes",
+              "chunk": {
+                "ordinal": 0,
+                "start_offset": 0,
+                "end_offset": 48,
+                "source_content_hash": "4abc89cb50507176763c0fa5367ec3f714ad78ded211dfd429942260696cdc46"
+              },
+              "score": 0.031746031746031744
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "channel-union",
+      "request": {
+        "method": "POST",
+        "path": "/search",
+        "headers": {
+          "X-API-Key": "channel-reader",
+          "X-Guild-ID": "100",
+          "X-Channel-ID": "200"
+        },
+        "json": {
+          "query": "CPSIF",
+          "k": 10
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "results": [
+            {
+              "doc_id": "00000000-0000-0000-0000-000000000003",
+              "title": "Team A guide",
+              "url": "https://example.test/team-a",
+              "source_id": "gdocs",
+              "text": "CPSIF team A guide",
+              "chunk": {
+                "ordinal": 0,
+                "start_offset": 0,
+                "end_offset": 18,
+                "source_content_hash": "6db6019cd49a8955fd2b8714c70be561ef066e9fbf13113d7ee1786c6d1969b2"
+              },
+              "score": 0.03278688524590164
+            },
+            {
+              "doc_id": "00000000-0000-0000-0000-000000000004",
+              "title": "Team B guide",
+              "url": "https://example.test/team-b",
+              "source_id": "gdocs",
+              "text": "CPSIF team B project guide",
+              "chunk": {
+                "ordinal": 0,
+                "start_offset": 0,
+                "end_offset": 26,
+                "source_content_hash": "cbd73a1e6e7cbdfa6f754a2f728018ed77336a5701b5f4cbc6bf2ad4faeea2fd"
+              },
+              "score": 0.03225806451612903
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "unconfigured-channel",
+      "request": {
+        "method": "POST",
+        "path": "/search",
+        "headers": {
+          "X-API-Key": "channel-reader",
+          "X-Guild-ID": "100",
+          "X-Channel-ID": "201"
+        },
+        "json": {
+          "query": "CPSIF",
+          "k": 10
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "results": []
+        }
+      }
+    },
+    {
+      "name": "empty-relevance",
+      "request": {
+        "method": "POST",
+        "path": "/search",
+        "headers": {
+          "X-API-Key": "person-reader",
+          "X-On-Behalf-Of": "11111111-1111-1111-1111-111111111111"
+        },
+        "json": {
+          "query": "unrelated galaxies",
+          "k": 10
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "results": []
+        }
+      }
+    },
+    {
+      "name": "filter-before-rank",
+      "request": {
+        "method": "POST",
+        "path": "/search",
+        "headers": {
+          "X-API-Key": "person-reader",
+          "X-On-Behalf-Of": "11111111-1111-1111-1111-111111111111"
+        },
+        "json": {
+          "query": "CPSIF",
+          "k": 1
+        }
+      },
+      "response": {
+        "status": 200,
+        "json": {
+          "results": [
+            {
+              "doc_id": "00000000-0000-0000-0000-000000000001",
+              "title": "Personal CPSIF notes",
+              "url": "https://example.test/personal-alice",
+              "source_id": "gdocs",
+              "text": "CPSIF CPSIF CPSIF personal notes",
+              "chunk": {
+                "ordinal": 0,
+                "start_offset": 0,
+                "end_offset": 32,
+                "source_content_hash": "12807ddcb015128e5e64d0c725f80d4545880fc30817d8f18243d7938e8537d8"
+              },
+              "score": 0.03278688524590164
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "missing-context",
+      "request": {
+        "method": "POST",
+        "path": "/search",
+        "headers": {
+          "X-API-Key": "admin"
+        },
+        "json": {
+          "query": "CPSIF",
+          "k": 10
+        }
+      },
+      "response": {
+        "status": 400,
+        "json": {
+          "detail": "provide exactly one person or channel context"
+        }
+      }
+    },
+    {
+      "name": "denied-person",
+      "request": {
+        "method": "POST",
+        "path": "/search",
+        "headers": {
+          "X-API-Key": "read-only",
+          "X-On-Behalf-Of": "11111111-1111-1111-1111-111111111111"
+        },
+        "json": {
+          "query": "CPSIF",
+          "k": 10
+        }
+      },
+      "response": {
+        "status": 403,
+        "json": {
+          "detail": "missing scope: act-as-user"
+        }
+      }
+    },
+    {
+      "name": "denied-channel",
+      "request": {
+        "method": "POST",
+        "path": "/search",
+        "headers": {
+          "X-API-Key": "admin",
+          "X-Guild-ID": "100",
+          "X-Channel-ID": "200"
+        },
+        "json": {
+          "query": "CPSIF",
+          "k": 10
+        }
+      },
+      "response": {
+        "status": 403,
+        "json": {
+          "detail": "missing scope: act-as-channel"
+        }
+      }
+    },
+    {
+      "name": "scope-unavailable",
+      "request": {
+        "method": "POST",
+        "path": "/search",
+        "headers": {
+          "X-API-Key": "person-reader",
+          "X-On-Behalf-Of": "11111111-1111-1111-1111-111111111111"
+        },
+        "json": {
+          "query": "CPSIF",
+          "k": 10
+        }
+      },
+      "response": {
+        "status": 503,
+        "json": {
+          "detail": "retrieval scope unavailable"
+        }
+      }
+    },
+    {
+      "name": "embedding-error",
+      "request": {
+        "method": "POST",
+        "path": "/search",
+        "headers": {
+          "X-API-Key": "person-reader",
+          "X-On-Behalf-Of": "11111111-1111-1111-1111-111111111111"
+        },
+        "json": {
+          "query": "CPSIF",
+          "k": 10
+        }
+      },
+      "response": {
+        "status": 502,
+        "json": {
+          "detail": "query embedding unavailable"
+        }
+      }
+    }
+  ]
+}
