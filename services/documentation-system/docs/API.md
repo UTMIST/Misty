@@ -354,9 +354,9 @@ title or the URL, and a warning is appended.
 
 `web` and `github` fetch in-process; the Google sources (`gdrive`, `gdocs`, `gsheets`,
 `gslides`) fetch via the [connectors](../../connectors/) service, which holds the Google
-credentials — migration `006` enabled them. `notion` and `youtube` have no fetcher and
-`content_fetch_enabled: false`, so they are catalogued without content and are skipped
-with a warning (`notion`, which requires auth) or silently (`youtube`).
+credentials — migration `006` enabled them. `youtube` has no fetcher and
+`content_fetch_enabled: false`, so its links are catalogued without content and fetching
+is silently skipped.
 
 ### Content fetch (best-effort)
 
@@ -595,8 +595,8 @@ A **source** describes a kind of URL and how the catalog treats it:
 | `content_fetch_enabled` | bool | Whether the catalog attempts a snapshot |
 | `active` | bool | |
 
-The eight seeded sources: `web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`,
-`notion`, `youtube`. All but `notion` and `youtube` have a fetcher and
+The seven seeded sources: `web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`,
+`youtube`. All but `youtube` have a fetcher and
 `content_fetch_enabled: true` — migration `006` enabled the four Google sources, which
 fetch through the connectors service.
 

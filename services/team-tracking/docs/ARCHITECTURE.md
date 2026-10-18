@@ -176,7 +176,7 @@ Indexes: `(team_id, ended_at)`, `(person_id, ended_at)`, `(started_at, ended_at)
 ### `providers`
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | text PK | Slug, e.g. `discord`, `github`, `notion`, `uoft_email`, `email` |
+| `id` | text PK | Slug, e.g. `discord`, `github`, `uoft_email`, `email` |
 | `label` | text NOT NULL | Display label |
 | `active` | boolean NOT NULL | Default `true` |
 
@@ -238,7 +238,7 @@ Alembic manages the Postgres schema; migrations are written by hand and kept in 
 - **`001_initial_schema.py`** — enables `citext`; creates `people`, `teams`, `role_kinds`, `team_memberships` and their indexes.
 - **`002_seed_role_kinds.py`** — inserts `executive`, `director`, `lead`, `member`.
 - **`003_api_keys.py`** — creates the `api_keys` table (Level-2 auth).
-- **`004_person_identifiers.py`** — creates `providers` and `person_identifiers`; seeds the four providers (`discord`, `github`, `notion`, `uoft_email`).
+- **`004_person_identifiers.py`** — creates `providers` and `person_identifiers`; seeds the initial providers.
 - **`005_person_access_level.py`** — adds `people.access_level` (`member`/`admin`/`superuser`, default `member`) with a check constraint.
 - **`006_email_provider_multivalued.py`** — seeds the `email` provider (five seed providers total) and swaps the table-wide `UNIQUE(person_id, provider)` constraint for a same-named partial unique index (`WHERE provider <> 'email'`), so every provider except `email` still gets "one link per person" while `email` becomes multi-valued. Downgrade fails loud (raises `RuntimeError`) when any `provider='email'` identifiers exist, rather than silently deleting verified addresses to make room for the strict constraint.
 - **`007_membership_no_overlap.py`** — adds the `btree_gist` `EXCLUDE` constraint that stops a person holding overlapping memberships in the same team, after deduplicating existing overlaps.
@@ -256,7 +256,7 @@ Concrete, step-by-step walkthroughs — add an endpoint, add a storage-adapter m
 
 Explicitly out of scope:
 
-- No Discord/GitHub/Notion sync jobs — connectors are separate processes that speak the HTTP API. The one exception is pushing team membership *out* to managed Google Groups (above), because team-tracking owns that mapping; it never reads directory data back from Google.
+- No Discord/GitHub sync jobs — connectors are separate processes that speak the HTTP API. The one exception is pushing team membership *out* to managed Google Groups (above), because team-tracking owns that mapping; it never reads directory data back from Google.
 - No permission-enforcement engine — downstream systems derive access from membership data.
 - No login/UI for officers editing directory data — handled by whatever admin surface is chosen.
 - No content storage — the directory is identity and structure only.

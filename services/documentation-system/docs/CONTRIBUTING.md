@@ -61,7 +61,7 @@ Endpoints live in `src/api/routers/` (`docs.py`, `sources.py`), grouped by resou
 
 ## Add a new Fetcher
 
-Goal: give an auth-gated source (e.g. Notion) a real content snapshot.
+Goal: give a source without a fetcher (e.g. YouTube) a real content snapshot.
 
 1. **Implement the `Fetcher` Protocol** — a class with
    `def fetch(self, url: str) -> FetchResult`. Put it in `src/fetch/<source>.py`. Return a
@@ -73,7 +73,7 @@ Goal: give an auth-gated source (e.g. Notion) a real content snapshot.
    return FetcherRegistry({
        "web": WebFetcher(),
        "github": GithubFetcher(),
-       "notion": NotionFetcher(),   # new
+       "youtube": YouTubeFetcher(),   # new
    })
    ```
    The key **must** equal the source's `id` — that's how `fetch_for` finds it.

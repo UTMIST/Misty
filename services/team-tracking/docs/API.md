@@ -531,7 +531,7 @@ curl -sS "http://localhost:8000/role_kinds/lead" \
 
 ## Providers
 
-Providers are the controlled vocabulary of identity provider types. The five seed values are `discord`, `github`, `notion`, `uoft_email`, and `email`. They are read-only through the API (no create/update endpoints). Both endpoints require scope `providers:read`.
+Providers are the controlled vocabulary of identity provider types. The four seed values are `discord`, `github`, `uoft_email`, and `email`. They are read-only through the API (no create/update endpoints). Both endpoints require scope `providers:read`.
 
 The `email` provider is special-cased: it is **multi-valued** (a person may have many `email` identifiers, unlike the "one link per provider" rule that governs every other provider) and is managed through its own dedicated endpoint, `POST /people/{id}/emails`, rather than the generic identifier `POST`/`PATCH`/`DELETE` endpoints below. See that section for details.
 
@@ -581,7 +581,7 @@ Get a single provider by its ID.
 
 | Param | Type | Notes |
 |-------|------|-------|
-| `provider_id` | string | e.g. `discord`, `github`, `notion` |
+| `provider_id` | string | e.g. `discord`, `github`, `uoft_email` |
 
 **Response:** `Provider` object, HTTP 200.
 
