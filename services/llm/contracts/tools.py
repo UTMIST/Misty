@@ -16,6 +16,7 @@ from contracts.tool_validation import (
     validate_identifier,
     validate_input_schema,
     validate_json_value,
+    validate_reasoning_state,
     validate_redacted_data,
 )
 
@@ -48,6 +49,13 @@ class ToolDefinition(_ToolModel):
 class TextBlock(_ToolModel):
     type: Literal["text"] = "text"
     text: UTF8String = Field(min_length=1)
+    phase: Literal["commentary", "final_answer"] | None = None
+
+
+class ReasoningStateBlock(_ToolModel):
+    type: Literal["reasoning_state"] = "reasoning_state"
+    provider: Literal["openai"] = "openai"
+    data: Annotated[dict[str, JsonValue], BeforeValidator(validate_reasoning_state)]
 
 
 class ReasoningBlock(_ToolModel):
@@ -76,10 +84,15 @@ class ToolResultBlock(_ToolModel):
 
 
 ContentBlock = Annotated[
-    TextBlock | ReasoningBlock | RedactedReasoningBlock | ToolUseBlock | ToolResultBlock,
+    TextBlock
+    | ReasoningBlock
+    | RedactedReasoningBlock
+    | ReasoningStateBlock
+    | ToolUseBlock
+    | ToolResultBlock,
     Field(discriminator="type"),
 ]
 AssistantBlock = Annotated[
-    TextBlock | ReasoningBlock | RedactedReasoningBlock | ToolUseBlock,
+    TextBlock | ReasoningBlock | RedactedReasoningBlock | ReasoningStateBlock | ToolUseBlock,
     Field(discriminator="type"),
 ]

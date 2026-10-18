@@ -173,6 +173,101 @@ uv run doc-keys list --active-only
 uv run doc-keys revoke <api_key_id>
 ```
 
+## Repairing docs missing content (`doc-backfill` CLI)
+
+A source fetch that fails during ingest is only a warning: the doc is catalogued, but no
+content is stored. Re-ingesting the same URL does not repair it either — the dedup path
+merges tags and returns before the fetch runs. Records predating content storage are in
+the same state.
+
+`doc-backfill` finds those docs and refetches them. Unlike `doc-keys` it talks to this
+service **over HTTP**, not to the database: the repair is already an endpoint
+(`POST /docs/{id}/refetch`), and going through it keeps the connectors/Google credentials
+inside the service instead of requiring them wherever the script runs.
+
+```bash
+# Discover only — lists what would be refetched, makes no fetch.
+DOCS_API_KEY=doc_<prefix>_<secret> uv --project services/documentation-system \
+  run doc-backfill --dry-run
+
+# Repair everything contentless.
+DOCS_API_KEY=doc_<prefix>_<secret> uv --project services/documentation-system \
+  run doc-backfill
+
+# Narrow to one source kind.
+DOCS_API_KEY=... uv --project services/documentation-system run doc-backfill --source-id gdocs
+```
+
+### Authorization
+
+Issue the key with **three** scopes (or `admin`):
+
+```bash
+uv --project services/documentation-system run doc-keys \
+  issue --name content-backfill --scopes docs:read docs:read:all docs:write
+```
+
+| Scope | Needed for |
+|-------|-----------|
+| `docs:read` | `GET /sources` — which sources have fetching enabled |
+| `docs:read:all` | `GET /docs?has_content=false` must see every doc, not one actor's |
+| `docs:write` | `POST /docs/{id}/refetch` (not needed for `--dry-run`) |
+
+`docs:read:all` does **not** imply `docs:read` — scope checks are an exact match plus the
+`admin` wildcard. A key holding only `docs:read:all` gets a 403 on `GET /sources`.
+
+The run reads its own scopes from `GET /api-keys/self` and refuses before listing
+anything if one is missing. That check is not belt-and-braces: a key with `docs:read`
+but not `docs:read:all`, sent without `X-On-Behalf-Of` (this tool never sends one),
+resolves to `DENY` rather than a 403 — `GET /docs` answers **200 `[]`**, which is
+indistinguishable from an empty catalog. Without the check, a mis-scoped key would
+print `nothing to do` and exit 0 with the gap untouched.
+
+### Configuration
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `DOCS_API_KEY` | *(required)* | Scoped key, read from the environment only |
+| `DOCS_BASE_URL` | `http://localhost:8001` | Service base URL; `--base-url` overrides it |
+
+Both are read by the CLI alone — they are not in `Settings` and the service never reads
+them, so they are absent from `verify_production_secrets()`. The key is deliberately not
+a command-line flag: argv is visible to anything that can run `ps`.
+
+### Reading the output
+
+Each doc gets its own line, then a summary:
+
+```
+repaired 4f3a1b2c-...  https://docs.google.com/document/d/abc
+empty    6c5d4e3f-...  https://github.com/owner/repo  refetch succeeded but no content was extracted
+failed   8b2c7d14-...  https://utmist.ca/handbook  502: connectors unreachable
+skipped  1a2b3c4d-...  https://notion.so/page  source 'notion' has content fetching disabled
+4 contentless doc(s): 1 repaired, 1 empty, 1 failed, 1 skipped
+```
+
+- **repaired** — content is now stored. Confirmed, not assumed: after the refetches the
+  run re-lists `has_content=false` once and demotes anything still in it.
+- **empty** — the refetch *worked* and produced no text to store. `POST /docs/{id}/refetch`
+  returns 200 whenever the fetch ran, and only writes content `if result.content`, so a
+  title-only fetcher (`github`, by design) or a page that extracts to nothing leaves the
+  doc contentless behind a 200. Reported apart from **failed** because nothing is broken
+  — but it still exits non-zero, because the doc is still missing content.
+- **failed** — the source still fails. The doc stays contentless and is named with its
+  reason; one failure never aborts the rest of the run.
+- **skipped** — the source has `content_fetch_enabled=false` (`notion`, `youtube`), so it
+  could never have content. Bucketed apart from failures so a permanent, expected gap
+  does not read as an error every run. The enabled set is read from `GET /sources`, so
+  registering a fetcher for a new source needs no change to the CLI.
+
+Exit codes: **0** every contentless doc now has content, **1** at least one does not
+(**failed** or **empty**), **2** fatal (missing key, mis-scoped key, service unreachable,
+or a verification listing that could not be read). A mis-scoped key is a hard error
+rather than an empty run, so it can never be mistaken for "nothing to repair"; likewise
+exit 0 means the corpus is complete, not merely that every request returned 200.
+
+---
+
 Notes:
 
 - Scopes are `docs:read`, `docs:write`, and `admin` (wildcard). Grant the minimum needed.
