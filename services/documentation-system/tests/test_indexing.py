@@ -150,6 +150,23 @@ def test_force_reembeds_unchanged_content(storage, embedder):
     }
 
 
+def test_old_title_embedding_cannot_overwrite_a_newer_index(storage, embedder, monkeypatch):
+    doc = _doc(storage)
+    original_embed = embedder.embed
+    newer_chunks = []
+
+    def embed_then_rename(inputs):
+        old_batch = original_embed(inputs)
+        storage.update_doc(doc.id, {"title": "New title"}, actor="test")
+        assert index_doc(doc.id, storage=storage, embedder=FakeEmbedder()).status == "indexed"
+        newer_chunks.extend(storage.list_doc_chunks(doc.id))
+        return old_batch
+
+    monkeypatch.setattr(embedder, "embed", embed_then_rename)
+    assert index_doc(doc.id, storage=storage, embedder=embedder).status == "skipped"
+    assert storage.list_doc_chunks(doc.id) == newer_chunks
+
+
 def test_shorter_content_replaces_the_set_and_drops_tail_chunks(storage, embedder):
     doc = _doc(storage)
     index_doc(doc.id, storage=storage, embedder=embedder)

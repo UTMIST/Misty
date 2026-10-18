@@ -12,6 +12,7 @@ from contracts.storage import DuplicateActiveUrl
 from contracts.types import MAX_CHUNK_CHARS, DocIngest, SourceGrant
 from contracts.visibility import DENY, SEE_ALL, Actor
 from src.config import get_settings
+from src.content import content_hash
 from src.ingest import ingest_doc
 from src.storage.postgres import PostgresStorageAdapter
 from tests.chunk_storage_cases import ChunkStorageCases, make_chunk, make_doc
@@ -173,6 +174,62 @@ def test_cleanup_rechecks_after_a_concurrent_commit(adapter, cleanup):
         assert adapter.get_doc(doc.id).active
     else:
         assert adapter.get_doc_content_meta(doc.id).fetched_at == refreshed_at
+
+
+def test_old_title_writer_rechecks_after_new_title_and_index_commit(adapter):
+    doc = make_doc(adapter)
+    old = make_chunk()
+    adapter.upsert_doc_content(
+        doc.id, content_text=old.chunk_text, content_hash=old.source_content_hash, fetched_at=None
+    )
+    adapter.replace_doc_chunks(doc.id, [old])
+    newer = make_chunk(source_title_hash=content_hash("Renamed"), embedding=[0.5] * 1536)
+    started = Event()
+    worker_pid = []
+    worker = local()
+
+    def before_execute(conn, cursor, statement, parameters, context, executemany):
+        if getattr(worker, "indexing", False) and not worker_pid:
+            worker_pid.append(conn.connection.driver_connection.info.backend_pid)
+            started.set()
+
+    def write_old():
+        worker.indexing = True
+        return adapter.replace_doc_chunks_if_current(
+            doc.id, old.source_content_hash, [old], expected_title_hash=old.source_title_hash
+        )
+
+    engine = adapter._engine
+    event.listen(engine, "before_cursor_execute", before_execute)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("UPDATE docs SET title = 'Renamed' WHERE id = :id"), {"id": doc.id}
+                )
+                adapter._write_chunks(conn, doc.id, [newer])
+                future = pool.submit(write_old)
+                assert started.wait(5)
+                blocked = False
+                deadline = monotonic() + 5
+                while not future.done() and monotonic() < deadline:
+                    with engine.connect() as observer:
+                        blocked = observer.execute(
+                            text(
+                                "SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"
+                            ),
+                            {"pid": worker_pid[0]},
+                        ).scalar_one()
+                    if blocked:
+                        break
+                    sleep(0.01)
+                assert blocked, "old index writer did not wait for the document lock"
+            assert future.result(timeout=5) is False
+    finally:
+        event.remove(engine, "before_cursor_execute", before_execute)
+
+    assert adapter.list_doc_chunks(doc.id) == [newer]
+    assert doc.id not in adapter.list_docs_for_indexing()
 
 
 @pytest.fixture

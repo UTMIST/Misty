@@ -603,14 +603,14 @@ not expire. Ownership never authorizes access. `MAX_AGE` must be greater than `R
 Scope: `docs:index` (or `admin`). Builds each doc's search index from its **stored**
 `doc_content` — it never fetches. A doc's text is split by the chunker, embedded through the
 llm service's `/embed`, and its whole chunk set is replaced in one transaction. Ingest,
-refetch, scheduled refresh, and `PATCH active` run the same step inline; this endpoint is
+refetch, scheduled refresh, and `PATCH active` or `PATCH title` run the same step inline; this endpoint is
 the retry path for their failures and the entry point for re-embedding after a model
 change (#209). Synchronous and bounded.
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
 | `doc_ids` | UUID[] \| null | null | 1–100 docs to index. Every id must exist (else **404** before any work) |
-| `stale_only` | bool | `true` | Listing mode (no `doc_ids`): only docs whose chunks are missing, built from older content, or should not exist (retired or no content). `false` lists every doc with content |
+| `stale_only` | bool | `true` | Listing mode (no `doc_ids`): only docs whose chunks are missing, built from older body/title context, lack title provenance, or should not exist (retired or no content). `false` lists every doc with content |
 | `force` | bool | `false` | Re-embed even when the content is unchanged (e.g. a new embedding model) |
 | `after` | UUID \| null | null | Listing-mode cursor: the previous response's `next_after`. Not allowed with `doc_ids` |
 | `limit` | int | 25 | 1–100 docs per call in listing mode |
@@ -632,9 +632,9 @@ The response counts each doc's outcome and lists them:
 | `status` | Meaning |
 |----------|---------|
 | `indexed` | A new chunk set replaced the old one |
-| `unchanged` | Chunks already match the stored content; no embedding call, no write (unless `force`) |
+| `unchanged` | Chunks already match the stored content and title; no embedding call, no write (unless `force`) |
 | `cleared` | The doc is retired, missing, or has no indexable text; its chunks were removed |
-| `skipped` | The content changed while embedding; nothing written (the newer write re-indexes) |
+| `skipped` | The content or title changed while embedding; nothing written (the newer write re-indexes) |
 | `failed` | Embedding or storage failed; nothing written, the previous chunk set is intact |
 
 To drain, repeat with `after: next_after` until `next_after` is null. A failing doc is

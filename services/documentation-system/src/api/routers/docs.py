@@ -283,10 +283,11 @@ def update_doc(
     updated = storage.update_doc(doc_id, values, actor=actor)
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="doc not found")
-    if "active" in values:
+    if "active" in values or "title" in values:
         # Retiring clears the doc's chunks; reactivating rebuilds them. A
         # failure is logged and left for POST /docs/index (a retired doc that
-        # still has chunks is listed as needing work).
+        # still has chunks is listed as needing work). Title-only updates
+        # also refresh the context embedded alongside the unchanged body.
         index_doc(doc_id, storage=storage, embedder=embedder)
     return updated
 

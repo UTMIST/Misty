@@ -155,6 +155,13 @@ Migration history:
   and adds generated keyword metadata with a GIN index. Vector scans remain exact;
   see the [storage contract and index decision](ARCHITECTURE.md#doc_chunks).
 
+- **`009_chunk_title_hash`** — adds nullable title provenance to chunks. Apply before
+  running the updated application. Existing vectors remain readable, but their unknown
+  title provenance makes them eligible for `POST /docs/index` with its default body.
+  Drain that endpoint once per environment to refresh existing chunks; this spends
+  embedding budget. The migration itself makes no provider calls. Downgrading to `008`
+  removes only the title fingerprint and preserves vectors, text, and citation offsets.
+
 Downgrading `008` removes the chunk table/index, preserving catalog records and full
 content. The database-level `vector` extension remains installed, even if `008`
 enabled it: it may belong to another role or support unrelated tables. Extension
@@ -406,8 +413,8 @@ dependency everywhere:
   the same scheduler as refresh-due if failures are routine. Re-embedding after a model
   change uses `{"stale_only": false, "force": true}`.
 
-Embedding cost is per changed document: unchanged content is never re-embedded. Ingest and
-refetch get slower by the `/embed` round trips (about one request per 96 chunks).
+Embedding cost is per changed body or title; identical body/title hashes avoid repeat
+calls after title provenance is recorded. Ingest, title edits, and refetch get slower by the `/embed` round trips (about one request per 96 chunks).
 
 **Deploy order:** recommended (not required) is connectors first, then set
 `CONNECTORS_BASE_URL` / `CONNECTORS_API_KEY` on documentation-system, then deploy

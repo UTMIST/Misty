@@ -233,6 +233,9 @@ Migration `008` enables pgvector and adds embedded chunks keyed by `(doc_id, ord
 The document FK cascades on hard deletion. Each row stores `chunk_text`, half-open
 `start_offset` / `end_offset` **Unicode code-point** indices into the source text,
 `source_content_hash`, `embedding vector(1536)`, `embedding_model`, and `dimensions`.
+Migration `009` adds nullable `source_title_hash`: SHA-256 of the title (None treated
+as empty). It records embedding context separately from the body hash used by citations.
+Existing chunks retain NULL provenance until the normal stale-index pass rebuilds them.
 The source hash uses `src/content.py`'s SHA-256 convention; it identifies the text
 version whose offsets were embedded, even if `doc_content` is later replaced.
 
@@ -558,24 +561,24 @@ cases (connector shapes, Unicode, repeated text, boundaries) and 200 seeded rand
 ### Indexing (#175): `src/indexing.py`
 
 `index_doc(doc_id, storage=, embedder=, force=False)` makes one doc's chunk set match its
-stored `doc_content`. It is keyed on catalog identity and stored text, never on a URL or a
+stored `doc_content` and title. It is keyed on catalog identity and stored text, never on a URL or a
 fetch, so anything catalogued with stored text (future meetings, #211) indexes the same way.
 
 1. A missing or retired doc, or one with no content, has its chunks cleared (`cleared`).
    `clear_doc_chunks_if_unindexable` rechecks under the chunk writers' lock; if a newer
    fetch or reactivation made it indexable, cleanup writes nothing (`skipped`).
-2. The text's hash is compared with `get_doc_index_state`. Same hash, existing chunks, and
-   no `force` → `unchanged`: no embedding call and no write, so re-indexing never
-   duplicates.
+2. The body and title hashes are compared with `get_doc_index_state`. Matching hashes,
+   existing chunks, and no `force` → `unchanged`: no embedding call or write. NULL title
+   provenance from an older chunk set is stale, even for a doc with no title.
 3. `chunk_text` splits the text. Each chunk is embedded as `title \n heading > path \n\n
    text` — the context prefix the chunker section calls for — while `chunk_text` stores only
    the raw slice, so offsets still index the source. The added title/heading context
    is capped at 1,000 characters, keeping long headings from overwhelming the input;
    source chunks are never truncated by this step.
 4. The whole set is built in memory, then written with
-   `replace_doc_chunks_if_current(doc_id, hash, chunks)`. In one transaction it locks the
-   doc and content rows, checks the doc is active and its content hash is still the one that
-   was chunked, and replaces the set. Shorter text therefore never leaves tail chunks.
+   `replace_doc_chunks_if_current(doc_id, hash, chunks, expected_title_hash=...)`. In one
+   transaction it locks the doc and content rows, checks the doc is active and both
+   body/title hashes still match the embedding inputs, and replaces the set. Shorter text therefore never leaves tail chunks.
 
 **Failure and retry.** Embedding errors (`EmbedderUnavailable`: connection, 429, 5xx;
 `EmbedderRejected`: 4xx, malformed or wrong-width vectors) and storage errors return
@@ -583,8 +586,8 @@ fetch, so anything catalogued with stored text (future meetings, #211) indexes t
 whole, never a mix. The catalog write that triggered indexing is kept. Retrying is calling
 `index_doc` again, which is what `POST /docs/index` does.
 
-**Races.** If content changes while a doc is being embedded, the conditional write is
-refused (`skipped`); the writer of the newer content runs its own index. Postgres locks
+**Races.** If content or title changes while a doc is being embedded, the conditional
+write is refused (`skipped`); the newer writer runs its own index. Postgres locks
 the `doc_content` row because `upsert_doc_content` never touches `docs`.
 Source-deletion cleanup also compares the content hash and capture time read before
 fetching, under the doc and content row locks. A delayed connector 404 cannot delete a
@@ -598,12 +601,14 @@ in all cases.
 | `POST /docs` (new or repeated ingest) | `index_doc`; a failure becomes an ingest warning |
 | `POST /docs/{id}/refetch`, `refresh-due` | `index_doc` after a successful fetch; failures are logged / counted in `index_failed` |
 | `PATCH active=false` / `true` | `index_doc` clears / rebuilds |
+| `PATCH title` | `index_doc` refreshes title context, including title removal; an identical title makes no embedding call |
 | Connectors `404 file not found for this url` (`SourceGone`) | `delete_doc_content`: text and chunks go together, so nothing rebuilds them. A later successful fetch stores and indexes again |
 | Any other fetch failure (timeout, 5xx, 403, an unrecognized 404) | Nothing: a transient failure is not a deletion |
 | `POST /docs/index` (`docs:index`) | Admin retry and #209's re-embed entry point (`stale_only=false, force=true`) |
 
 `list_docs_for_indexing` finds work for the admin route: active docs whose chunks are
-missing or built from an older hash, plus docs that still have chunks but should not
+missing, built from older body/title hashes, or missing title provenance, plus docs
+that still have chunks but should not
 (retired, or no content). It pages by doc id so a doc that keeps failing cannot block the
 rest. A changed embedding model is not "stale" to it: the stored model is the provider's
 resolved id, not the configured alias, so #209 forces a pass instead.

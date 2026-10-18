@@ -42,7 +42,7 @@ Connectors reachability at request time is soft for ingest but hard for refetch:
 Stored content is indexed for retrieval by embedding it through the [llm](../llm/) service's
 `POST /embed`. Configure it with `LLM_BASE_URL` and `LLM_API_KEY` (an llm key with the
 `embed` scope). Indexing runs inline after ingest, refetch, scheduled refresh, and
-`PATCH active`; it is a soft dependency, so an llm outage never fails those requests. The
+`PATCH active` or `PATCH title`; it is a soft dependency, so an llm outage never fails those requests. The
 doc stays catalogued with its content, ingest returns an `indexing failed` warning, and
 `POST /docs/index` (scope `docs:index`) retries. See "Indexing (#175)" in
 `docs/ARCHITECTURE.md`.
@@ -165,7 +165,8 @@ documentation-system/
 │       ├── 005_doc_content.py       Stores full extracted content + hash
 │       ├── 006_enable_google_content_fetch.py  Enables Google connector fetches
 │       ├── 007_source_document_access.py  Source grant provenance, expiry, sync time
-│       └── 008_doc_chunks.py      pgvector embeddings and generated keyword metadata
+│       ├── 008_doc_chunks.py      pgvector embeddings and generated keyword metadata
+│       └── 009_chunk_title_hash.py  Embedding title provenance and stale-index detection
 │
 ├── tests/                      Fast suite plus gated Postgres integration tests
 │   ├── conftest.py              build_seed_sources() — shared seed matching migration 002
@@ -184,6 +185,7 @@ documentation-system/
 │   ├── test_embed_client.py      HttpEmbedder batching and error mapping
 │   ├── test_migration_007.py     Source-access migration round trip
 │   ├── test_migration_008.py     pgvector migration, constraints, and round trip
+│   ├── test_migration_009.py     Title provenance migration and preservation of existing chunks
 │   ├── test_ingest.py
 │   ├── test_postgres_adapter.py   Integration tests (requires running Postgres; gated)
 │   ├── test_protocols.py

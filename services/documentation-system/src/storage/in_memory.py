@@ -14,6 +14,7 @@ from contracts.types import (
     SourceGrant,
 )
 from contracts.visibility import ActorContext, SEE_ALL, doc_visible
+from src.content import content_hash
 from src.retrieval import candidate_limit, fuse, keyword_density, validate_search
 from src.storage.chunks import validate_chunks_for_content, validate_doc_chunks
 
@@ -361,14 +362,22 @@ class InMemoryStorageAdapter:
         return [chunk.model_copy(deep=True) for chunk in self._chunks.get(doc_id, [])]
 
     def replace_doc_chunks_if_current(
-        self, doc_id: UUID, expected_content_hash: str, chunks: list[DocChunk]
+        self,
+        doc_id: UUID,
+        expected_content_hash: str,
+        chunks: list[DocChunk],
+        *,
+        expected_title_hash: str,
     ) -> bool:
-        validated = validate_chunks_for_content(chunks, expected_content_hash)
+        validated = validate_chunks_for_content(chunks, expected_content_hash, expected_title_hash)
         doc = self._docs.get(doc_id)
         content = self._content.get(doc_id)
         if doc is None or not doc.active or content is None:
             return False
-        if content[1] != expected_content_hash:
+        if (
+            content[1] != expected_content_hash
+            or content_hash(doc.title or "") != expected_title_hash
+        ):
             return False
         self._chunks[doc_id] = validated
         return True
@@ -395,6 +404,7 @@ class InMemoryStorageAdapter:
             return None
         return DocIndexState(
             source_content_hash=chunks[0].source_content_hash,
+            source_title_hash=chunks[0].source_title_hash,
             embedding_model=chunks[0].embedding_model,
             chunk_count=len(chunks),
         )
@@ -409,7 +419,12 @@ class InMemoryStorageAdapter:
             content = self._content.get(doc_id)
             chunks = self._chunks.get(doc_id)
             if self._docs[doc_id].active and content is not None:
-                due = not stale_only or not chunks or chunks[0].source_content_hash != content[1]
+                due = (
+                    not stale_only
+                    or not chunks
+                    or chunks[0].source_content_hash != content[1]
+                    or chunks[0].source_title_hash != content_hash(self._docs[doc_id].title or "")
+                )
             else:
                 due = bool(chunks)
             if due:

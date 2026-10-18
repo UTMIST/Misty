@@ -169,7 +169,7 @@ class StorageAdapter(Protocol):
         """Atomically replace a doc's entire chunk set; [] clears it.
 
         Validate before accessing storage: ordinals must be exactly 0..n-1
-        (input order does not matter), with one source hash and embedding model
+        (input order does not matter), with one body/title hash and embedding model
         per set. Each chunk must satisfy DocChunk's validation, including its
         MAX_CHUNK_CHARS text limit. Invalid input raises ValueError without
         changing prior rows.
@@ -194,15 +194,21 @@ class StorageAdapter(Protocol):
         ...
 
     def replace_doc_chunks_if_current(
-        self, doc_id: UUID, expected_content_hash: str, chunks: list[DocChunk]
+        self,
+        doc_id: UUID,
+        expected_content_hash: str,
+        chunks: list[DocChunk],
+        *,
+        expected_title_hash: str,
     ) -> bool:
         """replace_doc_chunks, but only while the chunks still describe the
         doc's current content: the doc exists and is active, and its stored
-        doc_content hash equals `expected_content_hash`. Checked and written in
-        one transaction, so an indexer that read older text can never replace
-        a set built from newer text. Every chunk's source_content_hash must
-        equal `expected_content_hash` (ValueError otherwise, before storage is
-        touched). False, writing nothing, when the condition does not hold.
+        doc_content hash equals `expected_content_hash`, and SHA-256 of its
+        title (None treated as empty) equals `expected_title_hash`. Checked
+        and written in one transaction, so an older body/title embedding
+        cannot replace a newer set. Every chunk must carry both expected
+        hashes (ValueError otherwise, before storage is touched). False,
+        writing nothing, when the condition does not hold.
         """
         ...
 
@@ -229,7 +235,7 @@ class StorageAdapter(Protocol):
         ...
 
     def get_doc_index_state(self, doc_id: UUID) -> DocIndexState | None:
-        """The current chunk set's source hash, model, and size; None when the
+        """The current chunk set's body/title hashes, model, and size; None when the
         doc has no chunks (or does not exist). Internal indexing state: no
         visibility predicate, never returned to API callers."""
         ...
@@ -242,8 +248,8 @@ class StorageAdapter(Protocol):
         Always includes docs that have chunks but should not (inactive, or no
         stored content), so a failed cleanup is retryable. With stale_only,
         adds active docs with content whose chunks are missing or were built
-        from a different content hash; without it, adds every active doc with
-        content (a forced full pass, e.g. after an embedding-model change).
+        from a different body/title hash (or unknown title hash); without it,
+        adds every active doc with content (a forced full pass, e.g. after an embedding-model change).
         """
         ...
 

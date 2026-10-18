@@ -85,6 +85,55 @@ def test_ingest_indexes_stored_google_content(ctx, fake_embedder):
     assert len(fake_embedder.calls) == 1
 
 
+@pytest.mark.parametrize("title", ["Renamed project 😀", None])
+def test_title_only_patch_reindexes_and_identical_title_is_unchanged(ctx, fake_embedder, title):
+    client, store, _ = ctx
+    doc_id = _ingest(client)["doc"]["id"]
+    previous = _chunks(store, doc_id)
+    response = client.patch(f"/docs/{doc_id}", headers=ADMIN, json={"title": title})
+    assert response.status_code == 200
+    assert len(fake_embedder.calls) == 2
+    assert _chunks(store, doc_id)[0].embedding != previous[0].embedding
+    assert store.get_doc_content(UUID(doc_id)) == LONG
+    assert all(c.source_content_hash == content_hash(LONG) for c in _chunks(store, doc_id))
+    assert UUID(doc_id) not in store.list_docs_for_indexing()
+
+    response = client.patch(f"/docs/{doc_id}", headers=ADMIN, json={"title": title})
+    assert response.status_code == 200
+    assert len(fake_embedder.calls) == 2
+
+
+def test_title_only_refetch_reindexes(ctx, fake_embedder):
+    client, store, fetchers = ctx
+    doc_id = _ingest(client)["doc"]["id"]
+    previous = _chunks(store, doc_id)
+    fetchers.result.title = "New upstream project title"
+    response = client.post(f"/docs/{doc_id}/refetch", headers=ADMIN)
+    assert response.status_code == 200
+    assert response.json()["title"] == fetchers.result.title
+    assert len(fake_embedder.calls) == 2
+    assert _chunks(store, doc_id)[0].embedding != previous[0].embedding
+    assert store.get_doc_content(UUID(doc_id)) == LONG
+
+
+def test_failed_title_refresh_preserves_chunks_and_default_retry_finds_it(ctx, fake_embedder):
+    client, store, _ = ctx
+    doc_id = _ingest(client)["doc"]["id"]
+    previous = _chunks(store, doc_id)
+    fake_embedder.fail_on_call = 2
+    response = client.patch(f"/docs/{doc_id}", headers=ADMIN, json={"title": "Renamed"})
+    assert response.status_code == 200
+    assert len(fake_embedder.calls) == 2
+    assert _chunks(store, doc_id) == previous
+    assert UUID(doc_id) in store.list_docs_for_indexing()
+
+    response = client.post("/docs/index", headers=ADMIN, json={})
+    assert response.status_code == 200
+    assert response.json()["indexed"] == 1
+    assert _chunks(store, doc_id)[0].embedding != previous[0].embedding
+    assert UUID(doc_id) not in store.list_docs_for_indexing()
+
+
 @pytest.mark.parametrize("model", ["openai-embed-3-small", "openai-embed-3-large"])
 def test_ingestion_and_search_share_the_configured_model(ctx, monkeypatch, model):
     from src.api import deps

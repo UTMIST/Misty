@@ -167,6 +167,8 @@ doc_chunks = Table(
     Column("start_offset", Integer, nullable=False),
     Column("end_offset", Integer, nullable=False),
     Column("source_content_hash", Text, nullable=False),
+    # NULL on pre-fingerprint chunks: keep them available but queue a refresh.
+    Column("source_title_hash", Text, nullable=True),
     Column("embedding", VECTOR(1536), nullable=False),
     Column("embedding_model", Text, nullable=False),
     Column("dimensions", Integer, nullable=False),
@@ -183,6 +185,7 @@ doc_chunks = Table(
         name="ck_doc_chunks_offsets",
     ),
     CheckConstraint("source_content_hash ~ '^[0-9a-f]{64}$'", name="ck_doc_chunks_content_hash"),
+    CheckConstraint("source_title_hash ~ '^[0-9a-f]{64}$'", name="ck_doc_chunks_title_hash"),
     CheckConstraint("embedding_model ~ '[^[:space:]]'", name="ck_doc_chunks_model"),
     CheckConstraint("dimensions = 1536", name="ck_doc_chunks_dimensions"),
     # Exact vector scans initially (#208); the PK serves per-document reads.

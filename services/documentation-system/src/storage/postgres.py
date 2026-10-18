@@ -35,6 +35,7 @@ from contracts.types import (
     SourceGrant,
 )
 from contracts.visibility import Actor, ActorContext, Channel, DENY, SEE_ALL
+from src.content import content_hash
 from src.retrieval import candidate_limit, fuse, terms, validate_search
 from src.storage.chunks import validate_chunks_for_content, validate_doc_chunks
 from src.storage.schema import (
@@ -663,15 +664,24 @@ class PostgresStorageAdapter:
         return True
 
     def replace_doc_chunks_if_current(
-        self, doc_id: UUID, expected_content_hash: str, chunks: list[DocChunk]
+        self,
+        doc_id: UUID,
+        expected_content_hash: str,
+        chunks: list[DocChunk],
+        *,
+        expected_title_hash: str,
     ) -> bool:
-        validated = validate_chunks_for_content(chunks, expected_content_hash)
+        validated = validate_chunks_for_content(chunks, expected_content_hash, expected_title_hash)
         with self._engine.begin() as conn:
             # Same parent lock as replace_doc_chunks, so chunk writers serialize.
-            active = conn.execute(
-                select(docs.c.active).where(docs.c.id == doc_id).with_for_update()
-            ).scalar_one_or_none()
-            if not active:
+            doc = conn.execute(
+                select(docs.c.active, docs.c.title).where(docs.c.id == doc_id).with_for_update()
+            ).one_or_none()
+            if (
+                doc is None
+                or not doc.active
+                or content_hash(doc.title or "") != expected_title_hash
+            ):
                 return False
             # Also lock the content row: upsert_doc_content never touches
             # `docs`, so only this lock makes it wait until the check and the
@@ -740,6 +750,7 @@ class PostgresStorageAdapter:
         # picks the shared value.
         stmt = select(
             func.min(doc_chunks.c.source_content_hash).label("source_content_hash"),
+            func.min(doc_chunks.c.source_title_hash).label("source_title_hash"),
             func.min(doc_chunks.c.embedding_model).label("embedding_model"),
             func.count().label("chunk_count"),
         ).where(doc_chunks.c.doc_id == doc_id)
@@ -756,6 +767,7 @@ class PostgresStorageAdapter:
             select(
                 doc_chunks.c.doc_id,
                 func.min(doc_chunks.c.source_content_hash).label("content_hash"),
+                func.min(doc_chunks.c.source_title_hash).label("title_hash"),
             )
             .group_by(doc_chunks.c.doc_id)
             .subquery()
@@ -769,6 +781,12 @@ class PostgresStorageAdapter:
                 or_(
                     indexed.c.content_hash.is_(None),
                     indexed.c.content_hash != doc_content.c.content_hash,
+                    indexed.c.title_hash.is_distinct_from(
+                        func.encode(
+                            func.sha256(func.convert_to(func.coalesce(docs.c.title, ""), "UTF8")),
+                            "hex",
+                        )
+                    ),
                 ),
             )
         orphaned = and_(has_chunks, or_(docs.c.active.is_(False), ~has_content))
