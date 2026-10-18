@@ -30,7 +30,7 @@ label-consistency.yml fails the build if you miss one — docs/CODE-OWNERSHIP.md
 Full list, and what each zone covers: docs/CODE-OWNERSHIP.md
 -->
 
-`discord-bot` · `packages/auth` · `services/connectors` · `services/documentation-system` · `services/llm` · `services/meeting` · `services/team-tracking` · `services/verification` · `docs` · `scripts` · `.github` · `root`
+`discord-bot` · `packages/auth` · `services/connectors` · `services/documentation-system` · `services/gateway` · `services/llm` · `services/meeting` · `services/team-tracking` · `services/verification` · `docs` · `scripts` · `.github` · `root`
 
 <!-- If this spans more than one zone, explain why it can't be split: -->
 

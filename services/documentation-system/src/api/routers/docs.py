@@ -230,8 +230,8 @@ def refresh_due_source_access(
                 actor=actor,
                 source_access_max_age_hours=settings.source_access_max_age_hours,
             )
-        except (FetchError, SourceAccessUnavailable) as e:
-            _record_failed_refetch(doc, e, storage=storage, actor=actor)
+        except (FetchError, SourceAccessUnavailable):
+            _record_failed_refetch(doc, storage=storage, actor=actor)
             failed += 1
         else:
             refreshed += 1
@@ -374,7 +374,7 @@ def refetch(
             source_access_max_age_hours=get_settings().source_access_max_age_hours,
         )
     except (FetchError, SourceAccessUnavailable) as e:
-        _record_failed_refetch(doc, e, storage=storage, actor=actor)
+        _record_failed_refetch(doc, storage=storage, actor=actor)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
     # A failure is logged and left for POST /docs/index: the doc's chunks no
     # longer match its content hash, so it is listed as stale.
@@ -383,17 +383,12 @@ def refetch(
     return get_visible_doc_or_404(doc_id, wctx, storage)
 
 
-def _record_failed_refetch(doc: Doc, error: Exception, *, storage: StorageAdapter, actor: str):
+def _record_failed_refetch(doc: Doc, *, storage: StorageAdapter, actor: str):
     storage.update_doc(
         doc.id,
         {"source_access_attempted_at": datetime.now(timezone.utc)},
         actor=actor,
     )
-    if isinstance(error, SourceGone):
-        # Confirmed deletion, not a transient failure: drop the stored text
-        # with its chunks so nothing re-indexes it. A later successful fetch
-        # (e.g. the file was re-shared) stores and indexes it again.
-        storage.delete_doc_content(doc.id)
 
 
 def _refetch_doc_source(
@@ -405,7 +400,14 @@ def _refetch_doc_source(
     actor: str,
     source_access_max_age_hours: int,
 ) -> Doc:
-    result = fetchers.fetch_for(doc.source_id, doc.url)
+    expected_content = storage.get_doc_content_meta(doc.id)
+    try:
+        result = fetchers.fetch_for(doc.source_id, doc.url)
+    except SourceGone:
+        # Remove text and chunks together only if no newer fetch stored text
+        # while this request was waiting for the connector.
+        storage.delete_doc_content(doc.id, expected=expected_content)
+        raise
     now = datetime.now(timezone.utc)
     if doc.source_id in GOOGLE_SOURCE_IDS:
         if result.permissions is None:

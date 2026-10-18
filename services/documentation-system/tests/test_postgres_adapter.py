@@ -15,6 +15,7 @@ from src.config import get_settings
 from src.ingest import ingest_doc
 from src.storage.postgres import PostgresStorageAdapter
 from tests.chunk_storage_cases import ChunkStorageCases, make_chunk, make_doc
+from tests.retrieval_cases import RetrievalCases
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_PG_TESTS") != "1", reason="set RUN_PG_TESTS=1 to run Postgres tests"
@@ -23,6 +24,28 @@ pytestmark = pytest.mark.skipif(
 
 class TestDocChunks(ChunkStorageCases):
     pass
+
+
+class TestRetrieval(RetrievalCases):
+    pass
+
+
+@pytest.mark.parametrize("visibility", [SEE_ALL, DENY, None])
+def test_retrieval_context_validation_precedes_database_access(adapter, monkeypatch, visibility):
+    from tests.retrieval_cases import embedding
+
+    def unexpected_connection():
+        pytest.fail("unscoped retrieval must fail before opening a database connection")
+
+    monkeypatch.setattr(adapter._engine, "connect", unexpected_connection)
+    with pytest.raises(ValueError):
+        adapter.search_chunks(
+            query="CPSIF",
+            embedding=embedding(),
+            visibility=visibility,
+            k=1,
+            min_cosine=0.3,
+        )
 
 
 @pytest.mark.parametrize(
@@ -77,6 +100,79 @@ def test_concurrent_chunk_replacements_never_mix_sets(adapter, already_indexed):
         futures = [pool.submit(replace, chunks) for chunks in sets]
         assert all(future.result(timeout=10) for future in futures)
     assert adapter.list_doc_chunks(doc.id) in sets
+
+
+@pytest.mark.parametrize("cleanup", ["retirement", "source_gone"])
+def test_cleanup_rechecks_after_a_concurrent_commit(adapter, cleanup):
+    doc = make_doc(adapter)
+    chunks = [make_chunk()]
+    adapter.upsert_doc_content(
+        doc.id,
+        content_text=chunks[0].chunk_text,
+        content_hash=chunks[0].source_content_hash,
+        fetched_at=None,
+    )
+    adapter.replace_doc_chunks(doc.id, chunks)
+    expected = adapter.get_doc_content_meta(doc.id)
+    if cleanup == "retirement":
+        adapter.update_doc(doc.id, {"active": False}, actor="test")
+    started = Event()
+    worker_pid = []
+    worker = local()
+    refreshed_at = datetime.now(timezone.utc)
+
+    def before_execute(conn, cursor, statement, parameters, context, executemany):
+        if getattr(worker, "cleaning", False) and not worker_pid:
+            worker_pid.append(conn.connection.driver_connection.info.backend_pid)
+            started.set()
+
+    def clean():
+        worker.cleaning = True
+        if cleanup == "retirement":
+            return adapter.clear_doc_chunks_if_unindexable(doc.id)
+        return adapter.delete_doc_content(doc.id, expected=expected)
+
+    engine = adapter._engine
+    event.listen(engine, "before_cursor_execute", before_execute)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with engine.begin() as conn:
+                # Leave the newer state uncommitted while cleanup starts.
+                if cleanup == "retirement":
+                    conn.execute(
+                        text("UPDATE docs SET active = true WHERE id = :id"), {"id": doc.id}
+                    )
+                else:
+                    conn.execute(
+                        text("UPDATE doc_content SET fetched_at = :at WHERE doc_id = :id"),
+                        {"at": refreshed_at, "id": doc.id},
+                    )
+                future = pool.submit(clean)
+                assert started.wait(5)
+                blocked = False
+                deadline = monotonic() + 5
+                while not future.done() and monotonic() < deadline:
+                    with engine.connect() as observer:
+                        blocked = observer.execute(
+                            text(
+                                "SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"
+                            ),
+                            {"pid": worker_pid[0]},
+                        ).scalar_one()
+                    if blocked:
+                        break
+                    sleep(0.01)
+                assert blocked or future.done(), "cleanup never reached the database"
+            assert future.result(timeout=5) is False
+    finally:
+        event.remove(engine, "before_cursor_execute", before_execute)
+
+    assert adapter.list_doc_chunks(doc.id) == chunks
+    assert adapter.get_doc_content(doc.id) == chunks[0].chunk_text
+    if cleanup == "retirement":
+        assert adapter.get_doc(doc.id).active
+    else:
+        assert adapter.get_doc_content_meta(doc.id).fetched_at == refreshed_at
 
 
 @pytest.fixture

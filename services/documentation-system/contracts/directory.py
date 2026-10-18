@@ -8,6 +8,14 @@ class DirectoryUnavailable(Exception):
 
 
 class DirectoryClient(Protocol):
+    def get_channel_source_team_ids(self, guild_id: str, channel_id: str) -> frozenset[UUID]:
+        """Resolve active configured teams with healthy managed Google Groups.
+
+        Empty for an unconfigured channel. Raises DirectoryUnavailable for any
+        unverified/malformed scope, never falls back to all teams.
+        """
+        ...
+
     def get_team_label(self, team_id: UUID) -> str | None:
         """Return the team's display label, or None if no such team.
         Raises DirectoryUnavailable if the directory cannot be reached."""

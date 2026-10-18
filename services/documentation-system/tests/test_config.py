@@ -20,7 +20,6 @@ def test_settings_defaults():
     assert s.api_key.get_secret_value()
     assert s.directory_api_key.get_secret_value()
     assert s.connectors_api_key.get_secret_value()
-    assert s.llm_api_key.get_secret_value()
 
 
 def test_embedding_settings(monkeypatch):
@@ -49,6 +48,29 @@ def test_verify_secrets_warns_in_production_with_default_llm_api_key(monkeypatch
     with caplog.at_level("WARNING"):
         verify_production_secrets()  # must not raise: indexing is a soft dependency
     assert any("LLM_API_KEY" in record.message for record in caplog.records)
+
+
+def test_retrieval_settings_and_secret_boundary():
+    settings = Settings(llm_api_key="embedding-secret")
+    assert settings.search_embed_model == "openai-embed-3-small"
+    assert settings.search_min_cosine == 0.3
+    assert settings.llm_api_key.get_secret_value() == "embedding-secret"
+    assert "embedding-secret" not in repr(settings)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"search_min_cosine": 0},
+        {"search_min_cosine": 1.1},
+        {"search_min_cosine": float("nan")},
+        {"search_embed_model": "unlisted"},
+        {"embed_model": "unlisted"},
+    ],
+)
+def test_invalid_retrieval_configuration_fails_at_settings_validation(changes):
+    with pytest.raises(ValueError):
+        Settings(**changes)
 
 
 # --- docs_env -----------------------------------------------------------------

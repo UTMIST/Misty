@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
+from contracts.retrieval import QueryEmbedding, SearchHit
 from contracts.types import (
     ApiKey,
     Doc,
@@ -12,7 +13,7 @@ from contracts.types import (
     Source,
     SourceGrant,
 )
-from contracts.visibility import ActorContext, SEE_ALL
+from contracts.visibility import ActorContext, RetrievalContext, SEE_ALL
 
 
 class DuplicateActiveUrl(Exception):
@@ -29,6 +30,27 @@ class StorageAdapter(Protocol):
 
     def is_ready(self) -> bool:
         """Return whether the backing store can answer a trivial query."""
+        ...
+
+    def search_chunks(
+        self,
+        *,
+        query: str,
+        embedding: QueryEmbedding,
+        visibility: RetrievalContext,
+        k: int,
+        min_cosine: float,
+    ) -> list[SearchHit]:
+        """Hybrid RRF search; no default/unfiltered visibility is allowed.
+
+        Both branches filter current grants, active documents, and the query's
+        resolved model/dimensions before their max(50,5*k) candidate limits.
+        Cosine is rounded to six decimals; keyword rank is term density.
+        A chunk qualifies at the absolute cosine floor OR by matching all
+        ASCII alphanumeric query terms. RRF constant 60; ties use doc id and
+        ordinal. Return at most k citations, possibly none. Invalid arguments
+        raise ValueError before I/O; storage errors raise RetrievalUnavailable.
+        """
         ...
 
     # Docs
@@ -184,12 +206,26 @@ class StorageAdapter(Protocol):
         """
         ...
 
-    def delete_doc_content(self, doc_id: UUID) -> bool:
+    def clear_doc_chunks_if_unindexable(self, doc_id: UUID) -> bool:
+        """Clear chunks only if the doc is still inactive or has no content.
+
+        Check and clear atomically with respect to chunk writers and changes
+        to the doc's active flag. False, without writing, if the doc is active
+        with stored content; True when cleared or the doc no longer exists.
+        A delayed cleanup must never erase a newer successful index.
+        """
+        ...
+
+    def delete_doc_content(self, doc_id: UUID, *, expected: DocContentMeta | None) -> bool:
         """Delete a doc's stored text and its chunks together, in one
         transaction; the catalog row (and its snapshot) stays. For a source
         confirmed gone: with no content there is nothing to re-index, so the
         removal sticks until a later successful fetch stores text again.
-        False when the doc does not exist; idempotent otherwise."""
+        `expected` is the content metadata read before fetching (None if
+        absent). Compare both hash and fetched_at under the write lock so a
+        delayed failure cannot delete a newer successful fetch, even when it
+        stored identical text. False without writing if metadata changed or
+        the doc does not exist; idempotent when expected is None."""
         ...
 
     def get_doc_index_state(self, doc_id: UUID) -> DocIndexState | None:

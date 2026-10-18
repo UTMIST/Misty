@@ -49,10 +49,12 @@ def _clear_settings_cache(_no_dotenv):
     get_settings.cache_clear()
     deps._directory_client.cache_clear()
     deps._embedder.cache_clear()
+    deps._embedding_client.cache_clear()
     yield
     get_settings.cache_clear()
     deps._directory_client.cache_clear()
     deps._embedder.cache_clear()
+    deps._embedding_client.cache_clear()
 
 
 @pytest.fixture(autouse=True)

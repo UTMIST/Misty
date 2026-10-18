@@ -219,6 +219,64 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
 
+  gateway-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: gateway
+          POSTGRES_PASSWORD: dev_password
+          POSTGRES_DB: gateway_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gateway -d gateway_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql+psycopg://gateway:dev_password@localhost:5432/gateway_test
+      GATEWAY_TEST_DATABASE_URL: postgresql+psycopg://gateway:dev_password@localhost:5432/gateway_test
+      RUN_PG_TESTS: "1"
+    defaults:
+      run:
+        working-directory: services/gateway
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: Smoke-test installed gateway wheel outside the checkout
+        run: |
+          wheel_check=$(mktemp -d)
+          uv build --package gateway --wheel --out-dir "$wheel_check/dist"
+          uv build --package platform-auth --wheel --out-dir "$wheel_check/dist"
+          uv export --frozen --package gateway --no-dev --no-emit-workspace \
+            --output-file "$wheel_check/requirements.txt" > /dev/null
+          uv venv "$wheel_check/venv"
+          uv pip install --python "$wheel_check/venv/bin/python" \
+            -r "$wheel_check/requirements.txt" "$wheel_check"/dist/*.whl
+          cd "$wheel_check"
+          "$wheel_check/venv/bin/python" -I -c "import src.api.app; import src.cli"
+          "$wheel_check/venv/bin/gateway-keys" --help
+      - name: Verify migration round trip
+        run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade base
+          uv run alembic upgrade head
+      - name: Run tests
+        run: uv run pytest
+      - name: Ruff check
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
   node-test:
     runs-on: ubuntu-latest
     defaults:
@@ -259,6 +317,12 @@ jobs:
         run: docker build -f services/llm/Dockerfile -t llm:ci .
       - name: Smoke-test llm image (imports resolve at boot)
         run: docker run --rm llm:ci python -c "import src.api.app"
+      - name: Build gateway image
+        run: docker build -f services/gateway/Dockerfile -t gateway:ci .
+      - name: Smoke-test gateway image (imports incl. contracts/ resolve at boot)
+        run: docker run --rm gateway:ci python -c "import src.api.app"
+      - name: Verify gateway against the current directory over HTTP
+        run: python3 services/gateway/tests/smoke_stack.py
       - name: Build discord-bot image
         run: docker build -t discord-bot:ci ./discord-bot
       - name: Smoke-test discord-bot image (source parses)

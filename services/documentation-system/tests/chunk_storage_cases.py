@@ -282,6 +282,19 @@ class ChunkStorageCases:
             )
         assert adapter.list_doc_chunks(doc.id) == original
 
+    @pytest.mark.parametrize("state", ["active", "retired", "no_content", "missing"])
+    def test_conditional_clear_preserves_indexable_docs(self, adapter, state):
+        doc = self._with_content(adapter) if state != "no_content" else make_doc(adapter)
+        chunks = [make_chunk()]
+        adapter.replace_doc_chunks(doc.id, chunks)
+        if state == "retired":
+            adapter.update_doc(doc.id, {"active": False}, actor="test")
+        doc_id = uuid4() if state == "missing" else doc.id
+
+        assert adapter.clear_doc_chunks_if_unindexable(doc_id) is (state != "active")
+        assert adapter.list_doc_chunks(doc.id) == (chunks if state in {"active", "missing"} else [])
+        assert adapter.clear_doc_chunks_if_unindexable(doc_id) is (state != "active")
+
     def test_docs_for_indexing(self, adapter):
         current = self._with_content(adapter)
         adapter.replace_doc_chunks(current.id, [make_chunk()])
@@ -312,10 +325,29 @@ class ChunkStorageCases:
     def test_delete_doc_content_removes_text_and_chunks_but_keeps_the_doc(self, adapter):
         doc = self._with_content(adapter)
         adapter.replace_doc_chunks(doc.id, [make_chunk()])
-        assert adapter.delete_doc_content(doc.id) is True
+        expected = adapter.get_doc_content_meta(doc.id)
+        assert adapter.delete_doc_content(doc.id, expected=expected) is True
         assert adapter.get_doc_content(doc.id) is None
         assert adapter.list_doc_chunks(doc.id) == []
         assert adapter.get_doc(doc.id) is not None
-        assert adapter.delete_doc_content(doc.id) is True
-        assert adapter.delete_doc_content(uuid4()) is False
+        assert adapter.delete_doc_content(doc.id, expected=None) is True
+        assert adapter.delete_doc_content(uuid4(), expected=None) is False
         assert doc.id not in adapter.list_docs_for_indexing(stale_only=False)
+
+    @pytest.mark.parametrize("change", ["text", "fetched_at", "first_fetch"])
+    def test_delete_doc_content_preserves_a_newer_fetch(self, adapter, change):
+        doc = make_doc(adapter) if change == "first_fetch" else self._with_content(adapter)
+        expected = adapter.get_doc_content_meta(doc.id)
+        text = "newer" if change == "text" else "UTMIST CPSIF"
+        adapter.upsert_doc_content(
+            doc.id,
+            content_text=text,
+            content_hash=content_hash(text),
+            fetched_at=None if change == "text" else datetime.now(timezone.utc),
+        )
+        chunks = [make_chunk(text=text)]
+        adapter.replace_doc_chunks(doc.id, chunks)
+
+        assert adapter.delete_doc_content(doc.id, expected=expected) is False
+        assert adapter.get_doc_content(doc.id) == text
+        assert adapter.list_doc_chunks(doc.id) == chunks

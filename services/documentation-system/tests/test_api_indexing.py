@@ -3,8 +3,10 @@ deletion, and the admin POST /docs/index. Offline: the autouse
 `fake_embedder` fixture stands in for the llm service."""
 
 from datetime import datetime, timezone
+import json
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -13,9 +15,11 @@ from src.api.app import create_app
 from src.api.deps import get_directory, get_fetchers, get_storage
 from src.api.hashing import generate_key
 from src.content import content_hash
+from src.embed.http_client import HttpEmbedder
+from src.embedding import HttpEmbeddingClient
 from src.storage.in_memory import InMemoryStorageAdapter
 from tests.conftest import build_seed_sources
-from tests.test_api_source_access import ADMIN, FakeDirectory, _result
+from tests.test_api_source_access import ADMIN, P1, FakeDirectory, _result
 
 URL = "https://docs.google.com/document/d/sponsors/edit"
 LONG = "\n\n".join(
@@ -79,6 +83,71 @@ def test_ingest_indexes_stored_google_content(ctx, fake_embedder):
     assert all(c.source_content_hash == content_hash(LONG) for c in chunks)
     assert all(c.chunk_text == LONG[c.start_offset : c.end_offset] for c in chunks)
     assert len(fake_embedder.calls) == 1
+
+
+@pytest.mark.parametrize("model", ["openai-embed-3-small", "openai-embed-3-large"])
+def test_ingestion_and_search_share_the_configured_model(ctx, monkeypatch, model):
+    from src.api import deps
+
+    client, store, fetchers = ctx
+    monkeypatch.setenv("LLM_API_KEY", "offline-embedding-key")
+    monkeypatch.setenv("SEARCH_EMBED_MODEL", model)
+    monkeypatch.delenv("EMBED_MODEL", raising=False)
+    deps.get_settings.cache_clear()
+    requested_models = []
+
+    def embed(request):
+        body = json.loads(request.content)
+        requested_models.append(body.get("model"))
+        assert body["model"] == model
+        return httpx.Response(
+            200,
+            json={
+                "model": model.replace("openai-embed", "text-embedding"),
+                "dimensions": 1536,
+                "embeddings": [
+                    {"index": i, "vector": [1.0] + [0.0] * 1535} for i in range(len(body["inputs"]))
+                ],
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(embed)) as http:
+        monkeypatch.setattr(
+            deps, "HttpEmbedder", lambda *a, **kw: HttpEmbedder(*a, **kw, client=http)
+        )
+        monkeypatch.setattr(
+            deps, "HttpEmbeddingClient", lambda *a, **kw: HttpEmbeddingClient(*a, **kw, client=http)
+        )
+        body = _ingest(client)
+        assert body["warnings"] == []
+        doc_id = body["doc"]["id"]
+        headers = {**_key(store, "docs:read", "act-as-user"), "X-On-Behalf-Of": str(P1)}
+
+        def search():
+            response = client.post("/search", headers=headers, json={"query": "CPSIF"})
+            assert response.status_code == 200
+            return response.json()["results"]
+
+        hits = search()
+        assert {hit["doc_id"] for hit in hits} == {doc_id}
+        assert all(hit["chunk"]["source_content_hash"] == content_hash(LONG) for hit in hits)
+        replacement = "Updated CPSIF sponsorship plan."
+        fetchers.result = _result("alice@example.com", content=replacement)
+        assert client.post(f"/docs/{doc_id}/refetch", headers=ADMIN).status_code == 200
+        assert [hit["text"] for hit in search()] == [replacement]
+        assert (
+            client.patch(f"/docs/{doc_id}", headers=ADMIN, json={"active": False}).status_code
+            == 200
+        )
+        assert search() == []
+        assert (
+            client.patch(f"/docs/{doc_id}", headers=ADMIN, json={"active": True}).status_code == 200
+        )
+        assert [hit["text"] for hit in search()] == [replacement]
+        fetchers.result = _result("bob@example.com", content=replacement)
+        assert client.post(f"/docs/{doc_id}/refetch", headers=ADMIN).status_code == 200
+        assert search() == []
+    assert len(requested_models) > 2
 
 
 def test_repeated_ingest_of_unchanged_content_embeds_nothing(ctx, fake_embedder):
@@ -165,6 +234,47 @@ def test_transient_fetch_failure_is_not_a_deletion(ctx):
 
     assert store.get_doc_content(UUID(doc_id)) == LONG
     assert _chunks(store, doc_id) == before
+
+
+@pytest.mark.parametrize("trigger", ["refetch", "ingest", "scheduled"])
+@pytest.mark.parametrize(
+    "new_text", [LONG, "Content restored after the file was re-shared."], ids=["same", "changed"]
+)
+def test_delayed_source_gone_preserves_a_newer_successful_fetch(
+    ctx, monkeypatch, trigger, new_text
+):
+    client, store, fetchers = ctx
+    doc_id = _ingest(client)["doc"]["id"]
+    original_fetch = fetchers.fetch_for
+    rebuilt = []
+
+    def delayed_gone(source_id, url):
+        monkeypatch.setattr(fetchers, "fetch_for", original_fetch)
+        fetchers.result = _result("alice@example.com", content=new_text)
+        assert client.post(f"/docs/{doc_id}/refetch", headers=ADMIN).status_code == 200
+        rebuilt.extend(_chunks(store, doc_id))
+        raise SourceGone("connectors returned 404: file not found for this url")
+
+    monkeypatch.setattr(fetchers, "fetch_for", delayed_gone)
+    if trigger == "ingest":
+        response = client.post("/docs", headers=ADMIN, json={"url": URL})
+        assert response.status_code == 200
+    elif trigger == "scheduled":
+        long_ago = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        store.update_doc(
+            UUID(doc_id),
+            {"source_access_synced_at": long_ago, "source_access_attempted_at": long_ago},
+            actor="test",
+        )
+        response = client.post("/docs/source-access/refresh-due", headers=ADMIN)
+        assert response.status_code == 200
+        assert response.json()["failed"] == 1
+    else:
+        assert client.post(f"/docs/{doc_id}/refetch", headers=ADMIN).status_code == 502
+
+    assert store.get_doc_content(UUID(doc_id)) == new_text
+    assert rebuilt
+    assert _chunks(store, doc_id) == rebuilt
 
 
 def test_repeated_ingest_seeing_deletion_removes_content(ctx):

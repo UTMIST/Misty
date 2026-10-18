@@ -28,7 +28,7 @@ override is optional in your shell):
 | `MISTY_PREVIEW_ENVIRONMENT_ID` | Literal UUID of the persistent `dev` environment; copies cannot inherit ownership. |
 | `DISCORD_TOKEN_DEV` | Dedicated dev application's bot token. |
 | `DISCORD_CLIENT_ID_DEV` | Dedicated dev application's application ID. |
-| `DISCORD_GUILD_ID_DEV` | Test guild for the dev application, including beta commands. |
+| `DISCORD_GUILD_ID_DEV` | Test guild for the dev application, including guild-scoped testing commands. |
 | `MISTY_PREVIEW_PROJECT_ID` | Optional selector-only project override; export in the shell. Defaults to Misty's project and is overridden by `--project`. The selector does not load `.env`. |
 
 See the [preview runbook](../docs/pr-previews.md) for selection, preflight checks,
@@ -178,19 +178,21 @@ gated purely by the auth layer — an unlinked user can't run gated commands, a
 linked user can. Identity is a Discord user's **global** account (snowflake), so
 a linked person is recognized in every server the bot shares with them.
 
-### Release channels (beta vs stable)
+### Registration scope (global vs testing guild)
 
-Commands are split into two channels by an `export const beta` flag:
+The internal `beta` flag selects registration scope independently of feature
+status. A feature labeled **in progress** can still register globally; `/qna`
+does so with `beta = false`:
 
 - **Stable** (`beta = false` or omitted) — registered **globally**, available in
   every server the bot is in (production).
-- **Beta** (`beta = true`) — registered **only** to the dedicated testing guild
+- **Testing-guild only** (`beta = true`) — registered **only** to the dedicated testing guild
   (`DISCORD_GUILD_ID`), so a new command can be trialed in the test server without
   ever reaching production. Promote it by flipping `beta` to `false`.
 
-`npm run register` sends stable commands globally and beta commands to the test
-guild exclusively (re-running also clears stale/promoted beta commands from the
-guild). If any command is beta and `DISCORD_GUILD_ID` is unset, registration warns
+`npm run register` sends global commands to every server and testing commands to the test
+guild exclusively (re-running also clears stale/promoted testing commands from the
+guild). If any command is testing-guild only and `DISCORD_GUILD_ID` is unset, registration warns
 and skips them.
 
 > **Local vs. Railway.** `npm run register` uses `--env-file=.env`, so it targets
@@ -204,6 +206,27 @@ and skips them.
 > production. See [RAILWAY-DEPLOYMENT.md §5](../docs/RAILWAY-DEPLOYMENT.md).
 
 ## Commands
+
+- `/qna question:<text>` (**public policy**, **in progress: available globally**) —
+  privately answers from the current recording's last 15 minutes of finalized
+  transcript. Run it in the exact text channel where recording started; threads
+  are separate channels. Replies identify the meeting using the exact minutes PDF
+  filename: `<sanitized name>_YYYY-MM-DD_HHMM.pdf`, or
+  `meeting_YYYY-MM-DD_HHMM.pdf` when no usable name is supplied. Both use the same
+  filename function and recording start time in America/Toronto, followed by
+  references and the time range used. An accepted question keeps its original meeting name
+  even if a new recording starts before its answer arrives.
+  Dense windows use less recent history and explicitly disclose
+  the shorter range. No account linking, directory lookup, or Q&A history is used.
+  The window and size/error contract are documented in the
+  [meeting API](../services/meeting/docs/API.md#post-meetingssession_idqna).
+  It works in every server with an active recording; `DISCORD_GUILD_ID` is not
+  required and no testing-guild restriction is applied.
+  The bot defers replies privately and gives the backend request a 75-second
+  deadline, including response-body reading. If the dedicated Q&A capacity is
+  full, it replies privately that Q&A is busy and asks you to retry shortly.
+  The playground only explains where
+  to invoke the command; it does not simulate an active recording.
 
 - `/link email:<your UTMIST email>` (public) — starts linking your Discord account
   to your directory record. Your email must already be in the directory (execs seed
@@ -266,6 +289,9 @@ and skips them.
 
 Every command is on the **stable** channel (`beta = false`), so they all register
 globally in every server the bot is in. There are currently no beta commands.
+This includes `/qna`; its **in progress** label is informational. The handler uses the invoking
+server's active meeting and exact recording text channel, with no testing-guild
+restriction or user-level permission check.
 
 > `/record` requires the `meeting` service to be deployed in the target
 > environment, with `MEETING_BASE_URL` + `MEETING_API_KEY` set on the bot. It was
@@ -317,7 +343,7 @@ parallel to team-tracking's scoped-key auth.
    - Discord app credentials (`DISCORD_TOKEN`, `DISCORD_CLIENT_ID`).
    - `DISCORD_GUILD_ID` — dedicated testing guild ID. **Beta** commands register
      exclusively here; stable commands are always global. Required only if you
-     have beta commands (see "Release channels" above).
+     have testing-guild-only commands (see "Registration scope" above).
    - `DIRECTORY_BASE_URL` (e.g. `http://localhost:8000`).
    - `DIRECTORY_API_KEY` — issue one from team-tracking:
      ```bash
@@ -343,8 +369,8 @@ parallel to team-tracking's scoped-key auth.
 3. `npm install`
 4. `npm run register` — registers the slash commands (run once, or whenever
    command definitions change). **Stable** commands go global (can take ~1h to
-   propagate); **beta** commands go only to the testing guild. See "Release
-   channels" above.
+   propagate); **testing-guild-only** commands go only to that guild. See
+   "Registration scope" above.
 5. `npm start` — then invite the bot to any server via its OAuth2 URL.
 
 ## Helper-bot request limits
@@ -540,12 +566,13 @@ local `.env`.
 | `src/commands/*.js` | Surface-neutral command handlers + registry. |
 | `src/index.js` | Client setup + interaction routing. |
 | `src/helperFlow.js` | Shared helper-bot authorization and answer handling used by Discord and the web playground. |
-| `src/registerCommands.js` | Slash-command registration (stable → global; beta → testing guild only). Runs as Railway's persistent-environment `preDeployCommand`; ephemeral PR copies use the [preview override](../docs/pr-previews.md#automatic-railway-pr-environments). `npm run register` runs it locally. |
+| `src/registerCommands.js` | Slash-command registration (global by default; testing-guild only when `beta = true`). Runs as Railway's persistent-environment `preDeployCommand`; ephemeral PR copies use the [preview override](../docs/pr-previews.md#automatic-railway-pr-environments). `npm run register` runs it locally. |
 | `src/defineCommand.js` | Neutral, surface-agnostic command factory. |
 | `src/adapters/discord/index.js` | Discord event wiring; dispatches to the router or dedicated recording handler. |
 | `src/adapters/discord/interactions.js` | Convert interactions to neutral intents and deliver replies. |
 | `src/adapters/discord/mentions.js` | Mention and reply helper with thread history. |
 | `src/adapters/discord/recording.js` | Dedicated `/record` interaction path and its authorization. |
+| `src/adapters/discord/qna.js` | Private in-progress `/qna` interaction path, with recording-channel context and no directory lookup. |
 | `src/adapters/discord/voice.js` | Voice occupancy, meeting prompts, and recording auto-stop. |
 | `src/adapters/discord/meetingPosts.js` | Meeting notifications and minutes attachments. |
 | `scripts/dev-web.js` | Orchestrator: ephemeral scratch DB + scratch team-tracking + web server. |

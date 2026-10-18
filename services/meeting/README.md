@@ -86,10 +86,11 @@ Every **protected** endpoint (HTTP and WS) requires `X-API-Key` + the `meetings`
 |--------|------|-------------|
 | GET | `/health` | Liveness probe → `{"status": "ok"}`. No auth. |
 | GET | `/meetings/{id}/transcript` | Poll the rolling transcript for an active session → `TranscriptView`. |
+| POST | `/meetings/{id}/qna` | Ask about finalized speech in the last 15 minutes → `QnaResponse`. See the [Q&A contract](docs/API.md#post-meetingssession_idqna). |
 | POST | `/meetings/{id}/stop` | End the session: close the Transcribe streams, finalize transcript, generate minutes + PDF, tear the session down → `StopResponse`. |
 | WS | `/meetings/{id}/stream` | Live audio ingest + control channel (see below). |
 
-`{id}` (`session_id`) must match `^[A-Za-z0-9_-]{1,64}$`. (The service writes nothing to disk, so this is input hygiene rather than path safety — see `test_session_lifecycle_never_touches_the_filesystem`.) A `session_id` unknown to the in-memory registry (never started, already stopped, or the process restarted) returns **404** on `/transcript` and `/stop`.
+`{id}` (`session_id`) must match `^[A-Za-z0-9_-]{1,64}$`. (The service writes nothing to disk, so this is input hygiene rather than path safety — see `test_session_lifecycle_never_touches_the_filesystem`.) A `session_id` unknown to the in-memory registry (never started, already stopped, or the process restarted) returns **404** on `/transcript`, `/qna`, and `/stop`.
 
 **`GET /meetings/{id}/transcript` → `TranscriptView`:** `{"segments": [{"speaker", "start_ms", "text"}, ...]}`. Reads whatever each speaker's live Transcribe stream has finalized so far. Polling is **free** — no AWS call, no audio re-sent — so it can be polled as often as you like. It is a cumulative view, not a diff/append stream.
 

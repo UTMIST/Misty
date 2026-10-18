@@ -80,6 +80,7 @@ def _refresh_existing_source_access(
     if source is None or not source.content_fetch_enabled:
         return []
     warnings: list[str] = []
+    expected_content = storage.get_doc_content_meta(existing.id)
     try:
         result = fetchers.fetch_for(existing.source_id, existing.url)
         if result.permissions is None:
@@ -94,8 +95,10 @@ def _refresh_existing_source_access(
         if isinstance(e, SourceGone):
             # Same rule as refetch: a confirmed deletion drops the stored text
             # and its chunks so nothing re-indexes it.
-            storage.delete_doc_content(existing.id)
-            return [f"source file not found ({e}); stored content and search index removed"]
+            removed = storage.delete_doc_content(existing.id, expected=expected_content)
+            if removed:
+                return [f"source file not found ({e}); stored content and search index removed"]
+            return [f"source file not found ({e}); a newer content fetch was retained"]
         return [f"source access refresh failed ({e}); prior source grants retained"]
 
     warnings.extend(result.warnings)

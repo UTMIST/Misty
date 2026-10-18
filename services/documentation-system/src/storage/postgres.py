@@ -1,11 +1,28 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from sqlalchemy import and_, delete, false, func, insert, or_, select, text, update
+from sqlalchemy import (
+    Float,
+    Numeric,
+    and_,
+    cast,
+    delete,
+    false,
+    func,
+    insert,
+    literal,
+    literal_column,
+    or_,
+    select,
+    text,
+    union_all,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from contracts.retrieval import ChunkCitation, RetrievalUnavailable, SearchHit
 from contracts.storage import DuplicateActiveUrl
 from contracts.types import (
     ApiKey,
@@ -17,7 +34,8 @@ from contracts.types import (
     Source,
     SourceGrant,
 )
-from contracts.visibility import Actor, ActorContext, DENY, SEE_ALL
+from contracts.visibility import Actor, ActorContext, Channel, DENY, SEE_ALL
+from src.retrieval import candidate_limit, fuse, terms, validate_search
 from src.storage.chunks import validate_chunks_for_content, validate_doc_chunks
 from src.storage.schema import (
     api_keys,
@@ -87,6 +105,18 @@ class PostgresStorageAdapter:
             return None
         if ctx is DENY:
             return false()
+        if isinstance(ctx, Channel):
+            return (
+                select(doc_grants.c.id)
+                .where(
+                    doc_grants.c.doc_id == docs.c.id,
+                    doc_grants.c.origin == "google_drive",
+                    doc_grants.c.expires_at > func.now(),
+                    doc_grants.c.grantee_type == "team",
+                    doc_grants.c.grantee_id.in_(list(ctx.source_team_ids)),
+                )
+                .exists()
+            )
         actor: Actor = ctx
         team_ids = list(actor.team_ids)
         grant_exists = (
@@ -121,6 +151,111 @@ class PostgresStorageAdapter:
             .exists()
         )
         return grant_exists
+
+    def search_chunks(self, *, query, embedding, visibility, k, min_cosine) -> list[SearchHit]:
+        embedding = validate_search(query, embedding, visibility, k, min_cosine)
+        # One statement/snapshot for both paths. Materializing the authorized
+        # corpus prevents either top-k branch from ranking invisible rows.
+        eligible = (
+            select(
+                docs.c.id.label("doc_id"),
+                docs.c.title,
+                docs.c.url,
+                docs.c.source_id,
+                doc_chunks.c.ordinal,
+                doc_chunks.c.start_offset,
+                doc_chunks.c.end_offset,
+                doc_chunks.c.source_content_hash,
+                doc_chunks.c.chunk_text,
+                doc_chunks.c.embedding,
+            )
+            .select_from(doc_chunks.join(docs, docs.c.id == doc_chunks.c.doc_id))
+            .where(
+                docs.c.active.is_(True),
+                self._visibility_clause(visibility),
+                doc_chunks.c.embedding_model == embedding.model,
+                doc_chunks.c.dimensions == embedding.dimensions,
+            )
+            .cte("eligible")
+            .prefix_with("MATERIALIZED")
+        )
+        columns = [c for c in eligible.c if c.name != "embedding"]
+        tie = (eligible.c.doc_id, eligible.c.ordinal)
+        cosine = cast(
+            func.round(
+                cast(1 - eligible.c.embedding.cosine_distance(embedding.vector), Numeric), 6
+            ),
+            Float,
+        )
+        vector = (
+            select(*columns, literal("vector").label("branch"), cosine.label("branch_score"))
+            .where(
+                func.vector_norm(eligible.c.embedding) > 0,
+                cosine >= min_cosine,
+            )
+            .order_by(cosine.desc(), *tie)
+            .limit(candidate_limit(k))
+            .subquery("vector_hits")
+        )
+        branches = [select(vector)]
+        wanted = sorted(set(terms(query)))
+        if wanted:
+            # The same explicit tokenization as the offline adapter. Runtime
+            # normalization avoids silently differing email/hyphen parsers.
+            normalized = func.btrim(
+                func.lower(
+                    func.regexp_replace(
+                        eligible.c.chunk_text.collate("C"), "[^A-Za-z0-9]+", " ", "g"
+                    )
+                )
+            )
+            tokens = func.string_to_array(normalized, " ")
+            density = cast(
+                sum(func.cardinality(func.array_positions(tokens, term)) for term in wanted), Float
+            ) / func.greatest(func.cardinality(tokens), 1)
+            config = literal_column("'simple'::regconfig")
+            matches = func.to_tsvector(config, normalized).op("@@")(
+                func.plainto_tsquery(config, " ".join(wanted))
+            )
+            keyword = (
+                select(*columns, literal("keyword").label("branch"), density.label("branch_score"))
+                .where(matches)
+                .order_by(density.desc(), *tie)
+                .limit(candidate_limit(k))
+                .subquery("keyword_hits")
+            )
+            branches.append(select(keyword))
+        try:
+            with self._engine.connect() as conn:
+                merged = union_all(*branches).subquery("candidates")
+                rows = (
+                    conn.execute(
+                        select(merged).order_by(
+                            merged.c.branch,
+                            merged.c.branch_score.desc(),
+                            merged.c.doc_id,
+                            merged.c.ordinal,
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+        except SQLAlchemyError as exc:
+            raise RetrievalUnavailable("retrieval storage unavailable") from exc
+        ranked = {"vector": [], "keyword": []}
+        for row in rows:
+            ranked[row["branch"]].append(
+                SearchHit(
+                    doc_id=row["doc_id"],
+                    title=row["title"],
+                    url=row["url"],
+                    source_id=row["source_id"],
+                    text=row["chunk_text"],
+                    score=0,
+                    chunk=ChunkCitation(**{name: row[name] for name in ChunkCitation.model_fields}),
+                )
+            )
+        return fuse(ranked["vector"], ranked["keyword"], k)
 
     def _grants_for(self, conn, doc_id: UUID) -> list[DocGrant]:
         rows = conn.execute(
@@ -561,13 +696,40 @@ class PostgresStorageAdapter:
                 [{"doc_id": doc_id, **chunk.model_dump()} for chunk in validated],
             )
 
-    def delete_doc_content(self, doc_id: UUID) -> bool:
+    def clear_doc_chunks_if_unindexable(self, doc_id: UUID) -> bool:
+        with self._engine.begin() as conn:
+            # Share the chunk writers' parent lock and recheck eligibility
+            # after acquiring it. A newer successful index must survive a
+            # cleanup based on an old inactive/contentless snapshot.
+            active = conn.execute(
+                select(docs.c.active).where(docs.c.id == doc_id).with_for_update()
+            ).scalar_one_or_none()
+            if active is None:
+                return True
+            if active:
+                content_id = conn.execute(
+                    select(doc_content.c.doc_id).where(doc_content.c.doc_id == doc_id)
+                ).scalar_one_or_none()
+                if content_id is not None:
+                    return False
+            conn.execute(delete(doc_chunks).where(doc_chunks.c.doc_id == doc_id))
+        return True
+
+    def delete_doc_content(self, doc_id: UUID, *, expected: DocContentMeta | None) -> bool:
         with self._engine.begin() as conn:
             # The chunk writers' parent lock: no index write can interleave.
             existing = conn.execute(
                 select(docs.c.id).where(docs.c.id == doc_id).with_for_update()
             ).scalar_one_or_none()
             if existing is None:
+                return False
+            row = conn.execute(
+                select(doc_content.c.content_hash, doc_content.c.fetched_at)
+                .where(doc_content.c.doc_id == doc_id)
+                .with_for_update()
+            ).one_or_none()
+            current = DocContentMeta(**row._mapping) if row is not None else None
+            if current != expected:
                 return False
             conn.execute(delete(doc_chunks).where(doc_chunks.c.doc_id == doc_id))
             conn.execute(delete(doc_content).where(doc_content.c.doc_id == doc_id))

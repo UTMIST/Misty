@@ -34,7 +34,7 @@ about the service in a real (staging / production) environment.
 ## Environment variables
 
 All configuration is env-driven (`src/config.py`, loaded from the process environment or a
-`.env` file). Twelve variables:
+`.env` file):
 
 | Env var | Setting | Default | Purpose |
 |---------|---------|---------|---------|
@@ -44,15 +44,17 @@ All configuration is env-driven (`src/config.py`, loaded from the process enviro
 | `DIRECTORY_API_KEY` | `directory_api_key` | `dev-api-key-change-me` | API key this service uses to call the directory |
 | `CONNECTORS_BASE_URL` | `connectors_base_url` | `http://localhost:8005` | Base URL of the connectors service (fetches Google source content) |
 | `CONNECTORS_API_KEY` | `connectors_api_key` | `dev-api-key-change-me` | API key this service uses to call connectors. **Should be overridden outside `local`**, but it's a soft dependency — `verify_production_secrets()` only logs a startup warning on the dev default, it does not refuse to boot (see [`src/config.py`](../src/config.py)). |
-| `LLM_BASE_URL` | `llm_base_url` | `http://localhost:8002` | Base URL of the llm service, whose `POST /embed` indexes stored content |
-| `LLM_API_KEY` | `llm_api_key` | `dev-api-key-change-me` | llm key with the `embed` scope. Soft dependency like `CONNECTORS_API_KEY`: the dev default outside `local` logs a startup warning, not a boot refusal. |
-| `EMBED_MODEL` | `embed_model` | unset | llm-side embedding alias (e.g. `openai-embed-3-small`); unset uses the llm service's `EMBED_MODEL`. Changing models means re-embedding everything (#209). |
-| `EMBED_MAX_REQUEST_CHARS` | `embed_max_request_chars` | `400000` | Characters per `/embed` request. Keep at or below the llm service's own `EMBED_MAX_REQUEST_CHARS`, or large docs fail to index. |
+| `LLM_BASE_URL` | `llm_base_url` | `http://localhost:8002` | Platform LLM `/embed` endpoint host. |
+| `LLM_API_KEY` | `llm_api_key` | empty | Secret `embed`-scoped LLM key; missing key keeps catalog operations available but search returns 503. |
+| `SEARCH_EMBED_MODEL` | `search_embed_model` | `openai-embed-3-small` | Query model alias; also supports `openai-embed-3-large`, both at 1536 dimensions. |
+| `SEARCH_MIN_COSINE` | `search_min_cosine` | `0.3` | Absolute vector floor in `(0,1]`; complete keyword matches qualify independently. |
+| `EMBED_MODEL` | `embed_model` | unset | Optional indexing model alias; unset uses `SEARCH_EMBED_MODEL`. An override must match the search model before its chunks can be retrieved. Changing models requires re-embedding (#209). |
+| `EMBED_MAX_REQUEST_CHARS` | `embed_max_request_chars` | `400000` | Characters per indexing `/embed` request. Keep at or below the llm service's own limit. |
 | `SOURCE_ACCESS_REFRESH_AFTER_HOURS` | `source_access_refresh_after_hours` | `24` | A Google doc becomes due for ACL/content refresh after this interval. |
 | `SOURCE_ACCESS_MAX_AGE_HOURS` | `source_access_max_age_hours` | `48` | Source-derived grants expire and stop authorizing reads after this interval without a complete successful sync. Must exceed the refresh interval. |
 
 The directory key needs read-only scopes `people:read`, `teams:read`, `memberships:read`,
-and `identifiers:read`. The provisioning script issues exactly these; no directory write
+`identifiers:read`, and `channels:read`. The provisioning script issues these; no directory write
 scope is required.
 
 Staging + production values live in **Railway** — set per environment via the
@@ -68,6 +70,40 @@ the runbook) to enable Google-source content.
 > `CONNECTORS_API_KEY` is different: a default there only logs a startup
 > warning — the service still boots, it just can't fetch Google-source
 > content (see "The connectors dependency" below).
+
+## Authorized retrieval
+
+Provision the documentation-system directory key again to add `channels:read`;
+keep its existing read scopes for person access and source reconciliation.
+Consumers need `docs:read` and literal `act-as-user` for person/DM searches,
+or literal `act-as-channel` for channel searches. Neither literal scope is
+implied by admin. Issue the minimum appropriate key, for example:
+
+```bash
+uv --project services/documentation-system run doc-keys issue --name member-search --scopes docs:read act-as-user
+uv --project services/documentation-system run doc-keys issue --name helper-search --scopes docs:read act-as-user act-as-channel
+uv --project services/llm run llm-keys --name documentation-system --scopes embed
+```
+
+Run from the repository root. Append the last key to LLM's `CONSUMER_KEYS` and
+set it as this service's `LLM_API_KEY`; set `LLM_BASE_URL` to that environment's
+private LLM URL. All actual provider credentials stay in the LLM service.
+`LLM_API_KEY` is deliberately a soft boot dependency: a missing value logs a
+warning outside local mode and search returns 503 before any outbound call.
+Catalog operations remain available during rollout. A bad nonempty key yields
+a safe embedding dependency error; no keyword-only fallback is enabled.
+
+Seed/index chunks with the resolved model matching `SEARCH_EMBED_MODEL`:
+`openai-embed-3-small` -> `text-embedding-3-small`, or
+`openai-embed-3-large` -> `text-embedding-3-large`. Both use 1536 dimensions.
+Switching the query model hides incompatible old chunks from both branches
+until reindexing; it never compares them or silently falls back. The absolute
+relevance floor starts at 0.3 and needs #178 calibration before quality claims.
+
+No migration or unfiltered-search feature flag is needed. Use the shared
+[contract fixture](API.md#authorized-retrieval-post-search) for consumer mocks;
+this issue proves seeded retrieval, while #277 (index lifecycle) and #278
+(real person/DM/channel integration) remain release gates.
 
 ## Postgres
 
@@ -358,13 +394,13 @@ Stored content is indexed for retrieval by calling the [llm](../../llm/) service
 `POST /embed` (see "Indexing (#175)" in [ARCHITECTURE.md](ARCHITECTURE.md)). It is a soft
 dependency everywhere:
 
-- **At boot:** a dev-default `LLM_API_KEY` outside `local` logs a warning; the service starts.
+- **At boot:** an empty or dev-default `LLM_API_KEY` outside `local` logs a warning; the service starts.
 - **At request time:** indexing runs inline after ingest, refetch, scheduled refresh, and
   `PATCH active`. If the llm service is down, rate-limited, or rejects the request, the
   triggering request still succeeds and nothing is written to the index: ingest returns an
   `indexing failed (...)` warning, refresh-due counts `index_failed`, and refetch/`PATCH`
   log it. The doc's previous chunks (if any) stay intact.
-- **Retry:** call `POST /docs/index` with a `docs:index` key. With no body it pages through
+- **Retry:** call `POST /docs/index` with a `docs:index` key. With body `{}` it pages through
   every doc whose chunks are missing, stale, or orphaned; repeat with `after: next_after`
   until `next_after` is null. Nothing schedules this — run it after an llm outage or from
   the same scheduler as refresh-due if failures are routine. Re-embedding after a model

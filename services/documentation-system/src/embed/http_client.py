@@ -2,11 +2,12 @@ import httpx
 
 from contracts.embedder import EmbedBatch, EmbedderRejected, EmbedderUnavailable
 
-# Mirrors services/llm/contracts/embed.py (MAX_BATCH_INPUTS) and the llm
+# Mirrors services/llm/contracts/embed.py (batch and per-input limits) and the llm
 # service's EMBED_MAX_REQUEST_CHARS default. Copied, not imported: services
 # never import each other. If the llm side lowers either limit, /embed 422s
 # and the indexer reports a non-retryable failure until these follow.
 MAX_BATCH_INPUTS = 96
+MAX_INPUT_CHARS = 32_000
 # The width of doc_chunks.embedding (migration 008). A model with another
 # width needs a migration, not a silent truncation.
 EMBEDDING_DIMENSIONS = 1536
@@ -37,6 +38,9 @@ class HttpEmbedder:
         self._client = client or httpx.Client(timeout=_TIMEOUT)
 
     def embed(self, inputs: list[str]) -> EmbedBatch:
+        # Validate the whole document first: a bad input in a later batch must
+        # not waste paid embeddings from earlier batches that we cannot save.
+        self._validate_inputs(inputs)
         vectors: list[tuple[float, ...]] = []
         model: str | None = None
         for batch in self._batches(inputs):
@@ -52,6 +56,22 @@ class HttpEmbedder:
         if model is None:
             raise EmbedderRejected("no inputs to embed")
         return EmbedBatch(vectors=tuple(vectors), model=model, dimensions=EMBEDDING_DIMENSIONS)
+
+    def _validate_inputs(self, inputs: list[str]) -> None:
+        if not inputs:
+            raise EmbedderRejected("no inputs to embed")
+        for i, text in enumerate(inputs):
+            if not isinstance(text, str) or not text.strip():
+                raise EmbedderRejected(f"input {i} must be a nonblank string")
+            if len(text) > MAX_INPUT_CHARS:
+                raise EmbedderRejected(f"input {i} exceeds the {MAX_INPUT_CHARS}-character limit")
+            if len(text) > self._max_request_chars:
+                raise EmbedderRejected(f"input {i} exceeds EMBED_MAX_REQUEST_CHARS")
+            try:
+                text.encode("utf-8")
+            except UnicodeEncodeError:
+                # Input text must never appear in the error or log.
+                raise EmbedderRejected(f"input {i} must be valid UTF-8") from None
 
     def _batches(self, inputs: list[str]) -> list[list[str]]:
         batches: list[list[str]] = []

@@ -1,17 +1,21 @@
 from dataclasses import replace
+import json
 from uuid import uuid4
 
+import httpx
 import pytest
 from sqlalchemy.exc import OperationalError
 
 from contracts.embedder import EmbedderRejected
 from src.chunking import chunk_text
 from src.content import content_hash
+from src.embed.http_client import HttpEmbedder
 from src.indexing import clear_doc_index, embedding_input, index_doc, index_warning
 from src.storage.in_memory import InMemoryStorageAdapter
 from tests.chunk_storage_cases import make_doc
 from tests.conftest import build_seed_sources
 from tests.fake_embedder import FAKE_MODEL, FakeEmbedder, fake_vector
+from tests.test_embed_client import _ok
 
 # The shape the connectors Google Docs extractor stores: markdown headings,
 # paragraphs, and lists. Long enough for several ~500-token chunks.
@@ -80,6 +84,44 @@ def test_embedding_input_adds_title_and_heading_path():
     assert embedding_input("Sponsors", chunk) == "Sponsors\nGuide > Tiers\n\nGold tier."
     no_heading = replace(chunk, heading_path=())
     assert embedding_input("Sponsors", no_heading) == "Sponsors\n\nGold tier."
+
+
+@pytest.mark.parametrize("title", [None, "Long title " * 4_000], ids=["no-title", "long-title"])
+def test_long_context_indexes_without_changing_source_chunks(storage, title):
+    # A late long heading used to fail after an earlier batch had been paid
+    # for. Use enough ordinary text to cross the HTTP client's batch boundary.
+    text = (
+        "\n\n".join("ordinary paragraph " * 100 for _ in range(100))
+        + "\n\n# "
+        + "long heading " * 3_000
+        + "\n\nFinal paragraph."
+    )
+    doc = _doc(storage, text)
+    storage.update_doc(doc.id, {"title": title}, actor="test")
+    inputs = []
+
+    def embed(request):
+        body = json.loads(request.content)
+        if any(len(value) > 32_000 for value in body["inputs"]):
+            return httpx.Response(422, json={"detail": "input exceeds the LLM character limit"})
+        inputs.extend(body["inputs"])
+        return _ok(body["inputs"])
+
+    with httpx.Client(transport=httpx.MockTransport(embed)) as client:
+        outcome = index_doc(
+            doc.id, storage=storage, embedder=HttpEmbedder("http://llm", "k", client=client)
+        )
+
+    assert outcome.status == "indexed"
+    stored = storage.list_doc_chunks(doc.id)
+    assert len(stored) > 96
+    assert len(inputs) == len(stored)
+    assert storage.get_doc_content(doc.id) == text
+    for value, chunk in zip(inputs, stored, strict=True):
+        assert value.endswith("\n\n" + chunk.chunk_text)
+        assert len(value) - len(chunk.chunk_text) <= 1_002  # bounded context + separator
+        assert chunk.chunk_text == text[chunk.start_offset : chunk.end_offset]
+        assert chunk.source_content_hash == content_hash(text)
 
 
 def test_reindexing_unchanged_content_makes_no_call_and_no_duplicates(storage, embedder):
@@ -162,6 +204,38 @@ def test_embedding_failure_keeps_the_previous_set_and_is_retryable(storage):
     retried = index_doc(doc.id, storage=storage, embedder=failing)
     assert retried.status == "indexed"
     assert storage.list_doc_chunks(doc.id)[-1].chunk_text.endswith("A new closing paragraph.")
+
+
+@pytest.mark.parametrize("stale_state", ["retired", "no_content"])
+def test_delayed_cleanup_preserves_a_newer_successful_index(
+    storage, embedder, monkeypatch, stale_state
+):
+    doc = _doc(storage)
+    if stale_state == "retired":
+        storage.update_doc(doc.id, {"active": False}, actor="test")
+        read_name = "get_doc"
+    else:
+        storage.delete_doc_content(doc.id, expected=storage.get_doc_content_meta(doc.id))
+        read_name = "get_doc_content"
+    original_read = getattr(storage, read_name)
+    rebuilt = []
+
+    def read_then_rebuild(doc_id, **kwargs):
+        stale = original_read(doc_id, **kwargs)
+        monkeypatch.setattr(storage, read_name, original_read)
+        storage.update_doc(doc_id, {"active": True}, actor="test")
+        _store(storage, doc_id, "Fresh content from a completed refetch.")
+        assert index_doc(doc_id, storage=storage, embedder=embedder).status == "indexed"
+        rebuilt.extend(storage.list_doc_chunks(doc_id))
+        return stale
+
+    monkeypatch.setattr(storage, read_name, read_then_rebuild)
+
+    outcome = index_doc(doc.id, storage=storage, embedder=embedder)
+
+    assert outcome.status == "skipped"
+    assert rebuilt
+    assert storage.list_doc_chunks(doc.id) == rebuilt
 
 
 def test_rejected_embedding_is_a_failure_not_an_exception(storage):

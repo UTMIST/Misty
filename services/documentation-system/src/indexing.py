@@ -33,6 +33,10 @@ from src.content import content_hash
 
 logger = logging.getLogger(__name__)
 
+# Context supplements the ~2,000-character source chunk. Bound it separately
+# so long titles/headings cannot dominate each request or exceed /embed limits.
+MAX_CONTEXT_CHARS = 1_000
+
 IndexStatus = Literal["indexed", "unchanged", "cleared", "skipped", "failed"]
 
 
@@ -58,9 +62,10 @@ def index_doc(
         doc = storage.get_doc(doc_id)
         text = storage.get_doc_content(doc_id) if doc is not None and doc.active else None
         if text is None:
-            # Missing, retired, or never fetched: nothing may stay searchable.
-            storage.replace_doc_chunks(doc_id, [])
-            return IndexOutcome("cleared")
+            # Recheck under the chunk writers' lock: a concurrent reactivation
+            # or refetch may already have rebuilt the index since our read.
+            cleared = storage.clear_doc_chunks_if_unindexable(doc_id)
+            return IndexOutcome("cleared") if cleared else _skipped()
 
         # Hash the text we actually chunk, so the conditional write compares
         # the stored hash against exactly what these chunks were built from.
@@ -103,12 +108,19 @@ def index_doc(
         return _failed(doc_id, f"index write failed: {type(e).__name__}")
 
 
-def embedding_input(title: str, chunk: Chunk) -> str:
+def embedding_input(title: str | None, chunk: Chunk) -> str:
     """The text sent to /embed for a chunk: the doc title and heading path as
     context, then the chunk. Added here, at index time, and never stored in
-    chunk_text, so stored offsets still point at the exact source text."""
-    context = [title, " > ".join(chunk.heading_path)]
-    return "\n".join(part for part in context if part) + "\n\n" + chunk.text
+    chunk_text, so stored offsets still point at the exact source text. Only
+    the added context is truncated; the source chunk is always kept whole."""
+    # Slice each field before joining, avoiding large temporary strings for
+    # every chunk in a document with an unusually long heading.
+    context = [
+        title[:MAX_CONTEXT_CHARS] if title else "",
+        " > ".join(heading[:MAX_CONTEXT_CHARS] for heading in chunk.heading_path),
+    ]
+    prefix = "\n".join(part for part in context if part)[:MAX_CONTEXT_CHARS]
+    return prefix + "\n\n" + chunk.text
 
 
 def clear_doc_index(doc_id: UUID, *, storage: StorageAdapter) -> IndexOutcome:

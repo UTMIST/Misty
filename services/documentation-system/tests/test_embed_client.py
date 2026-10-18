@@ -89,10 +89,50 @@ def test_splits_at_the_request_character_budget():
     embedder = HttpEmbedder(
         "http://llm", "k", max_request_chars=10, client=_client(_recording_handler(requests))
     )
-    embedder.embed(["aaaa", "bbbb", "cccc", "dddddddddddd"])
-    # An input larger than the budget still goes alone; /embed's own per-input
-    # cap is the authority on whether it is too large.
-    assert [r["inputs"] for r in requests] == [["aaaa", "bbbb"], ["cccc"], ["dddddddddddd"]]
+    embedder.embed(["aaaa", "bbbb", "cccc", "dddddddddd"])
+    assert [r["inputs"] for r in requests] == [["aaaa", "bbbb"], ["cccc"], ["dddddddddd"]]
+    assert all(sum(map(len, r["inputs"])) <= 10 for r in requests)
+
+
+@pytest.mark.parametrize(
+    "invalid,budget",
+    [
+        ("x" * 32_001, 400_000),
+        ("x" * 11, 10),
+        (" \n\t", 400_000),
+        ("private text \ud800", 400_000),
+        (None, 400_000),
+    ],
+    ids=["input-limit", "request-budget", "blank", "invalid-utf8", "non-string"],
+)
+def test_late_invalid_input_is_rejected_before_any_request(invalid, budget):
+    def unexpected_request(request):
+        pytest.fail("known invalid input must fail before the first HTTP request")
+
+    embedder = HttpEmbedder(
+        "http://llm", "k", max_request_chars=budget, client=_client(unexpected_request)
+    )
+    inputs = ["valid"] * (MAX_BATCH_INPUTS + 1) + [invalid]
+    with pytest.raises(EmbedderRejected) as exc:
+        embedder.embed(inputs)
+    assert "private text" not in str(exc.value)
+
+
+def test_empty_input_list_is_rejected_without_a_request():
+    def unexpected_request(request):
+        pytest.fail("an empty input list must not reach the LLM service")
+
+    with pytest.raises(EmbedderRejected):
+        HttpEmbedder("http://llm", "k", client=_client(unexpected_request)).embed([])
+
+
+def test_input_at_both_character_limits_is_accepted():
+    requests = []
+    embedder = HttpEmbedder(
+        "http://llm", "k", max_request_chars=32_000, client=_client(_recording_handler(requests))
+    )
+    embedder.embed(["x" * 32_000])
+    assert [len(r["inputs"][0]) for r in requests] == [32_000]
 
 
 @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])

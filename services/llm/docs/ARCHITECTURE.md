@@ -113,9 +113,22 @@ keeps encrypted reasoning and message phases across tool rounds; text-only calle
 still receive the original response fields. Bedrock signed/redacted state is
 rejected by OpenAI, and OpenAI state is rejected by Bedrock, before inference.
 
-Raw response JSON rejects duplicate keys, non-finite values, unknown item fields,
-and invalid tool calls before SDK coercion. A token-limited response withholds all
-tool calls, including complete siblings of an incomplete call. Usage is retained.
+OpenAI's [compatibility contract](https://developers.openai.com/api/reference/overview#backwards-compatibility)
+permits new JSON response properties. The adapter validates the fields it consumes
+in known objects instead of maintaining an exhaustive property allowlist. Extra
+envelope, message, text/refusal, function-call, and usage metadata is ignored and
+not exposed to consumers. Opaque reasoning items retain bounded additional fields,
+including summary/content extensions, so stateless replay does not lose state.
+This tolerance does not enable new output types or function execution modes:
+unknown item/content types, namespaced/asynchronous/programmatic calls, invalid
+known fields, and contradictory completion states still fail. Byte/depth bounds,
+duplicate-key rejection, finite JSON values, declared tool names, unique call IDs,
+and object-shaped tool arguments remain validated before SDK coercion.
+
+Every incomplete OpenAI response withholds all function calls, including complete
+siblings of a partial call, while retaining visible text and usage. Known token and
+filter reasons map to `max_tokens` and `content_filtered`; other or absent reasons
+map to `incomplete` rather than causing a 502 or implying successful completion.
 Errors are normalized without exposing provider response bodies. SDK retries are
 disabled and the existing request timeout is passed to the OpenAI client.
 
@@ -187,8 +200,9 @@ legacy and tool calls restore the prior context in `finally`. Concurrent calls,
 nested legacy calls, and different providers sharing a client remain isolated.
 No SDK source or response bytes are rewritten.
 
-Unknown modeled fields/shapes fail closed; an upstream schema addition may require
-a reviewed SDK/codec update. Well-formed upstream errors retain native SDK retries.
+Bedrock's unknown modeled fields/shapes fail closed; an upstream schema addition
+may require a reviewed SDK/codec update. OpenAI's additive-property handling is
+described above. Well-formed Bedrock errors retain native SDK retries.
 Malformed Converse error envelopes fail immediately with 502 instead of entering
 SDK parsing or retry evaluation, even when their HTTP status might be retryable.
 This is deliberate: passing corrupted error data through can itself raise a 500 or

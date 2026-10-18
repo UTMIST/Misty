@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { meetingFilename } from './meetingFilename.js';
 
 // Per-guild live-meeting lifecycle. Pure orchestration: all collaborators
 // (transport client, recorder factory, poster) are injected. No discord.js
@@ -263,5 +264,19 @@ export function createMeetingSurface({
     }
   }
 
-  return { start, status, stop, activeSession, updateVoiceChannel };
+  async function qna({ guildId, channelId, question }) {
+    const session = sessions.get(guildId);
+    if (!session) return { status: 'not-recording' };
+    const recordingChannelId = session.textChannel?.id;
+    if (!recordingChannelId || recordingChannelId !== channelId) {
+      return { status: 'wrong-channel', channelId: recordingChannelId };
+    }
+    // Capture this session before awaiting: stopping/new recording must never
+    // redirect an accepted question to another meeting in the same guild.
+    const meetingName = meetingFilename(session.name, session.startedAt);
+    const response = await meetingClient.qna(session.sessionId, question);
+    return { status: 'answered', response, meetingName };
+  }
+
+  return { start, status, stop, activeSession, updateVoiceChannel, qna };
 }

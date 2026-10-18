@@ -8,9 +8,9 @@ class EmbedderUnavailable(Exception):
 
 
 class EmbedderRejected(Exception):
-    """The llm service refused the request (4xx, a malformed response, or a
-    vector width the doc_chunks column cannot hold). Retrying unchanged input
-    will not help."""
+    """Input failed local validation, or the llm service refused the request
+    (4xx, a malformed response, or a vector width the doc_chunks column cannot
+    hold). Retrying unchanged input will not help."""
 
 
 @dataclass(frozen=True)
@@ -27,5 +27,6 @@ class Embedder(Protocol):
     def embed(self, inputs: list[str]) -> EmbedBatch:
         """Embed every input, splitting into as many /embed requests as the
         llm service's limits require. All-or-nothing: raises EmbedderUnavailable
-        or EmbedderRejected rather than returning a partial result."""
+        or EmbedderRejected rather than returning a partial result. Validate
+        all inputs before the first provider request."""
         ...
