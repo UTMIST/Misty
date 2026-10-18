@@ -121,7 +121,8 @@ numbered sequentially (`001`, `002`, …) and chained by `down_revision`.
 1. Create `migrations/versions/003_<short_name>.py`. Set `revision = "003"` and
    `down_revision = "002"` (the current head). Copy the header/imports from an existing
    migration.
-2. Write `upgrade()` and a real `downgrade()` — every migration must be reversible. Use
+2. Write `upgrade()` and a real `downgrade()` following the
+   [migration rollback rules and explicit retirement exceptions](../../../AGENTS.md#migrations). Use
    `op.create_table`, `op.add_column`, `op.bulk_insert`, `op.execute(sa.text(...))`, etc.
    Migration `002` is a good template for seed-data changes.
 3. **Keep `src/storage/schema.py` in sync.** The Core table definitions there must match
