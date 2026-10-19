@@ -1,7 +1,21 @@
 const MESSAGE_LIMIT = 2000;
 export const DELIVERY_ERROR = 'I couldn’t send the full reply. Please try again shortly.';
 
-/** Split text at newlines, balancing fenced code blocks within each message. */
+function preferredBoundary(text, limit) {
+  const available = text.slice(0, limit);
+  // Keep separators with the preceding text. Prefer complete paragraphs and
+  // sentences; within whitespace, prefer a line break over a space or tab.
+  for (const pattern of [/\r?\n[\t ]*\r?\n/g, /[.!?]["'”’\])]*\s+/g, /\n/g, /\s+/g]) {
+    let boundary = 0;
+    for (const match of available.matchAll(pattern)) {
+      if (match.index > 0) boundary = match.index + match[0].length;
+    }
+    if (boundary) return boundary;
+  }
+  return limit;
+}
+
+/** Split at prose boundaries, balancing fenced code blocks within each message. */
 export function chunkForDiscord(text) {
   const chunks = [];
   let remaining = text ?? '';
@@ -16,8 +30,10 @@ export function chunkForDiscord(text) {
       const crossing = markers.find((m) => m.index < cut && m.index + m[0].length > cut);
       if (crossing) cut = crossing.index;
       if (cut < remaining.length) {
-        const newline = remaining.lastIndexOf('\n', cut - 1);
-        if (newline > 0) cut = newline + 1;
+        const boundary = preferredBoundary(remaining, cut);
+        const marker = markers.find((m) => m.index < boundary && m.index + m[0].length > boundary);
+        // A prose boundary inside an opening language label is not usable.
+        cut = marker ? marker.index || cut : boundary;
       }
       // Do not split a UTF-16 surrogate pair (e.g. an emoji).
       if (/[\uD800-\uDBFF]/.test(remaining[cut - 1] ?? '')) cut -= 1;

@@ -29,6 +29,44 @@ test('text at the limit stays intact; long lines and emoji split without data lo
   ]);
 });
 
+test('a story paragraph splits at a sentence ending before falling back to spaces', () => {
+  const sentence = 'The explorers decided to REMAIN beside the river. ';
+  const text = sentence + 'The journey continued '.repeat(150);
+  const chunks = chunkForDiscord(text);
+  assert.equal(chunks[0], sentence);
+  assert.equal(chunks.join(''), text);
+  assert.ok(chunks.every((part) => part.length <= 2000));
+});
+
+test('paragraph breaks take priority over later sentence endings', () => {
+  for (const separator of ['\n\n', '\r\n\r\n', '\n \n']) {
+    const paragraph = 'The first chapter ended here.' + separator;
+    const chunks = chunkForDiscord(paragraph + 'The next chapter began. ' + 'word '.repeat(500));
+    // The splitter consumes the paragraph separator and removes its final LF.
+    assert.equal(chunks[0], paragraph.slice(0, -1));
+    assert.ok(chunks[1].startsWith('The next chapter began. '));
+    assert.ok(chunks.every((part) => part.length <= 2000));
+  }
+});
+
+test('whitespace keeps REMAIN intact when the character limit falls inside the word', () => {
+  for (const separator of [' ', '\t']) {
+    const lead = ('word' + separator).repeat(399);
+    const text = lead + 'REMAIN' + separator + 'word '.repeat(500);
+    const chunks = chunkForDiscord(text);
+    assert.equal(chunks[0], lead);
+    assert.ok(chunks[1].startsWith('REMAIN' + separator));
+    assert.equal(chunks.join(''), text);
+    assert.ok(chunks.every((part) => part.length <= 2000));
+  }
+});
+
+test('sentence boundaries include closing quotation marks', () => {
+  const sentence = 'She whispered, “We will remain.” ';
+  const chunks = chunkForDiscord(sentence + 'word '.repeat(500));
+  assert.equal(chunks[0], sentence);
+});
+
 test('code fences close and reopen with their language, including near the limit', () => {
   for (const lead of ['', 'intro\n', 'x'.repeat(1998) + '\n']) {
     const text = lead + '```js\n' + 'console.log(1);\n'.repeat(400) + '```\nafter';

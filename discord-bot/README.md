@@ -595,9 +595,11 @@ registration entrypoints. Commands, reply renderers, and application services
 remain surface-neutral. Import the module that owns a function directly;
 `adapters/discord/index.js` wires events rather than re-exporting its siblings.
 
-All Discord replies use the shared message helpers: text splits at line breaks
-where possible within the 2,000-character limit, and fenced code blocks close
-and reopen with their language across parts. Slash replies edit the deferred
+All Discord replies use the shared message helpers: text splits within the
+2,000-character limit, preferring paragraph breaks, then sentence endings, then
+whitespace (line breaks before spaces or tabs). A word is split only when no
+suitable boundary fits. Fenced code blocks close and reopen with their language
+across parts. Slash replies edit the deferred
 message first, then send follow-ups with the original visibility. Embeds are
 shortened with `…` to fit their property, field-count, and shared 6,000-character
 limits; files and embeds appear only on the first text part. Failed sends try a
