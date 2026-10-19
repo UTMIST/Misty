@@ -49,6 +49,44 @@ test('paragraph breaks take priority over later sentence endings', () => {
   }
 });
 
+test('Markdown section starts take priority over the paragraph break after a heading', () => {
+  for (let level = 1; level <= 6; level += 1) {
+    const intro = 'intro '.repeat(200) + '\n\n';
+    const heading = '#'.repeat(level) + ' Next chapter\n\n';
+    const text = intro + heading + 'The journey continued '.repeat(200);
+    const chunks = chunkForDiscord(text);
+    assert.equal(chunks[0], intro.slice(0, -1));
+    assert.ok(chunks[1].startsWith(heading + 'The journey continued '));
+    assert.equal(chunks[0] + '\n' + chunks.slice(1).join(''), text);
+    assert.ok(chunks.every((part) => part.length <= 2000));
+  }
+});
+
+test('a heading at the start stays with its body when that section exceeds the limit', () => {
+  const heading = '# The journey begins.\n\n';
+  const text = heading + 'word '.repeat(1000);
+  const chunks = chunkForDiscord(text);
+  assert.ok(chunks[0].startsWith(heading + 'word '));
+  assert.equal(chunks.join(''), text);
+  assert.ok(chunks.every((part) => part.length <= 2000));
+});
+
+test('the last Markdown section boundary is used when several headings fit', () => {
+  const previous = '# First\n\nIntroduction\n\n## Second\n\nMore text\n\n';
+  const heading = '### Third\n\n';
+  const chunks = chunkForDiscord(previous + heading + 'word '.repeat(600));
+  assert.equal(chunks[0], previous.slice(0, -1));
+  assert.ok(chunks[1].startsWith(heading + 'word '));
+});
+
+test('heading-like lines in fenced code do not create Markdown section boundaries', () => {
+  const intro = 'intro '.repeat(200) + '\n';
+  const chunks = chunkForDiscord(intro + '```md\n# Example\n\n' + 'word '.repeat(500) + '\n```');
+  assert.ok(chunks[0].startsWith(intro + '```md\n# Example'));
+  assert.ok(chunks.every((part) => part.length <= 2000));
+  assert.ok(chunks.every((part) => (part.match(/```/g) ?? []).length % 2 === 0));
+});
+
 test('whitespace keeps REMAIN intact when the character limit falls inside the word', () => {
   for (const separator of [' ', '\t']) {
     const lead = ('word' + separator).repeat(399);

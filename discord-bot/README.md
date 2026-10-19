@@ -596,11 +596,13 @@ remain surface-neutral. Import the module that owns a function directly;
 `adapters/discord/index.js` wires events rather than re-exporting its siblings.
 
 All Discord replies use the shared message helpers: text splits within the
-2,000-character limit, preferring paragraph breaks, then sentence endings, then
-whitespace (line breaks before spaces or tabs). A word is split only when no
+2,000-character limit, preferring Markdown section starts (`#` through `######`)
+before paragraph breaks, then sentence endings, then whitespace (line breaks
+before spaces or tabs). Headings stay with their following text where possible;
+heading-like lines inside fenced code are ignored. A word is split only when no
 suitable boundary fits. Fenced code blocks close and reopen with their language
-across parts. Slash replies edit the deferred
-message first, then send follow-ups with the original visibility. Embeds are
+across parts. Slash replies edit the deferred message first, then send follow-ups
+with the original visibility. Embeds are
 shortened with `…` to fit their property, field-count, and shared 6,000-character
 limits; files and embeds appear only on the first text part. Failed sends try a
 short error reply; if even that cannot be delivered, deferred replies attempt to

@@ -1,14 +1,35 @@
 const MESSAGE_LIMIT = 2000;
 export const DELIVERY_ERROR = 'I couldn’t send the full reply. Please try again shortly.';
 
-function preferredBoundary(text, limit) {
+function preferredBoundary(text, limit, markers, fence) {
   const available = text.slice(0, limit);
+  const headings = [...available.matchAll(/^ {0,3}#{1,6}[\t ]+[^\r\n]*(?:\r?\n[\t ]*)*/gm)].filter(
+    (heading) => {
+      let inCode = Boolean(fence);
+      for (const marker of markers) {
+        if (marker.index >= heading.index) break;
+        inCode = !inCode;
+      }
+      return !inCode;
+    },
+  );
+  // Start a new message before a Markdown heading, keeping its body with it.
+  const section = headings.findLast(
+    (heading) => available.slice(0, heading.index).trim().length > 0,
+  );
+  if (section) return section.index;
   // Keep separators with the preceding text. Prefer complete paragraphs and
   // sentences; within whitespace, prefer a line break over a space or tab.
   for (const pattern of [/\r?\n[\t ]*\r?\n/g, /[.!?]["'”’\])]*\s+/g, /\n/g, /\s+/g]) {
     let boundary = 0;
     for (const match of available.matchAll(pattern)) {
-      if (match.index > 0) boundary = match.index + match[0].length;
+      const candidate = match.index + match[0].length;
+      // If this part starts with a heading, do not strand it by cutting within
+      // the heading line or the blank lines immediately following it.
+      const separatesHeading = headings.some(
+        (heading) => candidate > heading.index && candidate <= heading.index + heading[0].length,
+      );
+      if (match.index > 0 && !separatesHeading) boundary = candidate;
     }
     if (boundary) return boundary;
   }
@@ -30,7 +51,7 @@ export function chunkForDiscord(text) {
       const crossing = markers.find((m) => m.index < cut && m.index + m[0].length > cut);
       if (crossing) cut = crossing.index;
       if (cut < remaining.length) {
-        const boundary = preferredBoundary(remaining, cut);
+        const boundary = preferredBoundary(remaining, cut, markers, fence);
         const marker = markers.find((m) => m.index < boundary && m.index + m[0].length > boundary);
         // A prose boundary inside an opening language label is not usable.
         cut = marker ? marker.index || cut : boundary;
