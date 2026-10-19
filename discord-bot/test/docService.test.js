@@ -5,6 +5,7 @@ import {
   llmSafe,
   SEARCH_CHUNK_K,
   SEARCH_MAX_DOCS,
+  SEARCH_MAX_QUERY_LENGTH,
 } from '../src/services/docService.js';
 import { DocUnavailable, DocBadReference } from '../src/clients/docClient.js';
 import { DirectoryUnavailable } from '../src/clients/directoryClient.js';
@@ -278,4 +279,26 @@ test('searchDocs rethrows unexpected errors', async () => {
     () => svc.searchDocs({ query: 'CPSIF', onBehalfOf: 'person-1' }),
     (e) => e instanceof TypeError,
   );
+});
+
+test('searchDocs returns QUERY_TOO_LONG past the code-point limit without calling the service', async () => {
+  let calls = 0;
+  const svc = createDocService({
+    directory: {},
+    docClient: {
+      searchDocs: async () => {
+        calls += 1;
+        return [];
+      },
+    },
+  });
+  // Astral characters are two UTF-16 units but one code point each.
+  const atLimit = '😀'.repeat(SEARCH_MAX_QUERY_LENGTH);
+  assert.deepEqual(await svc.searchDocs({ query: atLimit, onBehalfOf: 'p1' }), {
+    outcome: 'NO_MATCH',
+  });
+  assert.deepEqual(await svc.searchDocs({ query: `${atLimit}x`, onBehalfOf: 'p1' }), {
+    outcome: 'QUERY_TOO_LONG',
+  });
+  assert.equal(calls, 1);
 });

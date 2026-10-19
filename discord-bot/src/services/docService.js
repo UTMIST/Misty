@@ -4,6 +4,8 @@ import { DirectoryUnavailable } from '../clients/directoryClient.js';
 export const llmSafe = true;
 export const SEARCH_CHUNK_K = 25;
 export const SEARCH_MAX_DOCS = 5;
+// The doc service's limit, in Unicode code points.
+export const SEARCH_MAX_QUERY_LENGTH = 2000;
 
 export function createDocService({ docClient, directory }) {
   // Resolve a team slug to its id via the directory. Returns { teamId } on
@@ -76,6 +78,7 @@ export function createDocService({ docClient, directory }) {
   async function searchDocs({ query, onBehalfOf }) {
     const trimmed = typeof query === 'string' ? query.trim() : '';
     if (trimmed.length === 0) return { outcome: 'EMPTY_QUERY' };
+    if ([...trimmed].length > SEARCH_MAX_QUERY_LENGTH) return { outcome: 'QUERY_TOO_LONG' };
     try {
       const results = await docClient.searchDocs({
         query: trimmed,
