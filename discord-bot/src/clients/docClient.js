@@ -78,6 +78,22 @@ export function createDocClient({ baseUrl, apiKey, fetchImpl = fetch }) {
       return parseJson(resp);
     },
 
+    async searchDocs({ query, k, onBehalfOf }) {
+      const body = { query };
+      if (k !== undefined) body.k = k;
+      const resp = await send('/search', {
+        method: 'POST',
+        body: JSON.stringify(body),
+        ...oboHeader(onBehalfOf),
+      });
+      if (!resp.ok) throw unavailable(resp.status, 'POST /search');
+      const parsed = await parseJson(resp);
+      if (!Array.isArray(parsed?.results)) {
+        throw new DocUnavailable('malformed doc-service response');
+      }
+      return parsed.results;
+    },
+
     async deactivateDoc(id) {
       const resp = await send(`/docs/${encodeURIComponent(id)}`, {
         method: 'PATCH',

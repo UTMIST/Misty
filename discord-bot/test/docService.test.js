@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createDocService, llmSafe } from '../src/services/docService.js';
+import {
+  createDocService,
+  llmSafe,
+  SEARCH_CHUNK_K,
+  SEARCH_MAX_DOCS,
+} from '../src/services/docService.js';
 import { DocUnavailable, DocBadReference } from '../src/clients/docClient.js';
 import { DirectoryUnavailable } from '../src/clients/directoryClient.js';
 
@@ -162,4 +167,115 @@ test('addDoc sets owningPersonId from the caller (visible to the adder)', async 
   const res = await svc.addDoc({ url: 'https://x.com', owningPersonId: 'p1' });
   assert.equal(res.outcome, 'ADDED');
   assert.equal(payload.owningPersonId, 'p1');
+});
+
+function chunk(docId, ordinal, extra = {}) {
+  return {
+    doc_id: docId,
+    title: `Title ${docId}`,
+    url: `https://example.test/${docId}`,
+    source_id: 'gdocs',
+    text: `chunk ${ordinal} of ${docId}`,
+    chunk: { ordinal, start_offset: 0, end_offset: 10, source_content_hash: 'h' },
+    score: 0.03,
+    ...extra,
+  };
+}
+
+test('searchDocs asks for SEARCH_CHUNK_K chunks as the caller with a trimmed query', async () => {
+  let seen;
+  const svc = createDocService({
+    directory: {},
+    docClient: {
+      searchDocs: async (args) => {
+        seen = args;
+        return [chunk('d1', 0)];
+      },
+    },
+  });
+  await svc.searchDocs({ query: '  CPSIF  ', onBehalfOf: 'person-1' });
+  assert.deepEqual(seen, { query: 'CPSIF', k: SEARCH_CHUNK_K, onBehalfOf: 'person-1' });
+});
+
+test('searchDocs collapses chunks to distinct docs in rank order', async () => {
+  const svc = createDocService({
+    directory: {},
+    docClient: {
+      searchDocs: async () => [chunk('d2', 0), chunk('d1', 3), chunk('d2', 1), chunk('d3', 0)],
+    },
+  });
+  const res = await svc.searchDocs({ query: 'CPSIF', onBehalfOf: 'person-1' });
+  assert.equal(res.outcome, 'FOUND');
+  assert.deepEqual(
+    res.docs.map((d) => d.id),
+    ['d2', 'd1', 'd3'],
+  );
+  assert.deepEqual(res.docs[0], {
+    id: 'd2',
+    title: 'Title d2',
+    url: 'https://example.test/d2',
+    source_id: 'gdocs',
+  });
+});
+
+test('searchDocs caps the result at SEARCH_MAX_DOCS docs', async () => {
+  const many = Array.from({ length: SEARCH_MAX_DOCS + 3 }, (_, i) => chunk(`d${i}`, 0));
+  const svc = createDocService({
+    directory: {},
+    docClient: { searchDocs: async () => many },
+  });
+  const res = await svc.searchDocs({ query: 'CPSIF', onBehalfOf: 'person-1' });
+  assert.equal(res.docs.length, SEARCH_MAX_DOCS);
+  assert.equal(res.docs[0].id, 'd0');
+});
+
+test('searchDocs returns NO_MATCH for an empty result', async () => {
+  const svc = createDocService({
+    directory: {},
+    docClient: { searchDocs: async () => [] },
+  });
+  const res = await svc.searchDocs({ query: 'unrelated galaxies', onBehalfOf: 'person-1' });
+  assert.deepEqual(res, { outcome: 'NO_MATCH' });
+});
+
+test('searchDocs returns EMPTY_QUERY for a blank query without calling the service', async () => {
+  const svc = createDocService({
+    directory: {},
+    docClient: {
+      searchDocs: async () => assert.fail('doc service must not be called'),
+    },
+  });
+  for (const query of ['', '   ', null, undefined]) {
+    assert.deepEqual(await svc.searchDocs({ query, onBehalfOf: 'person-1' }), {
+      outcome: 'EMPTY_QUERY',
+    });
+  }
+});
+
+test('searchDocs maps DocUnavailable to DOC_DOWN', async () => {
+  const svc = createDocService({
+    directory: {},
+    docClient: {
+      searchDocs: async () => {
+        throw new DocUnavailable('down');
+      },
+    },
+  });
+  const res = await svc.searchDocs({ query: 'CPSIF', onBehalfOf: 'person-1' });
+  assert.deepEqual(res, { outcome: 'DOC_DOWN' });
+});
+
+test('searchDocs rethrows unexpected errors', async () => {
+  const svc = createDocService({
+    directory: {},
+    docClient: {
+      searchDocs: async () => {
+        throw new TypeError('bug');
+      },
+    },
+  });
+  await assert.rejects(
+    () => svc.searchDocs({ query: 'CPSIF', onBehalfOf: 'person-1' }),
+    (e) => e instanceof TypeError,
+  );
 });
