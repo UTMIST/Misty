@@ -197,9 +197,10 @@ Consumers authenticate with scoped keys issued via the `doc-keys` CLI, which tal
 it). See [`docs/API.md`](API.md) for how consumers present the key.
 
 ```bash
-# Issue a read+write key for an ingestion bot.
+# Issue the Discord bot's key: read+write for /doc add, plus literal act-as-user
+# so /doc list and /doc search run as the asking member.
 # The plaintext key is printed to STDOUT exactly once — capture it now.
-uv run doc-keys issue --name discord-bot --scopes docs:read docs:write
+uv run doc-keys issue --name discord-bot --scopes docs:read docs:write act-as-user
 
 # Issue a read-only key for a dashboard.
 uv run doc-keys issue --name dashboard --scopes docs:read
