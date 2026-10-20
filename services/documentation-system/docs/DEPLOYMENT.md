@@ -102,8 +102,11 @@ relevance floor starts at 0.3 and needs #178 calibration before quality claims.
 
 No migration or unfiltered-search feature flag is needed. Use the shared
 [contract fixture](API.md#authorized-retrieval-post-search) for consumer mocks;
-this issue proves seeded retrieval, while #277 (index lifecycle) and #278
-(real person/DM/channel integration) remain release gates.
+the [#277 integration verification](INGESTION-RETRIEVAL-AUDIT.md) also ingests its
+documents through the real indexing lifecycle before executing those exchanges.
+That runbook records reproducible offline/Postgres checks and the remaining
+controlled staging/provider acceptance. Real bot/DM/channel integration (#278)
+remains a separate release gate.
 
 ## Postgres
 
@@ -414,6 +417,14 @@ dependency everywhere:
   until `next_after` is null. Nothing schedules this — run it after an llm outage or from
   the same scheduler as refresh-due if failures are routine. Re-embedding after a model
   change uses `{"stale_only": false, "force": true}`.
+
+During an indexing outage, retrieval can still return the previous complete chunk
+set under **current** authorization. Its citations retain the old content hash;
+the newest stored content is not searchable until indexing recovers. An indexing
+failure cannot restore a revoked source grant. Confirmed source disappearance
+removes stored text and chunks together, while a transient fetch failure preserves
+them. Use the [integration runbook](INGESTION-RETRIEVAL-AUDIT.md) to verify recovery
+and record controlled staging evidence before release acceptance.
 
 Embedding cost is per changed body or title; identical body/title hashes avoid repeat
 calls after title provenance is recorded. Ingest, title edits, and refetch get slower by the `/embed` round trips (about one request per 96 chunks).

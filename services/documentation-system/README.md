@@ -280,6 +280,13 @@ This uses `InMemoryStorageAdapter` injected via FastAPI's `dependency_overrides`
 
 Without `RUN_PG_TESTS=1`, the Postgres adapter and migration tests are skipped.
 
+For ingestion → indexing → authorized retrieval acceptance (#277), run
+`uv run pytest tests/test_ingestion_retrieval.py -q`. The same cases run against
+Postgres in `tests/test_postgres_adapter.py::TestIngestionRetrieval`. They use the
+real HTTP clients with deterministic external responses, and never seed chunks.
+See the [integration runbook](docs/INGESTION-RETRIEVAL-AUDIT.md) for commands,
+failure/freshness behavior, and controlled staging acceptance.
+
 **Full (includes Postgres integration):**
 ```bash
 docker compose up -d postgres
@@ -333,7 +340,9 @@ metadata. Ingest, refetch, refresh, and retirement keep the index current, and
 
 **Deferred (per design §3/§11 non-goals):**
 
-- Indexing/retrieval release verification (#277) and bot/DM/channel integration (#278).
+- Controlled staging/provider acceptance for #277 (automated ingestion/retrieval
+  verification is implemented; see the [audit](docs/INGESTION-RETRIEVAL-AUDIT.md)),
+  and bot/DM/channel integration (#278).
 - An in-process scheduler or queue — Railway (or another external scheduler) calls the bounded refresh endpoint hourly; see the [refresh schedule](docs/DEPLOYMENT.md#source-access-refresh-schedule).
 - Additional fetchers — YouTube remains a registered source without a fetcher implementation.
 - Bulk import — ingest is one URL per request; no CSV/bulk endpoint.

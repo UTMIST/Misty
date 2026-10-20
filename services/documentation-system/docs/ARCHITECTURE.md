@@ -553,7 +553,9 @@ cases (connector shapes, Unicode, repeated text, boundaries) and 200 seeded rand
 - **#174 (storage):** store vectors and keyword-search metadata for the same chunks.
 - **#175 (indexing/lifecycle):** done; see "Indexing (#175)" below.
 - **#176 (retrieval):** implemented; see "Authorized retrieval" below. Evaluation (#178)
-  and integration verification (#277/#278) remain release gates.
+  and consumer integration (#278) remain release gates. #277's automated lifecycle
+  verification and controlled staging gate are tracked in the
+  [integration audit](INGESTION-RETRIEVAL-AUDIT.md).
 - **#178 (evaluation):** build the question set and measure hit-rate@k, including
   exact-name/acronym/date queries, before treating the starting parameters as final.
 
@@ -630,9 +632,15 @@ vector width. An override supports a planned re-embedding pass, not mixed-model 
 
 `POST /search` uses the [shared API contract and fixture](API.md#authorized-retrieval-post-search).
 The fixture is the consumer handoff for #71/#210 and the shared offline/Postgres
-adapter test source. It uses synthetic chunks; real ingestion/indexing verification is tracked in #277.
-Agreement with the two consumer owners remains a handoff step; local implementation
-does not constitute their sign-off. #277 and #278 remain release gates.
+adapter test source. `tests/ingestion_retrieval_cases.py` additionally creates its
+documents through `POST /docs`, runs real chunking/embedding/storage integration,
+and executes the same HTTP exchanges. External responses use MockTransport;
+the dependency factories, HTTP clients, authorization and ranking remain real.
+The same lifecycle cases run on both adapters; additional Postgres cases inject
+SQL faults to prove rollback and safe retrieval errors. See the
+[#277 integration audit](INGESTION-RETRIEVAL-AUDIT.md) for coverage and evidence.
+Consumer-owner agreement, controlled staging/provider acceptance, and #278 remain
+separate release gates.
 
 The request body controls only query and k. Trusted headers select either an
 `Actor` or a `Channel(source_team_ids)`; literal assertion scopes are required,
