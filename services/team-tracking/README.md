@@ -11,7 +11,7 @@ It answers questions like "who is currently on the Partnerships team," "who were
 Two design choices shape everything:
 
 - **Membership rows are never deleted.** When someone leaves a team, their row gains an `ended_at` date. The full history of who held what role survives leadership transitions, and point-in-time queries ("roster as of 2024-12-15") work without special logic.
-- **External accounts are mapped, not embedded.** A person's Discord/GitHub/Notion/UofT-email accounts live in a `person_identifiers` table keyed by a `providers` vocabulary — so the Discord bot can reverse-look-up a person from a raw snowflake without the base `people` table ever gaining an integration-specific column.
+- **External accounts are mapped, not embedded.** A person's Discord/GitHub/UofT-email accounts live in a `person_identifiers` table keyed by a `providers` vocabulary — so the Discord bot can reverse-look-up a person from a raw snowflake without the base `people` table ever gaining an integration-specific column.
 
 ## The API-only principle
 
@@ -261,7 +261,7 @@ Nine tables (`people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `p
 
 **Not implemented (by design):**
 
-- **Connectors layer** — no Discord/Google/GitHub/Notion sync. Connectors hang off the HTTP API when built.
+- **Connectors layer** — no Discord/Google/GitHub sync. Connectors hang off the HTTP API when built.
 - **Permission enforcement** — the API exposes primitives (memberships, admin flag) from which downstream systems derive access rules. No policy engine lives here.
 - **Admin UI** — officer edits go through whatever admin surface is chosen (NocoDB, Directus, direct SQL, or a custom app).
 - **Pagination** — list endpoints return all matching rows. Adequate for UTMIST's roster size; add limit/offset when needed.

@@ -276,7 +276,6 @@ See [Index type](#index-type) for why vectors initially use exact scans.
 | `gdocs` | Google Docs | `docs.google.com/document` | yes | **yes** |
 | `gsheets` | Google Sheets | `docs.google.com/spreadsheets` | yes | **yes** |
 | `gslides` | Google Slides | `docs.google.com/presentation` | yes | **yes** |
-| `notion` | Notion | `notion.so`, `notion.site` | yes | no |
 | `youtube` | YouTube | `youtube.com`, `youtu.be` | no | no |
 
 ## Auth
@@ -451,7 +450,7 @@ Limitations:
   full walk of the four academic-year trees. #175 should record the real count on first full
   ingest and revisit this decision if it differs by an order of magnitude.
 - **Google Docs only.** Sheets, Slides, PDFs, GitHub, and future sources were not validated;
-  don't assume the results generalize to GitHub (#86). Notion (#85) is canceled and untested.
+  don't assume the results generalize to GitHub (#86).
 - **No retrieval-quality measurement.** Hit-rate needs #173's embedding model and belongs to
   #178.
 - **Use extracted text length, not Drive file size.** One 884KB Drive file extracted to ~14KB

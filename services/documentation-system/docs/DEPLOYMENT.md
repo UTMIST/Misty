@@ -134,8 +134,8 @@ Migration history:
 
 - **`001_initial_schema`** — creates `sources`, `docs`, `doc_tags`, `api_keys`
   and their indexes.
-- **`002_seed_sources`** — seeds the eight built-in sources (`web`, `github`,
-  `gdrive`, `gdocs`, `gsheets`, `gslides`, `notion`, `youtube`).
+- **`002_seed_sources`** — seeds the initial built-in sources; migration `009`
+  removes the retired source, leaving seven.
 - **`003_doc_grants`** — adds the `doc_grants` table behind per-doc visibility,
   with the grantee-shape CHECK and both uniqueness constraints (including the
   partial index that catches duplicate `org` grants, which the plain unique
@@ -280,7 +280,7 @@ Each doc gets its own line, then a summary:
 repaired 4f3a1b2c-...  https://docs.google.com/document/d/abc
 empty    6c5d4e3f-...  https://github.com/owner/repo  refetch succeeded but no content was extracted
 failed   8b2c7d14-...  https://utmist.ca/handbook  502: connectors unreachable
-skipped  1a2b3c4d-...  https://notion.so/page  source 'notion' has content fetching disabled
+skipped  1a2b3c4d-...  https://youtube.com/watch?v=page  source 'youtube' has content fetching disabled
 4 contentless doc(s): 1 repaired, 1 empty, 1 failed, 1 skipped
 ```
 
@@ -293,7 +293,7 @@ skipped  1a2b3c4d-...  https://notion.so/page  source 'notion' has content fetch
   — but it still exits non-zero, because the doc is still missing content.
 - **failed** — the source still fails. The doc stays contentless and is named with its
   reason; one failure never aborts the rest of the run.
-- **skipped** — the source has `content_fetch_enabled=false` (`notion`, `youtube`), so it
+- **skipped** — the source has `content_fetch_enabled=false` (`youtube`), so it
   could never have content. Bucketed apart from failures so a permanent, expected gap
   does not read as an error every run. The enabled set is read from `GET /sources`, so
   registering a fetcher for a new source needs no change to the CLI.
@@ -326,7 +326,7 @@ Which sources get fetched is determined by two things that must agree:
 `web` and `github` fetch in-process. The four Google sources (`gdrive`, `gdocs`, `gsheets`,
 `gslides`) fetch via the [connectors](../../connectors/) service over HTTP
 (`ConnectorsFetcher`, registered in `src/fetch/registry.py`); migration `006` flipped their
-`content_fetch_enabled` to `true` to match. `notion` and `youtube` remain auth-gated:
+`content_fetch_enabled` to `true` to match. `youtube` remains fetch-disabled:
 `content_fetch_enabled` is `false` and no fetcher is registered, so ingest records the doc
 without a snapshot. Enabling a new source is a **code change**, not just config — implement
 the `Fetcher`, register it, and flip `content_fetch_enabled` (see
@@ -409,3 +409,9 @@ permissions matching an active, membership-synced Team Tracking mapping become g
 Domain/link-wide shares, external or unknown users, unmapped groups, and pre-migration
 legacy groups are intentionally ignored. Add legacy group mappings through Team Tracking's
 managed-group migration; never infer access from an ordinary team membership.
+
+## Registry cleanup (migration `009`)
+
+Reassigns documents from the retired source to `web` before removing its registry row.
+Downgrade restores only the registry entry; it does not undo the data cleanup.
+Use a database backup to recover the previous assignments.

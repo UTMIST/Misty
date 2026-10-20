@@ -112,7 +112,8 @@ Migrations are **hand-written** and kept in sync with `src/storage/schema.py`. T
    ```
 
    - `down_revision` must point at the previous head (currently `004`).
-   - Write a real `downgrade()` — it should exactly reverse `upgrade()`.
+   - Write a real `downgrade()` following the
+     [migration rollback rules and explicit retirement exceptions](../../../AGENTS.md#migrations).
    - Adding a column to an existing table? Make it nullable or give it a `server_default` so existing rows migrate cleanly, and mirror that in the corresponding Pydantic model (optional with a default) and in both adapters.
    - Seeding rows? Use `op.bulk_insert(...)` as migrations 002 and 004 do.
 

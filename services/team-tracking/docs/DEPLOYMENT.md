@@ -265,3 +265,9 @@ After any deploy, from a machine with `railway` linked to the environment:
   - Compliance-driven controls (SOC2 audit trail retention, key rotation SLA, etc.)
 
 Most of these are only worth the work if a compliance requirement forces them.
+
+## Registry cleanup (migration `011`)
+
+Deletes the retired provider's current-state identity rows before removing its registry row.
+Downgrade restores only the registry entry; it does not undo the data cleanup.
+Use a database backup to recover the previous assignments.
