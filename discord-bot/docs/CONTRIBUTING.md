@@ -153,6 +153,41 @@ CI runs `node-test` (`npm ci` + `npm test`) plus a Docker build with a boot smok
 - **Registering commands happens in the pre-deploy step, not at boot.** `railway.json`'s `preDeployCommand` runs `registerCommands.js` before the new process starts, so a deploy that fails there never starts the new process (Discord's global set may still have been overwritten — [RAILWAY-DEPLOYMENT.md §5](../../docs/RAILWAY-DEPLOYMENT.md#5-register-discord-slash-commands) covers recovery). Don't add a `rest.put(...)` to `index.js` to "make sure" — that would re-register on every restart. And don't tell a release note to run `register:production` by hand; the deploy already did.
 - **Beta commands only appear in the testing guild.** If a `beta: true` command isn't showing up, check `DISCORD_GUILD_ID`.
 
+## The authorized helper tool loop (#71)
+
+When `HELPER_TOOLS_ENABLED=true`, a helper answer runs through a client-executed
+tool loop (`src/toolExecutor.js`) instead of a single `/chat` call. The model can
+call document tools (`src/helperTools.js`) to search and read docs before it
+answers. The rules the loop enforces:
+
+- **Only `llmSafe` tools are reachable.** `src/toolRegistry.js` includes a
+  provider's tools only when it exports `llmSafe === true` (a literal `true`, not
+  just truthy). `linkService`/`emailService` can never become model tools.
+- **Scope comes from the surface, never the model.** `helperFlow.js` derives the
+  retrieval context from where the answer is going — a DM scopes to the asking
+  person (`X-On-Behalf-Of`), a shared channel scopes to that channel's configured
+  teams (`X-Guild-ID` + `X-Channel-ID`, resolved server-side). The executor binds
+  that context once and passes it to every tool call; any scope-shaped field the
+  model puts in a tool's `input` is ignored.
+- **Fail closed.** `docClient.searchDocs` throws before sending a request if the
+  context is missing, empty, or ambiguous. There is no unfiltered search to fall
+  back to. `get_document` is person-scoped only; in a channel the model cites the
+  source link from `search_documents` instead.
+- **Bounded work.** A tool-round limit and a cumulative output-token bound cap the
+  work one mention can trigger (`EXHAUSTED`).
+- **Opaque replay.** Assistant `content_blocks` are replayed verbatim, so the loop
+  is agnostic to Bedrock-vs-OpenAI reasoning transcripts.
+
+The document service is the real authorization boundary — it re-checks current
+grants on every `/search` and `/docs` read. The executor's optional `scopeCheck`
+is a **dormant seam** for a surface that can detect mid-generation revocation; no
+current surface supplies one, so by default the loop does not re-check and never
+returns `WITHHELD`. It is not an enforced guarantee today.
+
+This builds on the shared `POST /search` contract (#176) and the member-search
+client shape from #210/#289; channel configuration (#239) and the DM/channel
+integration that flips the flag on (#278) land separately.
+
 ## Checklist before you push
 
 - [ ] Command is registered in `commands/index.js`.

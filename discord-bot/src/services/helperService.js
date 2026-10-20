@@ -145,26 +145,34 @@ function normalize(messages) {
 // authenticated principal, resolves each speaker's identity, renders the
 // attributed transcript, and returns the completion text. No discord.js.
 export function createHelperService({ llmClient, directory }) {
-  return {
-    async answer({ turns, principal }) {
-      // The newest user turn is the mention that got us here, so its author is
-      // the principal handleMention already resolved — no need to look them up
-      // again.
-      const asker = [...turns].reverse().find((t) => t.role === 'user' && t.authorId);
-      const knownPeople = asker ? new Map([[asker.authorId, principal.person]]) : new Map();
+  // Render the attributed, trimmed, alternation-normalized transcript plus the
+  // system prompt. Shared by the text-only `answer` path and the tool-execution
+  // loop (#71), which needs the same prepared messages before it drives tools.
+  async function prepare({ turns, principal }) {
+    // The newest user turn is the mention that got us here, so its author is the
+    // principal handleMention already resolved — no need to look them up again.
+    const asker = [...turns].reverse().find((t) => t.role === 'user' && t.authorId);
+    const knownPeople = asker ? new Map([[asker.authorId, principal.person]]) : new Map();
 
-      const identities = await resolveIdentities(directory, turns, knownPeople);
-      const rendered = turns.map((t) => ({
-        role: t.role,
-        content:
-          t.role === 'user' ? renderUserTurn(t, identities.get(t.authorId)) : escapeText(t.text),
-      }));
-      const messages = normalize(trimToBudget(rendered));
+    const identities = await resolveIdentities(directory, turns, knownPeople);
+    const rendered = turns.map((t) => ({
+      role: t.role,
+      content:
+        t.role === 'user' ? renderUserTurn(t, identities.get(t.authorId)) : escapeText(t.text),
+    }));
+    const messages = normalize(trimToBudget(rendered));
+    const system = buildSystemPrompt(principal.person.display_name);
+    return { messages, system };
+  }
+
+  return {
+    prepare,
+    async answer({ turns, principal }) {
+      const { messages, system } = await prepare({ turns, principal });
       // Nothing answerable survived (e.g. a fetch race left an assistant turn
       // newest). Report it as an empty answer, which the caller already handles,
       // rather than sending an empty transcript and getting an opaque LLM error.
       if (!messages.length) return { content: '' };
-      const system = buildSystemPrompt(principal.person.display_name);
       const { content } = await llmClient.chat({ messages, system, maxTokens: HELPER_MAX_TOKENS });
       return { content };
     },

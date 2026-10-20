@@ -4,6 +4,13 @@ import {
   DEFAULT_HELPER_USER_WINDOW_SECONDS,
 } from './helperRequestLimiter.js';
 
+// A boolean env flag that is OFF unless explicitly set to the literal "true".
+// Anything else (unset, "1", "yes", "false", typos) stays false, so a live
+// feature can never be turned on by accident.
+function booleanFlag(env, name) {
+  return env[name] === 'true';
+}
+
 function positiveInteger(env, name, fallback, maximum = Number.MAX_SAFE_INTEGER) {
   if (env[name] === undefined) return fallback;
   const value = Number(env[name]);
@@ -55,6 +62,10 @@ export function loadConfig(env = process.env) {
       DEFAULT_HELPER_USER_WINDOW_SECONDS,
       Math.floor(Number.MAX_SAFE_INTEGER / 1000),
     ),
+    // Route helper answers through the authorized document tool loop (#71).
+    // Default OFF: stays text-only until retrieval and channel configuration are
+    // live in the target environment.
+    helperToolsEnabled: booleanFlag(env, 'HELPER_TOOLS_ENABLED'),
     verificationBaseUrl: env.VERIFICATION_BASE_URL.replace(/\/+$/, ''),
     verificationApiKey: env.VERIFICATION_API_KEY,
     infrastructureDiscordUsername: env.INFRASTRUCTURE_DISCORD_USERNAME || undefined,

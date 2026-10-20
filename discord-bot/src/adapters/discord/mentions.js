@@ -183,7 +183,16 @@ export async function handleMention(message, { appContext, botId }) {
   if (!turns.length) return;
 
   await target.sendTyping().catch(() => {});
-  const content = await answerHelperTurns(appContext, turns, caller.principal);
+  // Shared-channel scope keys on the configured channel, not the thread Misty
+  // opens inside it: in a thread, that's the parent channel. A tool-enabled
+  // answer is scoped to that channel's configured team union (resolved by the
+  // doc service); the asking person's own privileges never widen it.
+  const channelId = message.channel.isThread() ? message.channel.parentId : message.channel.id;
+  const content = await answerHelperTurns(appContext, turns, caller.principal, {
+    kind: 'channel',
+    guildId: message.guild?.id ?? message.guildId ?? null,
+    channelId: channelId ?? null,
+  });
   await sendDiscordMessage((part) => target.send(part), content).catch(() =>
     console.error('Could not deliver helper reply'),
   );
@@ -225,7 +234,9 @@ export async function handleDirectMessage(message, { appContext, botId }) {
   if (!turns.length) return;
 
   await message.channel.sendTyping().catch(() => {});
-  const content = await answerHelperTurns(appContext, turns, caller.principal);
+  // DM: a tool-enabled answer is scoped to the asking person — their own
+  // authorized documents, including anything privately shared with them.
+  const content = await answerHelperTurns(appContext, turns, caller.principal, { kind: 'person' });
   await sendDiscordMessage((part) => message.channel.send(part), content).catch(() =>
     console.error('Could not deliver helper DM reply'),
   );

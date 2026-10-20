@@ -25,6 +25,30 @@ function fakeFetch(responses) {
 const BASE = 'http://llm';
 const KEY = 'botkey';
 
+test('chat omits tools for the text-only path (empty or absent)', async () => {
+  const fetchImpl = fakeFetch([{ status: 200, body: { content: 'x' } }]);
+  const client = createLlmClient({ baseUrl: BASE, apiKey: KEY, fetchImpl });
+  await client.chat({ messages: [{ role: 'user', content: 'hi' }], tools: [] });
+  const body = JSON.parse(fetchImpl.calls[0].opts.body);
+  assert.equal('tools' in body, false);
+});
+
+test('chat forwards a non-empty tools list and returns stop_reason + content_blocks', async () => {
+  const blocks = [{ type: 'tool_use', id: 't1', name: 'search_documents', input: { query: 'q' } }];
+  const fetchImpl = fakeFetch([
+    { status: 200, body: { content: '', stop_reason: 'tool_use', content_blocks: blocks } },
+  ]);
+  const client = createLlmClient({ baseUrl: BASE, apiKey: KEY, fetchImpl });
+  const res = await client.chat({
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [{ name: 'search_documents', input_schema: {} }],
+  });
+  const body = JSON.parse(fetchImpl.calls[0].opts.body);
+  assert.equal(body.tools.length, 1);
+  assert.equal(res.stop_reason, 'tool_use');
+  assert.deepEqual(res.content_blocks, blocks);
+});
+
 test('chat POSTs /chat with key header and maps a 200 response', async () => {
   const fetchImpl = fakeFetch([
     {
@@ -48,6 +72,8 @@ test('chat POSTs /chat with key header and maps a 200 response', async () => {
     content: 'hi there',
     model: 'claude-sonnet-4-6',
     usage: { input_tokens: 5, output_tokens: 2 },
+    stop_reason: 'end_turn',
+    content_blocks: undefined,
   });
   const call = fetchImpl.calls[0];
   assert.match(call.url, /\/chat$/);

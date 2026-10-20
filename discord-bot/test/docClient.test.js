@@ -13,6 +13,112 @@ function jsonResponse(status, body) {
   };
 }
 
+const searchHit = {
+  doc_id: 'd1',
+  title: 'CPSIF',
+  url: 'https://x.test/d1',
+  text: 'CPSIF notes',
+  chunk: { ordinal: 0, start_offset: 0, end_offset: 11, source_content_hash: 'h' },
+  score: 0.5,
+};
+
+test('searchDocs (person) posts to /search with X-On-Behalf-Of and {query,k}', async () => {
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async (url, options) => {
+      assert.equal(url, 'http://doc/search');
+      assert.equal(options.method, 'POST');
+      assert.equal(options.headers['X-On-Behalf-Of'], 'person-1');
+      assert.equal('X-Guild-ID' in options.headers, false);
+      assert.deepEqual(JSON.parse(options.body), { query: 'cpsif', k: 5 });
+      return jsonResponse(200, { results: [searchHit] });
+    }),
+  });
+  const results = await client.searchDocs({ query: 'cpsif', k: 5, onBehalfOf: 'person-1' });
+  assert.deepEqual(results, [searchHit]);
+});
+
+test('searchDocs (channel) sends X-Guild-ID and X-Channel-ID, not an actor', async () => {
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async (url, options) => {
+      assert.equal(options.headers['X-Guild-ID'], '100');
+      assert.equal(options.headers['X-Channel-ID'], '200');
+      assert.equal('X-On-Behalf-Of' in options.headers, false);
+      return jsonResponse(200, { results: [] });
+    }),
+  });
+  const results = await client.searchDocs({ query: 'q', guildId: '100', channelId: '200' });
+  assert.deepEqual(results, []);
+});
+
+test('searchDocs omits k when not given so the service default applies', async () => {
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async (_url, options) => {
+      assert.deepEqual(JSON.parse(options.body), { query: 'q' });
+      return jsonResponse(200, { results: [] });
+    }),
+  });
+  await client.searchDocs({ query: 'q', onBehalfOf: 'p' });
+});
+
+test('searchDocs fails closed before any request when context is missing', async () => {
+  let called = false;
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async () => {
+      called = true;
+      return jsonResponse(200, { results: [] });
+    }),
+  });
+  await assert.rejects(() => client.searchDocs({ query: 'q' }), DocUnavailable);
+  assert.equal(called, false);
+});
+
+test('searchDocs fails closed when both person and channel context are given', async () => {
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async () => jsonResponse(200, { results: [] })),
+  });
+  await assert.rejects(
+    () => client.searchDocs({ query: 'q', onBehalfOf: 'p', guildId: '1', channelId: '2' }),
+    DocUnavailable,
+  );
+});
+
+test('searchDocs fails closed on a partial channel context (guild without channel)', async () => {
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async () => jsonResponse(200, { results: [] })),
+  });
+  await assert.rejects(() => client.searchDocs({ query: 'q', guildId: '100' }), DocUnavailable);
+});
+
+test('searchDocs throws DocUnavailable on a non-ok status', async () => {
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async () => jsonResponse(503, { detail: 'scope unavailable' })),
+  });
+  await assert.rejects(() => client.searchDocs({ query: 'q', onBehalfOf: 'p' }), DocUnavailable);
+});
+
+test('searchDocs rejects a body without a results array', async () => {
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async () => jsonResponse(200, { oops: true })),
+  });
+  await assert.rejects(() => client.searchDocs({ query: 'q', onBehalfOf: 'p' }), DocUnavailable);
+});
+
 test('ingestDoc posts to /docs and returns IngestResult (created)', async () => {
   const client = createDocClient({
     baseUrl: 'http://doc',

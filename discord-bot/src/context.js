@@ -9,6 +9,9 @@ import { createDocService } from './services/docService.js';
 import { createLlmClient } from './clients/llmClient.js';
 import { createHelperService } from './services/helperService.js';
 import { createHelperRequestLimiter } from './helperRequestLimiter.js';
+import { createDocumentTools, llmSafe as documentToolsLlmSafe } from './helperTools.js';
+import { buildToolRegistry } from './toolRegistry.js';
+import { createToolExecutor } from './toolExecutor.js';
 import { createMeetingClient } from './meeting/meetingClient.js';
 import { createMeetingSurface } from './meeting/meetingSurface.js';
 import { createRecorder } from './meeting/recorder.js';
@@ -56,6 +59,19 @@ export function createAppContext(config, { poster, notify } = {}) {
     windowSeconds: config.helperUserWindowSeconds,
   });
 
+  // Authorized tool-execution loop (#71). The registry includes only llmSafe
+  // tools; document retrieval is scoped per-call by the destination the flow
+  // supplies. Built and injected unconditionally; whether the helper actually
+  // routes through it is gated by config.helperToolsEnabled below.
+  const toolRegistry = buildToolRegistry([
+    {
+      name: 'documentTools',
+      llmSafe: documentToolsLlmSafe,
+      tools: createDocumentTools({ docClient }),
+    },
+  ]);
+  const toolExecutor = createToolExecutor({ llmClient, registry: toolRegistry });
+
   let meetingSurface;
   if (config.meetingBaseUrl) {
     const meetingClient = createMeetingClient({
@@ -93,6 +109,9 @@ export function createAppContext(config, { poster, notify } = {}) {
     llmClient,
     helperService,
     helperRequestLimiter,
+    toolRegistry,
+    toolExecutor,
+    helperToolsEnabled: Boolean(config.helperToolsEnabled),
     meetingSurface,
     discordGuildId: config.discordGuildId ?? null,
     infrastructureDiscordUsername: config.infrastructureDiscordUsername,
