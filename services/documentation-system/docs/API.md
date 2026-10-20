@@ -91,6 +91,24 @@ clients must convert code points to UTF-16 indices. No vectors or grants are
 returned. A channel citation links to the source; it does not create a separate
 channel-authorized direct-document endpoint.
 
+Ingest and successful content refresh index inline. An indexing failure preserves
+the previous complete chunk set: search may return its older text and body hash
+until `POST /docs/index` succeeds, even though the stored content or catalog title
+has changed. Citations always describe the returned chunk's revision. They do not
+promise that the source URL still serves that revision or that historical full
+text is available through the API. A newly ingested document with failed indexing
+has no results until a retry succeeds.
+
+Authorization uses current grants on every search, including searches over retained
+older chunks. Successful source-ACL reconciliation revokes access immediately;
+directory membership and channel/group changes apply on the next request. Source
+permission changes become known at repeated Google ingest, refetch, or scheduled
+refresh. A failed reconciliation retains the last complete grants until their
+existing expiry; it never extends them. Manual grants remain independent. See the
+[refresh schedule](DEPLOYMENT.md#source-access-refresh-schedule) and
+[integration verification](INGESTION-RETRIEVAL-AUDIT.md) for the accepted freshness
+window, recovery cases, and release evidence.
+
 Ranking is hybrid exact cosine plus complete keyword matching, with reciprocal
 rank fusion (`1/(60+vector_rank) + 1/(60+keyword_rank)`). Each branch considers up
 to `max(50,5*k)` eligible chunks, with active-document, grant-expiry, context,
