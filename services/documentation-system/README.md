@@ -4,12 +4,12 @@ Source-of-truth HTTP API for UTMIST's document catalog: a registry of URLs (docs
 
 ## What this service does
 
-UTMIST accumulates links faster than anyone can track them — onboarding docs on Google Drive, budget sheets, GitHub repos, Notion pages, YouTube recordings. Nobody owns a canonical index of "what exists and who's responsible for it," so links rot, duplicate, or vanish when the one person who bookmarked them graduates.
+UTMIST accumulates links faster than anyone can track them — onboarding docs on Google Drive, budget sheets, GitHub repos, YouTube recordings. Nobody owns a canonical index of "what exists and who's responsible for it," so links rot, duplicate, or vanish when the one person who bookmarked them graduates.
 
 The documentation-system service is that canonical index. It exposes a REST API over two core concepts:
 
 - **Docs** — a URL plus metadata: title, description, owning team/person, tags, an optional best-effort content snapshot, and an active flag (soft delete).
-- **Sources** — a registry of URL "kinds" (`web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`, `notion`, `youtube`) that says whether a source requires auth to fetch, has an API, and whether content fetching is even enabled for it.
+- **Sources** — a registry of URL "kinds" (`web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`, `youtube`) that says whether a source requires auth to fetch, has an API, and whether content fetching is even enabled for it.
 
 Content fetching is **egress-guarded (SSRF protection).** Ingesting a URL only ever fetches public destinations: the fetcher enforces an http/https scheme allowlist, resolves the target host, and refuses any private/loopback/link-local/reserved/carrier-grade-NAT or cloud-metadata (`169.254.169.254`) address — any hostname is accepted, but only if it resolves to a permitted public IP — before the request and again on every redirect hop. The connection is pinned to the validated IP (Host header + TLS SNI preserved) so DNS-rebinding can't slip an internal target past the check. A blocked or malformed URL is surfaced as an ordinary fetch failure (the doc is still catalogued with the URL as its title), never a 500.
 
@@ -106,7 +106,7 @@ DOCS_API_KEY=doc_<prefix>_<secret> uv run doc-backfill --dry-run
 DOCS_API_KEY=doc_<prefix>_<secret> uv run doc-backfill
 ```
 
-Sources with `content_fetch_enabled=false` (`notion`, `youtube`) can never have content, so they are reported as skipped rather than failed. A refetch that succeeds but extracts nothing (a title-only `github` doc, an empty page) is reported as `empty`, not `repaired` — a 200 from the refetch endpoint means the fetch ran, not that content was stored, so the run re-lists `has_content=false` to confirm. The tool checks its own scopes (`GET /api-keys/self`) before trusting any listing: without `docs:read:all` the catalog lists as empty rather than 403, which would otherwise read as "nothing to repair". See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli).
+Sources with `content_fetch_enabled=false` (`youtube`) can never have content, so they are reported as skipped rather than failed. A refetch that succeeds but extracts nothing (a title-only `github` doc, an empty page) is reported as `empty`, not `repaired` — a 200 from the refetch endpoint means the fetch ran, not that content was stored, so the run re-lists `has_content=false` to confirm. The tool checks its own scopes (`GET /api-keys/self`) before trusting any listing: without `docs:read:all` the catalog lists as empty rather than 403, which would otherwise read as "nothing to repair". See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli).
 
 **Ports:** this service runs on **8001** (team-tracking uses 8000) and its Postgres container is exposed on **5434** — both chosen to avoid colliding with team-tracking's defaults when running both services locally.
 
@@ -166,7 +166,8 @@ documentation-system/
 │       ├── 006_enable_google_content_fetch.py  Enables Google connector fetches
 │       ├── 007_source_document_access.py  Source grant provenance, expiry, sync time
 │       ├── 008_doc_chunks.py      pgvector embeddings and generated keyword metadata
-│       └── 009_chunk_title_hash.py  Embedding title provenance and stale-index detection
+│       ├── 009_remove_retired_source.py  Retires a source while preserving its documents
+│       └── 010_chunk_title_hash.py  Embedding title provenance and stale-index detection
 │
 ├── tests/                      Fast suite plus gated Postgres integration tests
 │   ├── conftest.py              build_seed_sources() — shared seed matching migration 002
@@ -185,7 +186,8 @@ documentation-system/
 │   ├── test_embed_client.py      HttpEmbedder batching and error mapping
 │   ├── test_migration_007.py     Source-access migration round trip
 │   ├── test_migration_008.py     pgvector migration, constraints, and round trip
-│   ├── test_migration_009.py     Title provenance migration and preservation of existing chunks
+│   ├── test_migration_009.py     Retired-source cleanup and registry rollback
+│   ├── test_migration_010.py     Title provenance migration and preservation of existing chunks
 │   ├── test_ingest.py
 │   ├── test_postgres_adapter.py   Integration tests (requires running Postgres; gated)
 │   ├── test_protocols.py
@@ -333,7 +335,7 @@ metadata. Ingest, refetch, refresh, and retirement keep the index current, and
 
 - Indexing/retrieval release verification (#277) and bot/DM/channel integration (#278).
 - An in-process scheduler or queue — Railway (or another external scheduler) calls the bounded refresh endpoint hourly; see the [refresh schedule](docs/DEPLOYMENT.md#source-access-refresh-schedule).
-- Additional fetchers — Notion and YouTube remain registered sources without fetcher implementations.
+- Additional fetchers — YouTube remains a registered source without a fetcher implementation.
 - Bulk import — ingest is one URL per request; no CSV/bulk endpoint.
 - Pagination — list endpoints return all matching rows, adequate for current catalog size.
 - Admin UI — no dashboard; catalog browsing goes through the API or a future thin client.

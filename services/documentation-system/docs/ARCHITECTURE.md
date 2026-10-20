@@ -233,7 +233,7 @@ Migration `008` enables pgvector and adds embedded chunks keyed by `(doc_id, ord
 The document FK cascades on hard deletion. Each row stores `chunk_text`, half-open
 `start_offset` / `end_offset` **Unicode code-point** indices into the source text,
 `source_content_hash`, `embedding vector(1536)`, `embedding_model`, and `dimensions`.
-Migration `009` adds nullable `source_title_hash`: SHA-256 of the title (None treated
+Migration `010` adds nullable `source_title_hash`: SHA-256 of the title (None treated
 as empty). It records embedding context separately from the body hash used by citations.
 Existing chunks retain NULL provenance until the normal stale-index pass rebuilds them.
 The source hash uses `src/content.py`'s SHA-256 convention; it identifies the text
@@ -284,7 +284,6 @@ See [Index type](#index-type) for why vectors initially use exact scans.
 | `gdocs` | Google Docs | `docs.google.com/document` | yes | **yes** |
 | `gsheets` | Google Sheets | `docs.google.com/spreadsheets` | yes | **yes** |
 | `gslides` | Google Slides | `docs.google.com/presentation` | yes | **yes** |
-| `notion` | Notion | `notion.so`, `notion.site` | yes | no |
 | `youtube` | YouTube | `youtube.com`, `youtu.be` | no | no |
 
 ## Auth
@@ -459,7 +458,7 @@ Limitations:
   full walk of the four academic-year trees. #175 should record the real count on first full
   ingest and revisit this decision if it differs by an order of magnitude.
 - **Google Docs only.** Sheets, Slides, PDFs, GitHub, and future sources were not validated;
-  don't assume the results generalize to GitHub (#86). Notion (#85) is canceled and untested.
+  don't assume the results generalize to GitHub (#86).
 - **No retrieval-quality measurement.** Hit-rate needs #173's embedding model and belongs to
   #178.
 - **Use extracted text length, not Drive file size.** One 884KB Drive file extracted to ~14KB

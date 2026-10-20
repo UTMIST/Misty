@@ -3,16 +3,16 @@
 Existing chunks remain readable with unknown title provenance (NULL) and
 are picked up by the normal stale-index retry operation.
 
-Revision ID: 009
-Revises: 008
+Revision ID: 010
+Revises: 009
 Create Date: 2026-10-18
 """
 
 from alembic import op
 import sqlalchemy as sa
 
-revision = "009"
-down_revision = "008"
+revision = "010"
+down_revision = "009"
 branch_labels = None
 depends_on = None
 

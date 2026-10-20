@@ -1,80 +1,145 @@
-"""Title provenance migration preserves existing chunks and supports rollback."""
+"""Exercise registry cleanup against rows with enforced foreign keys."""
 
-import os
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
 
-import pytest
-from alembic import command
-from alembic.config import Config
-from sqlalchemy import MetaData, Table, create_engine, delete, inspect, insert, select
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from sqlalchemy import create_engine, text
 
-from src.config import get_settings
-from src.content import content_hash
-from src.storage.postgres import PostgresStorageAdapter
-from src.storage.schema import docs
-from tests.chunk_storage_cases import make_chunk, make_doc
-
-pytestmark = pytest.mark.skipif(
-    os.environ.get("RUN_PG_TESTS") != "1" or os.environ.get("RUN_PG_MIGRATION_TESTS") != "1",
-    reason="requires disposable Postgres with both migration-test flags enabled",
-)
+from src.url_norm import derive_source
+from tests.conftest import build_seed_sources
 
 
-def test_migration_009_preserves_chunks_and_marks_unknown_title_stale():
-    engine = create_engine(get_settings().database_url)
+def _load_migration(filename):
+    path = Path(__file__).resolve().parents[1] / "migrations" / "versions" / filename
+    spec = spec_from_file_location(filename.removesuffix(".py"), path)
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+migration = _load_migration("009_remove_retired_source.py")
+seed = _load_migration("002_seed_sources.py")
+
+
+def test_cleanup_preserves_documents_and_retires_url_patterns(monkeypatch):
+    engine = create_engine("sqlite://")
+    with engine.begin() as conn:
+        conn.connection.create_function("now", 0, lambda: "2026-10-18")
+        conn.execute(text("PRAGMA foreign_keys = ON"))
+        conn.execute(text("CREATE TABLE sources (id TEXT PRIMARY KEY)"))
+        conn.execute(
+            text(
+                "CREATE TABLE docs (id TEXT PRIMARY KEY, source_id TEXT REFERENCES sources(id), "
+                "url TEXT, title TEXT, active BOOLEAN, updated_at TEXT, updated_by TEXT)"
+            )
+        )
+        conn.execute(
+            text("INSERT INTO sources VALUES (:id)"),
+            [{"id": sid} for sid in [migration.RETIRED_SOURCE_ID, "web", "youtube"]],
+        )
+        retired = next(s for s in seed.SOURCES if s[0] == migration.RETIRED_SOURCE_ID)
+        urls = [f"https://{host}/page" for host in retired[2]]
+        for i, url in enumerate(urls):
+            conn.execute(
+                text(
+                    "INSERT INTO docs VALUES (:id, :source, :url, 'preserved', :active, 'old', 'actor')"
+                ),
+                dict(id=str(i), source=retired[0], url=url, active=bool(i)),
+            )
+        conn.execute(
+            text("INSERT INTO docs VALUES ('other', 'youtube', 'url', 'other', 1, 'old', 'actor')")
+        )
+        monkeypatch.setattr(migration, "op", Operations(MigrationContext.configure(conn)))
+        migration.upgrade()
+        assert conn.execute(text("SELECT id FROM sources ORDER BY id")).scalars().all() == [
+            "web",
+            "youtube",
+        ]
+        rows = conn.execute(text("SELECT * FROM docs WHERE id <> 'other' ORDER BY id")).mappings()
+        for i, row in enumerate(rows):
+            assert row["source_id"] == "web"
+            assert row["url"] == urls[i]
+            assert row["title"] == "preserved"
+            assert row["active"] == bool(i)
+            assert row["updated_by"] == "migration_009"
+        assert conn.execute(
+            text("SELECT source_id, updated_by FROM docs WHERE id = 'other'")
+        ).one() == ("youtube", "actor")
+        for url in urls:
+            assert derive_source(url, build_seed_sources()) == "web"
+    engine.dispose()
+
+
+def test_postgres_registry_round_trip():
+    import os
+
+    import pytest
+    from alembic import command
+    from alembic.config import Config
+
+    from src.config import get_settings
+
+    if os.environ.get("RUN_PG_TESTS") != "1" or os.environ.get("RUN_PG_MIGRATION_TESTS") != "1":
+        pytest.skip("requires a disposable Postgres cluster and both migration-test opt-ins")
+
     cfg = Config("alembic.ini")
     cfg.set_main_option("script_location", "migrations")
-    adapter = PostgresStorageAdapter(engine)
-    doc = None
+    engine = create_engine(get_settings().database_url)
     try:
         command.downgrade(cfg, "008")
-        doc = make_doc(adapter)
-        chunk = make_chunk()
-        adapter.upsert_doc_content(
-            doc.id,
-            content_text=chunk.chunk_text,
-            content_hash=chunk.source_content_hash,
-            fetched_at=None,
-        )
-        old_table = Table("doc_chunks", MetaData(), autoload_with=engine)
-        values = chunk.model_dump(exclude={"source_title_hash"})
-        with engine.begin() as conn:
-            conn.execute(insert(old_table).values(doc_id=doc.id, **values))
-            original = conn.execute(select(old_table).where(old_table.c.doc_id == doc.id)).one()
-
-        for _ in range(2):
-            command.upgrade(cfg, "head")
-            assert adapter.get_doc_content(doc.id) == chunk.chunk_text
-            assert adapter.list_doc_chunks(doc.id) == [
-                chunk.model_copy(update={"source_title_hash": None})
-            ]
-            assert doc.id in adapter.list_docs_for_indexing()
-            assert (
-                adapter.replace_doc_chunks_if_current(
-                    doc.id,
-                    chunk.source_content_hash,
-                    [chunk],
-                    expected_title_hash=content_hash(doc.title),
-                )
-                is True
+        with engine.connect() as conn:
+            restored = conn.execute(
+                text("SELECT url_patterns, content_fetch_enabled FROM sources WHERE id = :id"),
+                {"id": migration.RETIRED_SOURCE_ID},
+            ).one()
+            assert restored.url_patterns == next(
+                s[2] for s in seed.SOURCES if s[0] == migration.RETIRED_SOURCE_ID
             )
-            assert doc.id not in adapter.list_docs_for_indexing()
-
-            command.downgrade(cfg, "008")
-            assert "source_title_hash" not in {
-                c["name"] for c in inspect(engine).get_columns("doc_chunks")
-            }
-            with engine.connect() as conn:
-                restored = conn.execute(select(old_table).where(old_table.c.doc_id == doc.id)).one()
-            # The migration changes only provenance metadata; vectors and all
-            # pre-existing columns survive upgrade/downgrade unchanged.
-            for name, value in original._mapping.items():
-                if name == "embedding":
-                    assert list(restored._mapping[name]) == list(value)
-                else:
-                    assert restored._mapping[name] == value
+            assert restored.content_fetch_enabled is False
+        command.upgrade(cfg, "head")
+        with engine.connect() as conn:
+            assert (
+                conn.execute(
+                    text("SELECT id FROM sources WHERE id = :id"),
+                    {"id": migration.RETIRED_SOURCE_ID},
+                ).scalar_one_or_none()
+                is None
+            )
     finally:
         command.upgrade(cfg, "head")
-        if doc is not None:
-            with engine.begin() as conn:
-                conn.execute(delete(docs).where(docs.c.id == doc.id))
         engine.dispose()
+
+
+def test_retired_urls_ingest_as_web(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from contracts.fetcher import FetchResult
+    from src.api.app import create_app
+    from src.api.deps import get_fetchers, get_storage
+    from src.config import get_settings
+    from src.storage.in_memory import InMemoryStorageAdapter
+
+    calls = []
+
+    class FakeFetchers:
+        def fetch_for(self, source_id, url):
+            calls.append((source_id, url))
+            return FetchResult(title="Web link", content="body", content_snapshot="body")
+
+    monkeypatch.setenv("API_KEY", "test-key")
+    get_settings.cache_clear()
+    adapter = InMemoryStorageAdapter(seed_sources=build_seed_sources())
+    app = create_app()
+    app.dependency_overrides[get_storage] = lambda: adapter
+    app.dependency_overrides[get_fetchers] = lambda: FakeFetchers()
+    retired = next(s for s in seed.SOURCES if s[0] == migration.RETIRED_SOURCE_ID)
+    with TestClient(app) as client:
+        for host in retired[2]:
+            url = f"https://{host}/page"
+            response = client.post("/docs", json={"url": url}, headers={"X-API-Key": "test-key"})
+            assert response.status_code == 201
+            assert response.json()["doc"]["source_id"] == "web"
+            assert response.json()["doc"]["title"] == "Web link"
+            assert calls[-1] == ("web", url)

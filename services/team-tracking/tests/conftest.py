@@ -58,7 +58,7 @@ def _clear_settings_cache(_no_dotenv):
 
 
 def build_seed_providers() -> list[Provider]:
-    """Standard providers seed for tests — matches migrations 004 and 006."""
+    """Standard providers seed for tests — matches migration head 011."""
     now = datetime.now(timezone.utc)
     return [
         Provider(
@@ -74,7 +74,6 @@ def build_seed_providers() -> list[Provider]:
         for pid, plabel in [
             ("discord", "Discord"),
             ("github", "GitHub"),
-            ("notion", "Notion"),
             ("uoft_email", "UofT Email"),
             ("email", "Email"),
         ]
