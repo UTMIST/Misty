@@ -27,11 +27,14 @@ about the service in a real (staging / production) environment.
   both at request time and at *boot* — a connectors outage or a missing
   `CONNECTORS_API_KEY` degrades Google-source fetches but never blocks
   startup (see `verify_production_secrets()` below).
+- **A reachable llm service** — embeds stored content so it can be searched.
+  Soft as well: see "The llm (embedding) dependency" below. Without it docs
+  are catalogued and their content stored, just not indexed.
 
 ## Environment variables
 
 All configuration is env-driven (`src/config.py`, loaded from the process environment or a
-`.env` file). Eight variables:
+`.env` file):
 
 | Env var | Setting | Default | Purpose |
 |---------|---------|---------|---------|
@@ -41,11 +44,17 @@ All configuration is env-driven (`src/config.py`, loaded from the process enviro
 | `DIRECTORY_API_KEY` | `directory_api_key` | `dev-api-key-change-me` | API key this service uses to call the directory |
 | `CONNECTORS_BASE_URL` | `connectors_base_url` | `http://localhost:8005` | Base URL of the connectors service (fetches Google source content) |
 | `CONNECTORS_API_KEY` | `connectors_api_key` | `dev-api-key-change-me` | API key this service uses to call connectors. **Should be overridden outside `local`**, but it's a soft dependency — `verify_production_secrets()` only logs a startup warning on the dev default, it does not refuse to boot (see [`src/config.py`](../src/config.py)). |
+| `LLM_BASE_URL` | `llm_base_url` | `http://localhost:8002` | Platform LLM `/embed` endpoint host. |
+| `LLM_API_KEY` | `llm_api_key` | empty | Secret `embed`-scoped LLM key; missing key keeps catalog operations available but search returns 503. |
+| `SEARCH_EMBED_MODEL` | `search_embed_model` | `openai-embed-3-small` | Query model alias; also supports `openai-embed-3-large`, both at 1536 dimensions. |
+| `SEARCH_MIN_COSINE` | `search_min_cosine` | `0.3` | Absolute vector floor in `(0,1]`; complete keyword matches qualify independently. |
+| `EMBED_MODEL` | `embed_model` | unset | Optional indexing model alias; unset uses `SEARCH_EMBED_MODEL`. An override must match the search model before its chunks can be retrieved. Changing models requires re-embedding (#209). |
+| `EMBED_MAX_REQUEST_CHARS` | `embed_max_request_chars` | `400000` | Characters per indexing `/embed` request. Keep at or below the llm service's own limit. |
 | `SOURCE_ACCESS_REFRESH_AFTER_HOURS` | `source_access_refresh_after_hours` | `24` | A Google doc becomes due for ACL/content refresh after this interval. |
 | `SOURCE_ACCESS_MAX_AGE_HOURS` | `source_access_max_age_hours` | `48` | Source-derived grants expire and stop authorizing reads after this interval without a complete successful sync. Must exceed the refresh interval. |
 
 The directory key needs read-only scopes `people:read`, `teams:read`, `memberships:read`,
-and `identifiers:read`. The provisioning script issues exactly these; no directory write
+`identifiers:read`, and `channels:read`. The provisioning script issues these; no directory write
 scope is required.
 
 Staging + production values live in **Railway** — set per environment via the
@@ -61,6 +70,43 @@ the runbook) to enable Google-source content.
 > `CONNECTORS_API_KEY` is different: a default there only logs a startup
 > warning — the service still boots, it just can't fetch Google-source
 > content (see "The connectors dependency" below).
+
+## Authorized retrieval
+
+Provision the documentation-system directory key again to add `channels:read`;
+keep its existing read scopes for person access and source reconciliation.
+Consumers need `docs:read` and literal `act-as-user` for person/DM searches,
+or literal `act-as-channel` for channel searches. Neither literal scope is
+implied by admin. Issue the minimum appropriate key, for example:
+
+```bash
+uv --project services/documentation-system run doc-keys issue --name member-search --scopes docs:read act-as-user
+uv --project services/documentation-system run doc-keys issue --name helper-search --scopes docs:read act-as-user act-as-channel
+uv --project services/llm run llm-keys --name documentation-system --scopes embed
+```
+
+Run from the repository root. Append the last key to LLM's `CONSUMER_KEYS` and
+set it as this service's `LLM_API_KEY`; set `LLM_BASE_URL` to that environment's
+private LLM URL. All actual provider credentials stay in the LLM service.
+`LLM_API_KEY` is deliberately a soft boot dependency: a missing value logs a
+warning outside local mode and search returns 503 before any outbound call.
+Catalog operations remain available during rollout. A bad nonempty key yields
+a safe embedding dependency error; no keyword-only fallback is enabled.
+
+Seed/index chunks with the resolved model matching `SEARCH_EMBED_MODEL`:
+`openai-embed-3-small` -> `text-embedding-3-small`, or
+`openai-embed-3-large` -> `text-embedding-3-large`. Both use 1536 dimensions.
+Switching the query model hides incompatible old chunks from both branches
+until reindexing; it never compares them or silently falls back. The absolute
+relevance floor starts at 0.3 and needs #178 calibration before quality claims.
+
+No migration or unfiltered-search feature flag is needed. Use the shared
+[contract fixture](API.md#authorized-retrieval-post-search) for consumer mocks;
+the [#277 integration verification](INGESTION-RETRIEVAL-AUDIT.md) also ingests its
+documents through the real indexing lifecycle before executing those exchanges.
+That runbook records reproducible offline/Postgres checks and the remaining
+controlled staging/provider acceptance. Real bot/DM/channel integration (#278)
+remains a separate release gate.
 
 ## Postgres
 
@@ -96,8 +142,8 @@ Migration history:
 
 - **`001_initial_schema`** — creates `sources`, `docs`, `doc_tags`, `api_keys`
   and their indexes.
-- **`002_seed_sources`** — seeds the eight built-in sources (`web`, `github`,
-  `gdrive`, `gdocs`, `gsheets`, `gslides`, `notion`, `youtube`).
+- **`002_seed_sources`** — seeds the initial built-in sources; migration `009`
+  removes the retired source, leaving seven.
 - **`003_doc_grants`** — adds the `doc_grants` table behind per-doc visibility,
   with the grantee-shape CHECK and both uniqueness constraints (including the
   partial index that catches duplicate `org` grants, which the plain unique
@@ -112,12 +158,21 @@ Migration history:
   and adds generated keyword metadata with a GIN index. Vector scans remain exact;
   see the [storage contract and index decision](ARCHITECTURE.md#doc_chunks).
 
+- **`009_remove_retired_source`** — retires the source registry entry while keeping
+  its documents as web links; see [registry cleanup](#registry-cleanup-migration-009).
+- **`010_chunk_title_hash`** — adds nullable title provenance to chunks. Apply before
+  running the updated application. Existing vectors remain readable, but their unknown
+  title provenance makes them eligible for `POST /docs/index` with its default body.
+  Drain that endpoint once per environment to refresh existing chunks; this spends
+  embedding budget. The migration itself makes no provider calls. Downgrading to `009`
+  removes only the title fingerprint and preserves vectors, text, and citation offsets.
+
 Downgrading `008` removes the chunk table/index, preserving catalog records and full
 content. The database-level `vector` extension remains installed, even if `008`
 enabled it: it may belong to another role or support unrelated tables. Extension
 removal is an administrator's separate decision after checking all dependencies.
-Re-upgrading restores an empty chunk table; index contents must be rebuilt later
-through #175's indexing flow. This migration does not call `/embed`.
+Re-upgrading restores an empty chunk table; rebuild it by draining `POST /docs/index`
+(see "The llm (embedding) dependency"). This migration does not call `/embed`.
 
 > **`004` is a data migration, not just a schema one.** It first collapses any
 > pre-existing duplicate active rows for the same `url_normalized` (keeping the
@@ -159,12 +214,16 @@ Consumers authenticate with scoped keys issued via the `doc-keys` CLI, which tal
 it). See [`docs/API.md`](API.md) for how consumers present the key.
 
 ```bash
-# Issue a read+write key for an ingestion bot.
+# Issue the Discord bot's key: read+write for /doc add, plus literal act-as-user
+# so /doc list and /doc search run as the asking member.
 # The plaintext key is printed to STDOUT exactly once — capture it now.
-uv run doc-keys issue --name discord-bot --scopes docs:read docs:write
+uv run doc-keys issue --name discord-bot --scopes docs:read docs:write act-as-user
 
 # Issue a read-only key for a dashboard.
 uv run doc-keys issue --name dashboard --scopes docs:read
+
+# Issue a key for an operator or job that retries/re-runs indexing (POST /docs/index).
+uv run doc-keys issue --name index-admin --scopes docs:index
 
 # List keys (metadata only — never plaintext).
 uv run doc-keys list --active-only
@@ -173,9 +232,106 @@ uv run doc-keys list --active-only
 uv run doc-keys revoke <api_key_id>
 ```
 
+## Repairing docs missing content (`doc-backfill` CLI)
+
+A source fetch that fails during ingest is only a warning: the doc is catalogued, but no
+content is stored. Re-ingesting the same URL does not repair it either — the dedup path
+merges tags and returns before the fetch runs. Records predating content storage are in
+the same state.
+
+`doc-backfill` finds those docs and refetches them. Unlike `doc-keys` it talks to this
+service **over HTTP**, not to the database: the repair is already an endpoint
+(`POST /docs/{id}/refetch`), and going through it keeps the connectors/Google credentials
+inside the service instead of requiring them wherever the script runs.
+
+```bash
+# Discover only — lists what would be refetched, makes no fetch.
+DOCS_API_KEY=doc_<prefix>_<secret> uv --project services/documentation-system \
+  run doc-backfill --dry-run
+
+# Repair everything contentless.
+DOCS_API_KEY=doc_<prefix>_<secret> uv --project services/documentation-system \
+  run doc-backfill
+
+# Narrow to one source kind.
+DOCS_API_KEY=... uv --project services/documentation-system run doc-backfill --source-id gdocs
+```
+
+### Authorization
+
+Issue the key with **three** scopes (or `admin`):
+
+```bash
+uv --project services/documentation-system run doc-keys \
+  issue --name content-backfill --scopes docs:read docs:read:all docs:write
+```
+
+| Scope | Needed for |
+|-------|-----------|
+| `docs:read` | `GET /sources` — which sources have fetching enabled |
+| `docs:read:all` | `GET /docs?has_content=false` must see every doc, not one actor's |
+| `docs:write` | `POST /docs/{id}/refetch` (not needed for `--dry-run`) |
+
+`docs:read:all` does **not** imply `docs:read` — scope checks are an exact match plus the
+`admin` wildcard. A key holding only `docs:read:all` gets a 403 on `GET /sources`.
+
+The run reads its own scopes from `GET /api-keys/self` and refuses before listing
+anything if one is missing. That check is not belt-and-braces: a key with `docs:read`
+but not `docs:read:all`, sent without `X-On-Behalf-Of` (this tool never sends one),
+resolves to `DENY` rather than a 403 — `GET /docs` answers **200 `[]`**, which is
+indistinguishable from an empty catalog. Without the check, a mis-scoped key would
+print `nothing to do` and exit 0 with the gap untouched.
+
+### Configuration
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `DOCS_API_KEY` | *(required)* | Scoped key, read from the environment only |
+| `DOCS_BASE_URL` | `http://localhost:8001` | Service base URL; `--base-url` overrides it |
+
+Both are read by the CLI alone — they are not in `Settings` and the service never reads
+them, so they are absent from `verify_production_secrets()`. The key is deliberately not
+a command-line flag: argv is visible to anything that can run `ps`.
+
+### Reading the output
+
+Each doc gets its own line, then a summary:
+
+```
+repaired 4f3a1b2c-...  https://docs.google.com/document/d/abc
+empty    6c5d4e3f-...  https://github.com/owner/repo  refetch succeeded but no content was extracted
+failed   8b2c7d14-...  https://utmist.ca/handbook  502: connectors unreachable
+skipped  1a2b3c4d-...  https://youtube.com/watch?v=page  source 'youtube' has content fetching disabled
+4 contentless doc(s): 1 repaired, 1 empty, 1 failed, 1 skipped
+```
+
+- **repaired** — content is now stored. Confirmed, not assumed: after the refetches the
+  run re-lists `has_content=false` once and demotes anything still in it.
+- **empty** — the refetch *worked* and produced no text to store. `POST /docs/{id}/refetch`
+  returns 200 whenever the fetch ran, and only writes content `if result.content`, so a
+  title-only fetcher (`github`, by design) or a page that extracts to nothing leaves the
+  doc contentless behind a 200. Reported apart from **failed** because nothing is broken
+  — but it still exits non-zero, because the doc is still missing content.
+- **failed** — the source still fails. The doc stays contentless and is named with its
+  reason; one failure never aborts the rest of the run.
+- **skipped** — the source has `content_fetch_enabled=false` (`youtube`), so it
+  could never have content. Bucketed apart from failures so a permanent, expected gap
+  does not read as an error every run. The enabled set is read from `GET /sources`, so
+  registering a fetcher for a new source needs no change to the CLI.
+
+Exit codes: **0** every contentless doc now has content, **1** at least one does not
+(**failed** or **empty**), **2** fatal (missing key, mis-scoped key, service unreachable,
+or a verification listing that could not be read). A mis-scoped key is a hard error
+rather than an empty run, so it can never be mistaken for "nothing to repair"; likewise
+exit 0 means the corpus is complete, not merely that every request returned 200.
+
+---
+
 Notes:
 
-- Scopes are `docs:read`, `docs:write`, and `admin` (wildcard). Grant the minimum needed.
+- Scopes are `docs:read`, `docs:read:all`, `docs:write`, `docs:index`, and `admin`
+  (wildcard). Grant the minimum needed. `docs:index` is separate from `docs:write`
+  because a forced re-index spends embedding-provider budget on every doc.
 - Human-readable metadata (name, prefix, scopes, id) is printed to **stderr**; only the
   plaintext key goes to **stdout**, so `... issue ... > key.txt` captures just the key.
 - `--actor` (global flag, default `cli`) is stamped on `created_by` / `updated_by`.
@@ -193,7 +349,7 @@ Which sources get fetched is determined by two things that must agree:
 `web` and `github` fetch in-process. The four Google sources (`gdrive`, `gdocs`, `gsheets`,
 `gslides`) fetch via the [connectors](../../connectors/) service over HTTP
 (`ConnectorsFetcher`, registered in `src/fetch/registry.py`); migration `006` flipped their
-`content_fetch_enabled` to `true` to match. `notion` and `youtube` remain auth-gated:
+`content_fetch_enabled` to `true` to match. `youtube` remains fetch-disabled:
 `content_fetch_enabled` is `false` and no fetcher is registered, so ingest records the doc
 without a snapshot. Enabling a new source is a **code change**, not just config — implement
 the `Fetcher`, register it, and flip `content_fetch_enabled` (see
@@ -245,6 +401,35 @@ a runtime dependency with **two different failure modes** depending on when it's
   `src/api/routers/docs.py`): refetch is an explicit user-initiated action, so it fails
   loudly rather than silently leaving stale content in place.
 
+## The llm (embedding) dependency
+
+Stored content is indexed for retrieval by calling the [llm](../../llm/) service's
+`POST /embed` (see "Indexing (#175)" in [ARCHITECTURE.md](ARCHITECTURE.md)). It is a soft
+dependency everywhere:
+
+- **At boot:** an empty or dev-default `LLM_API_KEY` outside `local` logs a warning; the service starts.
+- **At request time:** indexing runs inline after ingest, refetch, scheduled refresh, and
+  `PATCH active`. If the llm service is down, rate-limited, or rejects the request, the
+  triggering request still succeeds and nothing is written to the index: ingest returns an
+  `indexing failed (...)` warning, refresh-due counts `index_failed`, and refetch/`PATCH`
+  log it. The doc's previous chunks (if any) stay intact.
+- **Retry:** call `POST /docs/index` with a `docs:index` key. With body `{}` it pages through
+  every doc whose chunks are missing, stale, or orphaned; repeat with `after: next_after`
+  until `next_after` is null. Nothing schedules this — run it after an llm outage or from
+  the same scheduler as refresh-due if failures are routine. Re-embedding after a model
+  change uses `{"stale_only": false, "force": true}`.
+
+During an indexing outage, retrieval can still return the previous complete chunk
+set under **current** authorization. Its citations retain the old content hash;
+the newest stored content is not searchable until indexing recovers. An indexing
+failure cannot restore a revoked source grant. Confirmed source disappearance
+removes stored text and chunks together, while a transient fetch failure preserves
+them. Use the [integration runbook](INGESTION-RETRIEVAL-AUDIT.md) to verify recovery
+and record controlled staging evidence before release acceptance.
+
+Embedding cost is per changed body or title; identical body/title hashes avoid repeat
+calls after title provenance is recorded. Ingest, title edits, and refetch get slower by the `/embed` round trips (about one request per 96 chunks).
+
 **Deploy order:** recommended (not required) is connectors first, then set
 `CONNECTORS_BASE_URL` / `CONNECTORS_API_KEY` on documentation-system, then deploy
 documentation-system. documentation-system deploys independently either way — see
@@ -276,3 +461,9 @@ permissions matching an active, membership-synced Team Tracking mapping become g
 Domain/link-wide shares, external or unknown users, unmapped groups, and pre-migration
 legacy groups are intentionally ignored. Add legacy group mappings through Team Tracking's
 managed-group migration; never infer access from an ordinary team membership.
+
+## Registry cleanup (migration `009`)
+
+Reassigns documents from the retired source to `web` before removing its registry row.
+Downgrade restores only the registry entry; it does not undo the data cleanup.
+Use a database backup to recover the previous assignments.

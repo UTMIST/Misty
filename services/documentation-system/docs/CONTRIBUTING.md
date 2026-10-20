@@ -5,7 +5,7 @@ team with mixed FastAPI/Postgres experience: if a step feels obvious, skip it; i
 doesn't, it's spelled out.
 
 Read [`ARCHITECTURE.md`](ARCHITECTURE.md) first — the walkthroughs below assume you know
-the three Protocol boundaries.
+the Protocol boundaries.
 
 ## Conventions (read once)
 
@@ -61,7 +61,7 @@ Endpoints live in `src/api/routers/` (`docs.py`, `sources.py`), grouped by resou
 
 ## Add a new Fetcher
 
-Goal: give an auth-gated source (e.g. Notion) a real content snapshot.
+Goal: give a source without a fetcher (e.g. YouTube) a real content snapshot.
 
 1. **Implement the `Fetcher` Protocol** — a class with
    `def fetch(self, url: str) -> FetchResult`. Put it in `src/fetch/<source>.py`. Return a
@@ -73,7 +73,7 @@ Goal: give an auth-gated source (e.g. Notion) a real content snapshot.
    return FetcherRegistry({
        "web": WebFetcher(),
        "github": GithubFetcher(),
-       "notion": NotionFetcher(),   # new
+       "youtube": YouTubeFetcher(),   # new
    })
    ```
    The key **must** equal the source's `id` — that's how `fetch_for` finds it.
@@ -121,7 +121,8 @@ numbered sequentially (`001`, `002`, …) and chained by `down_revision`.
 1. Create `migrations/versions/003_<short_name>.py`. Set `revision = "003"` and
    `down_revision = "002"` (the current head). Copy the header/imports from an existing
    migration.
-2. Write `upgrade()` and a real `downgrade()` — every migration must be reversible. Use
+2. Write `upgrade()` and a real `downgrade()` following the
+   [migration rollback rules and explicit retirement exceptions](../../../AGENTS.md#migrations). Use
    `op.create_table`, `op.add_column`, `op.bulk_insert`, `op.execute(sa.text(...))`, etc.
    Migration `002` is a good template for seed-data changes.
 3. **Keep `src/storage/schema.py` in sync.** The Core table definitions there must match

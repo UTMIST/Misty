@@ -20,6 +20,128 @@ The OpenAPI schema is the authoritative, always-current contract. This page expl
 *semantics* the schema can't — idempotency, degrade behavior, and error meaning — and
 links to the schema rather than restating it.
 
+## Authorized retrieval: `POST /search`
+
+This is the shared contract for member search (#210), helper answers (#71), and
+evaluation (#178). The portable [retrieval fixture](fixtures/retrieval.json)
+contains synthetic seed data, sparse fake vectors, and HTTP exchanges for all
+three consumers. Expand sparse vectors with zeros to 1536 values; never call an
+embedding provider for this fixture. `X-API-Key` values are symbolic fixture keys.
+
+The body is `{"query":"CPSIF", "k":10}`. `query` must be nonblank UTF-8,
+contain no NUL, and be at most 2000 Unicode code points. Surrounding whitespace
+is stripped. `k` is an integer from 1 to 50, default 10. Extra fields are rejected,
+including caller-supplied teams, vectors, models, and identity.
+
+Every request needs `docs:read` (or `docs:read:all`/`admin`) and exactly one
+authenticated context:
+
+- Person/DM: `X-On-Behalf-Of: <person UUID>` and literal `act-as-user` scope.
+- Channel: `X-Guild-ID: <decimal snowflake>` and `X-Channel-ID: <decimal snowflake>`,
+  with literal `act-as-channel` scope. The service resolves the configured teams
+  through the authenticated directory API and checks their synced Google Groups.
+
+The admin wildcard grants neither assertion scope. Consumers assert identity
+from their authenticated event/session, outside model-controlled tool arguments.
+A channel search uses only current source-derived grants to those groups. It
+does not include private person shares, manual team grants, or org grants.
+An unconfigured channel returns `{"results":[]}`. There is no unfiltered search,
+even for administrators. Direct `/docs` endpoints retain their existing person
+visibility behavior; channel headers cannot confer access there.
+
+Example person request:
+
+```http
+POST /search
+X-API-Key: <docs consumer key with docs:read and act-as-user>
+X-On-Behalf-Of: 11111111-1111-1111-1111-111111111111
+Content-Type: application/json
+
+{"query":"CPSIF","k":2}
+```
+
+Example response (one chunk per result; a document may appear more than once):
+
+```json
+{
+  "results": [
+    {
+      "doc_id": "00000000-0000-0000-0000-000000000001",
+      "title": "Personal CPSIF notes",
+      "url": "https://example.test/personal-alice",
+      "source_id": "gdocs",
+      "text": "CPSIF CPSIF CPSIF personal notes",
+      "chunk": {
+        "ordinal": 0,
+        "start_offset": 0,
+        "end_offset": 32,
+        "source_content_hash": "12807ddcb015128e5e64d0c725f80d4545880fc30817d8f18243d7938e8537d8"
+      },
+      "score": 0.03278688524590164
+    }
+  ]
+}
+```
+
+`doc_id` resolves through `/docs/{id}` under the same person's context. The source
+`url` is the original link, not a fabricated deep link. `chunk` identifies the
+half-open Unicode code-point range in the exact content revision named by its
+SHA-256. Use the hash to detect stale citations after replacement; JavaScript
+clients must convert code points to UTF-16 indices. No vectors or grants are
+returned. A channel citation links to the source; it does not create a separate
+channel-authorized direct-document endpoint.
+
+Ingest and successful content refresh index inline. An indexing failure preserves
+the previous complete chunk set: search may return its older text and body hash
+until `POST /docs/index` succeeds, even though the stored content or catalog title
+has changed. Citations always describe the returned chunk's revision. They do not
+promise that the source URL still serves that revision or that historical full
+text is available through the API. A newly ingested document with failed indexing
+has no results until a retry succeeds.
+
+Authorization uses current grants on every search, including searches over retained
+older chunks. Successful source-ACL reconciliation revokes access immediately;
+directory membership and channel/group changes apply on the next request. Source
+permission changes become known at repeated Google ingest, refetch, or scheduled
+refresh. A failed reconciliation retains the last complete grants until their
+existing expiry; it never extends them. Manual grants remain independent. See the
+[refresh schedule](DEPLOYMENT.md#source-access-refresh-schedule) and
+[integration verification](INGESTION-RETRIEVAL-AUDIT.md) for the accepted freshness
+window, recovery cases, and release evidence.
+
+Ranking is hybrid exact cosine plus complete keyword matching, with reciprocal
+rank fusion (`1/(60+vector_rank) + 1/(60+keyword_rank)`). Each branch considers up
+to `max(50,5*k)` eligible chunks, with active-document, grant-expiry, context,
+model, and dimension predicates applied **before** its limit. Ties use document
+UUID and chunk ordinal. Vector candidates must meet `SEARCH_MIN_COSINE` (default
+0.3); complete keyword matches qualify independently. Fused scores are rank
+scores, not confidence or cosine values. Empty results are valid.
+
+Keyword terms are lowercase ASCII letter/digit runs, with punctuation separating
+terms and all distinct query terms required. This preserves acronyms, names,
+email components, and dates without stemming or stop-word removal. Keyword rank
+is matching-term occurrences divided by total term occurrences. Non-ASCII-only
+queries use the vector branch. See [architecture](ARCHITECTURE.md#authorized-retrieval)
+for the portable normalization and database query trade-off.
+
+| Condition | Status / body |
+|---|---|
+| No valid key | 401, standard auth detail |
+| Missing read or literal assertion scope | 403, `{"detail":"missing scope: <scope>"}` |
+| Missing, conflicting, or incomplete context | 400, `{"detail":"provide exactly one person or channel context"}` |
+| Malformed person UUID | 400, `{"detail":"X-On-Behalf-Of must be a UUID"}` |
+| Malformed channel IDs | 400, `{"detail":"channel IDs must be decimal snowflakes"}` |
+| Invalid body | 422, Pydantic detail list (`type`, `loc`, `msg`; input omitted) |
+| Directory unreachable, unauthorized, or malformed | 503, `{"detail":"retrieval scope unavailable"}` |
+| Query embedding failure / malformed or incompatible embedding | 502, `{"detail":"query embedding unavailable"}` |
+| Embedding rate limit or unconfigured dependency | 503, same embedding detail |
+| Embedding timeout | 504, same embedding detail |
+| Storage unavailable | 503, `{"detail":"retrieval storage unavailable"}` |
+
+Retrieval fails closed on scope lookup errors, including person membership errors;
+it does not inherit direct-document reads' partial directory degradation.
+No fallback to keyword-only or unfiltered access occurs on dependency failure.
+
 ## Authentication
 
 Other requests require an `X-API-Key` header. A request with a missing or invalid key is
@@ -46,7 +168,8 @@ Two kinds of key are accepted:
 |-------|--------|
 | `docs:read` | Read endpoints (`GET`) — but see visibility below: **alone, it returns nothing** |
 | `docs:read:all` | Read endpoints, bypassing per-doc visibility (sees every doc) |
-| `docs:write` | All mutating endpoints (`POST`, `PATCH`, `DELETE`) |
+| `docs:write` | All mutating endpoints (`POST`, `PATCH`, `DELETE`) except `POST /docs/index` |
+| `docs:index` | `POST /docs/index` — admin (re-)indexing, which spends embedding-provider budget |
 | `admin` | Wildcard — satisfies any scope check |
 
 A request with a valid key but the wrong scope is rejected with **403 Forbidden**
@@ -113,8 +236,10 @@ lacking a read scope is `403`. Neither falls through to `SEE_ALL`.
 | `DELETE` | `/docs/{id}/grants` | `docs:write` | Revoke a grant |
 | `POST` | `/docs/{id}/refetch` | `docs:write` | Re-run the content fetch |
 | `POST` | `/docs/source-access/refresh-due` | `docs:write` | Refresh due Google ACLs/content in a bounded batch |
+| `POST` | `/docs/index` | `docs:index` | (Re-)index stored content for retrieval; retry path |
 | `GET` | `/sources` | `docs:read` | List source kinds |
 | `GET` | `/sources/{id}` | `docs:read` | Get one source |
+| `GET` | `/api-keys/self` | *(any valid key)* | The calling key's own name and scopes |
 
 ## The `Doc` shape
 
@@ -195,7 +320,16 @@ Ingest returns an **envelope**, not a bare doc:
 - **`created`** — `true` if a new doc was created, `false` if the URL was already
   catalogued.
 - **`warnings`** — a list of non-fatal, human-readable strings (e.g. a failed content
-  fetch, a deferred owner label). An empty list means everything resolved cleanly.
+  fetch, a deferred owner label, a failed indexing run). An empty list means everything
+  resolved cleanly.
+
+After the catalog write, ingest [indexes](#post-docsindex--re-index-stored-content) the doc's stored content — on the
+idempotent path too, since a repeated Google ingest may store new text. If embedding or
+storing the chunks fails, the doc and its content are still saved and `warnings` contains
+`indexing failed (<reason>); retry with POST /docs/index`. A repeated Google ingest that
+finds the file gone (connectors' `404 file not found for this url`) removes the stored
+content and its chunks and warns `source file not found (...)`. If another fetch has
+stored content since this request started, it retains that newer content and index.
 
 ### Status codes
 
@@ -225,6 +359,33 @@ those.
 For Google sources, repeated ingest also reconciles source grants and refreshes content
 only when that source's `content_fetch_enabled` setting is true. Disabled sources never
 retrieve or store new content through initial ingest, repeated ingest, or scheduled refresh.
+
+**An idempotent hit never fetches.** Even when the existing doc has no stored content —
+the case a fetch would repair — dedup stays a cheap, network-free merge, so `POST /docs`
+keeps predictable latency however many times a URL is re-submitted. Content repair is
+`POST /docs/{id}/refetch`'s job; the `doc-backfill` CLI drives it in bulk over every
+contentless doc (see [`DEPLOYMENT.md`](DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli)).
+Keeping one repair path also keeps one copy of refetch's rule that an empty fetch must not
+wipe stored text.
+
+The gap is still reported: when the existing doc has no stored content, `warnings` also
+contains `no content is stored for this doc`. That states the fact and not the remedy on
+purpose — warnings are part of this contract and consumers render them verbatim, so the
+API does not name operator tooling. To find these docs, use
+[`GET /docs?has_content=false`](#get-docs--list--filter).
+
+### Content fetch (best-effort)
+
+If the derived source has content fetching enabled (`web`, `github`, and the four Google
+sources), the service tries to fetch a title, snapshot and full content at ingest. A fetch
+failure is **never** fatal: the doc is still created, `title` falls back to the caller's
+title or the URL, and a warning is appended.
+
+`web` and `github` fetch in-process; the Google sources (`gdrive`, `gdocs`, `gsheets`,
+`gslides`) fetch via the [connectors](../../connectors/) service, which holds the Google
+credentials — migration `006` enabled them. `youtube` has no fetcher and
+`content_fetch_enabled: false`, so its links are catalogued without content and fetching
+is silently skipped.
 
 ### Content fetch (best-effort)
 
@@ -263,10 +424,32 @@ List docs. Scope: `docs:read`. All filters are optional query params and combine
 | `owning_person_id` | UUID | — | Only docs owned by this person |
 | `source_id` | string | — | Only docs of this source kind |
 | `tag` | string | — | Only docs carrying this tag (matched case-insensitively) |
+| `has_content` | bool | — | `false` returns only docs with no stored content; `true` only docs with it |
 | `active_only` | bool | `true` | When `true`, hides soft-deleted docs |
 
 Returns a JSON array of `Doc` objects in a deterministic order. There is no pagination —
 the full matching set is returned (adequate for the current catalog size).
+
+### `has_content` — finding docs that need a content backfill
+
+`has_content=false` is the discovery query for documents whose content is missing: a doc
+whose source fetch failed at ingest is still catalogued, but gets no stored content and
+only a warning on the ingest response (see
+[`POST /docs`](#post-docs--ingest)), and older records predate content storage
+entirely. Omitting the param filters nothing, so existing callers are unaffected.
+
+Two things it deliberately does **not** key on:
+
+- **`content_snapshot`.** The snapshot is a bounded preview on the `Doc` itself; stored
+  content is a separate row. A doc can show a snapshot and still be contentless, and it
+  still needs backfilling, so it is still returned by `has_content=false`.
+- **The text being non-empty.** Empty content is never stored in the first place — both
+  ingest and `refetch` skip the write when a fetch yields no text — so presence of the
+  row is equivalent to presence of real content.
+
+This filter needs no scope of its own: it narrows the same actor-scoped listing every
+other filter narrows, so a caller can only ever discover contentless docs it was already
+permitted to see.
 
 **Visibility is applied on top of these filters**, so the result is what the *actor* may
 see AND matches the filters. A plain `docs:read` key with no `X-On-Behalf-Of` gets an
@@ -300,7 +483,7 @@ Patch a doc. Scope: `docs:write`. Send only the fields you want to change (`DocU
 | `description` | string \| null | |
 | `owning_team_id` | UUID \| null | Re-validated + label re-resolved |
 | `owning_person_id` | UUID \| null | Re-validated + label re-resolved |
-| `active` | bool \| null | Set `false` to soft-delete, `true` to restore |
+| `active` | bool \| null | Set `false` to soft-delete (removes the doc's search chunks), `true` to restore (re-indexes stored content) |
 
 Tags are **not** patched here — use the tag endpoints below.
 
@@ -405,13 +588,24 @@ available even when the source's automatic content fetching is disabled.
 Note the contrast with ingest: at ingest a fetch failure degrades to a warning, but an
 explicit `refetch` surfaces the failure as **502** so the caller knows it didn't work.
 
+A successful refetch [indexes](#post-docsindex--re-index-stored-content) the new content. An indexing failure does not
+change the response (the `Doc` has no warnings field); it is logged, and the doc is listed
+as stale by `POST /docs/index`. When connectors confirms the file is gone (`404 file not
+found for this url`), the route still returns **502**, and also deletes the stored content
+and its chunks so the doc stops being searchable, unless a newer fetch has stored content
+meanwhile; the catalog row stays. Any other failure
+(timeouts, 5xx, 403, a different 404) leaves content and chunks untouched.
+
 ## `POST /docs/source-access/refresh-due` — scheduled reconciliation
 
 Scope: `docs:write`. Query parameter `limit` defaults to 10 and is constrained to 1–100.
 Selects active Google docs with `content_fetch_enabled=true` whose latest sync or attempt is
 older than
 `SOURCE_ACCESS_REFRESH_AFTER_HOURS` (24 by default), refreshes each independently, and
-returns `{ "attempted", "refreshed", "failed" }`. One failed document does not stop the
+returns `{ "attempted", "refreshed", "failed", "index_failed" }`. Each refreshed doc is
+re-indexed; `index_failed` counts those whose new content could not be indexed (their prior
+chunks remain until `POST /docs/index` succeeds). A confirmed-gone file is handled as in
+refetch and counts as `failed`. One failed document does not stop the
 batch. Failed rows record their attempt time, so they do not starve later rows during the
 same hourly drain; run until `attempted` is less than `limit`. See the
 [refresh schedule](DEPLOYMENT.md#source-access-refresh-schedule). Disabled sources are skipped
@@ -421,6 +615,56 @@ Source grants expire after `SOURCE_ACCESS_MAX_AGE_HOURS` (48 by default). A fail
 does not erase a last-known-good grant immediately, but an extended connector, directory,
 or scheduler outage eventually makes it unusable. Manual grants remain independent and do
 not expire. Ownership never authorizes access. `MAX_AGE` must be greater than `REFRESH_AFTER`.
+
+## `POST /docs/index` — (re-)index stored content
+
+Scope: `docs:index` (or `admin`). Builds each doc's search index from its **stored**
+`doc_content` — it never fetches. A doc's text is split by the chunker, embedded through the
+llm service's `/embed`, and its whole chunk set is replaced in one transaction. Ingest,
+refetch, scheduled refresh, and `PATCH active` or `PATCH title` run the same step inline; this endpoint is
+the retry path for their failures and the entry point for re-embedding after a model
+change (#209). Synchronous and bounded.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `doc_ids` | UUID[] \| null | null | 1–100 docs to index. Every id must exist (else **404** before any work) |
+| `stale_only` | bool | `true` | Listing mode (no `doc_ids`): only docs whose chunks are missing, built from older body/title context, lack title provenance, or should not exist (retired or no content). `false` lists every doc with content |
+| `force` | bool | `false` | Re-embed even when the content is unchanged (e.g. a new embedding model) |
+| `after` | UUID \| null | null | Listing-mode cursor: the previous response's `next_after`. Not allowed with `doc_ids` |
+| `limit` | int | 25 | 1–100 docs per call in listing mode |
+
+The response counts each doc's outcome and lists them:
+
+```json
+{
+  "attempted": 2, "indexed": 1, "unchanged": 0, "cleared": 0, "skipped": 0, "failed": 1,
+  "results": [
+    {"doc_id": "…", "status": "indexed", "chunk_count": 7, "detail": null},
+    {"doc_id": "…", "status": "failed", "chunk_count": 0,
+     "detail": "embedding service unavailable: llm service returned 503"}
+  ],
+  "next_after": null
+}
+```
+
+| `status` | Meaning |
+|----------|---------|
+| `indexed` | A new chunk set replaced the old one |
+| `unchanged` | Chunks already match the stored content and title; no embedding call, no write (unless `force`) |
+| `cleared` | The doc is retired, missing, or has no indexable text; its chunks were removed |
+| `skipped` | The content or title changed while embedding; nothing written (the newer write re-indexes) |
+| `failed` | Embedding or storage failed; nothing written, the previous chunk set is intact |
+
+To drain, repeat with `after: next_after` until `next_after` is null. A failing doc is
+reported and passed over rather than blocking the batch. Reindexing never creates
+duplicates, and a shorter text never leaves chunks from the longer one behind.
+
+| Status | Meaning |
+|--------|---------|
+| **200 OK** | Ran; see per-doc `results` |
+| **404 Not Found** | A `doc_ids` entry does not exist (nothing was indexed) |
+| **401 / 403** | Auth failure / missing `docs:index` — checked before any provider call |
+| **422** | Malformed body — also rejected before any provider call |
 
 ---
 
@@ -441,13 +685,37 @@ A **source** describes a kind of URL and how the catalog treats it:
 | `content_fetch_enabled` | bool | Whether the catalog attempts a snapshot |
 | `active` | bool | |
 
-The eight seeded sources: `web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`,
-`notion`, `youtube`. Only `web` and `github` currently have a fetcher and
-`content_fetch_enabled: true`.
+The seven seeded sources: `web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`,
+`youtube`. All but `youtube` have a fetcher and
+`content_fetch_enabled: true` — migration `006` enabled the four Google sources, which
+fetch through the connectors service.
 
 ## `GET /sources/{id}` — get one source
 
 Scope: `docs:read`. **200** with the `Source`, or **404** if unknown.
+
+---
+
+## `GET /api-keys/self` — what can this key do
+
+No scope beyond a valid key: a caller may always read its own grant, and the response
+describes the key the caller already holds. **401** without a valid key.
+
+```json
+{ "name": "content-backfill", "scopes": ["docs:read", "docs:read:all", "docs:write"] }
+```
+
+`scopes` is sorted and literal — `admin` is reported as `admin`, not expanded into the
+scopes it satisfies. Applying the wildcard is the caller's job (`AuthedKey.has_scope`
+does it server-side).
+
+**Why a tool needs this.** Read routes answer an authorization failure with *filtered
+data*, not an error: a key holding `docs:read` but not `docs:read:all`, sent without
+`X-On-Behalf-Of`, resolves to `DENY` and gets **200 `[]`** from `GET /docs` — identical
+on the wire to an empty catalog (see "Visibility and `X-On-Behalf-Of`" above). Anything
+that acts on a listing being empty — `doc-backfill` concluding there is nothing to
+repair — must check its scopes here first rather than infer them from the data.
+Mirrors team-tracking's endpoint of the same path.
 
 ---
 

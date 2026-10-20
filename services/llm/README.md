@@ -1,6 +1,6 @@
 # llm
 
-Thin, stateless HTTP API for UTMIST's internal consumers: `POST /chat` for Claude completions on Amazon Bedrock, `POST /embed` for batch text embeddings on OpenAI, scoped API-key auth, no database.
+Thin, stateless HTTP API for UTMIST's internal consumers: `POST /chat` for OpenAI completions (optional Amazon Bedrock backends), `POST /embed` for batch text embeddings on OpenAI, scoped API-key auth, no database.
 
 ## What this service does
 
@@ -17,11 +17,11 @@ Two design choices shape everything:
 
 - AWS/OpenAI credentials and the model catalog live in exactly one place, not scattered across every bot and job.
 - Consumers can be written in any language, deployed anywhere, and revoked individually by rotating their key out of config.
-- The chat backend can be redeployed or re-pointed at a different Bedrock endpoint without touching its consumers.
+- The chat backend can be redeployed or re-pointed at a different provider without touching its consumers.
 
 ## Quick start
 
-Prerequisites: Python 3.11+, [uv](https://github.com/astral-sh/uv). No Docker or database needed for local dev. Tests use fakes; real calls need AWS credentials for chat and `OPENAI_API_KEY` for embeddings.
+Prerequisites: Python 3.11+, [uv](https://github.com/astral-sh/uv). No Docker or database needed for local dev. Tests use fakes; the default chat and embeddings both use `OPENAI_API_KEY`. Bedrock chat needs AWS credentials only when selected.
 
 ```bash
 # 0. From the repo root, enter the service directory (setup commands below run here)
@@ -54,7 +54,7 @@ curl -sS http://localhost:8002/chat \
 
 ### Environment tiers (`LLM_ENV`)
 
-`LLM_ENV` declares which environment this instance represents: `local` (default), `staging`, or `production`. Outside `local`, `create_app()` calls `verify_production_secrets()` and **refuses to start** unless `API_KEY` is overridden from the dev default and both `AWS_REGION` and `OPENAI_API_KEY` are set. Configure these before merging to an auto-deploy branch; see [DEPLOYMENT.md](docs/DEPLOYMENT.md#embeddings-post-embed).
+`LLM_ENV` declares which environment this instance represents: `local` (default), `staging`, or `production`. Outside `local`, `create_app()` calls `verify_production_secrets()` and **refuses to start** unless `API_KEY` is overridden from the dev default and `OPENAI_API_KEY` is set. `AWS_REGION` is required only for Bedrock. Invalid chat provider/model pairs fail at boot in every environment. Configure these before merging to an auto-deploy branch; see [DEPLOYMENT.md](docs/DEPLOYMENT.md#embeddings-post-embed).
 
 ### Configuration
 
@@ -65,16 +65,16 @@ All settings load from the environment (`src/config.py`, `.env` in dev):
 | `LLM_ENV` | `local` | Environment tier (`local` / `staging` / `production`). |
 | `API_KEY` | `dev-api-key-change-me` | Env-bootstrap key; carries `admin` scope. Must be overridden outside `local`. |
 | `CONSUMER_KEYS` | `""` | JSON array of per-consumer keys (see auth model). |
-| `LLM_PROVIDER` | `bedrock-converse` | Provider backend (`bedrock-converse` or `bedrock`). |
-| `LLM_MODEL` | `claude-sonnet-4-6` | Default chat model when a request omits `model`. |
+| `LLM_PROVIDER` | `openai` | Chat backend (`openai`, `bedrock-converse`, or `bedrock`). |
+| `LLM_MODEL` | `gpt-6.1-sol` | Default chat model when a request omits `model`. |
 | `EMBED_MODEL` | `openai-embed-3-small` | Embedding default at **1536 dimensions**; see [models and initial choice](docs/ARCHITECTURE.md#initial-embedding-model). |
-| `OPENAI_API_KEY` | `""` | OpenAI credential (`SecretStr`), required outside `local`. Missing locally → `/embed` returns 503. |
+| `OPENAI_API_KEY` | `""` | OpenAI credential (`SecretStr`), required outside `local`. Shared by OpenAI chat and embeddings; missing locally → those routes return 503. |
 | `REQUEST_TIMEOUT_S` | `60` | SDK timeout setting (seconds); see [embedding timeout caveats](docs/API.md#batching-and-timeouts). |
 | `EMBED_MAX_REQUEST_CHARS` | `400000` | Aggregate character cap; see [input limits](docs/API.md#post-embed). |
-| `THINKING_DEFAULT` | `true` | Whether extended thinking is on when a request omits `thinking`. |
+| `THINKING_DEFAULT` | `true` | OpenAI: medium reasoning when true, low when false; Bedrock: thinking on/off. |
 | `AWS_REGION` | `""` | Bedrock region. Standard AWS credential chain also reads `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_BEARER_TOKEN_BEDROCK`. |
 
-Chat bills as **standard Amazon Bedrock** (AWS credits apply) — deliberately *not* Claude Platform on AWS / Marketplace. Embeddings bill through **OpenAI, not AWS credits**.
+Default chat and embeddings bill through **OpenAI**. Selecting a Bedrock chat backend bills chat through standard Amazon Bedrock instead; embeddings remain on OpenAI.
 
 ## Auth model
 
@@ -105,7 +105,7 @@ Every endpoint except `/health` requires `X-API-Key`.
 
 | Method | Path | Scope | Description |
 |--------|------|-------|-------------|
-| POST | `/chat` | `chat` | Send chat turns to Claude, get a completion back. |
+| POST | `/chat` | `chat` | Send chat turns to the configured model, get a completion back. |
 | POST | `/embed` | `embed` | Turn a batch of strings into vectors. |
 | GET | `/health` | none | Liveness probe → `{"status": "ok"}`. |
 
@@ -117,16 +117,16 @@ Every endpoint except `/health` requires `X-API-Key`.
 |-------|------|-------|
 | `messages` | `[{role, content}]` | Required, non-empty. `role` is `user` or `assistant`; `content` is non-empty text or structured blocks. |
 | `system` | string \| null | Optional system prompt. |
-| `model` | string \| null | Optional. Must be one of `claude-sonnet-4-6`, `claude-opus-4-6`; defaults to `LLM_MODEL`. |
+| `model` | string \| null | Optional. Defaults to `LLM_MODEL`; must belong to the selected provider’s [catalog](docs/API.md#post-chat). |
 | `max_tokens` | int | Default `16000`, range `1`–`64000`. |
-| `thinking` | bool \| null | Extended thinking; defaults to `THINKING_DEFAULT` when omitted. |
+| `thinking` | bool \| null | Defaults to `THINKING_DEFAULT`; GPT-6.1 Sol maps true/false to medium/low. |
 | `tools` | list \| null | Optional client-executed tool definitions; see the [tool-use contract](docs/API.md#client-executed-tools). |
 
 **Response** (`ChatResponse`): `{ "content", "model", "stop_reason", "usage": { "input_tokens", "output_tokens" } }` for legacy text-only requests. Tool or structured-message requests additionally return ordered `content_blocks` for stateless continuation.
 
-Tool use is transport, not execution: consumers authorize and run tools, then send their results in the next request. Both providers preserve signed reasoning and redacted continuation blocks when thinking is enabled. Keep those blocks out of visible answers and logs; see [API.md](docs/API.md#client-executed-tools) for validation, limits, and replay rules.
+Tool use is transport, not execution: consumers authorize and run tools, then send their results in the next request. OpenAI preserves encrypted `reasoning_state` blocks; Bedrock preserves signed reasoning and redacted continuation blocks. Keep those blocks out of visible answers and logs; see [API.md](docs/API.md#client-executed-tools) for validation, limits, and replay rules.
 
-**Chat provider errors** are normalized to HTTP status: rate limit → **429**, timeout → **504**, other upstream/5xx/config faults → **502**. Validation failures (empty `messages`, unknown `model`) → **422**.
+**Chat provider errors** are normalized to HTTP status: rate limit → **429**, timeout → **504**, other upstream faults → **502**, missing local OpenAI key → **503**. Validation failures (empty `messages`, unknown or provider-incompatible `model`, unsupported continuation) → **422**.
 
 For the embedding contract, limits, and errors, see [`POST /embed`](docs/API.md#post-embed).
 
@@ -155,7 +155,8 @@ llm/
 │   │
 │   ├── providers/         Provider-agnostic model layer (no FastAPI)
 │   │   ├── base.py            Chat/embedding dataclasses, Protocols + normalized error hierarchy
-│   │   ├── bedrock_converse.py  Default chat: Claude via bedrock-runtime Converse API (US-regional profiles)
+│   │   ├── openai_chat.py       Default chat: GPT-6.1 Sol via OpenAI Responses
+│   │   ├── bedrock_converse.py  Optional chat: Claude via bedrock-runtime Converse API (US-regional profiles)
 │   │   ├── bedrock.py           Alt chat: Claude via AnthropicBedrockMantle (Messages endpoint)
 │   │   ├── openai_embed.py      Embeddings via the OpenAI API
 │   │   └── registry.py          Chat provider selection and OpenAI embedding builder
@@ -173,14 +174,20 @@ llm/
 
 **Dependency direction:** `contracts/` imports nothing from `src/`. `src/api/` depends on `contracts/`, `src/config`, and provider-neutral types and validation helpers, never vendor SDKs. `src/providers/` implements the `LLMProvider` and `EmbeddingProvider` Protocols and knows nothing about FastAPI. `src/api/deps.py` is the only place the concrete providers and key store get wired in — so tests override `get_llm` / `get_embedder` / `get_key_store` via `app.dependency_overrides`.
 
-### The two Bedrock chat providers
+### Chat providers
+
+`openai` (default) uses GPT-6.1 Sol through the Responses API. It reuses the existing
+OpenAI key and SDK. No consumer endpoint or auth changes are needed. See the
+[migration record](docs/OPENAI-MIGRATION.md) and [deployment steps](docs/DEPLOYMENT.md#switching-chat-to-openai).
+
+The two optional Bedrock chat providers remain available for rollback.
 
 Both bill as standard Amazon Bedrock; they differ only in the Bedrock endpoint and how model ids are formed:
 
-- **`bedrock-converse`** (default) — `BedrockConverseProvider` calls the `bedrock-runtime` **Converse** API. Used because this account's model access is US-regional cross-region inference profiles (`us.anthropic.claude-sonnet-4-6`), which the Messages endpoint can't target. Maps neutral model names to inference-profile ids via an explicit table.
+- **`bedrock-converse`** — `BedrockConverseProvider` calls the `bedrock-runtime` **Converse** API. Used because this account's model access is US-regional cross-region inference profiles (`us.anthropic.claude-sonnet-4-6`), which the Messages endpoint can't target. Maps neutral model names to inference-profile ids via an explicit table.
 - **`bedrock`** — `BedrockClaudeProvider` calls the **Mantle Messages** endpoint via `AnthropicBedrockMantle`. Needs global/Messages model access.
 
-API tests inject a `_FakeProvider` through `dependency_overrides`. Existing provider tests exercise the ordinary chat path with stubbed SDK clients. No tests call live AWS or Anthropic endpoints.
+API tests inject a `_FakeProvider` through `dependency_overrides`. Existing provider tests exercise the ordinary chat path with stubbed SDK clients. No tests call live AWS, Anthropic, or OpenAI endpoints.
 
 ## Testing
 

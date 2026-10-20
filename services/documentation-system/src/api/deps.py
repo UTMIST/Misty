@@ -4,9 +4,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
 from contracts.directory import DirectoryClient
+from contracts.embedder import Embedder
+from contracts.retrieval import EmbeddingClient
 from contracts.storage import StorageAdapter
 from src.config import get_settings
 from src.directory.http_client import HttpDirectoryClient
+from src.embed.http_client import HttpEmbedder
+from src.embedding import HttpEmbeddingClient
 from src.fetch.registry import FetcherRegistry, default_registry
 
 
@@ -41,3 +45,36 @@ def get_directory() -> DirectoryClient:
     # SecretStr boundary: HttpDirectoryClient sends the key as a plain header
     # value, so unwrap here rather than pushing SecretStr into the client.
     return _directory_client(s.directory_base_url, s.directory_api_key.get_secret_value())
+
+
+@lru_cache(maxsize=None)
+def _embedder(
+    base_url: str, api_key: str, model: str | None, max_request_chars: int
+) -> HttpEmbedder:
+    # Cached per configuration for the same reason as _directory_client: one
+    # pooled httpx.Client per process, not one per request.
+    return HttpEmbedder(base_url, api_key, model=model, max_request_chars=max_request_chars)
+
+
+def get_embedder() -> Embedder:
+    s = get_settings()
+    return _embedder(
+        s.llm_base_url,
+        s.llm_api_key.get_secret_value(),
+        s.embed_model or s.search_embed_model,
+        s.embed_max_request_chars,
+    )
+
+
+@lru_cache(maxsize=None)
+def _embedding_client(base_url: str, api_key: str, model: str) -> HttpEmbeddingClient:
+    return HttpEmbeddingClient(base_url, api_key, model)
+
+
+def get_embeddings() -> EmbeddingClient:
+    settings = get_settings()
+    return _embedding_client(
+        settings.llm_base_url,
+        settings.llm_api_key.get_secret_value(),
+        settings.search_embed_model,
+    )

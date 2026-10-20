@@ -33,6 +33,8 @@ def fetch(
     except SourceForbidden:
         raise HTTPException(status_code=403, detail="source denied access to this file")
     except SourceNotFound:
+        # documentation-system matches this exact detail as "source gone" and
+        # clears the doc's search index; change both together.
         raise HTTPException(status_code=404, detail="file not found for this url")
     except SourceUnsupported as e:
         raise HTTPException(status_code=422, detail=str(e))

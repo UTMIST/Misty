@@ -3,9 +3,11 @@ import { myTeamsAutocomplete as teamAutocomplete } from './teamAutocomplete.js';
 import {
   renderDocAddResult,
   renderDocListResult,
-  renderDocShowResult,
   renderDocRemoveResult,
+  renderDocSearchResult,
 } from '../messages/doc.js';
+import { ACCESS_RANK, rankOf } from '../auth/policy.js';
+import { SEARCH_MAX_QUERY_LENGTH } from '../services/docService.js';
 
 // Re-exported for callers/tests that reference /doc's autocomplete budget. The
 // implementation now lives in the shared teamAutocomplete module.
@@ -88,23 +90,33 @@ export default defineCommand({
         // Read as the linked caller so the doc service filters to what they can see.
         args.onBehalfOf = principal?.person?.id;
         const result = await ctx.docService.listDocs(args);
-        return renderDocListResult(result);
+        // Only admins can act on a doc id (/doc remove), so only they see it.
+        // rankOf(undefined) is 0, so an unlinked caller never gets ids.
+        const isAdmin = rankOf(principal?.person?.access_level) >= ACCESS_RANK.admin;
+        return renderDocListResult(result, { isAdmin });
       },
     },
     {
-      name: 'show',
-      description: 'Show full detail for one doc',
+      name: 'search',
+      description: 'Search the documents you can access',
       auth: 'linked',
-      ephemeral: false,
+      // Results include the caller's private shares, so never post them publicly.
+      ephemeral: true,
       options: [
-        { name: 'id', type: 'string', required: true, description: 'Doc id (from /doc list)' },
+        {
+          name: 'query',
+          type: 'string',
+          required: true,
+          maxLength: SEARCH_MAX_QUERY_LENGTH,
+          description: 'What to search for',
+        },
       ],
       async handler({ options, ctx, principal }) {
-        const result = await ctx.docService.showDoc({
-          id: options.id,
+        const result = await ctx.docService.searchDocs({
+          query: options.query,
           onBehalfOf: principal?.person?.id,
         });
-        return renderDocShowResult(result);
+        return renderDocSearchResult(result);
       },
     },
     {

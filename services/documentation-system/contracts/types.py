@@ -148,6 +148,16 @@ class DocContentMeta(BaseModel):
     fetched_at: datetime | None = None
 
 
+class DocIndexState(BaseModel):
+    """Provenance of a doc's current chunk set (one body/title hash and model)."""
+
+    model_config = ConfigDict(extra="forbid")
+    source_content_hash: str
+    source_title_hash: str | None = None
+    embedding_model: str
+    chunk_count: int
+
+
 class DocChunk(BaseModel):
     """An embedded slice of a document, identified within its replacement set.
 
@@ -168,6 +178,9 @@ class DocChunk(BaseModel):
     start_offset: int = Field(ge=0, le=2**31 - 1, strict=True)
     end_offset: int = Field(gt=0, le=2**31 - 1, strict=True)
     source_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # Separate from the raw source hash used by citations. NULL means a legacy
+    # set whose title context is unknown and must be re-indexed once.
+    source_title_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     embedding: tuple[float, ...] = Field(min_length=1536, max_length=1536, repr=False)
     embedding_model: str = Field(min_length=1)
     dimensions: Literal[1536]

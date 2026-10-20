@@ -71,6 +71,15 @@ def test_source_errors_map_to_status_codes(error, expected):
     assert resp.status_code == expected
 
 
+def test_not_found_detail_is_stable():
+    # documentation-system matches this exact detail to tell a confirmed
+    # deletion from a misrouted 404, and clears the doc's index on it
+    # (services/documentation-system/src/fetch/connectors.py).
+    with _client(_FakeSource(error=SourceNotFound("gone"))) as c:
+        resp = c.post("/fetch", json={"url": "https://x", "source_id": "gdocs"}, headers=AUTH)
+    assert resp.json() == {"detail": "file not found for this url"}
+
+
 def test_credentials_never_appear_in_an_error_body():
     with _client(_FakeSource(error=SourceNotConfigured("no creds"))) as c:
         resp = c.post("/fetch", json={"url": "https://x", "source_id": "gdocs"}, headers=AUTH)

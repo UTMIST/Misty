@@ -17,8 +17,8 @@ import {
 import {
   renderDocAddResult,
   renderDocListResult,
-  renderDocShowResult,
   renderDocRemoveResult,
+  renderDocSearchResult,
 } from '../src/messages/doc.js';
 import { renderAddEmailResult, renderVerifyEmailResult } from '../src/messages/email.js';
 
@@ -133,11 +133,14 @@ test('buildWhoamiEmbed sorts identifiers alphabetically and formats handle vs no
     [
       { provider: 'github', external_id: '9876', handle: 'eeetan' },
       { provider: 'discord', external_id: '123', handle: 'alex' },
-      { provider: 'notion', external_id: 'notion-uuid', handle: null },
+      { provider: 'uoft_email', external_id: 'member@mail.utoronto.ca', handle: null },
     ],
   ).embeds[0];
   const byName = Object.fromEntries(embed.fields.map((f) => [f.name, f.value]));
-  assert.equal(byName['Identities'], 'discord: <@123>\ngithub: eeetan (9876)\nnotion: notion-uuid');
+  assert.equal(
+    byName['Identities'],
+    'discord: <@123>\ngithub: eeetan (9876)\nuoft_email: member@mail.utoronto.ca',
+  );
 });
 
 test('buildWhoamiEmbed renders discord identity as a mention (drops stored handle)', () => {
@@ -608,38 +611,31 @@ test('renderDocAddResult TEAM_NOT_FOUND', () => {
   assert.match(renderDocAddResult({ outcome: 'TEAM_NOT_FOUND' }).content, /no team/i);
 });
 
-test('renderDocListResult LISTED is public and lists titles+ids', () => {
+test('renderDocListResult LISTED is public and lists titles+links, not ids', () => {
   const r = renderDocListResult({
     outcome: 'LISTED',
-    docs: [{ title: 'Onboarding', id: 'd1', source_id: 'gdocs' }],
+    docs: [{ title: 'Onboarding', id: 'd1', url: 'https://x.com', source_id: 'gdocs' }],
   });
   assert.equal(r.ephemeral, false);
   assert.match(r.content, /Onboarding/);
-  assert.match(r.content, /d1/);
+  assert.match(r.content, /<https:\/\/x\.com>/);
+  assert.doesNotMatch(r.content, /d1/);
+});
+
+test('renderDocListResult shows ids only when isAdmin is set', () => {
+  const docs = [{ title: 'Onboarding', id: 'd1', url: 'https://x.com', source_id: 'gdocs' }];
+  const shown = renderDocListResult({ outcome: 'LISTED', docs }, { isAdmin: true });
+  assert.match(shown.content, /`d1`/);
+  assert.match(shown.content, /<https:\/\/x\.com>/);
+  assert.doesNotMatch(renderDocListResult({ outcome: 'LISTED', docs }).content, /d1/);
+  assert.doesNotMatch(
+    renderDocListResult({ outcome: 'LISTED', docs }, { isAdmin: false }).content,
+    /d1/,
+  );
 });
 
 test('renderDocListResult LISTED empty', () => {
   assert.match(renderDocListResult({ outcome: 'LISTED', docs: [] }).content, /no docs/i);
-});
-
-test('renderDocShowResult SHOWN includes url and id', () => {
-  const r = renderDocShowResult({
-    outcome: 'SHOWN',
-    doc: {
-      title: 'Onboarding',
-      url: 'https://x.com',
-      id: 'd1',
-      source_id: 'gdocs',
-      tags: ['onboarding'],
-      owning_team_label: 'ML',
-    },
-  });
-  assert.match(r.content, /https:\/\/x\.com/);
-  assert.match(r.content, /ML/);
-});
-
-test('renderDocShowResult NOT_FOUND', () => {
-  assert.match(renderDocShowResult({ outcome: 'NOT_FOUND' }).content, /no doc/i);
 });
 
 test('renderDocRemoveResult REMOVED is ephemeral', () => {
@@ -648,12 +644,50 @@ test('renderDocRemoveResult REMOVED is ephemeral', () => {
   assert.match(r.content, /removed/i);
 });
 
+test('renderDocSearchResult FOUND numbers docs in rank order with titles and links', () => {
+  const r = renderDocSearchResult({
+    outcome: 'FOUND',
+    docs: [
+      { id: 'd2', title: 'Team A guide', url: 'https://example.test/a', source_id: 'gdocs' },
+      { id: 'd1', title: null, url: 'https://example.test/untitled', source_id: 'gdocs' },
+    ],
+  });
+  assert.equal(
+    r.content,
+    [
+      '1. **Team A guide** · gdocs — <https://example.test/a>',
+      '2. **https://example.test/untitled** · gdocs — <https://example.test/untitled>',
+    ].join('\n'),
+  );
+  assert.doesNotMatch(r.content, /d1|d2/);
+});
+
+test('renderDocSearchResult covers NO_MATCH, EMPTY_QUERY, QUERY_TOO_LONG, and unknown outcomes', () => {
+  assert.match(renderDocSearchResult({ outcome: 'NO_MATCH' }).content, /no documents/i);
+  assert.match(renderDocSearchResult({ outcome: 'EMPTY_QUERY' }).content, /enter something/i);
+  assert.match(renderDocSearchResult({ outcome: 'QUERY_TOO_LONG' }).content, /too long/i);
+  assert.match(renderDocSearchResult({ outcome: 'WAT' }).content, /something went wrong/i);
+});
+
+test('renderDocSearchResult is always ephemeral', () => {
+  for (const result of [
+    { outcome: 'FOUND', docs: [{ id: 'd1', title: 'T', url: 'https://x.com' }] },
+    { outcome: 'NO_MATCH' },
+    { outcome: 'EMPTY_QUERY' },
+    { outcome: 'QUERY_TOO_LONG' },
+    { outcome: 'DOC_DOWN' },
+    { outcome: 'WAT' },
+  ]) {
+    assert.equal(renderDocSearchResult(result).ephemeral, true);
+  }
+});
+
 test('doc renderers map DOC_DOWN', () => {
   for (const fn of [
     renderDocAddResult,
     renderDocListResult,
-    renderDocShowResult,
     renderDocRemoveResult,
+    renderDocSearchResult,
   ]) {
     assert.match(fn({ outcome: 'DOC_DOWN' }).content, /unavailable/i);
   }

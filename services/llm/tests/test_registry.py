@@ -3,11 +3,13 @@ from unittest.mock import Mock
 import pytest
 
 from contracts.embed import ALLOWED_EMBED_MODELS
+from contracts.models import MODELS_BY_PROVIDER, OPENAI_MODELS
 from src.config import Settings
 from src.providers import openai_embed, registry
 from src.providers.bedrock import BedrockClaudeProvider
 from src.providers.bedrock_converse import BedrockConverseProvider
 from src.providers.openai_embed import OpenAIEmbeddingProvider
+from src.providers.openai_chat import OpenAIChatProvider
 from src.providers.registry import get_embedding_provider, get_provider
 
 
@@ -38,6 +40,23 @@ def test_unknown_provider_raises():
     settings = Settings(llm_provider="nope", aws_region="us-east-1")
     with pytest.raises(ValueError, match="unknown LLM provider"):
         get_provider(settings)
+
+
+def test_get_provider_defaults_to_openai_and_unwraps_key(monkeypatch):
+    constructor = Mock(wraps=OpenAIChatProvider)
+    monkeypatch.setattr(registry, "OpenAIChatProvider", constructor)
+    settings = Settings(openai_api_key="synthetic-openai-key", request_timeout_s=17.5)
+    provider = get_provider(settings)
+    assert isinstance(provider, OpenAIChatProvider)
+    assert provider._client is None
+    constructor.assert_called_once_with(
+        api_key="synthetic-openai-key", default_model="gpt-6.1-sol", timeout_s=17.5
+    )
+
+
+def test_chat_catalog_matches_registered_providers():
+    assert set(MODELS_BY_PROVIDER) == set(registry.PROVIDERS)
+    assert MODELS_BY_PROVIDER["openai"] == OPENAI_MODELS
 
 
 @pytest.mark.parametrize("model", ["openai-embed-3-small", "openai-embed-3-large"])

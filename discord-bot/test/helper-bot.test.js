@@ -1,3 +1,4 @@
+import { chunkForDiscord } from '../src/adapters/discord/messages.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -7,7 +8,6 @@ import {
   isDirectMessage,
   directMessageHistoryToTurns,
   threadHistoryToTurns,
-  chunkForDiscord,
   handleMention,
   handleDirectMessage,
 } from '../src/adapters/discord/mentions.js';

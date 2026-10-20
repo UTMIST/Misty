@@ -1,0 +1,8 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: dev_password
+      POSTGRES_DB: gateway
+    ports: ["5435:5432"]

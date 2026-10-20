@@ -8,7 +8,7 @@ Every internal tool that wants model access — a docs helper bot, the `meeting`
 
 - **Credentials live in one place.** AWS/OpenAI credentials and the model catalog are configured once here, not scattered across every bot and job.
 - **Consumers are revocable individually.** Each holds its own scoped `llm_` key. Cutting one off is dropping its entry from `CONSUMER_KEYS` and redeploying — it doesn't touch anyone else.
-- **The chat provider can change without touching consumers.** Re-pointing at a different Bedrock endpoint is a config change here. No consumer redeploys.
+- **The chat provider can change without touching text-only consumers.** Selecting a supported provider is a config change here. Tool conversations must start fresh when changing providers.
 - **Consumers can be any language, anywhere.** The contract is HTTP + JSON, not an SDK.
 
 This is the platform's [API-only principle](../../../docs/ARCHITECTURE.md#the-core-principle-a-source-of-truth-is-api-only) applied to a service that owns *credentials* rather than a *domain*. Nothing runs inside llm except the chat and embedding proxy: no job queues, no scheduled jobs, no UI, no persistence.
@@ -26,7 +26,8 @@ src/providers/base.py    LLMRequest / LLMResult / LLMProvider Protocol
        ▲                 EmbeddingRequest / EmbeddingResult / EmbeddingProvider Protocol
        │                 + one ProviderError hierarchy shared by both
        │
-src/providers/bedrock_converse.py   ─┐  chat implementations,
+src/providers/openai_chat.py       ─┐  chat implementations,
+src/providers/bedrock_converse.py    │
 src/providers/bedrock.py            ─┘  selected by LLM_PROVIDER
 src/providers/openai_embed.py          OpenAI embeddings; model set by EMBED_MODEL
 ```
@@ -59,7 +60,7 @@ chat providers should not implement an unrelated vector operation. Both capabili
 neutral dataclasses, the same `ProviderError` hierarchy, and injected clients in tests.
 
 `get_embedder` wires the OpenAI implementation through `src/providers/registry.py`.
-`LLM_PROVIDER` selects only the Bedrock chat backend; embeddings have no provider selector
+`LLM_PROVIDER` selects only the chat backend; embeddings have no provider selector
 or automatic fallback. The embedding SDK client is built lazily on first use.
 
 Duplicate JSON object fields are rejected before SDK parsing so conflicting model,
@@ -90,22 +91,75 @@ requires re-embedding even when widths match: vectors from different models are 
 interchangeable. The provider rejects missing/mismatched model metadata and wrong-width
 or invalid vectors. Schema, chunking, and indexing work remain outside this service.
 
+## OpenAI chat (default)
+
+`OpenAIChatProvider` selects `gpt-6.1-sol` and uses the Responses API, required by
+that model for function calls. It reuses the embedding credential and pinned SDK,
+but maintains a separate lazy client. No AWS region is required for this backend.
+The shared `contracts/models.py` catalog validates configured provider/model pairs
+at boot and request overrides before inference; model names are not passthroughs.
+
+The service stays stateless: `store=false`, full history supplied by the consumer,
+and no `previous_response_id` or server-side conversations. Tools remain strictly
+client-executed functions (`strict=false` preserves the existing input-schema
+contract). Tool calls map to neutral `tool_use`; tool outputs map from `tool_result`,
+with errors encoded as `{"content": ..., "is_error": true}` because Responses has
+no separate error flag. There are no hosted tools or agent loops.
+
+OpenAI reasoning items travel as assistant-only `reasoning_state` blocks tagged
+with their provider. Their raw data is bounded and validated before replay. Text
+blocks preserve optional assistant `phase` values. This additive wire extension
+keeps encrypted reasoning and message phases across tool rounds; text-only callers
+still receive the original response fields. Bedrock signed/redacted state is
+rejected by OpenAI, and OpenAI state is rejected by Bedrock, before inference.
+
+OpenAI's [compatibility contract](https://developers.openai.com/api/reference/overview#backwards-compatibility)
+permits new JSON response properties. The adapter validates the fields it consumes
+in known objects instead of maintaining an exhaustive property allowlist. Extra
+envelope, message, text/refusal, function-call, and usage metadata is ignored and
+not exposed to consumers. Opaque reasoning items retain bounded additional fields,
+including summary/content extensions, so stateless replay does not lose state.
+This tolerance does not enable new output types or function execution modes:
+unknown item/content types, namespaced/asynchronous/programmatic calls, invalid
+known fields, and contradictory completion states still fail. Byte/depth bounds,
+duplicate-key rejection, finite JSON values, declared tool names, unique call IDs,
+and object-shaped tool arguments remain validated before SDK coercion.
+
+Every incomplete OpenAI response withholds all function calls, including complete
+siblings of a partial call, while retaining visible text and usage. Known token and
+filter reasons map to `max_tokens` and `content_filtered`; other or absent reasons
+map to `incomplete` rather than causing a 502 or implying successful completion.
+Errors are normalized without exposing provider response bodies. SDK retries are
+disabled and the existing request timeout is passed to the OpenAI client.
+
+OpenAI chat's catch-all 502 path emits a warning through
+`src.providers.openai_chat` with the failure stage (request, JSON decoding, or
+response validation), exception class, upstream HTTP status when available, and
+function/line locations. These locate schema drift and SDK failures without
+logging exception text, traceback source lines/locals, credentials, or content.
+The client still receives only the normalized 502 message.
+
+GPT-6.1 Sol always reasons: true/false map to medium/low effort. Responses requires
+at least 16 output tokens; smaller limits fail locally with 422. Reasoning shares
+the output budget with visible text. See the [API contract](API.md#thinking-and-continuation)
+and [migration record](OPENAI-MIGRATION.md).
+
 ## The two Bedrock chat providers
 
 Both bill as **standard Amazon Bedrock** (AWS credits apply) — deliberately not Claude Platform on AWS / Marketplace. They differ only in which Bedrock endpoint they call and how model ids are formed:
 
-| | `bedrock-converse` (default) | `bedrock` |
+| | `bedrock-converse` | `bedrock` |
 |---|---|---|
 | Endpoint | `bedrock-runtime` **Converse** API | **Mantle Messages** via `AnthropicBedrockMantle` |
 | Model ids | US-regional cross-region inference profiles (`us.anthropic.claude-sonnet-4-6`) | Global model ids |
 | Requires | Regional profile access | Global/Messages model access |
 
-`bedrock-converse` is the default because **this account's model access is US-regional inference profiles**, which the Messages endpoint cannot target. It maps neutral model names (`claude-sonnet-4-6`) to profile ids through an explicit table. If model access on the AWS account changes, that's the first thing to revisit.
+`bedrock-converse` was the original default because **this account's model access is US-regional inference profiles**, which the Messages endpoint cannot target. It maps neutral model names (`claude-sonnet-4-6`) to profile ids through an explicit table. If model access on the AWS account changes, that's the first thing to revisit.
 
 ## Stateless tool-use transport
 
 Issue #70 adds tool definitions and structured content to the same `/chat` route,
-not an agent runtime. Both providers translate the neutral tool, text, reasoning,
+not an agent runtime. Both Bedrock providers translate the neutral tool, text, reasoning,
 redacted-reasoning, and tool-result dataclasses in `src/providers/base.py`. The API
 router remains the only wire-model/dataclass translator. Shared JSON and identifier
 checks live in the framework-free `contracts/tool_validation.py`; they do not
@@ -128,7 +182,7 @@ not replay context that its current authorization no longer permits.
 Tool-mode input has explicit bounds and conversation invariants, documented in
 [API.md](API.md#client-executed-tools). Response lists may be empty even though request
 messages must not be: an empty `end_turn` is a successful completion. For `max_tokens`,
-both codecs and the router share a non-mutating filter that withholds every tool call
+all codecs and the router withhold every tool call
 before validating executable blocks, retaining usage, stop reason, and the order of
 other blocks. This avoids exposing incomplete arguments or executing a partial parallel
 batch before a retry. Consumers retry the original history, not the filtered turn;
@@ -146,8 +200,9 @@ legacy and tool calls restore the prior context in `finally`. Concurrent calls,
 nested legacy calls, and different providers sharing a client remain isolated.
 No SDK source or response bytes are rewritten.
 
-Unknown modeled fields/shapes fail closed; an upstream schema addition may require
-a reviewed SDK/codec update. Well-formed upstream errors retain native SDK retries.
+Bedrock's unknown modeled fields/shapes fail closed; an upstream schema addition
+may require a reviewed SDK/codec update. OpenAI's additive-property handling is
+described above. Well-formed Bedrock errors retain native SDK retries.
 Malformed Converse error envelopes fail immediately with 502 instead of entering
 SDK parsing or retry evaluation, even when their HTTP status might be retryable.
 This is deliberate: passing corrupted error data through can itself raise a 500 or
@@ -178,8 +233,9 @@ database, scheduler, or dependency for this transport.
 | `ProviderRateLimited` | 429 | Upstream returned 429 |
 | `ProviderTimeout` | 504 | Connection or timeout failure |
 | `ProviderUnavailable` | 502 | Upstream error or malformed output |
-| `ProviderUnsupportedModel` | 422 (`/embed`) | Model unsupported by the OpenAI embedding adapter |
-| `ProviderNotConfigured` | 503 (`/embed`) | Missing OpenAI credential in local development |
+| `ProviderUnsupportedModel` | 422 | Model unsupported by the selected adapter |
+| `ProviderInvalidRequest` | 422 (`/chat`) | Locally detectable provider incompatibility |
+| `ProviderNotConfigured` | 503 | Missing OpenAI credential in local development |
 
 `ProviderError` itself is the catch-all → 502. A provider that raises a raw vendor exception is a bug: the router's `except ProviderError` won't catch it, and it becomes a 500.
 

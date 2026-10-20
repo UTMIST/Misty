@@ -102,3 +102,34 @@ def validate_redacted_data(value: str) -> str:
     if not decoded or base64.b64encode(decoded).decode("ascii") != value:
         raise ValueError("redacted reasoning must be canonical base64")
     return value
+
+
+def validate_reasoning_state(value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    """Validate known reasoning fields; preserve bounded extensions for replay."""
+    validate_json_value(value, max_bytes=MAX_TOOL_PAYLOAD_BYTES)
+    required = {"id", "type", "summary", "encrypted_content"}
+    if (
+        not isinstance(value, dict)
+        or not required <= value.keys()
+        or value["type"] != "reasoning"
+        or any(
+            not isinstance(value[key], str) or not value[key] for key in ("id", "encrypted_content")
+        )
+        or value.get("status") not in (None, "completed", "incomplete")
+    ):
+        raise ValueError("invalid reasoning state")
+    for key, kind in (("summary", "summary_text"), ("content", "reasoning_text")):
+        entries = value.get(key)
+        if key == "content" and entries is None:
+            continue
+        if not isinstance(entries, list) or len(entries) > MAX_CONTENT_BLOCKS:
+            raise ValueError("invalid reasoning state content")
+        for entry in entries:
+            if (
+                not isinstance(entry, dict)
+                or not {"type", "text"} <= entry.keys()
+                or entry["type"] != kind
+                or not isinstance(entry["text"], str)
+            ):
+                raise ValueError("invalid reasoning state content")
+    return value
