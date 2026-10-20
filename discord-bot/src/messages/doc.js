@@ -3,11 +3,15 @@ import { FALLBACK, DIRECTORY_DOWN_MSG } from './common.js';
 const DOC_DOWN_MSG =
   'The documentation service is temporarily unavailable. Please try again shortly.';
 
-function docLine(doc, isAdmin) {
+function docSummary(doc, isAdmin) {
   const title = doc.title || doc.url;
   const src = doc.source_id ? ` · ${doc.source_id}` : '';
   const id = isAdmin ? ` · \`${doc.id}\`` : '';
-  return `• **${title}**${src} — <${doc.url}>${id}`;
+  return `**${title}**${src} — <${doc.url}>${id}`;
+}
+
+function docLine(doc, isAdmin) {
+  return `• ${docSummary(doc, isAdmin)}`;
 }
 
 export function renderDocAddResult(result) {
@@ -69,6 +73,26 @@ export function renderDocRemoveResult(result) {
         return `✅ Removed **${result.doc.title || result.doc.id}** from the catalog.`;
       case 'NOT_FOUND':
         return "There's no doc with that id.";
+      case 'DOC_DOWN':
+        return DOC_DOWN_MSG;
+      default:
+        return FALLBACK;
+    }
+  })();
+  return { content, ephemeral: true };
+}
+
+export function renderDocSearchResult(result) {
+  const content = (() => {
+    switch (result.outcome) {
+      case 'FOUND':
+        return result.docs.map((d, i) => `${i + 1}. ${docSummary(d, false)}`).join('\n');
+      case 'NO_MATCH':
+        return 'No documents you can access matched that search. Try different keywords.';
+      case 'EMPTY_QUERY':
+        return 'Please enter something to search for.';
+      case 'QUERY_TOO_LONG':
+        return 'That search is too long. Please shorten it and try again.';
       case 'DOC_DOWN':
         return DOC_DOWN_MSG;
       default:

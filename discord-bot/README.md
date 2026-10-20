@@ -247,6 +247,9 @@ and skips them.
 - `/team roster team:<slug> [as_of:<YYYY-MM-DD>]` (linked) — show a team's current roster.
 - `/my-teams` (linked) — list your active memberships.
 - `/doc <add|list|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
+- `/doc search query:<text>` (linked) — search the documents you can access and get the top matches
+  as titles and links. Replies are always private, because results include your own Drive shares.
+  Needs the bot's doc key to carry the literal `act-as-user` scope (an `admin` key does not imply it).
 
 - `@Misty <question>` (linked) — opens a helper thread and answers using the
   thread's recent history. In a thread Misty created, replying directly to one of

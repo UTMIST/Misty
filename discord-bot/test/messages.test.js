@@ -16,6 +16,7 @@ import {
   renderDocAddResult,
   renderDocListResult,
   renderDocRemoveResult,
+  renderDocSearchResult,
 } from '../src/messages/doc.js';
 import { renderAddEmailResult, renderVerifyEmailResult } from '../src/messages/email.js';
 
@@ -411,8 +412,51 @@ test('renderDocRemoveResult REMOVED is ephemeral', () => {
   assert.match(r.content, /removed/i);
 });
 
+test('renderDocSearchResult FOUND numbers docs in rank order with titles and links', () => {
+  const r = renderDocSearchResult({
+    outcome: 'FOUND',
+    docs: [
+      { id: 'd2', title: 'Team A guide', url: 'https://example.test/a', source_id: 'gdocs' },
+      { id: 'd1', title: null, url: 'https://example.test/untitled', source_id: 'gdocs' },
+    ],
+  });
+  assert.equal(
+    r.content,
+    [
+      '1. **Team A guide** · gdocs — <https://example.test/a>',
+      '2. **https://example.test/untitled** · gdocs — <https://example.test/untitled>',
+    ].join('\n'),
+  );
+  assert.doesNotMatch(r.content, /d1|d2/);
+});
+
+test('renderDocSearchResult covers NO_MATCH, EMPTY_QUERY, QUERY_TOO_LONG, and unknown outcomes', () => {
+  assert.match(renderDocSearchResult({ outcome: 'NO_MATCH' }).content, /no documents/i);
+  assert.match(renderDocSearchResult({ outcome: 'EMPTY_QUERY' }).content, /enter something/i);
+  assert.match(renderDocSearchResult({ outcome: 'QUERY_TOO_LONG' }).content, /too long/i);
+  assert.match(renderDocSearchResult({ outcome: 'WAT' }).content, /something went wrong/i);
+});
+
+test('renderDocSearchResult is always ephemeral', () => {
+  for (const result of [
+    { outcome: 'FOUND', docs: [{ id: 'd1', title: 'T', url: 'https://x.com' }] },
+    { outcome: 'NO_MATCH' },
+    { outcome: 'EMPTY_QUERY' },
+    { outcome: 'QUERY_TOO_LONG' },
+    { outcome: 'DOC_DOWN' },
+    { outcome: 'WAT' },
+  ]) {
+    assert.equal(renderDocSearchResult(result).ephemeral, true);
+  }
+});
+
 test('doc renderers map DOC_DOWN', () => {
-  for (const fn of [renderDocAddResult, renderDocListResult, renderDocRemoveResult]) {
+  for (const fn of [
+    renderDocAddResult,
+    renderDocListResult,
+    renderDocRemoveResult,
+    renderDocSearchResult,
+  ]) {
     assert.match(fn({ outcome: 'DOC_DOWN' }).content, /unavailable/i);
   }
 });
