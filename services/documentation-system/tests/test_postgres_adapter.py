@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, event, text
+from sqlalchemy.exc import SQLAlchemyError
 
 from contracts.storage import DuplicateActiveUrl
 from contracts.types import MAX_CHUNK_CHARS, DocIngest, SourceGrant
@@ -16,6 +17,7 @@ from src.content import content_hash
 from src.ingest import ingest_doc
 from src.storage.postgres import PostgresStorageAdapter
 from tests.chunk_storage_cases import ChunkStorageCases, make_chunk, make_doc
+from tests.ingestion_retrieval_cases import IngestionRetrievalCases
 from tests.retrieval_cases import RetrievalCases
 
 pytestmark = pytest.mark.skipif(
@@ -29,6 +31,58 @@ class TestDocChunks(ChunkStorageCases):
 
 class TestRetrieval(RetrievalCases):
     pass
+
+
+class TestIngestionRetrieval(IngestionRetrievalCases):
+    def test_failed_insert_rolls_back_then_real_search_and_retry_recover(self, flow):
+        doc = flow.ingest()
+        before = flow.search()
+        chunks = flow.store.list_doc_chunks(UUID(doc["id"]))
+        flow.providers.documents[doc["url"]]["content"] = (
+            "CPSIF replacement after storage recovery."
+        )
+
+        def fail_insert(conn, cursor, statement, parameters, context, executemany):
+            # The real replacement has already deleted the old rows inside its
+            # transaction. The API must keep the catalog write and roll back
+            # the complete chunk replacement, then recover through /docs/index.
+            if statement.startswith("INSERT INTO doc_chunks"):
+                raise SQLAlchemyError("private insert diagnostics")
+
+        engine = flow.store._engine
+        event.listen(engine, "before_cursor_execute", fail_insert)
+        try:
+            flow.refetch(doc)
+            assert flow.store.list_doc_chunks(UUID(doc["id"])) == chunks
+            assert flow.search() == before
+            result = flow.retry()
+            assert result["failed"] == 1
+            assert result["results"][0]["detail"] == "index write failed: SQLAlchemyError"
+            assert flow.store.list_doc_chunks(UUID(doc["id"])) == chunks
+        finally:
+            event.remove(engine, "before_cursor_execute", fail_insert)
+        assert flow.retry()["indexed"] == 1
+        flow.citations(flow.search(), doc, "CPSIF replacement after storage recovery.")
+        assert flow.retry()["attempted"] == 0
+
+    @pytest.mark.parametrize("context", ["person", "channel"])
+    def test_real_retrieval_sql_error_fails_closed_and_recovers(self, flow, context):
+        doc = flow.ingest()
+
+        def fail_search(conn, cursor, statement, parameters, context, executemany):
+            if "eligible AS MATERIALIZED" in statement:
+                raise SQLAlchemyError("private query diagnostics")
+
+        engine = flow.store._engine
+        event.listen(engine, "before_cursor_execute", fail_search)
+        headers = flow.headers("channel") if context == "channel" else flow.headers()
+        try:
+            response = flow.client.post("/search", headers=headers, json={"query": "CPSIF"})
+            assert response.status_code == 503
+            assert response.json() == {"detail": "retrieval storage unavailable"}
+        finally:
+            event.remove(engine, "before_cursor_execute", fail_search)
+        assert {h["doc_id"] for h in flow.search(context="channel")} == {doc["id"]}
 
 
 @pytest.mark.parametrize("visibility", [SEE_ALL, DENY, None])
