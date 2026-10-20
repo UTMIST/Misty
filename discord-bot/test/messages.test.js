@@ -131,11 +131,14 @@ test('buildWhoamiEmbed sorts identifiers alphabetically and formats handle vs no
     [
       { provider: 'github', external_id: '9876', handle: 'eeetan' },
       { provider: 'discord', external_id: '123', handle: 'alex' },
-      { provider: 'notion', external_id: 'notion-uuid', handle: null },
+      { provider: 'uoft_email', external_id: 'member@mail.utoronto.ca', handle: null },
     ],
   ).embeds[0];
   const byName = Object.fromEntries(embed.fields.map((f) => [f.name, f.value]));
-  assert.equal(byName['Identities'], 'discord: <@123>\ngithub: eeetan (9876)\nnotion: notion-uuid');
+  assert.equal(
+    byName['Identities'],
+    'discord: <@123>\ngithub: eeetan (9876)\nuoft_email: member@mail.utoronto.ca',
+  );
 });
 
 test('buildWhoamiEmbed renders discord identity as a mention (drops stored handle)', () => {

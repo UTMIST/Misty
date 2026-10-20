@@ -27,7 +27,6 @@ SOURCES = [
     _src("gdocs", ["docs.google.com/document"]),
     _src("gsheets", ["docs.google.com/spreadsheets"]),
     _src("gslides", ["docs.google.com/presentation"]),
-    _src("notion", ["notion.so", "notion.site"]),
     _src("youtube", ["youtube.com", "youtu.be"]),
 ]
 

@@ -426,7 +426,6 @@ def test_list_and_get_providers():
     assert {p.id for p in a.list_providers()} == {
         "discord",
         "github",
-        "notion",
         "uoft_email",
         "email",
     }

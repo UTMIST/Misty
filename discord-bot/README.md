@@ -573,6 +573,7 @@ local `.env`.
 | `src/defineCommand.js` | Neutral, surface-agnostic command factory. |
 | `src/adapters/discord/index.js` | Discord event wiring; dispatches to the router or dedicated recording handler. |
 | `src/adapters/discord/interactions.js` | Convert interactions to neutral intents and deliver replies. |
+| `src/adapters/discord/messages.js` | Shared Discord text splitting, embed limits, and channel/DM delivery. |
 | `src/adapters/discord/mentions.js` | Mention and reply helper with thread history. |
 | `src/adapters/discord/recording.js` | Dedicated `/record` interaction path and its authorization. |
 | `src/adapters/discord/qna.js` | Private in-progress `/qna` interaction path, with recording-channel context and no directory lookup. |
@@ -596,6 +597,19 @@ local `.env`.
 registration entrypoints. Commands, reply renderers, and application services
 remain surface-neutral. Import the module that owns a function directly;
 `adapters/discord/index.js` wires events rather than re-exporting its siblings.
+
+All Discord replies use the shared message helpers: text splits within the
+2,000-character limit, preferring Markdown section starts (`#` through `######`)
+before paragraph breaks, then sentence endings, then whitespace (line breaks
+before spaces or tabs). Headings stay with their following text where possible;
+heading-like lines inside fenced code are ignored. A word is split only when no
+suitable boundary fits. Fenced code blocks close and reopen with their language
+across parts. Slash replies edit the deferred message first, then send follow-ups
+with the original visibility. Embeds are
+shortened with `…` to fit their property, field-count, and shared 6,000-character
+limits; files and embeds appear only on the first text part. Failed sends try a
+short error reply; if even that cannot be delivered, deferred replies attempt to
+clear the thinking indicator. Delivery errors are logged without reply content.
 
 ## Testing
 

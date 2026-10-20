@@ -31,7 +31,6 @@ def test_list_providers(client):
     assert {p["id"] for p in resp.json()} == {
         "discord",
         "github",
-        "notion",
         "uoft_email",
         "email",
     }

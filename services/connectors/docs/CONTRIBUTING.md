@@ -77,19 +77,19 @@ The most common change. Say you're adding support for uploaded `.rtf` files.
 
 ## Walkthrough: add a whole new source (non-Google)
 
-Say you're adding Notion.
+Say you're adding YouTube.
 
-1. **Implement `SourceFetcher`** at `src/sources/notion.py`. One public method, `fetch(url) -> SourceResult`. Raise the `SourceError` subclasses — do not invent new ones without also adding a router mapping.
+1. **Implement `SourceFetcher`** at `src/sources/youtube.py`. One public method, `fetch(url) -> SourceResult`. Raise the `SourceError` subclasses — do not invent new ones without also adding a router mapping.
 
 2. **Add a builder and register the ids** in `src/sources/registry.py`:
 
    ```python
-   def _build_notion(settings: Settings) -> SourceFetcher:
-       return NotionSource(token=settings.notion_token.get_secret_value(), ...)
+   def _build_youtube(settings: Settings) -> SourceFetcher:
+       return YouTubeSource(token=settings.youtube_token.get_secret_value(), ...)
 
    SOURCE_BUILDERS: dict[str, Callable[[Settings], SourceFetcher]] = {
        **{sid: _build_google for sid in GOOGLE_SOURCE_IDS},
-       "notion": _build_notion,
+       "youtube": _build_youtube,
    }
    ```
 
@@ -97,7 +97,7 @@ Say you're adding Notion.
 
 3. **Add config** to `src/config.py` — `SecretStr` for anything credential-shaped. Decide deliberately whether it belongs in `verify_production_secrets()`. Google's does *not*, because "no credential" is a supported running state; if your source is a hard dependency for a consumer, yours might.
 
-4. **Tests**: a `tests/test_notion_source.py` with a fake client, plus a case in `tests/test_registry.py` asserting the new id resolves.
+4. **Tests**: a `tests/test_youtube_source.py` with a fake client, plus a case in `tests/test_registry.py` asserting the new id resolves.
 
 5. **Document it** in the README's `source_id` list — the caller supplies `source_id`, so an unregistered one is a 422 they'll hit immediately.
 

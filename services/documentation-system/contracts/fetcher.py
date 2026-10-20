@@ -47,6 +47,15 @@ class FetchError(Exception):
     ingest layer — becomes a warning, never blocks the doc."""
 
 
+class SourceGone(FetchError):
+    """The source confirmed the file no longer exists for us (connectors
+    answered "file not found"). Unlike a plain FetchError — a timeout, a 5xx,
+    a denied request — this is evidence of deletion, so the doc's index is
+    cleared together with stored content, unless a newer fetch succeeded
+    meanwhile. The catalog row stays: a doc is retired by a person, not by a
+    fetch."""
+
+
 class Fetcher(Protocol):
     def fetch(self, url: str) -> FetchResult:
         """Retrieve title, full content, and snapshot for a URL. Raises FetchError on failure."""

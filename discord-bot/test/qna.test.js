@@ -325,7 +325,13 @@ for (const stage of ['defer', 'edit']) {
       appContext: context(async () => ({ status: 'answered', response })),
     });
     await events.get('interactionCreate')(i);
-    assert.deepEqual(logs, [['Could not deliver private /qna reply']]);
+    assert.deepEqual(logs, [
+      [
+        stage === 'defer'
+          ? 'Could not deliver private /qna reply'
+          : 'Could not deliver Discord reply',
+      ],
+    ]);
   });
 }
 

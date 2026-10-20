@@ -1,4 +1,5 @@
 import { AttachmentBuilder } from 'discord.js';
+import { sendDiscordMessage } from './messages.js';
 import { meetingFilename } from '../../meeting/meetingFilename.js';
 
 // Tells a meeting's text channel that its recording died on its own. Never
@@ -6,9 +7,9 @@ import { meetingFilename } from '../../meeting/meetingFilename.js';
 export function makeChannelNotifier() {
   return async ({ channel, content }) => {
     try {
-      await channel?.send({ content });
-    } catch (e) {
-      console.error('meeting notice failed:', e.message);
+      if (channel) await sendDiscordMessage((part) => channel.send(part), { content });
+    } catch {
+      console.error('Could not deliver meeting notice');
     }
   };
 }
@@ -31,9 +32,9 @@ export function makeAttachmentPoster() {
       // reporting success would tell the user "minutes will post here shortly"
       // for a meeting that no longer exists anywhere. Let it propagate so
       // /record stop reports an error and they know to look.
-      await channel.send({ content, files: [pdfFile] });
+      await sendDiscordMessage((part) => channel.send(part), { content, files: [pdfFile] });
     } catch (e) {
-      console.error('meeting minutes post failed:', e.message);
+      console.error('meeting minutes post failed');
       throw e;
     }
   };

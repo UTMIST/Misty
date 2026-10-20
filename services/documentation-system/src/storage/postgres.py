@@ -22,12 +22,22 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from contracts.storage import DuplicateActiveUrl
 from contracts.retrieval import ChunkCitation, RetrievalUnavailable, SearchHit
-from contracts.types import ApiKey, Doc, DocChunk, DocContentMeta, DocGrant, Source, SourceGrant
+from contracts.storage import DuplicateActiveUrl
+from contracts.types import (
+    ApiKey,
+    Doc,
+    DocChunk,
+    DocContentMeta,
+    DocGrant,
+    DocIndexState,
+    Source,
+    SourceGrant,
+)
 from contracts.visibility import Actor, ActorContext, Channel, DENY, SEE_ALL
+from src.content import content_hash
 from src.retrieval import candidate_limit, fuse, terms, validate_search
-from src.storage.chunks import validate_doc_chunks
+from src.storage.chunks import validate_chunks_for_content, validate_doc_chunks
 from src.storage.schema import (
     api_keys,
     doc_chunks,
@@ -650,13 +660,151 @@ class PostgresStorageAdapter:
             ).scalar_one_or_none()
             if existing is None:
                 return False
-            conn.execute(delete(doc_chunks).where(doc_chunks.c.doc_id == doc_id))
-            if validated:
-                conn.execute(
-                    insert(doc_chunks),
-                    [{"doc_id": doc_id, **chunk.model_dump()} for chunk in validated],
-                )
+            self._write_chunks(conn, doc_id, validated)
         return True
+
+    def replace_doc_chunks_if_current(
+        self,
+        doc_id: UUID,
+        expected_content_hash: str,
+        chunks: list[DocChunk],
+        *,
+        expected_title_hash: str,
+    ) -> bool:
+        validated = validate_chunks_for_content(chunks, expected_content_hash, expected_title_hash)
+        with self._engine.begin() as conn:
+            # Same parent lock as replace_doc_chunks, so chunk writers serialize.
+            doc = conn.execute(
+                select(docs.c.active, docs.c.title).where(docs.c.id == doc_id).with_for_update()
+            ).one_or_none()
+            if (
+                doc is None
+                or not doc.active
+                or content_hash(doc.title or "") != expected_title_hash
+            ):
+                return False
+            # Also lock the content row: upsert_doc_content never touches
+            # `docs`, so only this lock makes it wait until the check and the
+            # write commit together. A newer upsert then lands after us and
+            # its own indexing trigger replaces this set.
+            current_hash = conn.execute(
+                select(doc_content.c.content_hash)
+                .where(doc_content.c.doc_id == doc_id)
+                .with_for_update()
+            ).scalar_one_or_none()
+            if current_hash != expected_content_hash:
+                return False
+            self._write_chunks(conn, doc_id, validated)
+        return True
+
+    @staticmethod
+    def _write_chunks(conn, doc_id: UUID, validated: list[DocChunk]) -> None:
+        conn.execute(delete(doc_chunks).where(doc_chunks.c.doc_id == doc_id))
+        if validated:
+            conn.execute(
+                insert(doc_chunks),
+                [{"doc_id": doc_id, **chunk.model_dump()} for chunk in validated],
+            )
+
+    def clear_doc_chunks_if_unindexable(self, doc_id: UUID) -> bool:
+        with self._engine.begin() as conn:
+            # Share the chunk writers' parent lock and recheck eligibility
+            # after acquiring it. A newer successful index must survive a
+            # cleanup based on an old inactive/contentless snapshot.
+            active = conn.execute(
+                select(docs.c.active).where(docs.c.id == doc_id).with_for_update()
+            ).scalar_one_or_none()
+            if active is None:
+                return True
+            if active:
+                content_id = conn.execute(
+                    select(doc_content.c.doc_id).where(doc_content.c.doc_id == doc_id)
+                ).scalar_one_or_none()
+                if content_id is not None:
+                    return False
+            conn.execute(delete(doc_chunks).where(doc_chunks.c.doc_id == doc_id))
+        return True
+
+    def delete_doc_content(self, doc_id: UUID, *, expected: DocContentMeta | None) -> bool:
+        with self._engine.begin() as conn:
+            # The chunk writers' parent lock: no index write can interleave.
+            existing = conn.execute(
+                select(docs.c.id).where(docs.c.id == doc_id).with_for_update()
+            ).scalar_one_or_none()
+            if existing is None:
+                return False
+            row = conn.execute(
+                select(doc_content.c.content_hash, doc_content.c.fetched_at)
+                .where(doc_content.c.doc_id == doc_id)
+                .with_for_update()
+            ).one_or_none()
+            current = DocContentMeta(**row._mapping) if row is not None else None
+            if current != expected:
+                return False
+            conn.execute(delete(doc_chunks).where(doc_chunks.c.doc_id == doc_id))
+            conn.execute(delete(doc_content).where(doc_content.c.doc_id == doc_id))
+        return True
+
+    def get_doc_index_state(self, doc_id: UUID) -> DocIndexState | None:
+        # One hash and model per set (validate_doc_chunks), so min() just
+        # picks the shared value.
+        stmt = select(
+            func.min(doc_chunks.c.source_content_hash).label("source_content_hash"),
+            func.min(doc_chunks.c.source_title_hash).label("source_title_hash"),
+            func.min(doc_chunks.c.embedding_model).label("embedding_model"),
+            func.count().label("chunk_count"),
+        ).where(doc_chunks.c.doc_id == doc_id)
+        with self._engine.connect() as conn:
+            row = conn.execute(stmt).one()
+        if row.chunk_count == 0:
+            return None
+        return DocIndexState(**row._mapping)
+
+    def list_docs_for_indexing(
+        self, *, stale_only: bool = True, after: UUID | None = None, limit: int = 100
+    ) -> list[UUID]:
+        indexed = (
+            select(
+                doc_chunks.c.doc_id,
+                func.min(doc_chunks.c.source_content_hash).label("content_hash"),
+                func.min(doc_chunks.c.source_title_hash).label("title_hash"),
+            )
+            .group_by(doc_chunks.c.doc_id)
+            .subquery()
+        )
+        has_content = doc_content.c.doc_id.is_not(None)
+        has_chunks = indexed.c.doc_id.is_not(None)
+        wanted = and_(docs.c.active.is_(True), has_content)
+        if stale_only:
+            wanted = and_(
+                wanted,
+                or_(
+                    indexed.c.content_hash.is_(None),
+                    indexed.c.content_hash != doc_content.c.content_hash,
+                    indexed.c.title_hash.is_distinct_from(
+                        func.encode(
+                            func.sha256(func.convert_to(func.coalesce(docs.c.title, ""), "UTF8")),
+                            "hex",
+                        )
+                    ),
+                ),
+            )
+        orphaned = and_(has_chunks, or_(docs.c.active.is_(False), ~has_content))
+        stmt = (
+            select(docs.c.id)
+            .select_from(
+                docs.outerjoin(doc_content, doc_content.c.doc_id == docs.c.id).outerjoin(
+                    indexed, indexed.c.doc_id == docs.c.id
+                )
+            )
+            .where(or_(wanted, orphaned))
+            .order_by(docs.c.id)
+            .limit(limit)
+        )
+        if after is not None:
+            stmt = stmt.where(docs.c.id > after)
+        with self._engine.connect() as conn:
+            return list(conn.execute(stmt).scalars())
 
     def list_doc_chunks(
         self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL

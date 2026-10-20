@@ -4,12 +4,12 @@ Source-of-truth HTTP API for UTMIST's document catalog: a registry of URLs (docs
 
 ## What this service does
 
-UTMIST accumulates links faster than anyone can track them — onboarding docs on Google Drive, budget sheets, GitHub repos, Notion pages, YouTube recordings. Nobody owns a canonical index of "what exists and who's responsible for it," so links rot, duplicate, or vanish when the one person who bookmarked them graduates.
+UTMIST accumulates links faster than anyone can track them — onboarding docs on Google Drive, budget sheets, GitHub repos, YouTube recordings. Nobody owns a canonical index of "what exists and who's responsible for it," so links rot, duplicate, or vanish when the one person who bookmarked them graduates.
 
 The documentation-system service is that canonical index. It exposes a REST API over two core concepts:
 
 - **Docs** — a URL plus metadata: title, description, owning team/person, tags, an optional best-effort content snapshot, and an active flag (soft delete).
-- **Sources** — a registry of URL "kinds" (`web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`, `notion`, `youtube`) that says whether a source requires auth to fetch, has an API, and whether content fetching is even enabled for it.
+- **Sources** — a registry of URL "kinds" (`web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`, `youtube`) that says whether a source requires auth to fetch, has an API, and whether content fetching is even enabled for it.
 
 Content fetching is **egress-guarded (SSRF protection).** Ingesting a URL only ever fetches public destinations: the fetcher enforces an http/https scheme allowlist, resolves the target host, and refuses any private/loopback/link-local/reserved/carrier-grade-NAT or cloud-metadata (`169.254.169.254`) address — any hostname is accepted, but only if it resolves to a permitted public IP — before the request and again on every redirect hop. The connection is pinned to the validated IP (Host header + TLS SNI preserved) so DNS-rebinding can't slip an internal target past the check. A blocked or malformed URL is surfaced as an ordinary fetch failure (the doc is still catalogued with the URL as its title), never a 500.
 
@@ -36,6 +36,16 @@ whose Google membership sync is healthy. Broad and unmapped principals produce n
 Configure the dependency with `CONNECTORS_BASE_URL` and `CONNECTORS_API_KEY`.
 
 Connectors reachability at request time is soft for ingest but hard for refetch: a connectors outage during `POST /docs` is caught and turned into a per-doc warning (the doc is still catalogued, just without a content snapshot) — see the `FetchError` handling in `src/ingest.py`. During `POST /docs/{id}/refetch`, the same `FetchError` is instead surfaced as an HTTP 502 — see `src/api/routers/docs.py` — because refetch is an explicit user-initiated action rather than a batch ingest. It is also a soft dependency at *boot* in staging/production: `verify_production_secrets()` (`src/config.py`) logs a startup warning, not a boot refusal, if `CONNECTORS_API_KEY` is still the built-in dev default — this service still starts and catalogues docs, it just can't fetch Google-source content. See `docs/DEPLOYMENT.md` for the recommended (not required) deploy order (connectors before documentation-system, so Google fetches work from the start).
+
+## Dependency on the llm service
+
+Stored content is indexed for retrieval by embedding it through the [llm](../llm/) service's
+`POST /embed`. Configure it with `LLM_BASE_URL` and `LLM_API_KEY` (an llm key with the
+`embed` scope). Indexing runs inline after ingest, refetch, scheduled refresh, and
+`PATCH active` or `PATCH title`; it is a soft dependency, so an llm outage never fails those requests. The
+doc stays catalogued with its content, ingest returns an `indexing failed` warning, and
+`POST /docs/index` (scope `docs:index`) retries. See "Indexing (#175)" in
+`docs/ARCHITECTURE.md`.
 
 ## Quick start
 
@@ -96,7 +106,7 @@ DOCS_API_KEY=doc_<prefix>_<secret> uv run doc-backfill --dry-run
 DOCS_API_KEY=doc_<prefix>_<secret> uv run doc-backfill
 ```
 
-Sources with `content_fetch_enabled=false` (`notion`, `youtube`) can never have content, so they are reported as skipped rather than failed. A refetch that succeeds but extracts nothing (a title-only `github` doc, an empty page) is reported as `empty`, not `repaired` — a 200 from the refetch endpoint means the fetch ran, not that content was stored, so the run re-lists `has_content=false` to confirm. The tool checks its own scopes (`GET /api-keys/self`) before trusting any listing: without `docs:read:all` the catalog lists as empty rather than 403, which would otherwise read as "nothing to repair". See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli).
+Sources with `content_fetch_enabled=false` (`youtube`) can never have content, so they are reported as skipped rather than failed. A refetch that succeeds but extracts nothing (a title-only `github` doc, an empty page) is reported as `empty`, not `repaired` — a 200 from the refetch endpoint means the fetch ran, not that content was stored, so the run re-lists `has_content=false` to confirm. The tool checks its own scopes (`GET /api-keys/self`) before trusting any listing: without `docs:read:all` the catalog lists as empty rather than 403, which would otherwise read as "nothing to repair". See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli).
 
 **Ports:** this service runs on **8001** (team-tracking uses 8000) and its Postgres container is exposed on **5434** — both chosen to avoid colliding with team-tracking's defaults when running both services locally.
 
@@ -133,11 +143,15 @@ documentation-system/
 │   ├── directory/
 │   │   └── http_client.py     HttpDirectoryClient — calls team-tracking over HTTP
 │   │
+│   ├── embed/
+│   │   └── http_client.py     HttpEmbedder — batches chunk text to the llm service's /embed
+│   │
 │   ├── ingest.py               ingest_doc(): normalize, dedup, source, fetch, own, persist
+│   ├── indexing.py             index_doc(): chunk, embed, and replace a doc's chunk set
 │   ├── retrieval.py            Shared keyword normalization, validation, and rank fusion
 │   ├── embedding.py            Authenticated LLM /embed client
 │   ├── url_norm.py             URL normalization + source derivation from patterns
-│   ├── config.py               Settings (DATABASE_URL, API_KEY, DIRECTORY_*)
+│   ├── config.py               Settings (DATABASE_URL, API_KEY, DIRECTORY_*, LLM_*)
 │   ├── cli.py                  doc-keys CLI (issue/list/revoke)
 │   └── backfill.py             doc-backfill CLI — repairs docs missing content
 │
@@ -151,7 +165,9 @@ documentation-system/
 │       ├── 005_doc_content.py       Stores full extracted content + hash
 │       ├── 006_enable_google_content_fetch.py  Enables Google connector fetches
 │       ├── 007_source_document_access.py  Source grant provenance, expiry, sync time
-│       └── 008_doc_chunks.py      pgvector embeddings and generated keyword metadata
+│       ├── 008_doc_chunks.py      pgvector embeddings and generated keyword metadata
+│       ├── 009_remove_retired_source.py  Retires a source while preserving its documents
+│       └── 010_chunk_title_hash.py  Embedding title provenance and stale-index detection
 │
 ├── tests/                      Fast suite plus gated Postgres integration tests
 │   ├── conftest.py              build_seed_sources() — shared seed matching migration 002
@@ -164,8 +180,14 @@ documentation-system/
 │   ├── test_fetchers.py
 │   ├── test_in_memory_adapter.py
 │   ├── chunk_storage_cases.py    Shared chunk-storage assertions for both adapters
+│   ├── fake_embedder.py          Offline /embed stand-in (autouse `fake_embedder` fixture)
+│   ├── test_indexing.py          index_doc lifecycle: unchanged, replace, clear, failure, races
+│   ├── test_api_indexing.py      Triggers, source deletion, and POST /docs/index
+│   ├── test_embed_client.py      HttpEmbedder batching and error mapping
 │   ├── test_migration_007.py     Source-access migration round trip
 │   ├── test_migration_008.py     pgvector migration, constraints, and round trip
+│   ├── test_migration_009.py     Retired-source cleanup and registry rollback
+│   ├── test_migration_010.py     Title provenance migration and preservation of existing chunks
 │   ├── test_ingest.py
 │   ├── test_postgres_adapter.py   Integration tests (requires running Postgres; gated)
 │   ├── test_protocols.py
@@ -199,7 +221,7 @@ Auth is **Level 2** (scoped API keys), matching team-tracking:
 
 - Every request needs `X-API-Key`. Keys are either the shared bootstrap env key (`API_KEY`, scope: `admin`) or a per-consumer key issued via the `doc-keys` CLI, stored as an Argon2 hash with a `docs:{read,write}` or `admin` scope set.
 - There is **no `X-Actor` header** — the actor stamped on `created_by`/`updated_by`/audit log entries is always the authenticated key's own name (`AuthedKey.name`). A caller cannot claim to be someone else; this is the "attested actor" model.
-- `require_scope("docs:read")` / `require_scope("docs:write")` gate each route; `admin` is a wildcard scope that satisfies any check.
+- `require_scope("docs:read")` / `require_scope("docs:write")` gate each route (`POST /docs/index` needs `docs:index`); `admin` is a wildcard scope that satisfies any check.
 - `AuditLogMiddleware` (imported from `platform_auth` directly, wired in `src/api/app.py`) logs every request with the resolved actor.
 - Manage keys with the CLI:
   ```bash
@@ -223,6 +245,7 @@ All endpoints require `X-API-Key` with the appropriate scope.
 | DELETE | `/docs/{id}/tags/{tag}` | `docs:write` | Remove a tag |
 | POST | `/docs/{id}/refetch` | `docs:write` | Re-run content fetch for an existing doc |
 | POST | `/docs/source-access/refresh-due` | `docs:write` | Refresh a bounded batch whose Google ACL is due |
+| POST | `/docs/index` | `docs:index` | (Re-)index stored content; retry path for indexing failures |
 | GET | `/sources` | `docs:read` | List sources (`?active_only=false`) |
 | GET | `/sources/{id}` | `docs:read` | Get one source |
 | GET | `/api-keys/self` | *(any valid key)* | The calling key's own name and scopes |
@@ -233,9 +256,11 @@ Machine-readable OpenAPI schema: `GET /openapi.json`. Interactive Swagger UI: `G
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `LLM_BASE_URL` | `http://localhost:8002` | Platform LLM service for query embeddings |
+| `LLM_BASE_URL` | `http://localhost:8002` | Platform LLM service for chunk and query embeddings |
 | `LLM_API_KEY` | empty | Secret consumer key with `embed`; missing key makes search return 503 |
 | `SEARCH_EMBED_MODEL` | `openai-embed-3-small` | Neutral embedding alias; `openai-embed-3-large` is also supported at 1536 dimensions |
+| `EMBED_MODEL` | unset | Indexing override; defaults to `SEARCH_EMBED_MODEL`. Keep models aligned for retrieval |
+| `EMBED_MAX_REQUEST_CHARS` | `400000` | Indexing request character budget; keep at or below the LLM service's limit |
 | `SEARCH_MIN_COSINE` | `0.3` | Absolute vector relevance floor, greater than 0 and at most 1; complete keyword matches qualify independently |
 
 The directory key additionally needs `channels:read` for channel search. See
@@ -254,6 +279,13 @@ uv run pytest --ignore=tests/test_postgres_adapter.py -q
 This uses `InMemoryStorageAdapter` injected via FastAPI's `dependency_overrides`, plus fakes for `Fetcher` and `DirectoryClient`. `tests/conftest.py` provides `build_seed_sources()`, a shared source seed matching migration 002, used across the in-memory adapter, ingest, API, and OpenAPI tests.
 
 Without `RUN_PG_TESTS=1`, the Postgres adapter and migration tests are skipped.
+
+For ingestion → indexing → authorized retrieval acceptance (#277), run
+`uv run pytest tests/test_ingestion_retrieval.py -q`. The same cases run against
+Postgres in `tests/test_postgres_adapter.py::TestIngestionRetrieval`. They use the
+real HTTP clients with deterministic external responses, and never seed chunks.
+See the [integration runbook](docs/INGESTION-RETRIEVAL-AUDIT.md) for commands,
+failure/freshness behavior, and controlled staging acceptance.
 
 **Full (includes Postgres integration):**
 ```bash
@@ -299,18 +331,20 @@ v1 covers the docs + sources registry, DB-enforced dedup, source-ACL reconciliat
 revocation and fail-closed expiry, best-effort content fetching with SSRF protection,
 team-tracking-backed ownership, tags, soft delete, scoped API keys, and both storage adapters.
 
-Embedded chunk persistence is available through the storage Protocol, with pgvector,
-source offsets, model/dimension metadata, and keyword-search metadata. See the
+Stored content is indexed for retrieval: chunked, embedded through the llm service, and
+persisted with pgvector, source offsets, model/dimension metadata, and keyword-search
+metadata. Ingest, refetch, refresh, and retirement keep the index current, and
+`POST /docs/index` retries failures (#175). See the
 [storage contract](docs/ARCHITECTURE.md#doc_chunks) and
 [database prerequisites](docs/DEPLOYMENT.md#postgres).
 
 **Deferred (per design §3/§11 non-goals):**
 
-- Indexing full stored content (#175) — chunking, vector storage, and authorized
-  hybrid retrieval exist; retrieval can use seeded chunks while ingest integration
-  is completed and verified separately in #277. Bot/DM/channel integration is #278.
+- Controlled staging/provider acceptance for #277 (automated ingestion/retrieval
+  verification is implemented; see the [audit](docs/INGESTION-RETRIEVAL-AUDIT.md)),
+  and bot/DM/channel integration (#278).
 - An in-process scheduler or queue — Railway (or another external scheduler) calls the bounded refresh endpoint hourly; see the [refresh schedule](docs/DEPLOYMENT.md#source-access-refresh-schedule).
-- Additional fetchers — Notion and YouTube remain registered sources without fetcher implementations.
+- Additional fetchers — YouTube remains a registered source without a fetcher implementation.
 - Bulk import — ingest is one URL per request; no CSV/bulk endpoint.
 - Pagination — list endpoints return all matching rows, adequate for current catalog size.
 - Admin UI — no dashboard; catalog browsing goes through the API or a future thin client.

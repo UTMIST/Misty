@@ -220,19 +220,19 @@ def test_a_doc_deleted_mid_run_is_reported_not_crashed():
 
 
 def test_sources_with_fetching_disabled_are_skipped_not_attempted():
-    """notion/youtube have content_fetch_enabled=false and no registered
-    fetcher, so they sit in has_content=false permanently. Attempting them
+    """YouTube has content_fetch_enabled=false and no registered
+    fetcher, so its documents sit in has_content=false permanently. Attempting to fetch them
     would 502 on every run; they are skipped before any network call and
     bucketed separately from real failures."""
     http = FakeHttp(
-        sources=[_source("web", fetch=True), _source("notion", fetch=False)],
-        docs=[_doc("d1", source_id="notion"), _doc("d2", source_id="web")],
+        sources=[_source("web", fetch=True), _source("youtube", fetch=False)],
+        docs=[_doc("d1", source_id="youtube"), _doc("d2", source_id="web")],
     )
     report = run_backfill(_client(http))
-    assert http.refetched == ["d2"]  # notion never attempted
+    assert http.refetched == ["d2"]  # youtube never attempted
     skipped = report.of(SKIPPED)
     assert [r.doc_id for r in skipped] == ["d1"]
-    assert "notion" in skipped[0].detail
+    assert "youtube" in skipped[0].detail
     assert report.failed == []  # a skip is not a failure
 
 
@@ -246,10 +246,10 @@ def test_unknown_source_is_skipped_rather_than_attempted():
 
 
 def test_enabled_sources_are_read_from_the_service_not_hardcoded():
-    """Enabling a Notion fetcher later must need no change to this tool."""
+    """Enabling a YouTube fetcher later must need no change to this tool."""
     http = FakeHttp(
-        sources=[_source("notion", fetch=True)],
-        docs=[_doc("d1", source_id="notion")],
+        sources=[_source("youtube", fetch=True)],
+        docs=[_doc("d1", source_id="youtube")],
     )
     report = run_backfill(_client(http))
     assert http.refetched == ["d1"]
@@ -267,8 +267,8 @@ def test_inactive_sources_are_excluded_from_the_enabled_set():
 
 def test_dry_run_makes_no_fetch():
     http = FakeHttp(
-        sources=[_source("web", fetch=True), _source("notion", fetch=False)],
-        docs=[_doc("d1"), _doc("d2", source_id="notion")],
+        sources=[_source("web", fetch=True), _source("youtube", fetch=False)],
+        docs=[_doc("d1"), _doc("d2", source_id="youtube")],
     )
     report = run_backfill(_client(http), dry_run=True)
     assert http.refetched == []
@@ -302,8 +302,8 @@ def test_non_list_listing_body_is_fatal():
 
 def test_summary_counts_each_bucket():
     http = FakeHttp(
-        sources=[_source("web", fetch=True), _source("notion", fetch=False)],
-        docs=[_doc("d1"), _doc("d2"), _doc("d3", source_id="notion")],
+        sources=[_source("web", fetch=True), _source("youtube", fetch=False)],
+        docs=[_doc("d1"), _doc("d2"), _doc("d3", source_id="youtube")],
         refetch={"d2": FakeResp(502, {"detail": "boom"})},
     )
     report = run_backfill(_client(http))
@@ -627,9 +627,9 @@ def test_backfill_repairs_a_contentless_doc_against_the_real_app(monkeypatch):
         doc_id = created.json()["doc"]["id"]
         assert adapter.get_doc_content(UUID(doc_id)) is None
 
-        # A notion doc can never be fetched (content_fetch_enabled=false).
-        notion = http.post("/docs", json={"url": "https://notion.so/page"}, headers=auth)
-        notion_id = notion.json()["doc"]["id"]
+        # A YouTube doc can never be fetched (content_fetch_enabled=false).
+        youtube = http.post("/docs", json={"url": "https://youtube.com/watch?v=page"}, headers=auth)
+        youtube_id = youtube.json()["doc"]["id"]
 
         # The source recovers; the backfill should now repair the web doc only.
         app.dependency_overrides[get_fetchers] = lambda: WorkingFetchers()
@@ -637,12 +637,12 @@ def test_backfill_repairs_a_contentless_doc_against_the_real_app(monkeypatch):
 
         by_id = {r.doc_id: r for r in report.results}
         assert by_id[doc_id].outcome == REPAIRED
-        assert by_id[notion_id].outcome == SKIPPED
+        assert by_id[youtube_id].outcome == SKIPPED
         assert report.failed == []
         assert adapter.get_doc_content(UUID(doc_id)) == "the body"
         # Repaired docs leave the contentless listing.
         remaining = http.get("/docs?has_content=false", headers=auth).json()
-        assert [d["id"] for d in remaining] == [notion_id]
+        assert [d["id"] for d in remaining] == [youtube_id]
 
 
 def test_a_title_only_fetch_is_reported_empty_against_the_real_app(monkeypatch):
