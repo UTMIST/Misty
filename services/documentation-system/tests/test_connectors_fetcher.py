@@ -1,8 +1,8 @@
 import httpx
 import pytest
 
-from contracts.fetcher import FetchError
-from src.fetch.connectors import ConnectorsFetcher
+from contracts.fetcher import FetchError, SourceGone
+from src.fetch.connectors import SOURCE_GONE_DETAIL, ConnectorsFetcher
 
 
 def _fetcher(handler):
@@ -77,7 +77,17 @@ def test_every_error_status_becomes_a_fetcherror(status):
     def handler(request):
         return httpx.Response(status, json={"detail": "nope"})
 
-    with pytest.raises(FetchError):
+    with pytest.raises(FetchError) as excinfo:
+        _fetcher(handler).fetch("https://docs.google.com/document/d/abc/edit")
+    # Only connectors' own not-found answer is evidence of deletion.
+    assert not isinstance(excinfo.value, SourceGone)
+
+
+def test_connectors_not_found_becomes_source_gone():
+    def handler(request):
+        return httpx.Response(404, json={"detail": SOURCE_GONE_DETAIL})
+
+    with pytest.raises(SourceGone):
         _fetcher(handler).fetch("https://docs.google.com/document/d/abc/edit")
 
 

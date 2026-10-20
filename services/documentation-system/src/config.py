@@ -34,8 +34,8 @@ class Settings(BaseSettings):
     # "simplify" these back to str. Only the boundaries that hand the raw
     # value to something that needs a str should call .get_secret_value():
     # src/api/auth.py (env-bootstrap key comparison), src/api/deps.py (the
-    # directory HTTP client), src/fetch/registry.py (the connectors fetchers),
-    # and verify_production_secrets below.
+    # directory and llm HTTP clients), src/fetch/registry.py (the connectors
+    # fetchers), and verify_production_secrets below.
     api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
     directory_base_url: str = "http://localhost:8000"
     directory_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
@@ -47,6 +47,11 @@ class Settings(BaseSettings):
         "openai-embed-3-small"
     )
     search_min_cosine: float = Field(default=0.3, gt=0, le=1, allow_inf_nan=False)
+    # Indexing follows search by default so their vectors use the same model.
+    # Override only for an explicit model migration/re-embedding pass.
+    embed_model: Literal["openai-embed-3-small", "openai-embed-3-large"] | None = None
+    # Keep at or below the llm service's EMBED_MAX_REQUEST_CHARS.
+    embed_max_request_chars: int = Field(default=400_000, gt=0)
     docs_env: Literal["local", "staging", "production"] = "local"
     # A scheduler should call the source-access refresh endpoint after the
     # first interval. Source-derived grants expire at the second interval so
@@ -125,5 +130,15 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
             "real connectors service and be recorded as per-doc ingest "
             "warnings rather than content. Set a strong, unique value via "
             "environment variables to enable Google-source content.",
+            settings.docs_env,
+        )
+    if settings.llm_api_key.get_secret_value() == DEFAULT_DEV_API_KEY:
+        # Soft dependency, like connectors: without the llm service the
+        # catalog still works, and content is stored but not indexed. Ingest
+        # and refetch report that as a warning; POST /docs/index retries.
+        logger.warning(
+            "LLM_API_KEY is still set to the built-in dev default in docs_env=%r. "
+            "This service will still start, but stored content will not be "
+            "indexed for retrieval until a valid llm `embed`-scoped key is set.",
             settings.docs_env,
         )

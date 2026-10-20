@@ -48,9 +48,30 @@ def _clear_settings_cache(_no_dotenv):
 
     get_settings.cache_clear()
     deps._directory_client.cache_clear()
+    deps._embedder.cache_clear()
+    deps._embedding_client.cache_clear()
     yield
     get_settings.cache_clear()
     deps._directory_client.cache_clear()
+    deps._embedder.cache_clear()
+    deps._embedding_client.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def fake_embedder(monkeypatch, _clear_settings_cache):
+    """Every app built in a test embeds offline through this shared fake.
+
+    Replaces the class get_embedder constructs rather than overriding the
+    dependency per app, so no test can reach a real llm service by forgetting
+    an override. Tests that need failures set `fake_embedder.fail_on_call`.
+    HttpEmbedder itself is tested directly in test_embed_client.py.
+    """
+    from src.api import deps
+    from tests.fake_embedder import FakeEmbedder
+
+    fake = FakeEmbedder()
+    monkeypatch.setattr(deps, "HttpEmbedder", lambda *args, **kwargs: fake)
+    return fake
 
 
 # (id, label, url_patterns, requires_auth, has_api, content_fetch_enabled)
