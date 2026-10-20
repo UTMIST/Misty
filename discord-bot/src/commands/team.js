@@ -205,7 +205,7 @@ export default defineCommand({
     },
     {
       name: 'google-sync',
-      description: 'Retry Google Group sync after external-members setup (admin)',
+      description: 'Retry Google Group sync and automatic settings (admin)',
       auth: 'admin',
       options: [
         {

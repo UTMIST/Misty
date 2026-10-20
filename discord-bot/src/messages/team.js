@@ -3,47 +3,37 @@ import { FALLBACK, DIRECTORY_DOWN_MSG } from './common.js';
 const USER_NOT_LINKED_MSG =
   "That user hasn't linked their directory account yet. Ask them to run `/link` first, then try again.";
 
-// ponytail: domain matches production GOOGLE_GROUPS_DOMAIN; prefer group_email from the status API when present.
-const GOOGLE_GROUPS_DOMAIN = 'utmist.skule.ca';
-const INFRA_OWNER_EMAIL = 'infrastructure@utmist.skule.ca';
-
-function googleGroupSettingsUrl(slugOrEmail) {
-  const local = String(slugOrEmail).includes('@')
-    ? String(slugOrEmail).split('@')[0]
-    : String(slugOrEmail);
-  return `https://groups.google.com/a/${GOOGLE_GROUPS_DOMAIN}/g/${encodeURIComponent(local)}/settings`;
+function googleGroupSettingsUrl(email) {
+  if (typeof email !== 'string') return null;
+  const parts = email.split('@');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  const [local, domain] = parts;
+  return `https://groups.google.com/a/${encodeURIComponent(domain)}/g/${encodeURIComponent(local)}/settings`;
 }
 
-function externalMembersSetupHint(slugOrEmail) {
-  const settingsUrl = googleGroupSettingsUrl(slugOrEmail);
-  // Both Groups Settings fields matter. Owner ability to change the second on a
-  // fresh group is unverified (#272); if it is admin-only, escalate instead of
-  // looping on Allow external members.
+function externalMembersSetupHint(settingsUrl) {
   return [
-    `Ask someone with access to \`${INFRA_OWNER_EMAIL}\` to open [Group settings](${settingsUrl}) and set:`,
-    `1. **Allow external members** — on`,
-    `2. **Who can add external members** — end users / members can add (not “only admins”)`,
-    `Save, then run \`/team google-sync\` for this team.`,
-    `If (1) is already on but sync still needs external members and (2) is locked to administrators only, stop toggling (1) — ask infrastructure to escalate to a Workspace Super Admin.`,
-    `_Note: whether a group owner can change (2) on every new group is not yet verified._`,
+    'Misty configures external membership automatically. Retry with `/team google-sync`.',
+    "If setup still fails, ask UTMIST's Google administrator to check API authorization and organization policy.",
+    `For manual recovery, check **Allow external members** and **Who can add external members** in [Group settings](${settingsUrl}) as this environment's Misty group owner, then retry sync.`,
   ].join('\n');
 }
 
-function renderGoogleGroupState(team, state, { includeSetup = false } = {}) {
-  const email = state.group_email ?? `${team.slug}@${GOOGLE_GROUPS_DOMAIN}`;
-  const header = `Google Group for **${team.label}** (\`${email}\`)`;
+function renderGoogleGroupState(team, state) {
+  const email = state.group_email;
+  const settingsUrl = googleGroupSettingsUrl(email);
+  const header = `Google Group for **${team.label}**${email ? ` (\`${email}\`)` : ''}`;
+  // Keep recovery instructions visible even when several membership errors accumulate.
+  const error = state.last_error?.slice(0, 600);
   let content;
   switch (state.status) {
     case 'synced':
-      content = [
-        `✅ ${header} is **synced**.`,
-        '_Note: an empty group can show synced before any external member has been tried. That is not proof external membership is enabled. Run `/team google-status` for setup instructions._',
-      ].join('\n');
+      content = `✅ ${header} is **synced**.`;
       break;
     case 'needs_external_members':
       content = [
-        `⚠️ ${header} needs external-member settings.`,
-        state.last_error ? `_Directory note:_ ${state.last_error}` : null,
+        `⚠️ ${header} needs external-member recovery.`,
+        error ? `_Directory note:_ ${error}` : null,
       ]
         .filter(Boolean)
         .join('\n');
@@ -51,7 +41,7 @@ function renderGoogleGroupState(team, state, { includeSetup = false } = {}) {
     case 'failed':
       content = [
         `❌ ${header} sync **failed**.`,
-        state.last_error ? `_${state.last_error}_` : null,
+        error ? `_${error}_` : null,
         'Re-run `/team google-sync` after fixing the issue, or ask infrastructure for help.',
       ]
         .filter(Boolean)
@@ -63,11 +53,12 @@ function renderGoogleGroupState(team, state, { includeSetup = false } = {}) {
   // A recorded email alone can be an attempted address belonging to another group.
   if (
     state.group_name &&
-    (includeSetup ||
-      state.status === 'needs_external_members' ||
-      /external members/i.test(state.last_error ?? ''))
+    settingsUrl &&
+    (state.status === 'needs_external_members' ||
+      (state.status === 'failed' &&
+        /group settings|external members/i.test(state.last_error ?? '')))
   ) {
-    return [content, '', externalMembersSetupHint(email)].join('\n');
+    return [content, '', externalMembersSetupHint(settingsUrl)].join('\n');
   }
   return content;
 }
@@ -75,9 +66,9 @@ function renderGoogleGroupState(team, state, { includeSetup = false } = {}) {
 function renderGoogleAfterCreate(team, google) {
   switch (google?.outcome) {
     case 'SYNC_RESULT':
-      return renderGoogleGroupState(team, google.state, { includeSetup: true });
+      return renderGoogleGroupState(team, google.state);
     case 'PENDING':
-      return 'Google Group provisioning may still be in progress. Run `/team google-status` in a moment for status and setup instructions.';
+      return 'Google Group provisioning may still be in progress. Run `/team google-status` in a moment to check automatic setup.';
     case 'NOT_CONFIGURED':
       return 'Google Groups is not configured on the directory, so no group was created. The team exists in Misty only.';
     case 'RETIRED_NO_GROUP':
@@ -114,7 +105,7 @@ export function renderGoogleGroupStatusResult(result) {
   const content = (() => {
     switch (result.outcome) {
       case 'STATUS':
-        return renderGoogleGroupState(result.team, result.state, { includeSetup: true });
+        return renderGoogleGroupState(result.team, result.state);
       case 'NO_MAPPING':
         return [
           `No Google Group mapping yet for **${result.team.label}** (\`${result.team.slug}\`).`,

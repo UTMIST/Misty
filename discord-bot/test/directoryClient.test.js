@@ -489,3 +489,25 @@ test('syncTeamGoogleGroup maps 404/409/503', async () => {
   });
   await assert.rejects(() => unconfigured.syncTeamGoogleGroup('t1'), GoogleGroupsNotConfigured);
 });
+
+test('syncTeamGoogleGroup treats other 503 responses as temporary outages', async () => {
+  for (const body of [null, {}, 'upstream unavailable', { detail: 'database unavailable' }]) {
+    const client = createDirectoryClient({
+      baseUrl: BASE,
+      apiKey: KEY,
+      fetchImpl: fakeFetch([{ status: 503, body }]),
+    });
+    await assert.rejects(() => client.syncTeamGoogleGroup('t1'), DirectoryUnavailable);
+  }
+  const client = createDirectoryClient({
+    baseUrl: BASE,
+    apiKey: KEY,
+    fetchImpl: async () => ({
+      status: 503,
+      json: async () => {
+        throw new SyntaxError('HTML');
+      },
+    }),
+  });
+  await assert.rejects(() => client.syncTeamGoogleGroup('t1'), DirectoryUnavailable);
+});

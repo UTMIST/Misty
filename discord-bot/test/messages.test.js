@@ -189,14 +189,14 @@ test('renderCreateTeamResult covers outcomes', () => {
     },
   }).content;
   assert.match(needsSetup, /Created team.*ML/s);
-  assert.match(needsSetup, /infrastructure@utmist\.skule\.ca/);
+  assert.match(needsSetup, /Misty group owner/);
   assert.match(needsSetup, /https:\/\/groups\.google\.com\/a\/utmist\.skule\.ca\/g\/ml\/settings/);
   assert.match(needsSetup, /Allow external members/);
   assert.match(needsSetup, /Who can add external members/);
-  assert.match(needsSetup, /Super Admin/);
-  assert.match(needsSetup, /not yet verified/i);
+  assert.match(needsSetup, /UTMIST's Google administrator/);
+  assert.doesNotMatch(needsSetup, /infrastructure@|Super Admin|not yet verified/i);
 
-  // Empty/fresh groups often report synced — create must still show manual setup.
+  // Settings verification also runs for empty groups; normal success needs no manual step.
   const syncedFresh = renderCreateTeamResult({
     outcome: 'CREATED',
     team,
@@ -206,10 +206,7 @@ test('renderCreateTeamResult covers outcomes', () => {
     },
   }).content;
   assert.match(syncedFresh, /synced/i);
-  assert.match(syncedFresh, /infrastructure@utmist\.skule\.ca/);
-  assert.match(syncedFresh, /groups\.google\.com/);
-  assert.match(syncedFresh, /Allow external members/);
-  assert.match(syncedFresh, /Who can add external members/);
+  assert.doesNotMatch(syncedFresh, /groups\.google\.com|manual|Allow external members/);
 
   const unconfigured = renderCreateTeamResult({
     outcome: 'CREATED',
@@ -274,24 +271,46 @@ test('renderGoogleGroupSyncResult covers outcomes', () => {
   assert.match(renderGoogleGroupSyncResult({ outcome: 'RETIRED_NO_GROUP' }).content, /retired/i);
 });
 
-test('google-status provides setup for an older empty synced group using its stored address', () => {
-  const content = renderGoogleGroupStatusResult({
-    outcome: 'STATUS',
-    team: { slug: 'renamed', label: 'Renamed' },
+test('settings failure offers automatic retry and manual recovery on every reply path', () => {
+  const team = { slug: 'renamed', label: 'Renamed' };
+  const state = {
+    group_email: 'original@staging.groups.utmist.ca',
+    group_name: 'groups/123',
+    status: 'failed',
+    last_error: 'group settings: HTTP 403; check Settings API authorization',
+  };
+  const replies = [
+    renderCreateTeamResult({ outcome: 'CREATED', team, google: { outcome: 'SYNC_RESULT', state } }),
+    renderGoogleGroupStatusResult({ outcome: 'STATUS', team, state }),
+    renderGoogleGroupSyncResult({ outcome: 'SYNC_RESULT', team, state }),
+  ];
+  for (const { content, ephemeral } of replies) {
+    assert.equal(ephemeral, true);
+    assert.match(content, /failed/i);
+    assert.match(content, /automatically/);
+    assert.match(content, /google-sync/);
+    assert.match(content, /UTMIST's Google administrator/);
+    assert.match(content, /API authorization/);
+    assert.match(content, /manual recovery/);
+    assert.match(content, /\/a\/staging\.groups\.utmist\.ca\/g\/original\/settings/);
+    assert.doesNotMatch(content, /infrastructure@|Super Admin|\/g\/renamed\//);
+  }
+});
+
+test('long group errors leave room for recovery instructions', () => {
+  const { content } = renderGoogleGroupSyncResult({
+    outcome: 'SYNC_RESULT',
+    team: { slug: 'ml', label: 'ML' },
     state: {
-      group_email: 'original@utmist.skule.ca',
+      group_email: 'ml@utmist.ca',
       group_name: 'groups/123',
-      status: 'synced',
+      status: 'failed',
+      last_error: 'group settings: ' + 'failure; '.repeat(500),
     },
-  }).content;
-  assert.match(content, /not proof/i);
-  assert.match(content, /infrastructure@utmist\.skule\.ca/);
-  assert.match(content, /\/g\/original\/settings/);
-  assert.match(content, /Allow external members/);
-  assert.match(content, /Who can add external members/);
-  assert.match(content, /Super Admin/);
-  assert.match(content, /not yet verified/);
+  });
+  assert.ok(content.length < 2000);
   assert.match(content, /google-sync/);
+  assert.match(content, /manual recovery/);
 });
 
 test('unconfirmed group creation never offers settings actions on any reply path', () => {
@@ -311,6 +330,34 @@ test('unconfirmed group creation never offers settings actions on any reply path
     assert.match(content, /already in use/);
     assert.match(content, /google-sync/);
     assert.doesNotMatch(content, /groups\.google\.com|Allow external members/);
+  }
+});
+
+test('group recovery uses the stored domain for each environment after a team rename', () => {
+  for (const domain of ['staging.groups.utmist.ca', 'utmist.ca', 'legacy.example.org']) {
+    const { content } = renderGoogleGroupStatusResult({
+      outcome: 'STATUS',
+      team: { slug: 'renamed', label: 'Renamed' },
+      state: {
+        group_email: `original@${domain}`,
+        group_name: 'groups/123',
+        status: 'needs_external_members',
+      },
+    });
+    assert.ok(content.includes(`https://groups.google.com/a/${domain}/g/original/settings`));
+    assert.doesNotMatch(content, /infrastructure@|utmist\.skule\.ca|\/g\/renamed\//);
+  }
+});
+
+test('group recovery does not invent a settings address when the stored email is missing', () => {
+  for (const group_email of [undefined, null, '', 'missing-domain', '@example.org', 'ml@']) {
+    const { content } = renderGoogleGroupStatusResult({
+      outcome: 'STATUS',
+      team: { slug: 'ml', label: 'ML' },
+      state: { group_email, group_name: 'groups/123', status: 'needs_external_members' },
+    });
+    assert.match(content, /needs external-member recovery/);
+    assert.doesNotMatch(content, /groups\.google\.com|utmist\.skule\.ca/);
   }
 });
 
@@ -363,14 +410,14 @@ test('Google Group offline cases: in-progress, disabled, setup, empty synced, fa
   assert.match(setup, /Who can add external members/);
   assert.match(setup, /groups\.google\.com/);
 
-  // Empty-group synced is not proof external membership works.
+  // Empty groups also pass backend settings verification before becoming synced.
   const emptySynced = renderGoogleGroupStatusResult({
     outcome: 'STATUS',
     team,
     state: { group_email: 'ml@utmist.skule.ca', status: 'synced' },
   }).content;
   assert.match(emptySynced, /synced/i);
-  assert.match(emptySynced, /empty group|not proof|before any external/i);
+  assert.doesNotMatch(emptySynced, /groups\.google\.com|not proof|manual/i);
 
   // Failed sync (generic + external-members flavored).
   const failed = renderGoogleGroupSyncResult({
@@ -380,6 +427,7 @@ test('Google Group offline cases: in-progress, disabled, setup, empty synced, fa
   }).content;
   assert.match(failed, /failed/i);
   assert.match(failed, /timeout/);
+  assert.doesNotMatch(failed, /groups\.google\.com|Allow external members/);
   const failedExternal = renderGoogleGroupSyncResult({
     outcome: 'SYNC_RESULT',
     team,

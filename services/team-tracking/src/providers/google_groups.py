@@ -5,10 +5,18 @@ that is the setup verified in issue #236. Google libraries are imported
 lazily so the dependency never loads when Google Groups is unconfigured.
 """
 
+from urllib.parse import quote
+
 from contracts.groups import ExternalMembersDisabled, GroupOperationPending, GroupProviderError
 
 API = "https://cloudidentity.googleapis.com/v1"
 SCOPE = "https://www.googleapis.com/auth/cloud-identity.groups"
+SETTINGS_API = "https://www.googleapis.com/groups/v1/groups"
+SETTINGS_SCOPE = "https://www.googleapis.com/auth/apps.groups.settings"
+EXTERNAL_SETTINGS = {
+    "allowExternalMembers": "true",
+    "whoCanAddExternalMembers": "END_USERS_CAN_ADD_EXTERNAL_MEMBERS",
+}
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 # google.rpc.Code values carried in an Operation's `error.code`
 NOT_FOUND = 5
@@ -25,6 +33,7 @@ class GoogleGroupsProvider:
         client_secret: str,
         refresh_token: str,
         session=None,
+        settings_session=None,
         timeout_s: float = 30.0,
     ) -> None:
         self.domain = domain
@@ -44,7 +53,78 @@ class GoogleGroupsProvider:
                     scopes=[SCOPE],
                 )
             )
+            # Keep membership authorization independent: a missing Settings
+            # grant must not prevent revocations with the existing Groups grant.
+            if settings_session is None:
+                settings_session = AuthorizedSession(
+                    Credentials(
+                        token=None,
+                        refresh_token=refresh_token,
+                        client_id=client_id,
+                        client_secret=client_secret,
+                        token_uri=TOKEN_URI,
+                        scopes=[SETTINGS_SCOPE],
+                    )
+                )
         self._session = session
+        self._settings_session = settings_session if settings_session is not None else session
+
+    def _settings_call(self, method: str, email: str, **kwargs) -> dict:
+        try:
+            response = self._settings_session.request(
+                method,
+                f"{SETTINGS_API}/{quote(email, safe='')}",
+                params={"alt": "json"},
+                timeout=self._timeout_s,
+                allow_redirects=False,
+                **kwargs,
+            )
+        except Exception as e:
+            # Settings PATCH is idempotent, unlike membership writes. A normal
+            # retry reads its effect first; it needs no pending membership intent.
+            raise GroupProviderError(
+                f"group settings: {type(e).__name__}; verify Settings API authorization and retry sync"
+            ) from e
+        if response.status_code != 200:
+            raise GroupProviderError(
+                f"group settings: HTTP {response.status_code}; "
+                "check Settings API enablement, apps.groups.settings scope and Google privileges; "
+                "retry sync"
+            )
+        try:
+            body = response.json()
+        except ValueError:
+            raise GroupProviderError("group settings: invalid JSON; retry sync") from None
+        if (
+            not isinstance(body, dict)
+            or not isinstance(body.get("email"), str)
+            or body["email"].lower() != email.lower()
+        ):
+            raise GroupProviderError("group settings: unexpected group response; retry sync")
+        allowed = body.get("allowExternalMembers")
+        who = body.get("whoCanAddExternalMembers")
+        # Google omits this dependent setting on fresh groups while external
+        # membership is disabled. Configure both, then require both on read-back.
+        omitted_while_disabled = allowed == "false" and "whoCanAddExternalMembers" not in body
+        if allowed not in ("true", "false") or (
+            who
+            not in ("END_USERS_CAN_ADD_EXTERNAL_MEMBERS", "ONLY_ADMINS_CAN_ADD_EXTERNAL_MEMBERS")
+            and not omitted_while_disabled
+        ):
+            raise GroupProviderError("group settings: incomplete settings response; retry sync")
+        return body
+
+    def ensure_external_members(self, group_email: str) -> None:
+        current = self._settings_call("GET", group_email)
+        changes = {k: v for k, v in EXTERNAL_SETTINGS.items() if current.get(k) != v}
+        if changes:
+            self._settings_call("PATCH", group_email, json=changes)
+            current = self._settings_call("GET", group_email)
+        if any(current[k] != v for k, v in EXTERNAL_SETTINGS.items()):
+            raise GroupProviderError(
+                "group settings: external membership settings not confirmed; "
+                "ask UTMIST's Google administrator to check policy, then retry sync"
+            )
 
     def _call(self, method: str, path: str, **kwargs):
         """Returns (status, json body). Transport and token-refresh failures

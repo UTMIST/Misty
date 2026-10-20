@@ -27,6 +27,7 @@ class FakeGroups:
         self.members: dict[str, dict[str, str]] = {}  # group name -> email -> membership
         self.owners: dict[str, set[str]] = {}
         self.external_allowed = True
+        self.settings_calls: list[str] = []
         self.fail: str | None = None  # method name that raises GroupProviderError
 
     def _maybe_fail(self, method: str) -> None:
@@ -46,6 +47,11 @@ class FakeGroups:
     def list_members(self, group_name):
         self._maybe_fail("list_members")
         return dict(self.members[group_name])
+
+    def ensure_external_members(self, group_email):
+        assert group_email in self.groups
+        self.settings_calls.append(group_email)
+        self._maybe_fail("settings")
 
     def add_member(self, group_name, email):
         self._maybe_fail("add_member")
@@ -307,8 +313,9 @@ def test_api_writes_keep_the_group_in_sync(client, groups):
     assert [g["team_id"] for g in listed.json()] == [team["id"]]
 
 
-def test_sync_endpoint(client, groups):
-    groups.fail = "create_group"
+@pytest.mark.parametrize("failure", ["create_group", "settings"])
+def test_sync_endpoint(client, groups, failure):
+    groups.fail = failure
     team = client.post("/teams", json={"slug": "ml", "label": "ML"}, headers=AUTH).json()
     assert (
         client.get(f"/teams/{team['id']}/google-group", headers=AUTH).json()["status"] == "failed"
@@ -414,6 +421,23 @@ class FakeSession:
         return r
 
 
+class ReadySettingsSession:
+    """Existing membership tests have independently verified group settings."""
+
+    def request(self, method, url, **kwargs):
+        from urllib.parse import unquote
+
+        assert method == "GET"
+        return FakeResponse(
+            200,
+            {
+                "email": unquote(url.rsplit("/", 1)[1]),
+                "allowExternalMembers": "true",
+                "whoCanAddExternalMembers": "END_USERS_CAN_ADD_EXTERNAL_MEMBERS",
+            },
+        )
+
+
 def _provider(*responses):
     session = FakeSession(*responses)
     p = GoogleGroupsProvider(
@@ -423,6 +447,7 @@ def _provider(*responses):
         client_secret="secret",
         refresh_token="refresh",
         session=session,
+        settings_session=ReadySettingsSession(),
     )
     return p, session
 
@@ -659,7 +684,8 @@ def test_pending_remove_must_finish_before_member_can_rejoin(storage):
     assert session.calls[-1][0] == "POST"
 
 
-def test_pending_add_does_not_block_unrelated_revocations(storage, groups):
+@pytest.mark.parametrize("settings_failure", [False, True])
+def test_pending_add_does_not_block_unrelated_revocations(storage, groups, settings_failure):
     team = _team(storage)
     leaves = _member(storage, team, "leaves@x")
     sync_team(storage, groups, team.id, actor="t")
@@ -671,8 +697,11 @@ def test_pending_add_does_not_block_unrelated_revocations(storage, groups):
     groups.add_member = pending_add
     sync_team(storage, groups, team.id, actor="t")
     storage.update_person(leaves.id, PersonUpdate(active=False), actor="t")
+    if settings_failure:
+        groups.fail = "settings"
     result = sync_team(storage, groups, team.id, actor="t")
     assert result.status == "failed" and len(result.pending_changes) == 1
+    assert result.pending_changes[0].operation_name == "operations/add"
     assert groups.members[result.group_name] == {}
 
 
@@ -857,3 +886,271 @@ def test_partial_google_config_refuses_to_boot():
             )
         )
     verify_production_secrets(Settings())
+
+
+# --- Automatic external-member settings ---
+
+
+def _settings_body(**changes):
+    return {
+        "email": "ml@utmist.example",
+        "allowExternalMembers": "true",
+        "whoCanAddExternalMembers": "END_USERS_CAN_ADD_EXTERNAL_MEMBERS",
+        **changes,
+    }
+
+
+def _settings_provider(*responses):
+    provider, membership_session = _provider()
+    settings_session = FakeSession(*responses)
+    provider._settings_session = settings_session
+    return provider, settings_session, membership_session
+
+
+def test_settings_patch_is_minimal_verified_and_idempotent():
+    before = _settings_body(
+        allowExternalMembers="false",
+        whoCanAddExternalMembers="ONLY_ADMINS_CAN_ADD_EXTERNAL_MEMBERS",
+        whoCanViewGroup="ALL_MEMBERS_CAN_VIEW",
+    )
+    after = _settings_body(whoCanViewGroup="ALL_MEMBERS_CAN_VIEW")
+    p, session, members = _settings_provider(
+        FakeResponse(200, before),
+        FakeResponse(200, after),
+        FakeResponse(200, after),
+        FakeResponse(200, after),
+    )
+    p.ensure_external_members("ml@utmist.example")
+    p.ensure_external_members("ml@utmist.example")
+    assert [c[0] for c in session.calls] == ["GET", "PATCH", "GET", "GET"]
+    assert session.calls[1][2]["json"] == {
+        "allowExternalMembers": "true",
+        "whoCanAddExternalMembers": "END_USERS_CAN_ADD_EXTERNAL_MEMBERS",
+    }
+    assert all(c[1].endswith("/groups/ml%40utmist.example") for c in session.calls)
+    assert all(c[2]["allow_redirects"] is False for c in session.calls)
+    assert all(c[2]["params"] == {"alt": "json"} for c in session.calls)
+    assert members.calls == []
+
+
+def test_settings_patch_only_changes_the_incorrect_setting():
+    p, session, _ = _settings_provider(
+        FakeResponse(200, _settings_body(allowExternalMembers="false")),
+        FakeResponse(200, _settings_body()),
+        FakeResponse(200, _settings_body()),
+    )
+    p.ensure_external_members("ml@utmist.example")
+    assert session.calls[1][2]["json"] == {"allowExternalMembers": "true"}
+
+
+def test_fresh_disabled_group_can_omit_the_dependent_external_add_setting():
+    before = {"email": "ml@utmist.example", "allowExternalMembers": "false"}
+    p, session, _ = _settings_provider(
+        FakeResponse(200, before),
+        FakeResponse(200, _settings_body()),
+        FakeResponse(200, _settings_body()),
+    )
+    p.ensure_external_members("ml@utmist.example")
+    assert session.calls[1][2]["json"] == {
+        "allowExternalMembers": "true",
+        "whoCanAddExternalMembers": "END_USERS_CAN_ADD_EXTERNAL_MEMBERS",
+    }
+    assert [c[0] for c in session.calls] == ["GET", "PATCH", "GET"]
+
+
+def test_successful_patch_requires_readback_not_just_its_response():
+    before = _settings_body(allowExternalMembers="false")
+    p, _, _ = _settings_provider(
+        FakeResponse(200, before),
+        FakeResponse(200, _settings_body()),
+        FakeResponse(200, before),
+    )
+    with pytest.raises(GroupProviderError, match="not confirmed"):
+        p.ensure_external_members("ml@utmist.example")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        None,
+        [],
+        {},
+        {"email": None},
+        _settings_body(email="other@x"),
+        _settings_body(allowExternalMembers=True),
+        _settings_body(whoCanAddExternalMembers=None),
+    ],
+)
+def test_malformed_settings_reads_never_trigger_a_patch(body):
+    p, session, _ = _settings_provider(FakeResponse(200, body))
+    with pytest.raises(GroupProviderError, match="group settings"):
+        p.ensure_external_members("ml@utmist.example")
+    assert [c[0] for c in session.calls] == ["GET"]
+
+
+@pytest.mark.parametrize("status", [301, 401, 403, 404, 429, 503])
+def test_settings_http_errors_are_sanitized_and_do_not_retry(status):
+    p, session, _ = _settings_provider(FakeResponse(status, {"error": "secret-token"}))
+    with pytest.raises(GroupProviderError, match=f"HTTP {status}") as e:
+        p.ensure_external_members("ml@utmist.example")
+    assert "secret-token" not in str(e.value)
+    assert len(session.calls) == 1
+
+
+def test_lost_settings_patch_response_is_recovered_by_reading_before_retry():
+    p, session, _ = _settings_provider(
+        FakeResponse(200, _settings_body(allowExternalMembers="false")),
+        TimeoutError("secret-token"),
+        FakeResponse(200, _settings_body()),
+    )
+    with pytest.raises(GroupProviderError, match="TimeoutError") as e:
+        p.ensure_external_members("ml@utmist.example")
+    assert "secret-token" not in str(e.value)
+    assert not isinstance(e.value, GroupOperationPending)
+    p.ensure_external_members("ml@utmist.example")
+    assert [c[0] for c in session.calls] == ["GET", "PATCH", "GET"]
+
+
+def test_settings_use_independent_oauth_scopes(monkeypatch):
+    from google.auth.transport import requests
+    from src.providers.google_groups import SCOPE, SETTINGS_SCOPE
+
+    credentials = []
+
+    def session(creds):
+        credentials.append(creds)
+        return FakeSession()
+
+    monkeypatch.setattr(requests, "AuthorizedSession", session)
+    p = GoogleGroupsProvider(
+        customer_id="C01",
+        domain="utmist.example",
+        client_id="id",
+        client_secret="secret",
+        refresh_token="refresh",
+    )
+    assert [c.scopes for c in credentials] == [[SCOPE], [SETTINGS_SCOPE]]
+    assert p._session is not p._settings_session
+
+
+def test_settings_failure_blocks_additions_but_preserves_revocations_and_recovery(storage, groups):
+    team = _team(storage)
+    leaves = _member(storage, team, "leaves@gmail.com")
+    first = sync_team(storage, groups, team.id, actor="t")
+    storage.update_person(leaves.id, PersonUpdate(active=False), actor="t")
+    _member(storage, team, "joins@gmail.com")
+    groups.fail = "settings"
+    failed = sync_team(storage, groups, team.id, actor="t")
+    assert failed.status == "failed" and "settings" in failed.last_error
+    assert failed.last_synced_at == first.last_synced_at
+    assert _emails(groups, failed) == set()
+    assert failed.pending_changes == []
+    assert synced_team_for_group(storage, failed.group_email) is None
+    groups.fail = None
+    recovered = sync_team(storage, groups, team.id, actor="t")
+    assert recovered.status == "synced" and recovered.group_name == first.group_name
+    assert _emails(groups, recovered) == {"joins@gmail.com"}
+    assert len(groups.groups) == 1
+
+
+def test_empty_active_group_requires_settings_but_retirement_does_not(storage, groups):
+    team = _team(storage)
+    groups.fail = "settings"
+    failed = sync_team(storage, groups, team.id, actor="t")
+    assert failed.status == "failed" and failed.group_name
+    assert failed.last_synced_at is None
+    groups.settings_calls.clear()
+    storage.update_team(team.id, TeamUpdate(active=False), actor="t")
+    retired = sync_team(storage, groups, team.id, actor="t")
+    assert retired.status == "synced"
+    assert groups.settings_calls == []
+
+
+def test_settings_retry_uses_persisted_group_address_after_team_rename(storage, groups):
+    team = _team(storage)
+    groups.fail = "settings"
+    first = sync_team(storage, groups, team.id, actor="t")
+    storage.update_team(team.id, TeamUpdate(slug="renamed"), actor="t")
+    groups.fail = None
+    state = sync_team(storage, groups, team.id, actor="t")
+    assert state.status == "synced" and state.group_email == first.group_email
+    assert groups.settings_calls == [first.group_email, first.group_email]
+    assert len(groups.groups) == 1
+
+
+def test_settings_crash_leaves_confirmed_group_identity_and_invalidates_synced_state(
+    storage, groups
+):
+    team = _team(storage)
+    first = sync_team(storage, groups, team.id, actor="t")
+
+    def crash(email):
+        saved = storage.get_team_google_group(team.id)
+        assert saved.group_name == first.group_name and saved.status == "failed"
+        raise KeyboardInterrupt()
+
+    groups.ensure_external_members = crash
+    with pytest.raises(KeyboardInterrupt):
+        sync_team(storage, groups, team.id, actor="t")
+    assert synced_team_for_group(storage, first.group_email) is None
+
+
+def test_fresh_group_runs_real_settings_provider_before_external_add(storage):
+    team = _team(storage)
+    _member(storage, team, "ada@gmail.com")
+    p, members = _provider(
+        FakeResponse(200, {"done": True, "response": {"name": "groups/abc"}}),
+        FakeResponse(200, {"memberships": []}),
+        FakeResponse(200, {"done": True}),
+    )
+    settings = FakeSession(
+        FakeResponse(200, _settings_body(allowExternalMembers="false")),
+        FakeResponse(200, _settings_body()),
+        FakeResponse(200, _settings_body()),
+    )
+    p._settings_session = settings
+    original = members.request
+
+    def request(method, url, **kwargs):
+        if method == "POST" and url.endswith("/memberships"):
+            assert [c[0] for c in settings.calls] == ["GET", "PATCH", "GET"]
+        return original(method, url, **kwargs)
+
+    members.request = request
+    state = sync_team(storage, p, team.id, actor="integration")
+    assert state.status == "synced" and state.updated_by == "integration"
+    assert state.pending_changes == []
+
+
+def test_settings_refresh_failure_does_not_prevent_google_membership_removal(storage, groups):
+    from google.auth.exceptions import RefreshError
+
+    team = _team(storage)
+    person = _member(storage, team, "leaves@gmail.com")
+    first = sync_team(storage, groups, team.id, actor="t")
+    storage.update_person(person.id, PersonUpdate(active=False), actor="t")
+    _member(storage, team, "joins@gmail.com")
+    member_name = groups.members[first.group_name][person.primary_email]
+    provider, members = _provider(
+        FakeResponse(
+            200,
+            {
+                "memberships": [
+                    {
+                        "name": member_name,
+                        "preferredMemberKey": {"id": person.primary_email},
+                        "roles": [{"name": "MEMBER"}],
+                    }
+                ]
+            },
+        ),
+        FakeResponse(200, {"done": True}),
+    )
+    provider._settings_session = FakeSession(RefreshError("secret-token"))
+    state = sync_team(storage, provider, team.id, actor="retry")
+    assert state.status == "failed" and "RefreshError" in state.last_error
+    assert "secret-token" not in state.last_error
+    assert state.last_synced_at == first.last_synced_at
+    assert [call[0] for call in members.calls] == ["GET", "DELETE"]
+    assert members.calls[-1][1].endswith(member_name)
+    assert state.pending_changes == []

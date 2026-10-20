@@ -264,7 +264,9 @@ export function createDirectoryClient({ baseUrl, apiKey, fetchImpl = fetch }) {
       }
       if (resp.status === 503) {
         const body = await resp.json().catch(() => ({}));
-        throw new GoogleGroupsNotConfigured(body.detail ?? 'google groups not configured');
+        if (body?.detail === 'google groups not configured') {
+          throw new GoogleGroupsNotConfigured(body.detail);
+        }
       }
       throw new DirectoryUnavailable(`directory returned ${resp.status}`);
     },

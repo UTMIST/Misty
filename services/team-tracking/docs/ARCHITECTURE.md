@@ -93,7 +93,7 @@ The result: a `dev:spoof` key cannot be created against a production directory, 
 
 Each team gets a Google Group so Drive documents and channel access can be granted to a team, not to individuals one by one. Team Tracking membership is the source of truth. Joining a Discord channel never changes Google membership.
 
-**Layering.** `contracts/groups.py` defines the `GroupProvider` Protocol. `src/providers/google_groups.py` implements it with the Cloud Identity Groups API, and `src/google_groups.py` holds the reconciler (`sync_team`), which depends only on the two Protocols. Routers schedule syncs and never call Google. `src/api/deps.py` wires the provider, or `None` when the five `GOOGLE_*` settings are unset; with `None`, every sync trigger is a no-op.
+**Layering.** `contracts/groups.py` defines the `GroupProvider` Protocol. `src/providers/google_groups.py` implements it with the Cloud Identity Groups and Groups Settings APIs, and `src/google_groups.py` holds the reconciler (`sync_team`), which depends only on the two Protocols. Routers schedule syncs and never call Google. `src/api/deps.py` wires the provider, or `None` when the five `GOOGLE_*` settings are unset; with `None`, every sync trigger is a no-op.
 
 **Who is in a team's group.** Every *active* person whose membership is current today (`started_at <= today < ended_at`), with **all** of their addresses: `primary_email` plus every verified `email` identifier. People sign into Drive with whichever Google account they use, so adding every verified address is what makes a share to the group actually work for them. Parent teams do not inherit their sub-teams' members. A retired team keeps its group (Drive shares to it become harmless), but every member is removed.
 
@@ -107,7 +107,38 @@ Each team gets a Google Group so Drive documents and channel access can be grant
 
 **No duplicate groups.** The group's address is `<slug>@<domain>`. Each group is created with the description `Managed by Misty team-tracking (team <uuid>)`. If creation hits `409 already exists`, the provider looks the address up, adopts the group only if its description is exactly that marker (a previous attempt that succeeded but was never recorded), and otherwise fails with "already in use". So a retry never duplicates a group or takes over a stranger's. Until creation succeeds the address follows the current slug, so a taken address can be fixed by renaming the team. After that the address never changes, even if the slug does.
 
-**External members.** API-created groups reject addresses outside the managed domain until Group settings allow them: **Allow external members** and **Who can add external members** (end users / members, not only admins). The Groups Settings API returned 401 in testing ([#236](https://github.com/UTMIST/Misty/issues/236)), so this step is manual — see [DEPLOYMENT.md](DEPLOYMENT.md#onboarding-each-new-group-manual-step) for the operator flow, Misty `/team google-sync`, and what is still unverified about owner edits to the second setting. A sync that hits that rejection still applies internal adds and all removals, then records `needs_external_members` with an instruction, rather than failing the whole sync. An empty group's `synced` status is not proof the settings are correct.
+**External members.** For every active managed group, the provider reads the
+[Groups Settings resource](https://developers.google.com/workspace/admin/groups-settings/v1/reference/groups),
+PATCHes only the required differences (`allowExternalMembers: "true"` and
+`whoCanAddExternalMembers: "END_USERS_CAN_ADD_EXTERNAL_MEMBERS"`), then verifies
+with a fresh read. Requests explicitly select JSON (`alt=json`); Google can return
+XML otherwise. Fresh groups can omit `whoCanAddExternalMembers` while
+`allowExternalMembers` is `"false"`; that initial omission is accepted, but both
+enabled values must be present on verification. This runs before additions,
+including for empty groups; retired groups skip settings changes. The persisted
+group address survives team renames.
+
+No other settings are sent. Live validation preserved active privacy, joining,
+posting, and moderation settings. Google normalized the deprecated
+`whoCanMarkFavoriteReplyOnOwnTopic` alias during the PATCH; its replacement
+`whoCanAssistContent` stayed unchanged. Do not compare every legacy response field
+as if it represented an independent active permission.
+
+Settings calls use a separate authorized session scoped to `apps.groups.settings`,
+with the same refresh token as Cloud Identity membership calls. This lets existing
+membership authorization continue to remove members when the Settings grant is
+missing. The reconciler persists the confirmed group identity and marks the mapping
+`failed` before settings calls; unsuccessful verification holds additions, still
+attempts removals, and cannot publish a `synced` mapping. Settings failures store
+sanitized diagnostics, never response bodies or credentials. If settings verify
+but Google still rejects an external address, the mapping records
+`needs_external_members` unless another error requires `failed`.
+
+A Settings PATCH is idempotent and does not use membership `pending_changes`.
+After a lost response, the next sync reads the effect before deciding to PATCH
+again. Unconfirmed membership writes keep their separate recovery rules below.
+UTMIST's own administrator handles authorization/policy recovery; the old external
+Workspace dependency is resolved. See the [credentials and rollout runbook](DEPLOYMENT.md#managed-google-groups).
 
 **Independent changes, confirmed completion.** A sync applies removals before additions and attempts every one even when another fails, so a persistently rejected newcomer can't keep a departed member in the group. Any failure makes the whole sync `failed` with every error in `last_error`. Membership create/delete return an Operation; the provider counts a change as made only when the Operation is `done` with no `error`, or an idempotent already-exists/already-gone result confirms it.
 
@@ -225,7 +256,7 @@ Two trade-offs worth knowing:
 | `last_synced_at` | timestamptz NULL | Last fully converged sync |
 | `pending_changes` | jsonb NOT NULL DEFAULT `[]` | Unconfirmed membership writes; shape is in [API.md](API.md#team-google-groups) |
 
-Written before membership calls and after every sync attempt (upsert on `team_id`). It records the mapping, unconfirmed writes, and last outcome. Google's membership list remains the record of who is actually in the group. See [Managed Google Groups](#managed-google-groups).
+Written before settings and membership calls and after every sync attempt (upsert on `team_id`). It records the mapping, unconfirmed writes, and last outcome. Google's membership list remains the record of who is actually in the group. See [Managed Google Groups](#managed-google-groups).
 
 ### Convention: named exec seats
 

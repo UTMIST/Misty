@@ -44,9 +44,9 @@ Set in Railway per environment; see the runbook's env-var table for the full lis
 | `API_KEY` | Env bootstrap admin key. Generate with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`. Do NOT prefix with `tt_`. |
 | `TT_ENV` | `staging` or `production`. Controls the `dev:spoof` scope safety gates (the CLI refuses to issue such keys and the middleware 403s them when `TT_ENV=production`). |
 | `PORT` | `8000` (explicit — required so cross-service refs from consumers resolve). |
-| `GOOGLE_GROUPS_CUSTOMER_ID` | Workspace customer id without the `customers/` prefix (`C01yare3k`). Optional; see [Managed Google Groups](#managed-google-groups). |
-| `GOOGLE_GROUPS_DOMAIN` | Domain new team groups are created under (`utmist.skule.ca`). |
-| `GOOGLE_OAUTH_CLIENT_ID` | OAuth client of the `misty-utmist` GCP project. |
+| `GOOGLE_GROUPS_CUSTOMER_ID` | Managed Google customer id without the `customers/` prefix. The new `utmist.ca` organization is `C00kwr2qe`; see [Google identity setup (#236)](https://github.com/UTMIST/Misty/issues/236). |
+| `GOOGLE_GROUPS_DOMAIN` | Domain new team groups are created under: `staging.groups.utmist.ca` for nonproduction, `utmist.ca` for the new production setup. |
+| `GOOGLE_OAUTH_CLIENT_ID` | Internal OAuth client from the matching environment's GCP project. |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | That client's secret. |
 | `GOOGLE_OAUTH_REFRESH_TOKEN` | Offline refresh token for the group-owning account. |
 
@@ -173,20 +173,46 @@ That last one is your migration progress bar — as consumers move to DB-issued 
 
 ## Managed Google Groups
 
-team-tracking creates a Google Group for each team and keeps its members equal to the team's current membership. How it decides membership, and why, is in [ARCHITECTURE.md](ARCHITECTURE.md#managed-google-groups); the consumer-facing endpoints are in [API.md](API.md#team-google-groups). The Google-side setup and its verification are recorded in [#236](https://github.com/UTMIST/Misty/issues/236#issuecomment-6001988660).
+team-tracking creates a Google Group for each team and keeps its members equal to the team's current membership. How it decides membership, and why, is in [ARCHITECTURE.md](ARCHITECTURE.md#managed-google-groups); the consumer-facing endpoints are in [API.md](API.md#team-google-groups). [Google identity setup (#236)](https://github.com/UTMIST/Misty/issues/236) preserves the setup history.
 
 ### Credentials
 
-The integration authenticates **as a user**, `infrastructure@utmist.skule.ca`, with an OAuth refresh token. It doesn't use a service account: user OAuth is the setup that was verified to create groups and manage external members. Groups are created with that account as their initial owner.
+The integration authenticates **as a user** with an OAuth refresh token. Groups
+are created with that account as their initial owner. The replacement identities
+are `misty@staging.groups.utmist.ca` for nonproduction and `misty@utmist.ca` for
+production; consult [Google identity setup (#236)](https://github.com/UTMIST/Misty/issues/236)
+for the migration status before replacing any existing deployment.
 
-1. In [OAuth Playground](https://developers.google.com/oauthplayground/), choose "Use your own OAuth credentials" and enter the `misty-utmist` project's OAuth client (its redirect URIs must include `https://developers.google.com/oauthplayground`).
-2. Authorize **only** `https://www.googleapis.com/auth/cloud-identity.groups`, signed in as `infrastructure@utmist.skule.ca`.
-3. Exchange the code for tokens and keep the **refresh token**. Set it, the client id, and the client secret as the `GOOGLE_*` variables above, along with the customer id and domain.
-4. **Check the OAuth app's publishing status first.** An External app in *Testing* gets refresh tokens that expire after seven days, which would silently stop every sync a week after deploy ([refresh-token lifetime](https://developers.google.com/identity/protocols/oauth2#expiration)).
+1. Use the matching project's **Internal**, **Desktop app** OAuth client with an
+   operator-run local loopback authorization flow. Follow Google's
+   [installed-app flow](https://developers.google.com/identity/protocols/oauth2/native-app)
+   with state verification, PKCE, and offline access. These clients do not use
+   OAuth Playground's web redirect.
+2. Enable the **Cloud Identity API**, **Groups Settings API**, and **Admin SDK API**
+   in that project. Google's [Settings API prerequisites](https://developers.google.com/workspace/admin/groups-settings/limits)
+   also require the Directory API to be enabled; this does not add a Directory
+   OAuth scope. Sign in as the environment's group-owning account and authorize:
+   `https://www.googleapis.com/auth/cloud-identity.groups` and
+   `https://www.googleapis.com/auth/apps.groups.settings`. Adding a scope in code
+   does not extend an existing grant; reauthorize older membership-only tokens.
+3. Exchange the code privately, retain the refresh token, and verify token refresh
+   and reads from both APIs on a disposable managed group before setting the five
+   `GOOGLE_*` variables. Confirm the account can update that group's settings under
+   UTMIST's policy; OAuth consent alone does not grant Google administrative rights.
+4. Keep the audience **Internal**. An External app in *Testing* has a seven-day
+   refresh-token lifetime for this scope. Internal avoids that testing limit,
+   but grants can still expire or be revoked; see
+   [refresh-token lifetime](https://developers.google.com/identity/protocols/oauth2#expiration).
 
 The client secret and refresh token are credentials: keep them in Railway variables and the maintainers' private storage only. Never paste them into issues, logs, or chat.
 
-**If the grant is revoked or expires**, every sync records `status: failed` with `last_error` `google request failed: RefreshError`. Repeat steps 1–3 as the same account, replace `GOOGLE_OAUTH_REFRESH_TOKEN`, then run the backfill below to catch up.
+**If the grant is revoked or expires**, sync records `status: failed`. Membership
+access failures report `google request failed: RefreshError`; settings-only grant
+failures report `group settings: RefreshError` with recovery guidance and still
+allow membership removals using the existing scope. Repeat steps 1–3 as the same
+account, replace `GOOGLE_OAUTH_REFRESH_TOKEN`, and retry a targeted sync before
+backfilling. Boot validates the five settings' presence, not remote permissions;
+remote authorization is verified during sync.
 
 ### Database connection
 
@@ -216,22 +242,71 @@ Connection-establishment timeouts and OAuth refresh failures leave no new pendin
 
 Cloud Identity exposes no operation-polling endpoint. A pending write whose effect never appears and cannot be safely retried requires operator investigation. Use the recorded operation name, address, and exact membership resource with the Google owner/support to establish that the request has terminated. Only after that confirmation may a maintainer remove the corresponding entry from `team_google_groups.pending_changes`, while API and cron writers are stopped, then run a normal sync. Do not clear entries based only on elapsed time or an empty member list: that recreates the delayed-addition race. Lost responses may have no operation name and require the same investigation.
 
-### Onboarding each new group (manual step)
+### External-member setup and recovery
 
-API-created groups reject members outside `utmist.skule.ca`, and most members use personal addresses. After a team's group is created, its mapping shows `status: needs_external_members` as soon as someone external is added. An empty group's `synced` status is **not** proof that external membership is enabled.
+Normal sync configures and verifies external-member settings automatically before
+adding members. It changes only **Allow external members** and **Who can add
+external members**, preserving other privacy settings. UTMIST owns the organization;
+no external Workspace administrator is required. Groups Settings authorization
+and organization policy still have to permit these changes.
 
-As `infrastructure@utmist.skule.ca` (group owner), open the group's **Group settings** and set:
+If `last_error` starts with `group settings`, no new additions are attempted;
+removals still run and pending membership writes remain tracked. Check API
+enablement, the OAuth grant's `apps.groups.settings` scope, and the owning
+account's Google privileges. In the 2026-10-20 staging test, the nonadmin group
+owner received 401 despite valid scopes and enabled APIs. The explicitly approved
+temporary **Groups Admin** role allowed settings reads and writes after propagation;
+it was removed after testing. The user subsequently authorized ongoing Groups
+Admin access for both Misty accounts, and staging's role was restored. That proves
+a working permission configuration, not the minimum required privilege; a narrower
+supported alternative has not been tested.
+Retry normal sync after recovery. It reads settings first, so a lost PATCH response
+or a previous successful configuration does not cause blind repeated writes.
 
-1. **Allow external members** (`allowExternalMembers`) — on.
-2. **Who can add external members** (`whoCanAddExternalMembers`) — end users / members can add (e.g. `END_USERS_CAN_ADD_EXTERNAL_MEMBERS`), not “only admins”.
+If Google still refuses an external address after verification
+(`needs_external_members`), ask UTMIST's Google administrator to check group and
+organization policy. For manual recovery, open the confirmed group's settings as
+this environment's Misty owner, check **Allow external members** and **Who can add
+external members**, then retry. Settings links use the stored group email/domain,
+not a renamed team's slug. Misty admin/team roles do not confer Google ownership.
+Manual changes do not bypass the backend's settings verification.
 
-Save, then re-sync: Misty `/team google-sync`, or `POST /teams/{team_id}/google-group/sync` with a `teams:write` key, or `team-tracking-groups sync --team <slug>`. The status should become `synced` once an external add can succeed.
+Use `POST /teams/{team_id}/google-group/sync` with a `teams:write` key or
+`team-tracking-groups sync --team <slug>`. The companion bot flow in
+[PR #279](https://github.com/UTMIST/Misty/pull/279) exposes `/team google-status`
+and `/team google-sync` for the same state and retry path. Generic service 503s
+are temporary outages; only the explicit `google groups not configured` response
+means the integration is disabled.
 
-If (1) is already on but adds still fail and (2) is administrator-only, do **not** keep toggling (1). Escalate to a Workspace Super Admin (via infrastructure). Misty admins and team leads are not Google Group owners unless granted that in Google.
+### Rollout and fresh-group acceptance
 
-**Unverified (as of #272):** a one-off Super Admin edit confirmed both fields on a test group, but we have not yet recorded a fresh-group check of whether the **owner** (`infrastructure@`) can change (2) in the Groups UI on every new team group. Treat owner success on (2) as unverified until that is done; the bot copy says the same.
+1. Enable the APIs and authorize both scopes above. Deploy the backend and any
+   existing sync cron on the same version before rolling out the bot guidance.
+   No schema migration or additional runtime variable is needed for settings.
+2. In staging, create one disposable team with no document shares. Confirm its
+   recorded group identity and both settings through the Settings API, then add
+   an approved external test member and verify membership. No manual group toggle
+   should be needed. The empty team's successful sync verifies settings, but does
+   not by itself prove that an actual external member can be added.
+3. Retry `/team google-sync`; confirm it reuses the same group. End the test
+   membership, sync, and verify removal. Check the bot's create/status/retry replies
+   against the resulting mapping. Retire the disposable team afterward; normal
+   retirement empties its group and preserves the directory history.
+4. Run a targeted sync for each existing managed team before treating older stored
+   `synced` results as settings-verified. Review mappings before a global backfill:
+   it creates missing groups. Daily cron activation remains a separate operation.
 
-Find teams waiting on this step with `GET /teams/google-groups` and filter on `status`, or Misty `/team google-status`.
+The [setup issue](https://github.com/UTMIST/Misty/issues/236) tracks setup history.
+Offline tests cover authorization failures, lost responses, settings read-back,
+removals despite settings failure, and pending-write recovery. The 2026-10-20 live
+test passed fresh-group setup, external-member addition/removal, repeat sync with
+no duplicate group or extra settings PATCH, and PR #279's command handlers through
+real HTTP to a local API using real Google providers. Its directory was in memory;
+the external member was the staging connector service account. All disposable
+groups were deleted. The temporary role was removed before the user separately
+approved ongoing Groups Admin access. This did not exercise the Discord gateway
+or deploy the new token/code. Runtime activation and actual
+Discord acceptance remain; production OAuth and rollout are separate.
 
 ### Existing groups and Drive shares
 
