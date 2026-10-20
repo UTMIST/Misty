@@ -4,6 +4,7 @@ import { resolvePrincipal } from '../../auth/principal.js';
 import { authorize } from '../../auth/policy.js';
 import { DirectoryUnavailable } from '../../clients/directoryClient.js';
 import { humansIn } from './voice.js';
+import { safeReply } from './interactions.js';
 
 // `/record` is a DEDICATED adapter path, not a neutral command: it drives
 // live voice I/O (joining a voice channel, streaming Opus) that has no
@@ -112,10 +113,7 @@ export async function handleRecordInteraction(interaction, appContext, recordCom
   const subcommand = interaction.options.getSubcommand(false);
   await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
 
-  const reply = (content) =>
-    interaction
-      .editReply({ content })
-      .catch((e) => console.error('record reply failed:', e.message));
+  const reply = (content) => safeReply(interaction, { content, ephemeral: true });
 
   if (!interaction.guildId) {
     await reply('/record can only be used in a server channel.');
