@@ -11,6 +11,7 @@ import {
   EmailAlreadyRegistered,
   GoogleGroupsNotConfigured,
   GoogleGroupSyncConflict,
+  ChannelTeamsInvalid,
 } from '../src/clients/directoryClient.js';
 
 function fakeFetch(responses) {
@@ -510,4 +511,35 @@ test('syncTeamGoogleGroup treats other 503 responses as temporary outages', asyn
     }),
   });
   await assert.rejects(() => client.syncTeamGoogleGroup('t1'), DirectoryUnavailable);
+});
+
+test('getChannelTeams returns body on 200', async () => {
+  const fetchImpl = fakeFetch([
+    { status: 200, body: { guild_id: '1', channel_id: '2', team_ids: [], version: 'v' } },
+  ]);
+  const client = createDirectoryClient({ baseUrl: BASE, apiKey: KEY, fetchImpl });
+  const body = await client.getChannelTeams('1', '2');
+  assert.deepEqual(body.team_ids, []);
+  assert.match(fetchImpl.calls[0].url, /\/channels\/1\/2\/teams$/);
+});
+
+test('replaceChannelTeams PUTs team_ids and maps 400', async () => {
+  const ok = fakeFetch([{ status: 200, body: { team_ids: ['t1'], version: 'v' } }]);
+  const okClient = createDirectoryClient({ baseUrl: BASE, apiKey: KEY, fetchImpl: ok });
+  const body = await okClient.replaceChannelTeams('1', '2', ['t1']);
+  assert.deepEqual(body.team_ids, ['t1']);
+  assert.equal(ok.calls[0].opts.method, 'PUT');
+  assert.deepEqual(JSON.parse(ok.calls[0].opts.body), { team_ids: ['t1'] });
+
+  const bad = fakeFetch([{ status: 400, body: { detail: 'unknown team' } }]);
+  const badClient = createDirectoryClient({ baseUrl: BASE, apiKey: KEY, fetchImpl: bad });
+  await assert.rejects(() => badClient.replaceChannelTeams('1', '2', ['x']), ChannelTeamsInvalid);
+});
+
+test('clearChannelTeams DELETEs and tolerates 204', async () => {
+  const fetchImpl = fakeFetch([{ status: 204, body: null }]);
+  const client = createDirectoryClient({ baseUrl: BASE, apiKey: KEY, fetchImpl });
+  await client.clearChannelTeams('1', '2');
+  assert.equal(fetchImpl.calls[0].opts.method, 'DELETE');
+  assert.match(fetchImpl.calls[0].url, /\/channels\/1\/2\/teams$/);
 });

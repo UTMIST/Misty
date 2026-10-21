@@ -71,6 +71,9 @@ export async function dispatch(intent, { commands, appContext }) {
       ctx: { ...appContext, commands: availableCommands },
       discordUserId: intent.discordUserId,
       discordHandle: intent.discordHandle,
+      discordGuildId: intent.discordGuildId ?? null,
+      discordChannelId: intent.discordChannelId ?? null,
+      channelUsedParent: Boolean(intent.channelUsedParent),
     });
   } catch (err) {
     console.error(`Command ${intent.commandName} failed:`, err);
