@@ -28,6 +28,15 @@ class StorageAdapter(Protocol):
     """Stable contract between the service and persistence. Concrete adapters
     (Postgres, in-memory) implement these with identical semantics."""
 
+    def get_doc_by_google_file_id(self, file_id: str) -> Doc | None:
+        """Match supported Google URL aliases, including legacy/manual rows.
+
+        Prefer active, then earliest created_at/id. Includes retired rows so
+        discovery can honor operator retirement. No visibility filter: trusted
+        ingest only, like get_doc_by_normalized_url. Never grants access.
+        """
+        ...
+
     def is_ready(self) -> bool:
         """Return whether the backing store can answer a trivial query."""
         ...

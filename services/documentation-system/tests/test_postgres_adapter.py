@@ -1,3 +1,4 @@
+from tests.google_identity_cases import GoogleIdentityCases
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -790,3 +791,7 @@ def test_ownership_requires_valid_grant_and_source_revocation_hides_doc(adapter,
 
     adapter.add_grant(doc.id, grantee_type="person", grantee_id=_P1, actor="admin")
     assert adapter.get_doc(doc.id, visibility=actor) is not None
+
+
+class TestGoogleIdentity(GoogleIdentityCases):
+    pass

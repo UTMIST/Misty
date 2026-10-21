@@ -15,6 +15,7 @@ from contracts.types import (
 )
 from contracts.visibility import ActorContext, SEE_ALL, doc_visible
 from src.content import content_hash
+from src.google_identity import google_file_id
 from src.retrieval import candidate_limit, fuse, keyword_density, validate_search
 from src.storage.chunks import validate_chunks_for_content, validate_doc_chunks
 
@@ -171,6 +172,12 @@ class InMemoryStorageAdapter:
             return None
         winner = min(matches, key=lambda d: (not d.active, d.created_at, d.id))
         return self._hydrate(winner)
+
+    def get_doc_by_google_file_id(self, file_id: str) -> Doc | None:
+        matches = [d for d in self._docs.values() if google_file_id(d.url_normalized) == file_id]
+        if not matches:
+            return None
+        return self._hydrate(min(matches, key=lambda d: (not d.active, d.created_at, d.id)))
 
     def list_docs(
         self,

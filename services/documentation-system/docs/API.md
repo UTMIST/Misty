@@ -729,3 +729,40 @@ Errors use FastAPI's standard shape:
 
 Validation errors (422) carry the structured `detail` array FastAPI generates. See
 `/openapi.json` for the exact per-endpoint schemas.
+
+## Discovery import — `POST /docs/discovery`
+
+Requires `docs:write`; actor is the authenticated key name. This literal route is
+registered before `/docs/{doc_id}`. Strict body:
+
+```json
+{"file_id": "example", "source_id": "gdocs"}
+```
+
+File ids contain letters, digits, `_` and `-` (1–200 characters); source is one of
+`gdocs`, `gsheets`, `gslides`, `gdrive`. No URLs, owners, grants or claimed actor are
+accepted. The trusted discovery caller supplies the source from the connector's
+MIME classification. The catalog checks active/fetch-enabled source status before
+fetching, then deduplicates by Drive identity, including legacy/manual URL aliases.
+New records use the normal ingest, complete source-ACL reconciliation and indexer.
+Existing records are inspected without refetching or re-embedding. Retirement is
+honored. Scopes and validation precede provider work.
+
+Always returns 200 for a classified outcome:
+
+```json
+{"status": "indexed", "doc_id": "11111111-1111-1111-1111-111111111111", "warnings": 0}
+```
+
+`indexed` means new usable chunks were written; `existing` means a current stored
+index already exists. `registered` means catalogued without usable indexed content;
+`index_failed` reports failed, missing or stale indexing; `retired` is skipped;
+`disabled` means source fetching is disabled/inactive (no doc id). Warnings are a
+count, with no content/principals/raw upstream details. An empty/whitespace extraction,
+unmapped ACL or fetch failure must not be counted as indexed.
+
+Use the existing refetch/source-refresh and `/docs/index` recovery endpoints; discovery
+never repairs existing records itself. See [operations and limits](DISCOVERY.md).
+All new Google URL ingests now use file identity for normalized dedup keys; displayed
+original URLs and existing stored keys are preserved. Preexisting duplicate records
+are not merged. The active earliest record wins identity lookup.

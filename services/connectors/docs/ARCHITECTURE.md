@@ -4,7 +4,7 @@ Why this service is shaped the way it is. For *what it does* and how to run it, 
 
 ## What it is, in one line
 
-An **outbound adapter**: it holds the credential for an external document source, and turns a URL into text. Nothing else.
+An **outbound adapter**: it holds the credential for an external document source, and turns a URL into text and enumerates bounded source metadata pages.
 
 ## What it deliberately is not
 
@@ -102,3 +102,14 @@ The gap is deliberate. The consumer's clamp trips first and reports a truncation
 ## Why no persistence
 
 Caching fetched content here would mean deciding invalidation policy on behalf of every consumer, and holding document text in a service whose entire authorization story is "the caller already checked." Consumers that want a cache own it — documentation-system stores its own content snapshots, with its own staleness rules.
+
+## Metadata discovery
+
+The adapter also exposes bounded Google metadata enumeration through the
+`DiscoverySource` Protocol. `deps.py` wires the configured Google identity; no Google
+SDK enters the API layer. Each request lists one page of direct shares or one
+folder's immediate children. Format classification uses the same `EXTRACTORS` and
+`text/*` fallback as fetch. Discovery returns no ACLs or content and cannot authorize
+a member. The external catalog runner owns traversal, checkpoints and scheduling;
+connectors remains stateless. See [API](API.md#post-discovergoogle) and the
+[discovery runbook](../../documentation-system/docs/DISCOVERY.md).

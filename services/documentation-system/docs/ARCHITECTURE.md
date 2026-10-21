@@ -715,3 +715,23 @@ The one place concrete adapters meet their Protocols. `get_storage` builds a
 offline fake). Tests override `get_storage`
 (and inject fake fetchers/directory) via `app.dependency_overrides` — which is why these are
 injected functions, not module globals.
+
+## Automatic discovery (#291)
+
+`doc-discover` is an external HTTP runner, checkpointed on its own volume. It calls
+connectors' bounded metadata enumeration and the catalog's `/docs/discovery` import
+endpoint. It never connects to the catalog database or imports another service's
+code. Listing metadata is not ACL evidence: imports reuse `ingest_doc` and `index_doc`,
+so grants still come only from each file's complete, resolved source ACL.
+
+`StorageAdapter.get_doc_by_google_file_id` matches supported URL aliases in both
+adapters, including old manual records. New normalized Google keys collapse to a
+canonical Drive file URL, reusing the active-URL uniqueness constraint for concurrent
+new ingests. No migration or rewriting of existing keys/grants is needed. Legacy
+alias lookup currently evaluates URL expressions in Postgres; measure catalog growth
+before introducing an indexed identity column and its duplicate-data migration.
+
+Discovery only imports new identities and reports existing content/index gaps;
+#292 continues to own refresh. Retired records stay retired. Complete or incomplete
+listings never remove records, chunks or grants. The [runbook](DISCOVERY.md) owns the
+checkpoint, scheduling, recovery and topology contract.

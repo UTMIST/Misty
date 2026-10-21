@@ -6,6 +6,7 @@ No I/O — deterministic and heavily unit-tested. Consumed by the ingest flow.
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from contracts.types import Source
+from src.google_identity import google_file_id
 
 # Query params that never identify a distinct document — stripped for dedup.
 _TRACKING_PARAMS = {
@@ -32,6 +33,7 @@ def normalize_url(url: str) -> str:
     - drop the fragment
     - remove tracking query params; keep the rest, sorted for stability
     - strip a trailing slash from the path
+    - collapse supported Google editor/Drive URL aliases to one file-id key
     """
     parts = urlsplit(url.strip())
     scheme = parts.scheme.lower()
@@ -50,7 +52,11 @@ def normalize_url(url: str) -> str:
     kept.sort()
     query = urlencode(kept)
 
-    return urlunsplit((scheme, netloc, path, query, ""))
+    normalized = urlunsplit((scheme, netloc, path, query, ""))
+    file_id = google_file_id(normalized)
+    if file_id is not None:
+        return f"https://drive.google.com/file/d/{file_id}"
+    return normalized
 
 
 def _host_and_path(url: str) -> tuple[str, str]:

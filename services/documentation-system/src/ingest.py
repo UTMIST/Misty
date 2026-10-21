@@ -8,6 +8,7 @@ from contracts.fetcher import FetchError, SourceGone
 from contracts.storage import DuplicateActiveUrl, StorageAdapter
 from contracts.types import DocIngest, IngestResult
 from src.content import clamp_content, content_hash
+from src.google_identity import google_file_id
 from src.fetch.registry import FetcherRegistry
 from src.source_access import (
     GOOGLE_ACCESS_ORIGIN,
@@ -146,7 +147,10 @@ def ingest_doc(
     directory: DirectoryClient,
     actor: str,
     source_access_max_age_hours: int = 48,
+    refresh_existing: bool = True,
 ) -> IngestResult:
+    # Discovery sets refresh_existing=False: existing/retired identities are
+    # returned without provider work. Refresh and repair retain their own paths.
     warnings: list[str] = []
     url_normalized = normalize_url(payload.url)
 
@@ -156,15 +160,24 @@ def ingest_doc(
     # An on-behalf-of ingest colliding with a doc the actor can't see is a
     # known, accepted limitation (revisit if on-behalf-of ingest is ever
     # introduced).
-    existing = storage.get_doc_by_normalized_url(url_normalized)
-    if existing is not None and existing.active:
-        refresh_warnings = _refresh_existing_source_access(
-            existing,
-            storage=storage,
-            fetchers=fetchers,
-            directory=directory,
-            actor=actor,
-            max_age_hours=source_access_max_age_hours,
+    file_id = google_file_id(url_normalized)
+    existing = (
+        storage.get_doc_by_google_file_id(file_id)
+        if file_id is not None
+        else storage.get_doc_by_normalized_url(url_normalized)
+    )
+    if existing is not None and (existing.active or not refresh_existing):
+        refresh_warnings = (
+            _refresh_existing_source_access(
+                existing,
+                storage=storage,
+                fetchers=fetchers,
+                directory=directory,
+                actor=actor,
+                max_age_hours=source_access_max_age_hours,
+            )
+            if refresh_existing
+            else []
         )
         return _merge_into_existing(
             storage, existing, payload, actor=actor, warnings=refresh_warnings

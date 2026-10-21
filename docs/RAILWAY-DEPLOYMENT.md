@@ -509,3 +509,15 @@ by an existing admin running `/seed` from Discord.
   don't "normalize" it, and keep `railway.json` and the Dockerfile `CMD` in step
   with each other. Railway reads `railway.json`, so that file is what actually
   governs the deploy.
+
+## Automatic sharing discovery
+
+The optional dedicated `doc-discover` cron service uses
+`services/documentation-system/railway.discovery.json` and the documentation-system
+image. It requires a persistent checkpoint volume, an environment/connector identity
+label, a catalog `docs:write` key and a connectors `discover` key. It has no migrations,
+HTTP healthcheck or automatic failure restart. Keep `DISCOVERY_ENABLED=false` until
+operators configure and approve staging acceptance. Do not enable PR-preview cron
+copies. Follow the [service runbook](../services/documentation-system/docs/DISCOVERY.md)
+for all settings, schedule, monitoring, recovery, member instructions and the separate
+production activation gate. Keep #292's existing-document refresh scheduled as well.

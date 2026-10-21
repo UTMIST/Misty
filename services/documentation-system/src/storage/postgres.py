@@ -36,6 +36,7 @@ from contracts.types import (
 )
 from contracts.visibility import Actor, ActorContext, Channel, DENY, SEE_ALL
 from src.content import content_hash
+from src.google_identity import GOOGLE_ID_PATTERNS
 from src.retrieval import candidate_limit, fuse, terms, validate_search
 from src.storage.chunks import validate_chunks_for_content, validate_doc_chunks
 from src.storage.schema import (
@@ -396,6 +397,23 @@ class PostgresStorageAdapter:
             row = conn.execute(
                 select(docs)
                 .where(docs.c.url_normalized == url_normalized)
+                .order_by(docs.c.active.desc(), docs.c.created_at, docs.c.id)
+                .limit(1)
+            ).first()
+            return self._row_to_doc(conn, row) if row else None
+
+    def get_doc_by_google_file_id(self, file_id: str) -> Doc | None:
+        with self._engine.connect() as conn:
+            row = conn.execute(
+                select(docs)
+                .where(
+                    or_(
+                        *(
+                            func.substring(docs.c.url_normalized, p) == file_id
+                            for p in GOOGLE_ID_PATTERNS
+                        )
+                    )
+                )
                 .order_by(docs.c.active.desc(), docs.c.created_at, docs.c.id)
                 .limit(1)
             ).first()
