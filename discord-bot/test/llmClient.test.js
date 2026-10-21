@@ -135,3 +135,52 @@ test('chat aborts and throws LlmUnavailable when the request stalls past timeout
     LlmUnavailable,
   );
 });
+
+for (const phase of ['headers', 'body']) {
+  test(`chat propagates the caller deadline while waiting for response ${phase}`, async () => {
+    const controller = new AbortController();
+    let fetchSignal;
+    const client = createLlmClient({
+      baseUrl: BASE,
+      apiKey: KEY,
+      fetchImpl: async (_url, { signal }) => {
+        fetchSignal = signal;
+        const waitForAbort = () =>
+          new Promise((_, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+            controller.abort();
+          });
+        return phase === 'headers' ? waitForAbort() : { ok: true, json: waitForAbort };
+      },
+    });
+    await assert.rejects(
+      client.chat({ messages: [{ role: 'user', content: 'Read' }], signal: controller.signal }),
+      LlmUnavailable,
+    );
+    assert.equal(fetchSignal.aborted, true);
+  });
+}
+
+test('the client timeout remains active through response body reading', async () => {
+  let fetchSignal;
+  const client = createLlmClient({
+    baseUrl: BASE,
+    apiKey: KEY,
+    timeoutMs: 10,
+    fetchImpl: async (_url, { signal }) => {
+      fetchSignal = signal;
+      return {
+        ok: true,
+        json: () =>
+          new Promise((_, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          }),
+      };
+    },
+  });
+  await assert.rejects(
+    client.chat({ messages: [{ role: 'user', content: 'Read' }] }),
+    LlmUnavailable,
+  );
+  assert.equal(fetchSignal.aborted, true);
+});

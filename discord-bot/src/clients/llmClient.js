@@ -23,7 +23,7 @@ export function createLlmClient({ baseUrl, apiKey, fetchImpl = fetch, timeoutMs 
   const headers = { 'X-API-Key': apiKey, 'Content-Type': 'application/json' };
 
   return {
-    async chat({ messages, system, model, maxTokens = 1024, tools }) {
+    async chat({ messages, system, model, maxTokens = 1024, tools, signal }) {
       const body = { messages, max_tokens: maxTokens };
       if (system) body.system = system;
       if (model) body.model = model;
@@ -32,38 +32,41 @@ export function createLlmClient({ baseUrl, apiKey, fetchImpl = fetch, timeoutMs 
       // it was.
       if (Array.isArray(tools) && tools.length > 0) body.tools = tools;
 
-      let resp;
       const controller = new AbortController();
+      const abort = () => controller.abort();
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        resp = await fetchImpl(`${baseUrl}/chat`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(body),
-          signal: controller.signal,
-        });
-      } catch {
-        throw new LlmUnavailable('network error reaching llm service');
+        let resp;
+        try {
+          resp = await fetchImpl(`${baseUrl}/chat`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+            signal: controller.signal,
+          });
+        } catch {
+          throw new LlmUnavailable('network error reaching llm service');
+        }
+        if (!resp.ok) throw new LlmUnavailable(`llm service returned ${resp.status}`);
+        let data;
+        try {
+          data = await resp.json();
+        } catch {
+          throw new LlmUnavailable('malformed llm response');
+        }
+        return {
+          content: data.content,
+          model: data.model,
+          usage: data.usage,
+          stop_reason: data.stop_reason,
+          content_blocks: data.content_blocks,
+        };
       } finally {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
       }
-      if (!resp.ok) throw new LlmUnavailable(`llm service returned ${resp.status}`);
-      let data;
-      try {
-        data = await resp.json();
-      } catch {
-        throw new LlmUnavailable('malformed llm response');
-      }
-      // stop_reason and content_blocks drive the tool loop: they detect a
-      // tool_use turn and let it replay the assistant turn verbatim. They stay
-      // undefined on text-only responses.
-      return {
-        content: data.content,
-        model: data.model,
-        usage: data.usage,
-        stop_reason: data.stop_reason,
-        content_blocks: data.content_blocks,
-      };
     },
   };
 }

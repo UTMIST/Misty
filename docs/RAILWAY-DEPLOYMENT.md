@@ -127,7 +127,7 @@ Set these per environment (staging vs production) per service.
 | `EMAIL_BACKEND` | — | — | `resend` (or `gmail`) — **not** `fake` |
 | `EMAIL_FROM` | — | — | `UTMIST <noreply@utmist.ca>` |
 | `RESEND_API_KEY` | — | — | from Resend |
-| `GOOGLE_GROUPS_CUSTOMER_ID`, `GOOGLE_GROUPS_DOMAIN`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` | optional, all-or-nothing; enables managed team Google Groups, plus a daily `team-tracking-groups sync` cron — see [team-tracking DEPLOYMENT.md](../services/team-tracking/docs/DEPLOYMENT.md#managed-google-groups) | — | — |
+| `GOOGLE_GROUPS_CUSTOMER_ID`, `GOOGLE_GROUPS_DOMAIN`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` | optional, all-or-nothing; OAuth grant needs `cloud-identity.groups` and `apps.groups.settings` for automatic group settings; enables managed team Google Groups, plus a daily `team-tracking-groups sync` cron — see [team-tracking DEPLOYMENT.md](../services/team-tracking/docs/DEPLOYMENT.md#managed-google-groups) | — | — |
 
 > **documentation-system boots fine without `CONNECTORS_API_KEY`.** Unlike
 > `API_KEY`/`DIRECTORY_API_KEY`, `verify_production_secrets()` only logs a
@@ -177,9 +177,10 @@ Set these per environment (staging vs production) per service.
 | `DISCORD_GUILD_ID` | test guild (staging) / blank (prod) |
 | `ENABLE_DISCORD` / `ENABLE_WEB` | `true` / `false` |
 | `HELPER_USER_MAX_REQUESTS` / `HELPER_USER_WINDOW_SECONDS` | optional helper allowance overrides; see [bot configuration and reset semantics](../discord-bot/README.md#helper-bot-request-limits) |
+| `HELPER_TOOLS_ENABLED` | defaults to `false`; literal `true` enables Discord document tools after retrieval/channel setup; see [helper configuration and access checks](../discord-bot/README.md#helper-document-tools) |
 | `PORT` | Railway-injected port for the Discord readiness listener; defaults to `3002` locally |
 | `DIRECTORY_BASE_URL` / `DIRECTORY_API_KEY` | team-tracking; key set by the provisioning script |
-| `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system |
+| `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system; key scopes `docs:read docs:write act-as-user`, plus literal `act-as-channel` for shared-channel helper retrieval (see its [key docs](../services/documentation-system/docs/DEPLOYMENT.md#issuing-api-keys-doc-keys-cli)) |
 | `VERIFICATION_BASE_URL` / `VERIFICATION_API_KEY` | verification |
 | `INFRASTRUCTURE_DISCORD_USERNAME` | *optional* — Discord username or ID shown by `/bug` for infrastructure support |
 | `MEETING_BASE_URL` / `MEETING_API_KEY` | meeting; a `meetings`-scoped consumer key |

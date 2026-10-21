@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   answerHelperTurns,
   EMPTY_ANSWER,
+  WITHHELD_ANSWER,
   COULDNT_COMPLETE,
   LLM_UNAVAILABLE,
 } from '../src/helperFlow.js';
@@ -79,11 +80,11 @@ test('EXHAUSTED maps to the could-not-complete message', async () => {
   assert.equal(out, COULDNT_COMPLETE);
 });
 
-test('EMPTY and WITHHELD both map to the empty-answer message', async () => {
+test('EMPTY and WITHHELD map to distinct safe messages', async () => {
   for (const outcome of [OUTCOME.EMPTY, OUTCOME.WITHHELD]) {
     const ctx = appContext({ enabled: true, run: async () => ({ outcome }) });
     const out = await answerHelperTurns(ctx, turns, principal, { kind: 'person' });
-    assert.equal(out, EMPTY_ANSWER);
+    assert.equal(out, outcome === OUTCOME.WITHHELD ? WITHHELD_ANSWER : EMPTY_ANSWER);
   }
 });
 

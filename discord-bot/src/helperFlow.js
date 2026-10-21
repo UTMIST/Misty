@@ -2,6 +2,7 @@ import { resolvePrincipal } from './auth/principal.js';
 import { authorize } from './auth/policy.js';
 import { DirectoryUnavailable } from './clients/directoryClient.js';
 import { OUTCOME } from './toolExecutor.js';
+import { renderHelperAnswer } from './messages/helper.js';
 
 export const LINK_PROMPT =
   'You need to link your account first. Run `/link` to identify yourself, then try again.';
@@ -12,6 +13,8 @@ export const LLM_UNAVAILABLE =
 export const EMPTY_ANSWER = "I couldn't come up with an answer that time — please try rephrasing.";
 export const COULDNT_COMPLETE =
   "I couldn't finish that one — please try again, or narrow the question.";
+export const WITHHELD_ANSWER =
+  "I couldn't confirm continued access to the sources for that answer. Please try again.";
 
 // Derive the trusted retrieval context from the answer's destination. This is
 // the single place scope is decided, from the surface, never from the model:
@@ -60,34 +63,52 @@ export async function resolveHelperCaller(appContext, discordUserId) {
  *   text-only path (backward compatible).
  */
 export async function answerHelperTurns(appContext, turns, principal, destination) {
+  const reply = await prepareHelperReply(appContext, turns, principal, destination);
+  return reply.content;
+}
+
+/** Prepare a reply with a final access check for adapters that send it later. */
+export async function prepareHelperReply(appContext, turns, principal, destination) {
   const context = retrievalContext(destination, principal);
+  // Discord history has no trusted provenance for old bot text (including
+  // pre-rollout replies, restarts, and answers sent before the flag was disabled).
+  // Retain user questions for follow-up retrieval, never replay old answers or
+  // cached document text without a fresh authorized read.
+  const safeTurns = turns.filter((turn) => turn.role === 'user');
 
   if (!toolsAvailable(appContext, context)) {
     let content;
     try {
-      ({ content } = await appContext.helperService.answer({ turns, principal }));
+      ({ content } = await appContext.helperService.answer({ turns: safeTurns, principal }));
     } catch (err) {
       console.error('helper answer failed:', err.message);
-      return LLM_UNAVAILABLE;
+      return { content: LLM_UNAVAILABLE };
     }
-    return content?.trim() ? content : EMPTY_ANSWER;
+    return { content: content?.trim() ? content : EMPTY_ANSWER };
   }
 
   try {
-    const { messages, system } = await appContext.helperService.prepare({ turns, principal });
-    if (!messages.length) return EMPTY_ANSWER;
+    const { messages, system } = await appContext.helperService.prepare({
+      turns: safeTurns,
+      principal,
+    });
+    if (!messages.length) return { content: EMPTY_ANSWER };
     const result = await appContext.toolExecutor.run({ messages, system, context, principal });
     switch (result.outcome) {
       case OUTCOME.ANSWER:
-        // result.citations is available for a future surface to render sources.
-        return result.content;
+        return {
+          content: renderHelperAnswer(result.content, result.citations),
+          canPublish: result.canPublish,
+        };
       case OUTCOME.EXHAUSTED:
-        return COULDNT_COMPLETE;
+        return { content: COULDNT_COMPLETE };
+      case OUTCOME.WITHHELD:
+        return { content: WITHHELD_ANSWER };
       default:
-        return EMPTY_ANSWER;
+        return { content: EMPTY_ANSWER };
     }
   } catch (err) {
     console.error('helper tool answer failed:', err.message);
-    return LLM_UNAVAILABLE;
+    return { content: LLM_UNAVAILABLE };
   }
 }

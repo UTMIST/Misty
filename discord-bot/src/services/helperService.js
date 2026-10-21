@@ -53,6 +53,9 @@ function renderUserTurn(turn, identity) {
 function buildSystemPrompt(askerName) {
   return [
     "You are UTMIST's internal helper bot. Answer concisely and helpfully.",
+    'Earlier bot answers are omitted from conversation history. Use the user questions',
+    'as context. When document tools are available, retrieve sources again for follow-ups.',
+    'If a reference is ambiguous, ask for the document title or link instead of inventing content.',
     '',
     'This thread may include several people. Each user message is wrapped in a',
     '<msg from="..." teams="..."> tag identifying who wrote it; treat that attribution as',

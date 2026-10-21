@@ -24,8 +24,8 @@ function normalizeString(value, max) {
 
 // Project a /search hit (SearchHit) down to what the model needs to answer and
 // cite. We forward the ids, title, source url, and a bounded text snippet — not
-// raw service internals. `citation` carries the chunk descriptor so a future
-// surface can render a precise source reference.
+// raw service internals. `citation` carries the chunk descriptor for access
+// revalidation and source rendering.
 function projectHit(hit) {
   const docId = hit?.doc_id ?? null;
   const text = typeof hit?.text === 'string' ? hit.text : '';
@@ -50,6 +50,19 @@ function retrievalArgs(context) {
   return { guildId: context?.guildId, channelId: context?.channelId };
 }
 
+function projectDoc(doc, docId) {
+  return {
+    found: true,
+    doc_id: doc.id ?? docId,
+    title: doc.title ?? null,
+    content: typeof doc.content === 'string' ? doc.content : (doc.content_snapshot ?? null),
+  };
+}
+
+// The executor supplies a per-answer request/deadline gate. Direct tool tests
+// may omit it; model-driven calls must always use the executor.
+const directRead = (_key, read) => read();
+
 export function createDocumentTools({ docClient }) {
   return [
     {
@@ -68,17 +81,35 @@ export function createDocumentTools({ docClient }) {
       async run(input, ctx) {
         const query = normalizeString(input?.query, MAX_QUERY_LEN);
         if (!query) return { content: { error: 'query is required' }, is_error: true };
-        const results = await docClient.searchDocs({
+        const args = {
           query,
           k: MAX_RESULTS,
           ...retrievalArgs(ctx.context), // trusted, bound by the executor — never from input
-        });
+        };
+        const readDocument = ctx.readDocument ?? directRead;
+        const key = JSON.stringify(['search', args]);
+        const read = (signal) => docClient.searchDocs(args, { signal });
+        const results = await readDocument(key, read);
         const projected = (results ?? []).map(projectHit);
         // `citations` ride alongside the model-visible content so the executor
         // can surface sources without the model having to echo them back.
         const citations = projected.filter((r) => r.doc_id).map((r) => r.citation);
         const forModel = projected.map(({ citation, ...rest }) => rest);
-        return { content: { results: forModel }, citations };
+        // Re-run the same authorized search before replay/publication. Require
+        // every original chunk and its metadata to remain visible unchanged.
+        // Ranking changes can conservatively withhold an answer; missing hits
+        // must never be treated as proof of continued access.
+        const fingerprints = projected.map((hit) => JSON.stringify(hit));
+        return {
+          content: { results: forModel },
+          citations,
+          async revalidate(readForPass = readDocument) {
+            if (!fingerprints.length) return true;
+            const current = await readForPass(key, read);
+            const visible = new Set(current.map((hit) => JSON.stringify(projectHit(hit))));
+            return fingerprints.every((hit) => visible.has(hit));
+          },
+        };
       },
     },
     {
@@ -110,19 +141,30 @@ export function createDocumentTools({ docClient }) {
             },
           };
         }
-        const doc = await docClient.getDoc(docId, { onBehalfOf });
+        const readDocument = ctx.readDocument ?? directRead;
+        const key = JSON.stringify(['get', docId, onBehalfOf]);
+        const read = (signal) =>
+          docClient.getDoc(docId, { onBehalfOf, ...(signal ? { signal } : {}) });
+        const doc = await readDocument(key, read);
         // A doc the context can't see comes back null (indistinguishable from
         // missing): report not-found, never that it exists but is forbidden.
         if (!doc) return { content: { found: false } };
         const id = doc.id ?? docId;
+        const content = projectDoc(doc, docId);
+        const fingerprint = JSON.stringify({ content, url: doc.url ?? null });
         return {
-          content: {
-            found: true,
-            doc_id: id,
-            title: doc.title ?? null,
-            content: typeof doc.content === 'string' ? doc.content : (doc.content_snapshot ?? null),
-          },
+          content,
           citations: [{ doc_id: id, title: doc.title ?? null, url: doc.url ?? null }],
+          async revalidate(readForPass = readDocument) {
+            const current = await readForPass(key, read);
+            return Boolean(
+              current &&
+              JSON.stringify({
+                content: projectDoc(current, docId),
+                url: current.url ?? null,
+              }) === fingerprint,
+            );
+          },
         };
       },
     },

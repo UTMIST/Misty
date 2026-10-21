@@ -152,16 +152,16 @@ test('citations dedupe across rounds by doc_id', async () => {
   assert.deepEqual(res.citations.map((c) => c.doc_id).sort(), ['d1', 'd2']);
 });
 
-// --- Dormant scopeCheck seam -------------------------------------------------
+// --- Additional caller checks -------------------------------------------------
 
-test('without a scopeCheck the loop never withholds (seam is dormant)', async () => {
+test('a text-only response needs no document revalidation', async () => {
   const llm = scriptedLlm([{ content: 'answer', stop_reason: 'end_turn' }]);
   const exec = createToolExecutor({ llmClient: llm, registry: registryWith(async () => ({})) });
-  const res = await exec.run(base); // no scopeCheck
+  const res = await exec.run(base);
   assert.equal(res.outcome, OUTCOME.ANSWER);
 });
 
-test('a scopeCheck returning false before publishing yields WITHHELD, no model text', async () => {
+test('a caller check denying before generation yields WITHHELD without a model call', async () => {
   const llm = scriptedLlm([{ content: 'secret answer', stop_reason: 'end_turn' }]);
   const exec = createToolExecutor({ llmClient: llm, registry: registryWith(async () => ({})) });
   const res = await exec.run({ ...base, scopeCheck: async () => false });
@@ -180,3 +180,183 @@ test('a throwing scopeCheck fails closed (WITHHELD)', async () => {
   });
   assert.equal(res.outcome, OUTCOME.WITHHELD);
 });
+
+for (const usage of [
+  { output_tokens: 8 },
+  undefined,
+  { output_tokens: -1 },
+  { output_tokens: NaN },
+]) {
+  test(`remaining budget caps the next request, including missing/invalid usage: ${JSON.stringify(usage)}`, async () => {
+    const llm = scriptedLlm([
+      { stop_reason: 'tool_use', content_blocks: [toolUse('t', 'search_documents', {})], usage },
+      { content: 'ok', stop_reason: 'end_turn', usage: { output_tokens: 2 } },
+    ]);
+    const exec = createToolExecutor({
+      llmClient: llm,
+      registry: registryWith(async () => ({})),
+      maxOutputTokens: 10,
+      perCallMaxTokens: 8,
+    });
+    assert.equal((await exec.run(base)).outcome, OUTCOME.ANSWER);
+    assert.deepEqual(
+      llm.calls.map((call) => call.maxTokens),
+      [8, 2],
+    );
+  });
+}
+
+test('an exhausted budget stops before tools or another model call', async () => {
+  const llm = scriptedLlm([
+    {
+      stop_reason: 'tool_use',
+      content_blocks: [toolUse('t', 'search_documents', {})],
+      usage: { output_tokens: 8 },
+    },
+  ]);
+  const exec = createToolExecutor({
+    llmClient: llm,
+    registry: registryWith(async () => assert.fail('budget exhausted')),
+    maxOutputTokens: 8,
+    perCallMaxTokens: 8,
+  });
+  assert.equal((await exec.run(base)).outcome, OUTCOME.EXHAUSTED);
+  assert.equal(llm.calls.length, 1);
+});
+
+test('an over-budget final answer is not published', async () => {
+  const llm = scriptedLlm([
+    { content: 'over budget', stop_reason: 'end_turn', usage: { output_tokens: 11 } },
+  ]);
+  const exec = createToolExecutor({
+    llmClient: llm,
+    registry: registryWith(async () => ({})),
+    maxOutputTokens: 10,
+  });
+  const result = await exec.run(base);
+  assert.equal(result.outcome, OUTCOME.EXHAUSTED);
+  assert.equal(result.content, undefined);
+  assert.equal(llm.calls[0].maxTokens, 10);
+});
+
+test('zero output budget fails before a paid call', async () => {
+  const llm = scriptedLlm([]);
+  const exec = createToolExecutor({
+    llmClient: llm,
+    registry: registryWith(async () => ({})),
+    maxOutputTokens: 0,
+  });
+  assert.equal((await exec.run(base)).outcome, OUTCOME.EXHAUSTED);
+  assert.equal(llm.calls.length, 0);
+});
+
+for (const [stopReason, outcome] of [
+  ['max_tokens', OUTCOME.EXHAUSTED],
+  ['incomplete', OUTCOME.EMPTY],
+  ['content_filtered', OUTCOME.EMPTY],
+  ['unknown', OUTCOME.EMPTY],
+  [undefined, OUTCOME.EMPTY],
+]) {
+  test(`a ${stopReason} completion cannot publish partial text or execute its tools`, async () => {
+    const llm = scriptedLlm([
+      {
+        content: 'Partial instructions: first you',
+        stop_reason: stopReason,
+        content_blocks: [toolUse('t', 'search_documents', { query: 'q' })],
+      },
+    ]);
+    const exec = createToolExecutor({
+      llmClient: llm,
+      registry: registryWith(async () => assert.fail('incomplete tool call executed')),
+    });
+    assert.deepEqual(await exec.run(base), { outcome });
+    assert.equal(llm.calls.length, 1);
+  });
+}
+
+test('a tool_use response without any calls is not treated as a final answer', async () => {
+  const exec = createToolExecutor({
+    llmClient: scriptedLlm([{ stop_reason: 'tool_use', content: 'Let me search.' }]),
+    registry: registryWith(async () => assert.fail('no calls')),
+  });
+  assert.deepEqual(await exec.run(base), { outcome: OUTCOME.EMPTY });
+});
+
+for (const batchSize of [5, 10, 40, 128]) {
+  test(`an oversized batch of ${batchSize} calls is rejected before any tool work`, async () => {
+    const llm = scriptedLlm([
+      {
+        stop_reason: 'tool_use',
+        content_blocks: Array.from({ length: batchSize }, (_, i) =>
+          toolUse(`t${i}`, 'search_documents', { query: 'q' }),
+        ),
+      },
+    ]);
+    const exec = createToolExecutor({
+      llmClient: llm,
+      registry: registryWith(async () => assert.fail('oversized batch executed')),
+    });
+    assert.deepEqual(await exec.run(base), { outcome: OUTCOME.EXHAUSTED });
+    assert.equal(llm.calls.length, 1);
+  });
+}
+
+test('tool-call capacity is shared across rounds and counts unavailable calls', async () => {
+  const llm = scriptedLlm([
+    {
+      stop_reason: 'tool_use',
+      content_blocks: [
+        toolUse('t1', 'unknown', {}),
+        toolUse('t2', 'search_documents', {}),
+        toolUse('t3', 'search_documents', {}),
+      ],
+    },
+    {
+      stop_reason: 'tool_use',
+      content_blocks: [
+        toolUse('t4', 'search_documents', {}),
+        toolUse('t5', 'search_documents', {}),
+      ],
+    },
+  ]);
+  let tools = 0;
+  const exec = createToolExecutor({
+    llmClient: llm,
+    registry: registryWith(async () => {
+      tools++;
+      return {};
+    }),
+  });
+  assert.deepEqual(await exec.run(base), { outcome: OUTCOME.EXHAUSTED });
+  assert.equal(tools, 2); // the second batch is rejected as a whole
+  assert.equal(llm.calls.length, 2);
+});
+
+test('the turn deadline aborts a stalled model request even if it ignores cancellation', async () => {
+  let requestSignal;
+  const exec = createToolExecutor({
+    llmClient: {
+      chat: ({ signal }) => {
+        requestSignal = signal;
+        return new Promise(() => {});
+      },
+    },
+    registry: registryWith(async () => assert.fail('no tools after deadline')),
+    maxDurationMs: 50,
+  });
+  assert.deepEqual(await exec.run(base), { outcome: OUTCOME.EXHAUSTED });
+  assert.equal(requestSignal.aborted, true);
+});
+
+for (const limits of [
+  { maxToolCalls: -1 },
+  { maxToolCalls: 1.5 },
+  { maxDocumentRequests: Infinity },
+  { maxDocumentRequests: -1 },
+  { maxDurationMs: 0 },
+  { maxDurationMs: 2147483648 },
+]) {
+  test(`invalid work limits are rejected: ${JSON.stringify(limits)}`, () => {
+    assert.throws(() => createToolExecutor({ llmClient: {}, registry: {}, ...limits }), RangeError);
+  });
+}

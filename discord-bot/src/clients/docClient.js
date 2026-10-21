@@ -104,8 +104,11 @@ export function createDocClient({ baseUrl, apiKey, fetchImpl = fetch }) {
       return parseJson(resp);
     },
 
-    async getDoc(id, { onBehalfOf } = {}) {
-      const resp = await send(`/docs/${encodeURIComponent(id)}`, oboHeader(onBehalfOf));
+    async getDoc(id, { onBehalfOf, signal } = {}) {
+      const resp = await send(`/docs/${encodeURIComponent(id)}`, {
+        ...oboHeader(onBehalfOf),
+        ...(signal ? { signal } : {}),
+      });
       if (resp.status === 404) return null;
       if (!resp.ok) throw unavailable(resp.status, 'GET /docs/{id}');
       return parseJson(resp);
@@ -121,13 +124,14 @@ export function createDocClient({ baseUrl, apiKey, fetchImpl = fetch }) {
     // NOTE (#71/#210 coordination): this extends the member-search client shape
     // from #289 (`searchDocs({ query, k, onBehalfOf })`) with the channel path
     // (`guildId`/`channelId`). Person-only callers behave exactly as in #289.
-    async searchDocs({ query, k, onBehalfOf, guildId, channelId }) {
+    async searchDocs({ query, k, onBehalfOf, guildId, channelId }, { signal } = {}) {
       const body = { query };
       if (k !== undefined) body.k = k;
       const resp = await send('/search', {
         method: 'POST',
         headers: searchContextHeaders({ onBehalfOf, guildId, channelId }),
         body: JSON.stringify(body),
+        ...(signal ? { signal } : {}),
       });
       if (!resp.ok) throw unavailable(resp.status, 'POST /search');
       const parsed = await parseJson(resp);
