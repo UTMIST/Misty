@@ -157,7 +157,7 @@ def test_scheduled_refresh_skips_fetch_disabled_sources_before_applying_limit(ct
     fetchers.calls.clear()
     response = client.post("/docs/source-access/refresh-due?limit=1", headers=ADMIN)
     assert response.status_code == 200
-    assert response.json() == {"attempted": 1, "refreshed": 1, "failed": 0}
+    assert response.json() == {"attempted": 1, "refreshed": 1, "failed": 0, "index_failed": 0}
     assert fetchers.calls == [("gdocs", enabled["url"])]
     assert store.get_doc(UUID(disabled["id"])).content_snapshot is None
     assert store.get_doc_content(UUID(disabled["id"])) is None
@@ -199,6 +199,7 @@ def test_hourly_schedule_refreshes_delayed_document_without_hourly_downloads(ctx
         "attempted": 1,
         "refreshed": 1,
         "failed": 0,
+        "index_failed": 0,
     }
     refreshed = store.get_doc(UUID(doc["id"]))
     assert refreshed.source_access_synced_at == clock[0]

@@ -1,3 +1,5 @@
+import { sendDiscordMessage } from './messages.js';
+
 export const AUTO_STOP_GRACE_MS = 20_000;
 
 // Count the human (non-bot) occupants of a recorded voice channel.
@@ -44,11 +46,11 @@ export function createMeetingPrompt({
   const sendPrompt = (user, guildId) => {
     if (!user?.send) return;
     try {
-      Promise.resolve(user.send({ content: NEW_MEETING_PROMPT })).catch((err) =>
-        console.error(`meeting prompt failed for guild ${guildId}:`, err),
+      sendDiscordMessage((part) => user.send(part), { content: NEW_MEETING_PROMPT }).catch(() =>
+        console.error(`meeting prompt failed for guild ${guildId}`),
       );
-    } catch (err) {
-      console.error(`meeting prompt failed for guild ${guildId}:`, err);
+    } catch {
+      console.error(`meeting prompt failed for guild ${guildId}`);
     }
   };
 
@@ -81,8 +83,8 @@ export function createMeetingPrompt({
         .catch((err) => {
           console.error(`meeting prompt failed for guild ${guildId}:`, err);
         });
-    } catch (err) {
-      console.error(`meeting prompt failed for guild ${guildId}:`, err);
+    } catch {
+      console.error(`meeting prompt failed for guild ${guildId}`);
     }
   };
 }

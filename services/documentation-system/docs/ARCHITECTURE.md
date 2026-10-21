@@ -10,9 +10,9 @@ thing it is (its *source*), tries to fetch a title and snapshot, validates the o
 the [team-tracking](../../team-tracking/) directory, and stores it — deduplicated, so the same
 URL never appears twice. Everything below keeps that flow testable and swappable.
 
-## The three Protocol boundaries
+## The Protocol boundaries
 
-No concrete dependency — database, URL fetching, or directory service — leaks into the
+No concrete dependency — database, URL fetching, directory, or embeddings — leaks into the
 ingest logic or the HTTP layer. Each sits behind a **Protocol** (a structural interface in
 `contracts/`). The ingest orchestrator and routers depend only on the Protocols; concrete
 implementations are wired in one place (`src/api/deps.py`).
@@ -22,9 +22,11 @@ network, or Postgres, and swapping in Postgres required zero changes to ingest o
 
 | Protocol | File | Responsibility |
 |----------|------|----------------|
-| `StorageAdapter` | `contracts/storage.py` | Persist/query docs, tags, sources, API keys |
+| `StorageAdapter` | `contracts/storage.py` | Persist/query docs, content, embedded chunks, tags, sources, API keys |
 | `Fetcher` | `contracts/fetcher.py` | `fetch(url) -> FetchResult` (title + snapshot) |
 | `DirectoryClient` | `contracts/directory.py` | Resolve team/person ids to labels |
+| `Embedder` | `contracts/embedder.py` | Embed chunk text through the llm service's `/embed` |
+| `EmbeddingClient` | `contracts/retrieval.py` | Resolve query text to a validated model-specific vector |
 
 `contracts/` imports nothing from `src/`. That dependency direction keeps the boundaries
 honest: the domain types and Protocols don't know FastAPI, Postgres, or httpx exist.
@@ -33,7 +35,13 @@ honest: the domain types and Protocols don't know FastAPI, Postgres, or httpx ex
 
 Defines every persistence operation with identical semantics across implementations:
 `create_doc`, `get_doc`, `get_doc_by_normalized_url`, `list_docs`, `update_doc`,
-`add_tag`, `remove_tag`, the two source reads, and the API-key operations.
+`add_tag`, `remove_tag`, grant operations, `upsert_doc_content`, `get_doc_content`,
+`get_doc_content_meta`, `delete_doc_content`, `replace_doc_chunks`,
+`replace_doc_chunks_if_current`, `clear_doc_chunks_if_unindexable`, `list_doc_chunks`,
+`get_doc_index_state`,
+`list_docs_for_indexing`, `search_chunks`, the two source reads,
+API-key operations, and the readiness query. See `contracts/storage.py` for the
+complete signatures.
 
 - **`InMemoryStorageAdapter`** (`src/storage/in_memory.py`) — plain dicts, no I/O. Used by
   the fast suite via FastAPI's `dependency_overrides`.
@@ -125,9 +133,8 @@ heals on the next read or update.
 
 ## Data model
 
-Six tables (`src/storage/schema.py`; `001` creates the first four, `002` seeds sources,
-`003` adds `doc_grants`, `004` hardens dedup, `005` adds `doc_content`, and `007` adds
-source-access provenance/expiry):
+Tables are defined in `src/storage/schema.py`; their migration history is listed in
+[`DEPLOYMENT.md`](DEPLOYMENT.md#migrations-alembic).
 
 ### `sources`
 
@@ -212,8 +219,62 @@ One row per (doc, tag). `UniqueConstraint(doc_id, tag)` makes tagging idempotent
 Auth store: `name` (unique), `prefix` (unique, the lookup key), `key_hash` (Argon2), `scopes`
 (text array), `active`, `revoked_at`, `last_used_at`. The plaintext key is never stored.
 
-Every table carries the audit quartet `created_at` / `updated_at` / `created_by` /
-`updated_by`.
+Docs, sources, and API keys carry the audit quartet `created_at` / `updated_at` /
+`created_by` / `updated_by`. Derived content and chunks follow document identity
+and content provenance.
+
+### `doc_content`
+
+Full extracted text lives in a separate 1:1 row keyed to `docs.id`, with a SHA-256
+`content_hash`, `fetched_at`, and `updated_at` (migration `005`). Missing content
+has no row. Both content reads and metadata reads enforce document visibility.
+
+### `doc_chunks`
+
+Migration `008` enables pgvector and adds embedded chunks keyed by `(doc_id, ordinal)`.
+The document FK cascades on hard deletion. Each row stores `chunk_text`, half-open
+`start_offset` / `end_offset` **Unicode code-point** indices into the source text,
+`source_content_hash`, `embedding vector(1536)`, `embedding_model`, and `dimensions`.
+Migration `010` adds nullable `source_title_hash`: SHA-256 of the title (None treated
+as empty). It records embedding context separately from the body hash used by citations.
+Existing chunks retain NULL provenance until the normal stale-index pass rebuilds them.
+The source hash uses `src/content.py`'s SHA-256 convention; it identifies the text
+version whose offsets were embedded, even if `doc_content` is later replaced.
+
+The initial profile from #173 is `text-embedding-3-small`, 1536 dimensions. Store
+the resolved `/embed` response model, not the `openai-embed-3-small` config alias.
+`DocChunk` in `contracts/types.py` validates the width, finite float32 values,
+nonblank text/model, hash, and offset span. Its text limit (`MAX_CHUNK_CHARS`) is
+16,384 Unicode code points: well above the approximate 2,000-character target,
+but conservative enough to keep generated `tsvector` metadata below Postgres's
+size limit, including multibyte text. Oversized chunks raise `ValueError` before
+either adapter accesses storage. Both adapters round vectors to float32 and return
+immutable, hashable chunk values with tuple embeddings; JSON still uses arrays.
+A dimension change needs a schema migration;
+model compatibility across documents and re-embedding remain #209's responsibility.
+
+`replace_doc_chunks(doc_id, chunks)` validates a complete set before storage access:
+ordinals are exactly `0..n-1`, with one model and source hash per set. Input order
+does not matter. Replacement is atomic and idempotent; `[]` clears the set and an
+unknown doc returns `False`. Postgres locks the parent doc before deleting/inserting,
+including the first write, so concurrent replacements cannot interleave chunk sets.
+The in-memory adapter validates before replacing its dict entry. Both reject invalid
+sets with `ValueError` and preserve the previous set on failure.
+
+`list_doc_chunks` returns detached values in ordinal order and applies the same
+visibility predicate as `get_doc_content`. Missing, invisible, and unindexed docs
+all return `[]`. Like content reads, it does not filter the document's `active` flag.
+`replace_doc_chunks` records supplied provenance without comparing it to current
+content; the indexer uses `replace_doc_chunks_if_current` instead (see
+[Indexing](#indexing-175-srcindexingpy)). #176 must apply active/authorization
+predicates before ranking.
+
+`search_vector` is a stored generated `tsvector` from the same `chunk_text`, with a
+GIN index. It uses the explicit `simple` text-search configuration to preserve names
+and acronyms without stemming or stop-word removal. Future keyword queries must use
+that same configuration. Authorized retrieval applies explicit portable token
+normalization before `simple` parsing; see [Authorized retrieval](#authorized-retrieval).
+See [Index type](#index-type) for why vectors initially use exact scans.
 
 ### Seeded sources
 
@@ -225,7 +286,6 @@ Every table carries the audit quartet `created_at` / `updated_at` / `created_by`
 | `gdocs` | Google Docs | `docs.google.com/document` | yes | **yes** |
 | `gsheets` | Google Sheets | `docs.google.com/spreadsheets` | yes | **yes** |
 | `gslides` | Google Slides | `docs.google.com/presentation` | yes | **yes** |
-| `notion` | Notion | `notion.so`, `notion.site` | yes | no |
 | `youtube` | YouTube | `youtube.com`, `youtu.be` | no | no |
 
 ## Auth
@@ -260,7 +320,7 @@ of logic, and it's held in lockstep by parity tests (`tests/test_visibility.py` 
 adapter parity suite). **If you change the rule, change both and extend those tests** —
 this is the file where a divergence becomes a silent data leak.
 
-**The actor context** is one of three things (`src/api/authz.py` builds it):
+**The direct-document actor context** is one of three things (`src/api/authz.py` builds it):
 
 | Context | When | Meaning |
 |---|---|---|
@@ -366,17 +426,18 @@ hybrid can't fix measured latency or relevance problems.
 
 ### Index type
 
-`vector(N)` with **no ANN index (exact scan) to start** — a 100%-recall baseline for #178 at
-a few thousand chunks. Add **HNSW** (pgvector >= 0.5) past roughly 10k chunks, once scans cost
-materially. (The keyword branch uses the GIN index above.)
+`vector(1536)` with **no ANN index (exact scan) to start.** At a few thousand chunks an exact
+nearest-neighbor scan provides a simple 100%-recall baseline for #178. Introduce an **HNSW**
+index (pgvector >= 0.5) only once the corpus crosses roughly 10k chunks and exact scans start
+to cost materially. This applies to the vector branch only; the keyword branch uses the GIN
+index described above.
 
 ### Retrieval constraints and open decisions
 
-- **Relevance floor: choose in #176, calibrate on #178.** An absolute cosine floor is
-  unmeasured; more candidates shift the score distribution, and a relative-to-top-hit floor
-  can admit an irrelevant best hit. Evaluate abstention, define how the floor interacts with
-  lexical-only matches and fusion (fused ranks aren't cosine scores), and recalibrate when the
-  corpus or model changes materially.
+- **Relevance floor: absolute cosine, implemented in #176; calibrate on #178.**
+  `SEARCH_MIN_COSINE` starts at 0.3. Complete keyword matches qualify independently;
+  RRF ranks never determine eligibility. The starting threshold is uncalibrated,
+  and evaluation must measure abstention as well as hit-rate.
 - **Visibility follows the explicit person or channel context in #77/#176.** Direct search
   and DMs preserve the person's access. Shared-channel answers use the configured teams'
   Google Group entitlement (#238 maps channels to teams) — never the asker's private grants
@@ -399,7 +460,7 @@ Limitations:
   full walk of the four academic-year trees. #175 should record the real count on first full
   ingest and revisit this decision if it differs by an order of magnitude.
 - **Google Docs only.** Sheets, Slides, PDFs, GitHub, and future sources were not validated;
-  don't assume the results generalize to GitHub (#86). Notion (#85) is canceled and untested.
+  don't assume the results generalize to GitHub (#86).
 - **No retrieval-quality measurement.** Hit-rate needs #173's embedding model and belongs to
   #178.
 - **Use extracted text length, not Drive file size.** One 884KB Drive file extracted to ~14KB
@@ -492,13 +553,144 @@ cases (connector shapes, Unicode, repeated text, boundaries) and 200 seeded rand
 
 - **#218 (pure chunker):** done; see "Chunker (#218)" above.
 - **#174 (storage):** store vectors and keyword-search metadata for the same chunks.
-- **#175 (indexing/lifecycle):** populate and maintain each chunk's embedding and `tsvector`
-  from the same text, including replacement and deletion.
-- **#176 (retrieval):** combine keyword and vector results, applying the authorized person or
-  channel predicate inside both queries before ranking and fusion. Choose the relevance-floor
-  policy using #178; no unfiltered fallback.
+- **#175 (indexing/lifecycle):** done; see "Indexing (#175)" below.
+- **#176 (retrieval):** implemented; see "Authorized retrieval" below. Evaluation (#178)
+  and consumer integration (#278) remain release gates. #277's automated lifecycle
+  verification and controlled staging gate are tracked in the
+  [integration audit](INGESTION-RETRIEVAL-AUDIT.md).
 - **#178 (evaluation):** build the question set and measure hit-rate@k, including
   exact-name/acronym/date queries, before treating the starting parameters as final.
+
+### Indexing (#175): `src/indexing.py`
+
+`index_doc(doc_id, storage=, embedder=, force=False)` makes one doc's chunk set match its
+stored `doc_content` and title. It is keyed on catalog identity and stored text, never on a URL or a
+fetch, so anything catalogued with stored text (future meetings, #211) indexes the same way.
+
+1. A missing or retired doc, or one with no content, has its chunks cleared (`cleared`).
+   `clear_doc_chunks_if_unindexable` rechecks under the chunk writers' lock; if a newer
+   fetch or reactivation made it indexable, cleanup writes nothing (`skipped`).
+2. The body and title hashes are compared with `get_doc_index_state`. Matching hashes,
+   existing chunks, and no `force` → `unchanged`: no embedding call or write. NULL title
+   provenance from an older chunk set is stale, even for a doc with no title.
+3. `chunk_text` splits the text. Each chunk is embedded as `title \n heading > path \n\n
+   text` — the context prefix the chunker section calls for — while `chunk_text` stores only
+   the raw slice, so offsets still index the source. The added title/heading context
+   is capped at 1,000 characters, keeping long headings from overwhelming the input;
+   source chunks are never truncated by this step.
+4. The whole set is built in memory, then written with
+   `replace_doc_chunks_if_current(doc_id, hash, chunks, expected_title_hash=...)`. In one
+   transaction it locks the doc and content rows, checks the doc is active and both
+   body/title hashes still match the embedding inputs, and replaces the set. Shorter text therefore never leaves tail chunks.
+
+**Failure and retry.** Embedding errors (`EmbedderUnavailable`: connection, 429, 5xx;
+`EmbedderRejected`: 4xx, malformed or wrong-width vectors) and storage errors return
+`failed` with a sanitized reason, never raise, and write nothing: the previous set stays
+whole, never a mix. The catalog write that triggered indexing is kept. Retrying is calling
+`index_doc` again, which is what `POST /docs/index` does.
+
+**Races.** If content or title changes while a doc is being embedded, the conditional
+write is refused (`skipped`); the newer writer runs its own index. Postgres locks
+the `doc_content` row because `upsert_doc_content` never touches `docs`.
+Source-deletion cleanup also compares the content hash and capture time read before
+fetching, under the doc and content row locks. A delayed connector 404 cannot delete a
+newer successful fetch, including one that stored identical text. The catalog row stays
+in all cases.
+
+**Triggers** — all inline; there is no worker or scheduler inside the catalog:
+
+| Event | Effect |
+|-------|--------|
+| `POST /docs` (new or repeated ingest) | `index_doc`; a failure becomes an ingest warning |
+| `POST /docs/{id}/refetch`, `refresh-due` | `index_doc` after a successful fetch; failures are logged / counted in `index_failed` |
+| `PATCH active=false` / `true` | `index_doc` clears / rebuilds |
+| `PATCH title` | `index_doc` refreshes title context, including title removal; an identical title makes no embedding call |
+| Connectors `404 file not found for this url` (`SourceGone`) | `delete_doc_content`: text and chunks go together, so nothing rebuilds them. A later successful fetch stores and indexes again |
+| Any other fetch failure (timeout, 5xx, 403, an unrecognized 404) | Nothing: a transient failure is not a deletion |
+| `POST /docs/index` (`docs:index`) | Admin retry and #209's re-embed entry point (`stale_only=false, force=true`) |
+
+`list_docs_for_indexing` finds work for the admin route: active docs whose chunks are
+missing, built from older body/title hashes, or missing title provenance, plus docs
+that still have chunks but should not
+(retired, or no content). It pages by doc id so a doc that keeps failing cannot block the
+rest. A changed embedding model is not "stale" to it: the stored model is the provider's
+resolved id, not the configured alias, so #209 forces a pass instead.
+
+`HttpEmbedder` (`src/embed/http_client.py`) splits inputs into `/embed` requests of at most
+96 inputs and `EMBED_MAX_REQUEST_CHARS` characters (mirrors of the llm service's limits),
+orders vectors by their `index`, and rejects any width other than the 1536-dimension column.
+Before the first request, it validates **every** input: nonblank UTF-8 text, at most
+32,000 characters, and no single input larger than `EMBED_MAX_REQUEST_CHARS`. A known
+invalid input in a later batch therefore cannot waste paid work on earlier batches.
+These are character guards, not an exact provider token count.
+Revoking a doc's source access (zero mapped grants) keeps its chunks, as it keeps its
+content; retrieval (#176) applies visibility.
+
+Indexing uses `SEARCH_EMBED_MODEL` unless `EMBED_MODEL` explicitly overrides it. Keep
+the two aligned: retrieval excludes chunks produced by another model, even at the same
+vector width. An override supports a planned re-embedding pass, not mixed-model search.
+
+## Authorized retrieval
+
+`POST /search` uses the [shared API contract and fixture](API.md#authorized-retrieval-post-search).
+The fixture is the consumer handoff for #71/#210 and the shared offline/Postgres
+adapter test source. `tests/ingestion_retrieval_cases.py` additionally creates its
+documents through `POST /docs`, runs real chunking/embedding/storage integration,
+and executes the same HTTP exchanges. External responses use MockTransport;
+the dependency factories, HTTP clients, authorization and ranking remain real.
+The same lifecycle cases run on both adapters; additional Postgres cases inject
+SQL faults to prove rollback and safe retrieval errors. See the
+[#277 integration audit](INGESTION-RETRIEVAL-AUDIT.md) for coverage and evidence.
+Consumer-owner agreement, controlled staging/provider acceptance, and #278 remain
+separate release gates.
+
+The request body controls only query and k. Trusted headers select either an
+`Actor` or a `Channel(source_team_ids)`; literal assertion scopes are required,
+including for admins. Channel context is created only by search. Existing direct
+document routes continue to construct their existing person/sentinel contexts.
+`StorageAdapter.search_chunks` requires a person or channel and rejects `SEE_ALL`,
+`DENY`, and missing context before opening a database connection.
+
+Person retrieval resolves both directory membership and confirmed source-group
+membership live, retaining the complete grant rule. Lookup failure returns 503
+instead of partial scope. Channel retrieval calls authenticated
+`/channels/{guild}/{channel}/teams` and `/teams/google-groups`, intersects active
+configured teams with healthy synced groups, and permits only unexpired
+`google_drive` team grants. It never includes private shares, manual team grants,
+or org grants. Empty configuration yields no candidates and no embedding call.
+Neither resolved scope nor results are cached, so grant removal, expiration,
+membership changes, channel reconfiguration, and group sync failure affect the
+next request.
+
+The Postgres adapter runs one SQL statement: a materialized eligible-chunk CTE
+applies current visibility, document active flag, and exact embedding model/width
+before either candidate path sorts and limits. Exact pgvector cosine and keyword
+density each contribute at most `max(50,5*k)` candidates. Cosine is rounded to six
+decimals to keep float32 implementations stable at ranking ties. Each branch
+breaks ties by document UUID and ordinal. RRF with constant 60 combines their
+one-based ranks; final ties use that same identity. Citations carry source URLs,
+document IDs, original chunk offsets, and source hashes; no embedding or grant
+metadata crosses the response boundary.
+
+**Keyword portability trade-off.** Both adapters tokenize ASCII letter/digit runs
+and lowercase them. All query terms must occur; density is matching occurrences
+divided by all occurrences. Postgres uses `to_tsvector('simple', normalized_text)`
+and `plainto_tsquery('simple', normalized_query)`. Normalization separates email
+components and hyphenated dates identically offline and in SQL. Unicode-only
+queries use vectors. Runtime normalization currently scans the eligible corpus
+and does **not** use #174's raw-text GIN index: the raw Postgres parser treats
+emails and hyphens differently from these portable tokens. At the small starting
+corpus this is deliberate. A future indexed normalized column must preserve
+these semantics and pass the same parity cases; do not silently substitute the
+raw index. No schema migration is needed for retrieval.
+
+Query embeddings use an `EmbeddingClient` Protocol, wired to authenticated HTTP
+`/embed` in `deps.py`. The adapter checks response indices, exact resolved model,
+width, finite nonzero float32 values, and duplicate JSON fields before querying
+storage. Equal vector widths never make models interchangeable. Both candidate
+paths exclude stored chunks from other models. HTTP clients are pooled; calls
+are synchronous worker-thread operations, with timeouts and no retries.
+Dependency errors never trigger broader or keyword-only fallback.
 
 ## SSRF protection in the web fetcher
 
@@ -520,6 +712,8 @@ job is cataloguing the open web.
 
 The one place concrete adapters meet their Protocols. `get_storage` builds a
 `PostgresStorageAdapter` over a pooled engine; `get_fetchers` returns `default_registry()`;
-`get_directory` builds an `HttpDirectoryClient` from settings. Tests override `get_storage`
+`get_directory` builds an `HttpDirectoryClient` from settings; `get_embedder` builds a cached
+`HttpEmbedder` (the test suite's autouse `fake_embedder` fixture replaces it with an
+offline fake). Tests override `get_storage`
 (and inject fake fetchers/directory) via `app.dependency_overrides` — which is why these are
 injected functions, not module globals.

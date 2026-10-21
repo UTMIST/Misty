@@ -9,6 +9,7 @@ import myTeams from './my-teams.js';
 import doc from './doc.js';
 import help from './help.js';
 import record from './record.js';
+import qna from './qna.js';
 import helperLimits from './helper-limits.js';
 import bug from './bug.js';
 
@@ -27,6 +28,7 @@ export const commands = new Map([
   [doc.name, doc],
   [help.name, help],
   [record.name, record],
+  [qna.name, qna],
   [bug.name, bug],
   [helperLimits.name, helperLimits],
 ]);

@@ -9,9 +9,15 @@ from sqlalchemy import create_engine, inspect
 
 from src.config import get_settings
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("RUN_PG_TESTS") != "1", reason="set RUN_PG_TESTS=1 to run Postgres tests"
-)
+pytestmark = [
+    pytest.mark.skipif(
+        os.environ.get("RUN_PG_TESTS") != "1", reason="set RUN_PG_TESTS=1 to run Postgres tests"
+    ),
+    pytest.mark.skipif(
+        os.environ.get("RUN_PG_MIGRATION_TESTS") != "1",
+        reason="set RUN_PG_MIGRATION_TESTS=1 only against a disposable database cluster",
+    ),
+]
 
 
 def _alembic_cfg() -> Config:

@@ -2,8 +2,18 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from contracts.types import ApiKey, Doc, DocContentMeta, DocGrant, Source, SourceGrant
-from contracts.visibility import ActorContext, SEE_ALL
+from contracts.retrieval import QueryEmbedding, SearchHit
+from contracts.types import (
+    ApiKey,
+    Doc,
+    DocChunk,
+    DocContentMeta,
+    DocGrant,
+    DocIndexState,
+    Source,
+    SourceGrant,
+)
+from contracts.visibility import ActorContext, RetrievalContext, SEE_ALL
 
 
 class DuplicateActiveUrl(Exception):
@@ -20,6 +30,27 @@ class StorageAdapter(Protocol):
 
     def is_ready(self) -> bool:
         """Return whether the backing store can answer a trivial query."""
+        ...
+
+    def search_chunks(
+        self,
+        *,
+        query: str,
+        embedding: QueryEmbedding,
+        visibility: RetrievalContext,
+        k: int,
+        min_cosine: float,
+    ) -> list[SearchHit]:
+        """Hybrid RRF search; no default/unfiltered visibility is allowed.
+
+        Both branches filter current grants, active documents, and the query's
+        resolved model/dimensions before their max(50,5*k) candidate limits.
+        Cosine is rounded to six decimals; keyword rank is term density.
+        A chunk qualifies at the absolute cosine floor OR by matching all
+        ASCII alphanumeric query terms. RRF constant 60; ties use doc id and
+        ordinal. Return at most k citations, possibly none. Invalid arguments
+        raise ValueError before I/O; storage errors raise RetrievalUnavailable.
+        """
         ...
 
     # Docs
@@ -49,9 +80,17 @@ class StorageAdapter(Protocol):
         owning_person_id: UUID | None = None,
         source_id: str | None = None,
         tag: str | None = None,
+        has_content: bool | None = None,
         active_only: bool = True,
         visibility: ActorContext = SEE_ALL,
-    ) -> list[Doc]: ...
+    ) -> list[Doc]:
+        """Docs matching every supplied filter, oldest first, grants omitted.
+
+        `has_content` selects on the presence of a `doc_content` ROW: None (the
+        default) does not filter, False returns only docs with no content row,
+        True only docs with one."""
+        ...
+
     def update_doc(self, doc_id: UUID, values: dict, *, actor: str) -> Doc | None:
         """Patch scalar columns (title, description, active, owning_* ids/labels,
         content_snapshot, fetched_at). `values` holds already-resolved columns.
@@ -124,6 +163,94 @@ class StorageAdapter(Protocol):
         predicate as get_doc_content — metadata about content is content.
         `content_hash` detects CHANGE, not freshness: compare `fetched_at` to know
         how current the row is."""
+        ...
+
+    def replace_doc_chunks(self, doc_id: UUID, chunks: list[DocChunk]) -> bool:
+        """Atomically replace a doc's entire chunk set; [] clears it.
+
+        Validate before accessing storage: ordinals must be exactly 0..n-1
+        (input order does not matter), with one body/title hash and embedding model
+        per set. Each chunk must satisfy DocChunk's validation, including its
+        MAX_CHUNK_CHARS text limit. Invalid input raises ValueError without
+        changing prior rows.
+        False for a missing doc, True otherwise; repeating a write creates no
+        duplicates. Concurrent replacements cannot produce a mixed set.
+
+        This stores supplied provenance; it does not check current doc_content,
+        trigger indexing, or implement retirement/model-mismatch policy.
+        """
+        ...
+
+    def list_doc_chunks(
+        self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL
+    ) -> list[DocChunk]:
+        """Chunks ordered by ordinal, using get_doc's visibility predicate.
+
+        Missing/invisible docs and docs without chunks all return []. Returned
+        values are immutable, with tuple embeddings, and the returned list is
+        detached from persisted data.
+        Like get_doc_content, this does not filter on the doc's active flag.
+        """
+        ...
+
+    def replace_doc_chunks_if_current(
+        self,
+        doc_id: UUID,
+        expected_content_hash: str,
+        chunks: list[DocChunk],
+        *,
+        expected_title_hash: str,
+    ) -> bool:
+        """replace_doc_chunks, but only while the chunks still describe the
+        doc's current content: the doc exists and is active, and its stored
+        doc_content hash equals `expected_content_hash`, and SHA-256 of its
+        title (None treated as empty) equals `expected_title_hash`. Checked
+        and written in one transaction, so an older body/title embedding
+        cannot replace a newer set. Every chunk must carry both expected
+        hashes (ValueError otherwise, before storage is touched). False,
+        writing nothing, when the condition does not hold.
+        """
+        ...
+
+    def clear_doc_chunks_if_unindexable(self, doc_id: UUID) -> bool:
+        """Clear chunks only if the doc is still inactive or has no content.
+
+        Check and clear atomically with respect to chunk writers and changes
+        to the doc's active flag. False, without writing, if the doc is active
+        with stored content; True when cleared or the doc no longer exists.
+        A delayed cleanup must never erase a newer successful index.
+        """
+        ...
+
+    def delete_doc_content(self, doc_id: UUID, *, expected: DocContentMeta | None) -> bool:
+        """Delete a doc's stored text and its chunks together, in one
+        transaction; the catalog row (and its snapshot) stays. For a source
+        confirmed gone: with no content there is nothing to re-index, so the
+        removal sticks until a later successful fetch stores text again.
+        `expected` is the content metadata read before fetching (None if
+        absent). Compare both hash and fetched_at under the write lock so a
+        delayed failure cannot delete a newer successful fetch, even when it
+        stored identical text. False without writing if metadata changed or
+        the doc does not exist; idempotent when expected is None."""
+        ...
+
+    def get_doc_index_state(self, doc_id: UUID) -> DocIndexState | None:
+        """The current chunk set's body/title hashes, model, and size; None when the
+        doc has no chunks (or does not exist). Internal indexing state: no
+        visibility predicate, never returned to API callers."""
+        ...
+
+    def list_docs_for_indexing(
+        self, *, stale_only: bool = True, after: UUID | None = None, limit: int = 100
+    ) -> list[UUID]:
+        """Doc ids whose index may need work, ascending by id, ids > `after`.
+
+        Always includes docs that have chunks but should not (inactive, or no
+        stored content), so a failed cleanup is retryable. With stale_only,
+        adds active docs with content whose chunks are missing or were built
+        from a different body/title hash (or unknown title hash); without it,
+        adds every active doc with content (a forced full pass, e.g. after an embedding-model change).
+        """
         ...
 
     # Sources

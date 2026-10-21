@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import doc, { AUTOCOMPLETE_TIMEOUT_MS } from '../src/commands/doc.js';
 import { PRINCIPAL_AUTOCOMPLETE_TIMEOUT_MS } from '../src/router.js';
+import { SEARCH_MAX_QUERY_LENGTH } from '../src/services/docService.js';
 
 function findSub(name) {
   return doc.subcommands.find((s) => s.name === name);
@@ -10,7 +11,7 @@ function findSub(name) {
 test('doc command is stable with four subcommands', () => {
   assert.equal(doc.name, 'doc');
   assert.equal(doc.beta, false);
-  assert.deepEqual(doc.subcommands.map((s) => s.name).sort(), ['add', 'list', 'remove', 'show']);
+  assert.deepEqual(doc.subcommands.map((s) => s.name).sort(), ['add', 'list', 'remove', 'search']);
 });
 
 test('add and list have an autocomplete team option; remove is admin', () => {
@@ -129,23 +130,30 @@ test('list handler passes the caller person id as onBehalfOf', async () => {
   assert.equal(received.onBehalfOf, 'p1');
 });
 
-test('show handler passes the caller person id as onBehalfOf', async () => {
-  let received;
+test('list handler renders doc ids for admins and withholds them otherwise', async () => {
   const ctx = {
     docService: {
-      showDoc: async (args) => {
-        received = args;
-        return { outcome: 'NOT_FOUND' };
-      },
+      listDocs: async () => ({
+        outcome: 'LISTED',
+        docs: [{ title: 'Onboarding', id: 'd1', url: 'https://x.com', source_id: 'gdocs' }],
+      }),
     },
   };
-  await findSub('show').handler({
-    options: { id: 'd1' },
-    principal: { person: { id: 'p1' } },
-    ctx,
-  });
-  assert.equal(received.id, 'd1');
-  assert.equal(received.onBehalfOf, 'p1');
+  const base = { options: { team: null, tag: null, source: null }, ctx };
+  const run = (access_level) =>
+    findSub('list').handler({
+      ...base,
+      principal: access_level === null ? null : { person: { id: 'p1', access_level } },
+    });
+
+  for (const level of ['admin', 'superuser']) {
+    assert.match((await run(level)).content, /`d1`/, `${level} should see the id`);
+  }
+  // A member has no /doc remove, so the id is noise; an unlinked caller is
+  // fail-closed (rankOf(undefined) === 0).
+  for (const level of ['member', undefined, null]) {
+    assert.doesNotMatch((await run(level)).content, /d1/, `${level} should not see the id`);
+  }
 });
 
 test('list handler omits onBehalfOf when the caller is not linked (fail-closed)', async () => {
@@ -163,25 +171,6 @@ test('list handler omits onBehalfOf when the caller is not linked (fail-closed)'
     principal: null,
     ctx,
   });
-  assert.equal(received.onBehalfOf, undefined);
-});
-
-test('show handler omits onBehalfOf when the caller is not linked (fail-closed)', async () => {
-  let received;
-  const ctx = {
-    docService: {
-      showDoc: async (args) => {
-        received = args;
-        return { outcome: 'NOT_FOUND' };
-      },
-    },
-  };
-  await findSub('show').handler({
-    options: { id: 'd1' },
-    principal: null,
-    ctx,
-  });
-  assert.equal(received.id, 'd1');
   assert.equal(received.onBehalfOf, undefined);
 });
 
@@ -205,4 +194,58 @@ test('add handler owns the doc as the caller (owningPersonId)', async () => {
     ctx,
   });
   assert.equal(received.owningPersonId, 'p1');
+});
+
+test('search is linked-only, ephemeral, and takes a required length-capped query', () => {
+  const search = findSub('search');
+  assert.equal(search.auth, 'linked');
+  assert.equal(search.ephemeral, true);
+  assert.deepEqual(search.options, [
+    {
+      name: 'query',
+      type: 'string',
+      required: true,
+      maxLength: SEARCH_MAX_QUERY_LENGTH,
+      description: 'What to search for',
+    },
+  ]);
+});
+
+test('search handler searches as the caller and renders the result', async () => {
+  let received;
+  const ctx = {
+    docService: {
+      searchDocs: async (args) => {
+        received = args;
+        return {
+          outcome: 'FOUND',
+          docs: [{ id: 'd1', title: 'Team A guide', url: 'https://x.com', source_id: 'gdocs' }],
+        };
+      },
+    },
+  };
+  const payload = await findSub('search').handler({
+    options: { query: 'CPSIF' },
+    principal: { person: { id: 'p1', access_level: 'admin' } },
+    ctx,
+  });
+  assert.deepEqual(received, { query: 'CPSIF', onBehalfOf: 'p1' });
+  assert.match(payload.content, /1\. \*\*Team A guide\*\*/);
+  assert.doesNotMatch(payload.content, /d1/);
+  assert.equal(payload.ephemeral, true);
+});
+
+test('search handler renders the no-match and unavailable outcomes', async () => {
+  for (const [outcome, pattern] of [
+    ['NO_MATCH', /no documents/i],
+    ['DOC_DOWN', /unavailable/i],
+  ]) {
+    const payload = await findSub('search').handler({
+      options: { query: 'CPSIF' },
+      principal: { person: { id: 'p1' } },
+      ctx: { docService: { searchDocs: async () => ({ outcome }) } },
+    });
+    assert.match(payload.content, pattern);
+    assert.equal(payload.ephemeral, true);
+  }
 });

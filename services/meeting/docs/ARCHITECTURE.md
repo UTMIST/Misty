@@ -140,6 +140,45 @@ Decode runs in-process via PyAV, which bundles its own ffmpeg libraries. **No `f
 
 This is a genuine hard dependency: `verify_production_secrets()` requires `LLM_BASE_URL` and `LLM_API_KEY` outside `local`, so `meeting` refuses to boot without them. Deploy `llm` first.
 
+## Live meeting Q&A
+
+`POST /meetings/{id}/qna` snapshots finalized speech and elapsed time, then awaits
+its injected asynchronous `qna_runner`. The runner owns a bounded dedicated
+executor; it never submits Q&A to the default executor shared by WebSocket audio
+feeding and report generation. Otherwise concurrent slow questions could starve
+those workers and make `/stop` discard the queued audio tail. Pool capacity is
+one quarter of the runtime's default shared executor size, rounded down (minimum one), so
+Q&A concurrency stays below audio/report capacity. Admission fails immediately
+when full,
+and actual worker completion releases capacity even if its waiter is cancelled.
+The application lifespan creates the singleton and shuts it down, clearing the
+cached registry so future app lifespans cannot reuse a closed runner. Shutdown
+does not block the event loop or claim to cancel already running HTTP calls.
+
+Q&A does not flush or replay audio,
+mutate the meeting lifecycle, or retain conversation history. New questions are
+refused as soon as stop is requested, while the audio tail remains ingestible.
+Already accepted questions own their snapshot and can finish after cleanup.
+
+The pipeline sends the entire bounded recent window to the shared LLM service.
+There is no embedding, retrieval index, or database. Transcript text is treated
+as untrusted evidence, and model citations are validated against request-local
+segment IDs before speaker/timestamp metadata is returned. The exact window,
+size guard, and error contract live in [API.md](API.md#post-meetingssession_idqna).
+As with minutes generation, collaborator wiring belongs only in `wiring.py`.
+
+The question defines the task; only the transcript is treated as evidence rather
+than instructions. The prompt explicitly supports summarizing the available
+discussion and cautiously recognizing contextual speech-recognition near-matches.
+Near-matches should quote the actual transcript spelling and state uncertainty.
+Offline tests check the prompt contract, evidence transport, and citation parsing;
+they do not establish the live model's semantic answer quality.
+
+Parsing accepts plain JSON or a single complete JSON Markdown code block, then
+applies the same strict schema and citation validation. It does not repair
+truncation or extract answers from surrounding prose. Invalid responses are
+rejected without logging.
+
 ## Live-verify caveats
 
 Several integration assumptions are unit-tested against fakes but **not yet confirmed against real Discord audio or a real AWS account**:

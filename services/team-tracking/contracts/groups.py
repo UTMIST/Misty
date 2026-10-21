@@ -7,8 +7,7 @@ class GroupProviderError(Exception):
 
 
 class ExternalMembersDisabled(GroupProviderError):
-    """The group rejects members outside the organization. A group owner must
-    enable "Allow external members" in Google Groups, then the team re-syncs."""
+    """The group still rejects outside members after settings reconciliation."""
 
 
 class GroupOperationPending(GroupProviderError):
@@ -41,6 +40,16 @@ class GroupProvider(Protocol):
     def list_members(self, group_name: str) -> dict[str, str]:
         """Lowercased member email -> membership resource name, for plain MEMBER
         memberships only. Owners and managers are omitted and never touched."""
+        ...
+
+    def ensure_external_members(self, group_email: str) -> None:
+        """Read, minimally configure, and verify external-member settings.
+
+        Only called for a confirmed managed group. Repeating it is safe, even
+        after a lost PATCH response: read the current settings before writing.
+        Leave unrelated settings unchanged. Raise GroupProviderError unless
+        external membership and owner-managed external additions are verified.
+        """
         ...
 
     def add_member(self, group_name: str, email: str) -> None:

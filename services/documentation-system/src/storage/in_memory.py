@@ -1,8 +1,22 @@
 from datetime import datetime, timezone
+from math import sqrt
 from uuid import UUID, uuid4
 
-from contracts.types import ApiKey, Doc, DocContentMeta, DocGrant, Source, SourceGrant
+from contracts.retrieval import ChunkCitation, QueryEmbedding, SearchHit
+from contracts.types import (
+    ApiKey,
+    Doc,
+    DocChunk,
+    DocContentMeta,
+    DocGrant,
+    DocIndexState,
+    Source,
+    SourceGrant,
+)
 from contracts.visibility import ActorContext, SEE_ALL, doc_visible
+from src.content import content_hash
+from src.retrieval import candidate_limit, fuse, keyword_density, validate_search
+from src.storage.chunks import validate_chunks_for_content, validate_doc_chunks
 
 
 def _now() -> datetime:
@@ -25,6 +39,7 @@ class InMemoryStorageAdapter:
         self._grants: dict[UUID, list[DocGrant]] = {}
         # doc_id -> (content_text, content_hash, fetched_at)
         self._content: dict[UUID, tuple[str, str, datetime | None]] = {}
+        self._chunks: dict[UUID, list[DocChunk]] = {}
 
     def _hydrate(self, doc: Doc) -> Doc:
         data = doc.model_dump()
@@ -46,6 +61,49 @@ class InMemoryStorageAdapter:
             owning_team_id=doc.owning_team_id,
             grants=self._grant_pairs(doc.id),
         )
+
+    def search_chunks(self, *, query, embedding, visibility, k, min_cosine) -> list[SearchHit]:
+        embedding: QueryEmbedding = validate_search(query, embedding, visibility, k, min_cosine)
+        query_norm = sqrt(sum(v * v for v in embedding.vector))
+        vector, keyword = [], []
+        for doc in self._docs.values():
+            if not doc.active or not self._visible(doc, visibility):
+                continue
+            for chunk in self._chunks.get(doc.id, []):
+                if (
+                    chunk.embedding_model != embedding.model
+                    or chunk.dimensions != embedding.dimensions
+                ):
+                    continue
+                hit = SearchHit(
+                    doc_id=doc.id,
+                    title=doc.title,
+                    url=doc.url,
+                    source_id=doc.source_id,
+                    text=chunk.chunk_text,
+                    chunk=ChunkCitation(
+                        **chunk.model_dump(include=set(ChunkCitation.model_fields))
+                    ),
+                    score=0,
+                )
+                norm = sqrt(sum(v * v for v in chunk.embedding))
+                if norm:
+                    cosine = sum(a * b for a, b in zip(embedding.vector, chunk.embedding)) / (
+                        query_norm * norm
+                    )
+                    cosine = round(max(-1.0, min(1.0, cosine)), 6)
+                    if cosine >= min_cosine:
+                        vector.append((cosine, hit))
+                density = keyword_density(chunk.chunk_text, query)
+                if density:
+                    keyword.append((density, hit))
+        limit = candidate_limit(k)
+
+        def ranked(branch):
+            branch.sort(key=lambda pair: (-pair[0], pair[1].doc_id, pair[1].chunk.ordinal))
+            return [hit for _, hit in branch[:limit]]
+
+        return fuse(ranked(vector), ranked(keyword), k)
 
     # --- Docs ---
 
@@ -121,6 +179,7 @@ class InMemoryStorageAdapter:
         owning_person_id=None,
         source_id=None,
         tag=None,
+        has_content=None,
         active_only=True,
         visibility: ActorContext = SEE_ALL,
     ) -> list[Doc]:
@@ -135,6 +194,8 @@ class InMemoryStorageAdapter:
             if source_id is not None and doc.source_id != source_id:
                 continue
             if tag is not None and tag not in self._tags.get(doc.id, set()):
+                continue
+            if has_content is not None and (doc.id in self._content) != has_content:
                 continue
             if not self._visible(doc, visibility):
                 continue
@@ -284,6 +345,91 @@ class InMemoryStorageAdapter:
             return None
         _text, content_hash, fetched_at = entry
         return DocContentMeta(content_hash=content_hash, fetched_at=fetched_at)
+
+    def replace_doc_chunks(self, doc_id: UUID, chunks: list[DocChunk]) -> bool:
+        validated = validate_doc_chunks(chunks)
+        if doc_id not in self._docs:
+            return False
+        self._chunks[doc_id] = validated
+        return True
+
+    def list_doc_chunks(
+        self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL
+    ) -> list[DocChunk]:
+        doc = self._docs.get(doc_id)
+        if doc is None or not self._visible(doc, visibility):
+            return []
+        return [chunk.model_copy(deep=True) for chunk in self._chunks.get(doc_id, [])]
+
+    def replace_doc_chunks_if_current(
+        self,
+        doc_id: UUID,
+        expected_content_hash: str,
+        chunks: list[DocChunk],
+        *,
+        expected_title_hash: str,
+    ) -> bool:
+        validated = validate_chunks_for_content(chunks, expected_content_hash, expected_title_hash)
+        doc = self._docs.get(doc_id)
+        content = self._content.get(doc_id)
+        if doc is None or not doc.active or content is None:
+            return False
+        if (
+            content[1] != expected_content_hash
+            or content_hash(doc.title or "") != expected_title_hash
+        ):
+            return False
+        self._chunks[doc_id] = validated
+        return True
+
+    def clear_doc_chunks_if_unindexable(self, doc_id: UUID) -> bool:
+        doc = self._docs.get(doc_id)
+        if doc is not None and doc.active and doc_id in self._content:
+            return False
+        self._chunks.pop(doc_id, None)
+        return True
+
+    def delete_doc_content(self, doc_id: UUID, *, expected: DocContentMeta | None) -> bool:
+        if doc_id not in self._docs:
+            return False
+        if self.get_doc_content_meta(doc_id) != expected:
+            return False
+        self._content.pop(doc_id, None)
+        self._chunks.pop(doc_id, None)
+        return True
+
+    def get_doc_index_state(self, doc_id: UUID) -> DocIndexState | None:
+        chunks = self._chunks.get(doc_id) if doc_id in self._docs else None
+        if not chunks:
+            return None
+        return DocIndexState(
+            source_content_hash=chunks[0].source_content_hash,
+            source_title_hash=chunks[0].source_title_hash,
+            embedding_model=chunks[0].embedding_model,
+            chunk_count=len(chunks),
+        )
+
+    def list_docs_for_indexing(
+        self, *, stale_only: bool = True, after: UUID | None = None, limit: int = 100
+    ) -> list[UUID]:
+        out = []
+        for doc_id in sorted(self._docs):
+            if after is not None and doc_id <= after:
+                continue
+            content = self._content.get(doc_id)
+            chunks = self._chunks.get(doc_id)
+            if self._docs[doc_id].active and content is not None:
+                due = (
+                    not stale_only
+                    or not chunks
+                    or chunks[0].source_content_hash != content[1]
+                    or chunks[0].source_title_hash != content_hash(self._docs[doc_id].title or "")
+                )
+            else:
+                due = bool(chunks)
+            if due:
+                out.append(doc_id)
+        return out[:limit]
 
     # --- Sources ---
 

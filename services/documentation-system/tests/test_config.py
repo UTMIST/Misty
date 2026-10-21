@@ -22,6 +22,57 @@ def test_settings_defaults():
     assert s.connectors_api_key.get_secret_value()
 
 
+def test_embedding_settings(monkeypatch):
+    assert Settings().embed_model is None
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm:8002")
+    monkeypatch.setenv("EMBED_MODEL", "openai-embed-3-small")
+    monkeypatch.setenv("EMBED_MAX_REQUEST_CHARS", "1000")
+    s = Settings()
+    assert (s.llm_base_url, s.embed_model, s.embed_max_request_chars) == (
+        "http://llm:8002",
+        "openai-embed-3-small",
+        1000,
+    )
+    monkeypatch.setenv("EMBED_MAX_REQUEST_CHARS", "0")
+    with pytest.raises(ValueError):
+        Settings()
+
+
+def test_verify_secrets_warns_in_production_with_default_llm_api_key(monkeypatch, caplog):
+    from src.config import verify_production_secrets
+
+    monkeypatch.setenv("DOCS_ENV", "production")
+    monkeypatch.setenv("API_KEY", "a-strong-api-secret")
+    monkeypatch.setenv("DIRECTORY_API_KEY", "a-strong-directory-secret")
+    monkeypatch.setenv("LLM_API_KEY", DEFAULT_DEV_API_KEY)
+    with caplog.at_level("WARNING"):
+        verify_production_secrets()  # must not raise: indexing is a soft dependency
+    assert any("LLM_API_KEY" in record.message for record in caplog.records)
+
+
+def test_retrieval_settings_and_secret_boundary():
+    settings = Settings(llm_api_key="embedding-secret")
+    assert settings.search_embed_model == "openai-embed-3-small"
+    assert settings.search_min_cosine == 0.3
+    assert settings.llm_api_key.get_secret_value() == "embedding-secret"
+    assert "embedding-secret" not in repr(settings)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"search_min_cosine": 0},
+        {"search_min_cosine": 1.1},
+        {"search_min_cosine": float("nan")},
+        {"search_embed_model": "unlisted"},
+        {"embed_model": "unlisted"},
+    ],
+)
+def test_invalid_retrieval_configuration_fails_at_settings_validation(changes):
+    with pytest.raises(ValueError):
+        Settings(**changes)
+
+
 # --- docs_env -----------------------------------------------------------------
 
 
@@ -115,6 +166,7 @@ def test_verify_secrets_passes_in_production_with_real_secrets(monkeypatch):
     monkeypatch.setenv("API_KEY", "a-strong-api-secret")
     monkeypatch.setenv("DIRECTORY_API_KEY", "a-strong-directory-secret")
     monkeypatch.setenv("CONNECTORS_API_KEY", "a-strong-connectors-secret")
+    monkeypatch.setenv("LLM_API_KEY", "a-strong-llm-secret")
     verify_production_secrets()  # must not raise
 
 
@@ -151,7 +203,9 @@ def test_create_app_raises_in_production_with_default_api_key(monkeypatch):
 #      nothing logs. The guard tests below are the only thing that notices.
 
 
-@pytest.mark.parametrize("field", ["api_key", "directory_api_key", "connectors_api_key"])
+@pytest.mark.parametrize(
+    "field", ["api_key", "directory_api_key", "connectors_api_key", "llm_api_key"]
+)
 def test_credentials_never_leak_via_string_conversion(field):
     secret = f"super-secret-{field}-value"
     s = Settings(**{field: secret})

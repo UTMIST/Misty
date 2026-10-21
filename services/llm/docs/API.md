@@ -6,7 +6,7 @@ Three endpoints. Everything except `/health` requires `X-API-Key`.
 
 | Method | Path | Scope | Description |
 |---|---|---|---|
-| POST | `/chat` | `chat` | Send chat turns to Claude, get a completion back |
+| POST | `/chat` | `chat` | Send chat turns to the configured model, get a completion back |
 | POST | `/embed` | `embed` | Turn a batch of strings into vectors |
 | GET | `/health` | — | Liveness probe |
 
@@ -53,19 +53,19 @@ Text sent upstream must be valid UTF-8; invalid text is rejected before a provid
 |---|---|---|---|
 | `messages` | `[{role, content}]` | — | Required, **min 1**. `role` is `user` or `assistant`; `content` is a non-empty string or a non-empty list of the structured blocks below. |
 | `system` | string \| null | `null` | Optional system prompt |
-| `model` | string \| null | `LLM_MODEL` | Must be `claude-sonnet-4-6` or `claude-opus-4-6` |
-| `max_tokens` | int | `16000` | `1`–`64000` |
-| `thinking` | bool \| null | `THINKING_DEFAULT` | Extended thinking. `null` means "use the server default", which is **not** the same as `false`. |
+| `model` | string \| null | `LLM_MODEL` | OpenAI: `gpt-6.1-sol`; Bedrock: `claude-sonnet-4-6` or `claude-opus-4-6` |
+| `max_tokens` | int | `16000` | `16`–`64000` for OpenAI; `1`–`64000` for Bedrock. Includes reasoning tokens. |
+| `thinking` | bool \| null | `THINKING_DEFAULT` | OpenAI: true → medium, false → low reasoning (GPT-6.1 Sol cannot disable reasoning). Bedrock: thinking on/off. `null` means "use the server default", which is **not** the same as `false`. |
 | `tools` | tool definitions \| null | `null` | Optional client-executed tools. Omitted, `null`, and `[]` mean no tool definitions; at most 32 definitions. |
 
-`model` is validated against `ALLOWED_MODELS` in `contracts/chat.py`. A model the AWS account can serve but that isn't in that set is a **422**, not a passthrough — adding a model means editing that constant.
+`model` is validated against the catalog in `contracts/models.py`, including compatibility with `LLM_PROVIDER`. Unknown or incompatible models return **422** before inference. The default is `gpt-6.1-sol` on `openai`; there is no cross-provider fallback.
 
 **Response** (`ChatResponse`) — `200`:
 
 ```json
 {
   "content": "...",
-  "model": "us.anthropic.claude-sonnet-4-6",
+  "model": "gpt-6.1-sol",
   "stop_reason": "end_turn",
   "usage": {"input_tokens": 412, "output_tokens": 1288}
 }
@@ -101,7 +101,7 @@ The service is stateless — it stores no conversation. To continue a conversati
 
 ### Client-executed tools
 
-Both Bedrock providers support this contract. Supplying tools or structured message
+OpenAI and both Bedrock providers support client-executed tools. Supplying tools or structured message
 content opts into block-level responses. Existing string-message requests without
 tools retain the response above, with no extra `null` or empty fields.
 
@@ -112,11 +112,13 @@ The schema must have `"type": "object"`; schema references are not fetched or
 resolved by this service. Structural validation is not a complete JSON Schema or
 model-specific schema-compatibility check. Tool definitions and structured blocks
 reject unknown fields and coercion; the legacy chat/message wrappers keep their
-existing extra-field behavior.
+existing extra-field behavior. The native OpenAI item inside `reasoning_state.data`
+allows bounded additional properties for forward-compatible replay; its known
+fields and the surrounding block remain validated.
 
 ```json
 {
-  "model": "claude-sonnet-4-6",
+  "model": "gpt-6.1-sol",
   "thinking": false,
   "messages": [{"role": "user", "content": "Find the deployment guide."}],
   "tools": [{
@@ -136,7 +138,7 @@ A tool request can produce an empty visible `content` with `stop_reason: "tool_u
 ```json
 {
   "content": "",
-  "model": "us.anthropic.claude-sonnet-4-6",
+  "model": "gpt-6.1-sol",
   "stop_reason": "tool_use",
   "usage": {"input_tokens": 120, "output_tokens": 25},
   "content_blocks": [{
@@ -176,9 +178,13 @@ and redacted continuation data.
 
 #### Structured content blocks
 
+`reasoning_state` is an additional assistant-only block for OpenAI continuation;
+see [thinking and continuation](#thinking-and-continuation).
+
 | `type` | Fields | Allowed role |
 |---|---|---|
-| `text` | Non-empty `text` string | `user`, `assistant` |
+| `text` | Non-empty `text`; optional `phase` (`commentary` or `final_answer`) on assistant messages | `user`, `assistant` |
+| `reasoning_state` | `provider: "openai"`, strictly validated native reasoning item in `data` | `assistant` |
 | `reasoning` | `text` string, non-empty `signature` string | `assistant` |
 | `redacted_reasoning` | Non-empty canonical base64 `data` | `assistant` |
 | `tool_use` | `id`, `name`, JSON-object `input` | `assistant` |
@@ -218,7 +224,32 @@ and the API's `max_tokens` cap. Do not append the truncated assistant turn or
 fabricate tool results. The service does not automatically retry a successful
 truncated response. Only `stop_reason: "tool_use"` permits the tool-result exchange.
 
+For OpenAI, **all** incomplete responses withhold function calls. Token exhaustion
+maps to `max_tokens` and filtering to `content_filtered`; other or absent incomplete
+reasons map to `incomplete`. These return **200** with partial text and usage, and
+never authorize tool execution or imply a complete answer. Unsupported output types
+and invalid known fields still return **502**. Additional metadata properties on
+known upstream objects are tolerated and omitted from the public response, except
+for the native reasoning state retained for replay below.
+
 #### Thinking and continuation
+
+OpenAI uses Responses with `store=false`. Its encrypted reasoning items are returned
+as `reasoning_state` blocks with `provider: "openai"` and `data` containing the native
+reasoning item. Replay these blocks unchanged with tool results; never render or log
+them. They are assistant-only and covered by the aggregate payload limits. Known
+reasoning fields are validated; additional native properties are preserved unchanged
+so new metadata does not break continuation. Text blocks may carry an assistant
+`phase`; replay it too. OpenAI requests
+containing Bedrock signed/redacted blocks, and Bedrock requests containing OpenAI
+state, return **422** before inference. Start a fresh conversation when switching providers.
+
+For GPT-6.1 Sol, `thinking: true` selects `medium`; `false` selects `low`. Both use
+reasoning tokens within `max_tokens`; a small budget may be consumed before an answer.
+OpenAI does not return readable chain-of-thought text. See
+[OpenAI reasoning continuation](https://developers.openai.com/api/docs/guides/reasoning).
+
+The following signed-continuation behavior applies to **Bedrock**:
 
 The ordinary `THINKING_DEFAULT` behavior is unchanged, including for tool requests.
 With adaptive thinking enabled, the returned assistant turn can contain signed
@@ -273,13 +304,18 @@ response bodies are unchanged; error-input echoing is intentionally not backward
 |---|---|---|
 | Empty `messages`, empty `content`, unknown `model`, `max_tokens` out of range | 422 | Safe validation error |
 | Invalid tool definitions, blocks, history, JSON values, or payload bounds | 422 | Rejected before inference; raw input and validation context are not echoed |
+| Provider-incompatible model/history, or OpenAI `max_tokens` below 16 | 422 | Safe string `detail`; no upstream call |
 | Missing/invalid `X-API-Key` | 401 | — |
 | Valid key without `chat` | 403 | — |
 | Provider rate limited (upstream 429) | 429 | `LLM provider rate limited` |
 | Provider timeout | 504 | `LLM provider timeout` |
+| Missing local `OPENAI_API_KEY` with OpenAI chat | 503 | `LLM provider not configured` |
 | Any other provider failure (upstream 5xx, auth, config) | 502 | `LLM provider error` |
 
-**502 is the one to check first on a fresh deploy.** Missing or wrong AWS credentials, a region without model access, and a model id the account can't serve all normalize to `ProviderUnavailable` → 502. Once boot checks pass, `/health` does not test these credentials or model access — they are only exercised on a real call.
+**502 is the one to check first on a fresh deploy.** An invalid provider credential
+or missing account model access normalizes to `ProviderUnavailable` → 502. For
+Bedrock, also check the region/profile. Once boot checks pass, `/health` does not
+test credentials or model access — they are only exercised on a real call.
 
 ---
 

@@ -11,7 +11,7 @@ It answers questions like "who is currently on the Partnerships team," "who were
 Two design choices shape everything:
 
 - **Membership rows are never deleted.** When someone leaves a team, their row gains an `ended_at` date. The full history of who held what role survives leadership transitions, and point-in-time queries ("roster as of 2024-12-15") work without special logic.
-- **External accounts are mapped, not embedded.** A person's Discord/GitHub/Notion/UofT-email accounts live in a `person_identifiers` table keyed by a `providers` vocabulary — so the Discord bot can reverse-look-up a person from a raw snowflake without the base `people` table ever gaining an integration-specific column.
+- **External accounts are mapped, not embedded.** A person's Discord/GitHub/UofT-email accounts live in a `person_identifiers` table keyed by a `providers` vocabulary — so the Discord bot can reverse-look-up a person from a raw snowflake without the base `people` table ever gaining an integration-specific column.
 
 ## The API-only principle
 
@@ -128,7 +128,7 @@ team-tracking/
 │   │   └── postgres.py     PostgresStorageAdapter — used in production
 │   │
 │   ├── providers/
-│   │   └── google_groups.py  GoogleGroupsProvider — Cloud Identity Groups API
+│   │   └── google_groups.py  GoogleGroupsProvider — Cloud Identity + Groups Settings APIs
 │   ├── google_groups.py    sync_team(): reconcile a team's Google Group with its members
 │   ├── groups_cli.py       team-tracking-groups CLI (backfill / scheduled sync)
 │   ├── cli.py              team-tracking-keys CLI (issue / list / revoke API keys)
@@ -165,6 +165,12 @@ team-tracking/
 **Eight routers, 32 endpoints.** **Ten migrations (001–010);** the latest, 010, persists unconfirmed Google membership writes.
 
 **Dependency direction:** `contracts/` imports nothing from `src/`. The API layer imports only from `contracts/` and `src/config`. The storage layer imports `contracts/` for types and defines its own schema. Nothing imports from `src/storage/` except `src/api/deps.py` (the single wiring point). This is the **Protocol boundary** — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+Managed Google Groups use the five optional `GOOGLE_*` variables in `.env.example`.
+The owning account's refresh token needs both `cloud-identity.groups` and
+`apps.groups.settings`. Sync configures and verifies external-member settings
+before additions, including for empty groups; settings failure holds additions
+while removals continue. See [credentials and rollout](docs/DEPLOYMENT.md#managed-google-groups).
 
 ## API at a glance
 
@@ -261,7 +267,7 @@ Nine tables (`people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `p
 
 **Not implemented (by design):**
 
-- **Connectors layer** — no Discord/Google/GitHub/Notion sync. Connectors hang off the HTTP API when built.
+- **Connectors layer** — no Discord/Google/GitHub sync. Connectors hang off the HTTP API when built.
 - **Permission enforcement** — the API exposes primitives (memberships, admin flag) from which downstream systems derive access rules. No policy engine lives here.
 - **Admin UI** — officer edits go through whatever admin surface is chosen (NocoDB, Directus, direct SQL, or a custom app).
 - **Pagination** — list endpoints return all matching rows. Adequate for UTMIST's roster size; add limit/offset when needed.
