@@ -260,6 +260,8 @@ and skips them.
   snowflakes (`111…` / `222…`) so the command works without Discord.
 - `/channel-access set team:<> [team2:<> … team5:<>]` (admin) — replace the channel's
   team list (up to five). Team options use slug autocomplete.
+- `/channel-access append team:<> [team2:<> … team5:<>]` (admin) — add teams to the
+  existing list without removing ones already configured (union, then the same PUT).
 - `/channel-access clear` (admin) — clear the channel's team list (no document access).
 - `/doc <add|list|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
 - `/doc search query:<text>` (linked) — search the documents you can access and get the top matches

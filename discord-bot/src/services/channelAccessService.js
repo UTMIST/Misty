@@ -36,17 +36,43 @@ export function createChannelAccessService({ directory } = {}) {
     }
   }
 
+  async function writeTeams(guildId, channelId, teams, outcome) {
+    const config = await directory.replaceChannelTeams(
+      guildId,
+      channelId,
+      teams.map((t) => t.id),
+    );
+    return { outcome, teams, version: config.version ?? null };
+  }
+
   async function set({ guildId, channelId, slugs }) {
     try {
       const resolved = await resolveTeams(slugs);
       if (resolved.outcome !== 'OK') return resolved;
       if (resolved.teams.length === 0) return { outcome: 'NO_TEAMS' };
-      const config = await directory.replaceChannelTeams(
-        guildId,
-        channelId,
-        resolved.teams.map((t) => t.id),
-      );
-      return { outcome: 'SET', teams: resolved.teams, version: config.version ?? null };
+      return await writeTeams(guildId, channelId, resolved.teams, 'SET');
+    } catch (e) {
+      if (e instanceof ChannelTeamsInvalid) {
+        return { outcome: 'INVALID_TEAMS', detail: e.detail };
+      }
+      if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
+      throw e;
+    }
+  }
+
+  async function append({ guildId, channelId, slugs }) {
+    try {
+      const resolved = await resolveTeams(slugs);
+      if (resolved.outcome !== 'OK') return resolved;
+      if (resolved.teams.length === 0) return { outcome: 'NO_TEAMS' };
+      const current = await directory.getChannelTeams(guildId, channelId);
+      const byId = new Map();
+      for (const id of current?.team_ids ?? []) {
+        const team = await directory.getTeam(id);
+        if (team) byId.set(team.id, team);
+      }
+      for (const team of resolved.teams) byId.set(team.id, team);
+      return await writeTeams(guildId, channelId, [...byId.values()], 'APPENDED');
     } catch (e) {
       if (e instanceof ChannelTeamsInvalid) {
         return { outcome: 'INVALID_TEAMS', detail: e.detail };
@@ -66,5 +92,5 @@ export function createChannelAccessService({ directory } = {}) {
     }
   }
 
-  return { show, set, clear };
+  return { show, set, append, clear };
 }

@@ -31,7 +31,7 @@ export function renderShowResult(result, { channelId, usedParent } = {}) {
   return base(channelId, usedParent, `**Current teams**\n${teamList(result.teams)}`);
 }
 
-export function renderSetResult(result, { channelId, usedParent } = {}) {
+function renderWriteErrors(result) {
   if (result.outcome === 'DIRECTORY_DOWN') {
     return { content: DIRECTORY_DOWN_MSG, ephemeral: true };
   }
@@ -55,10 +55,26 @@ export function renderSetResult(result, { channelId, usedParent } = {}) {
       ephemeral: true,
     };
   }
+  return null;
+}
+
+export function renderSetResult(result, { channelId, usedParent } = {}) {
+  const err = renderWriteErrors(result);
+  if (err) return err;
   return base(
     channelId,
     usedParent,
     `**Updated.** Misty may use documents from these teams in this channel:\n${teamList(result.teams)}`,
+  );
+}
+
+export function renderAppendResult(result, { channelId, usedParent } = {}) {
+  const err = renderWriteErrors(result);
+  if (err) return err;
+  return base(
+    channelId,
+    usedParent,
+    `**Appended.** Misty may use documents from these teams in this channel:\n${teamList(result.teams)}`,
   );
 }
 

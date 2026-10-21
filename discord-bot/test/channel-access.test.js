@@ -10,6 +10,7 @@ import {
   interactionToIntent,
 } from '../src/adapters/discord/interactions.js';
 import {
+  renderAppendResult,
   renderClearResult,
   renderSetResult,
   renderShowResult,
@@ -27,7 +28,8 @@ test('channel-access is registered and admin-gated', () => {
   for (const sub of channelAccess.subcommands) assert.equal(sub.auth, 'admin');
   const data = buildDiscordData(channelAccess);
   assert.equal(data.name, 'channel-access');
-  assert.equal(data.options.length, 3);
+  assert.equal(data.options.length, 4);
+  assert.ok(data.options.some((o) => o.name === 'append'));
 });
 
 test('channelScopeFromInteraction uses parent channel in a thread', () => {
@@ -130,6 +132,27 @@ test('service set reports unknown slug before writing', async () => {
   assert.equal(wrote, false);
 });
 
+test('service append unions with the existing set', async () => {
+  const calls = [];
+  const directory = {
+    getTeamBySlug: async (slug) => (slug === 'ops' ? ops : null),
+    getChannelTeams: async () => ({ team_ids: ['t1'], version: 'v1' }),
+    getTeam: async (id) => (id === 't1' ? ml : null),
+    replaceChannelTeams: async (g, c, ids) => {
+      calls.push(ids);
+      return { team_ids: ids, version: 'v2' };
+    },
+  };
+  const svc = createChannelAccessService({ directory });
+  const result = await svc.append({ guildId: 'g1', channelId: 'c1', slugs: ['ops'] });
+  assert.equal(result.outcome, 'APPENDED');
+  assert.deepEqual(calls[0], ['t1', 't2']);
+  assert.deepEqual(
+    result.teams.map((t) => t.slug),
+    ['ml', 'ops'],
+  );
+});
+
 test('service set maps ChannelTeamsInvalid', async () => {
   const directory = {
     getTeamBySlug: async () => ml,
@@ -176,11 +199,18 @@ test('renderers name teams and keep Drive personal', () => {
   assert.match(set.content, /parent channel/i);
   assert.match(set.content, /Ops/);
 
+  const appended = renderAppendResult(
+    { outcome: 'APPENDED', teams: [ml, ops] },
+    { channelId: 'c1' },
+  );
+  assert.match(appended.content, /Appended/);
+  assert.match(appended.content, /Ops/);
+
   const cleared = renderClearResult({ outcome: 'CLEARED' }, { channelId: 'c1' });
   assert.match(cleared.content, /Cleared/);
 });
 
-test('handler set/show/clear against a fake service', async () => {
+test('handler set/show/append/clear against a fake service', async () => {
   const calls = [];
   const ctx = {
     channelAccessService: {
@@ -191,6 +221,10 @@ test('handler set/show/clear against a fake service', async () => {
       set: async (args) => {
         calls.push(['set', args]);
         return { outcome: 'SET', teams: [ml] };
+      },
+      append: async (args) => {
+        calls.push(['append', args]);
+        return { outcome: 'APPENDED', teams: [ml, ops] };
       },
       clear: async (args) => {
         calls.push(['clear', args]);
@@ -221,6 +255,16 @@ test('handler set/show/clear against a fake service', async () => {
   });
   assert.match(set.content, /Updated/);
   assert.deepEqual(calls[1][1].slugs, ['ml', 'ops']);
+
+  const append = await channelAccess.handler({
+    ...scope,
+    subcommand: 'append',
+    options: { team: 'ops' },
+    ctx,
+    principal: { person: admin },
+  });
+  assert.match(append.content, /Appended/);
+  assert.deepEqual(calls[2][1].slugs, ['ops']);
 
   const clear = await channelAccess.handler({
     ...scope,

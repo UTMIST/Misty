@@ -1,6 +1,7 @@
 import { defineCommand } from '../defineCommand.js';
 import { allTeamsAutocomplete } from './teamAutocomplete.js';
 import {
+  renderAppendResult,
   renderClearResult,
   renderNotInGuild,
   renderSetResult,
@@ -14,6 +15,14 @@ const TEAM_OPTION = (name, required, description) => ({
   description,
   autocomplete: allTeamsAutocomplete,
 });
+
+const TEAM_OPTIONS = [
+  TEAM_OPTION('team', true, 'Team slug'),
+  TEAM_OPTION('team2', false, 'Additional team slug'),
+  TEAM_OPTION('team3', false, 'Additional team slug'),
+  TEAM_OPTION('team4', false, 'Additional team slug'),
+  TEAM_OPTION('team5', false, 'Additional team slug'),
+];
 
 function collectSlugs(options) {
   return ['team', 'team2', 'team3', 'team4', 'team5']
@@ -55,13 +64,7 @@ export default defineCommand({
       name: 'set',
       description: 'Replace the teams whose documents may inform answers here (admin)',
       auth: 'admin',
-      options: [
-        TEAM_OPTION('team', true, 'Team slug'),
-        TEAM_OPTION('team2', false, 'Additional team slug'),
-        TEAM_OPTION('team3', false, 'Additional team slug'),
-        TEAM_OPTION('team4', false, 'Additional team slug'),
-        TEAM_OPTION('team5', false, 'Additional team slug'),
-      ],
+      options: TEAM_OPTIONS,
       async handler({ options, ctx, discordGuildId, discordChannelId, channelUsedParent }) {
         const denied = scopeOrDeny({ discordGuildId, discordChannelId });
         if (denied) return denied;
@@ -71,6 +74,25 @@ export default defineCommand({
           slugs: collectSlugs(options),
         });
         return renderSetResult(result, {
+          channelId: discordChannelId,
+          usedParent: channelUsedParent,
+        });
+      },
+    },
+    {
+      name: 'append',
+      description: 'Add teams to this channel without removing existing ones (admin)',
+      auth: 'admin',
+      options: TEAM_OPTIONS,
+      async handler({ options, ctx, discordGuildId, discordChannelId, channelUsedParent }) {
+        const denied = scopeOrDeny({ discordGuildId, discordChannelId });
+        if (denied) return denied;
+        const result = await ctx.channelAccessService.append({
+          guildId: discordGuildId,
+          channelId: discordChannelId,
+          slugs: collectSlugs(options),
+        });
+        return renderAppendResult(result, {
           channelId: discordChannelId,
           usedParent: channelUsedParent,
         });
