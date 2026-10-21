@@ -95,6 +95,8 @@ class ImportResult(WireModel):
 class Listing(WireModel):
     folder_id: str | None = None
     page_token: str | None = None
+    # Successfully consumed cursors for this listing, retained across runs.
+    seen_page_tokens: set[str] = Field(default_factory=set)
 
 
 class State(BaseModel):
@@ -208,7 +210,11 @@ class DiscoveryClient:
             "/discover/google",
             connector=True,
             timeout=timeout,
-            body={**listing.model_dump(), "page_size": self.settings.discovery_page_size},
+            body={
+                "folder_id": listing.folder_id,
+                "page_token": listing.page_token,
+                "page_size": self.settings.discovery_page_size,
+            },
         )
         if body is None:
             return None
@@ -216,8 +222,13 @@ class DiscoveryClient:
             page = Page.model_validate(body)
             if len(page.items) > self.settings.discovery_page_size:
                 raise ValueError()
-            if page.next_page_token and page.next_page_token == listing.page_token:
-                raise ValueError()
+            if page.next_page_token and (
+                page.next_page_token == listing.page_token
+                or page.next_page_token in listing.seen_page_tokens
+            ):
+                # A failed listing must not starve queued folders. Discard the
+                # cycling page; the next full scan retries from the beginning.
+                return None
             return page
         except (ValidationError, ValueError):
             raise DiscoveryError("connector returned invalid discovery page") from None
@@ -349,6 +360,8 @@ def run_discovery(client, settings: Settings, state: State, save) -> int:
                 counts["incomplete_pages"] += page.incomplete
                 state.pending = list(page.items)
                 if page.next_page_token:
+                    if listing.page_token is not None:
+                        listing.seen_page_tokens.add(listing.page_token)
                     listing.page_token = page.next_page_token
                 else:
                     state.frontier.pop(0)

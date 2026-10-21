@@ -373,6 +373,73 @@ def test_page_budget_continues_from_cursor_next_invocation():
     assert client.catalog == {"after-empty-page"}
 
 
+@pytest.mark.parametrize("tokens", [("A",), ("A", "B"), ("A", "B", "C")])
+@pytest.mark.parametrize("legacy_checkpoint", [False, True])
+def test_listing_cycle_across_restarts_does_not_starve_later_folders(
+    tmp_path, tokens, legacy_checkpoint
+):
+    listed, imported = [], []
+    recovered = False
+
+    def handler(request):
+        if request.url.path == "/api-keys/self":
+            return httpx.Response(200, json={"scopes": ["docs:write"]})
+        payload = json.loads(request.content)
+        if request.url.path == "/docs/discovery":
+            imported.append(payload["file_id"])
+            return httpx.Response(
+                200, json={"status": "indexed", "doc_id": "11111111-1111-1111-1111-111111111111"}
+            )
+        assert request.url.path == "/discover/google"
+        # The connector forbids extra fields: checkpoint history must stay local.
+        assert set(payload) == {"folder_id", "page_token", "page_size"}
+        key = (payload["folder_id"], payload["page_token"])
+        listed.append(key)
+        if key == (None, None):
+            page = Page(items=[folder("later")], next_page_token=None if recovered else "A")
+        elif key[0] is None:
+            next_token = tokens[(tokens.index(key[1]) + 1) % len(tokens)]
+            # Reject the cycling page before accepting its items or cursor.
+            page = Page(items=[file("cycle-item")], next_page_token=next_token)
+            if next_token != "A":
+                page.items = []
+        elif key == ("later", None):
+            # Cursors are scoped to each listing, not shared across folders.
+            page = Page(items=[], next_page_token="A")
+        else:
+            assert key == ("later", "A")
+            page = Page(items=[file("good")])
+        return httpx.Response(200, json=page.model_dump())
+
+    state = State(identity="default")
+    if legacy_checkpoint:
+        # An existing checkpoint has no cursor history and can resume mid-listing.
+        state = State.model_validate_json(
+            '{"identity":"default","frontier":['
+            '{"folder_id":null,"page_token":"A"},{"folder_id":"later"}]}'
+        )
+    client, settings = api(handler), Settings(discovery_max_pages=1)
+    path = tmp_path / "state.json"
+    for _ in range(len(tokens) + 4):
+        code = run_discovery(client, settings, state, lambda: save_state(path, state))
+        state = State.model_validate_json(path.read_text())
+        if code != 2:
+            break
+    assert code == 1
+    assert state.completed_at is not None
+    assert state.frontier == state.pending == []
+    assert state.counts["listing_failed"] == 1
+    assert state.counts["indexed"] == 1
+    assert imported == ["good"]
+    assert [key for key in listed if key[0] == "later"] == [("later", None), ("later", "A")]
+
+    # The next full scan retries the failed listing with fresh history.
+    recovered = True
+    assert run_discovery(client, Settings(), state, lambda: save_state(path, state)) == 0
+    assert state.counts.get("listing_failed", 0) == 0
+    assert imported == ["good", "good"]
+
+
 @pytest.mark.parametrize(
     "body",
     [

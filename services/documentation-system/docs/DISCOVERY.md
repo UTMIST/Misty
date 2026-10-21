@@ -108,9 +108,10 @@ one checkpoint across accounts, API environments, or independent services.
 Each invocation defaults to at most 20 Drive listing pages and 100 handled items,
 with 100 results per page and 10,000 unique folders per full scan. A metadata page
 is checkpointed before its files are imported. Each confirmed import result advances
-that checkpoint. Pending work, retry attempts and visited folders survive interruption;
-an OS lock rejects overlapping runs on the same volume. Run only one service: locks on separate
-volumes do not coordinate. Checkpoints contain file ids and opaque page tokens and
+that checkpoint. Pending work, retry attempts, visited folders and each listing's
+consumed cursors survive interruption. An OS lock rejects overlapping runs on the same
+volume. Run only one service: locks on separate volumes do not coordinate.
+Checkpoints contain file ids and opaque page tokens and
 are operator-only (mode 0600); they contain no content or credentials.
 
 The 900-second budget gates new requests; HTTP phase timeouts do not cancel server
@@ -123,7 +124,8 @@ across invocations. The first two failures stop without an immediate replay; the
 invocation safely rechecks identity. The third failure counts as `import_failed` and
 advances to later work. A later full scan retries the file. Authentication,
 configuration and malformed-response errors stop without consuming this retry budget
-or skipping the pending item. Existing checkpoints default to zero retry attempts.
+or skipping the pending item. Existing checkpoints default to zero retry attempts
+and empty cursor history; history is collected as their current listing resumes.
 
 Exit codes:
 
@@ -180,9 +182,12 @@ disabled discovery sources are not reclassified. New manual Forms edit imports u
 
 An inaccessible folder or a failed page is counted; later queued folders continue.
 A later full scan retries it. Rejected/expired Drive tokens become failed listings;
-the next full scan starts them without an old token. Malformed HTTP responses stop
-without advancing the current checkpoint. After correcting configuration/provider
-problems, retry normally. For a corrupt checkpoint or persistent pagination failure,
+the next full scan starts them without an old token. A repeated cursor, including a
+multi-page cycle across scheduled invocations, discards that page and counts as
+`listing_failed` so later folders can proceed. Cursor history is kept separately for
+each listing and discarded when that listing finishes or fails. Other malformed HTTP
+responses stop without advancing the current checkpoint. After correcting
+configuration/provider problems, retry normally. For a corrupt checkpoint or persistent pagination failure,
 stop the schedule, retain a restricted backup, and start from a fresh checkpoint;
 catalog identity dedup makes replay safe. Increasing a folder bound can resume a
 bounded checkpoint; never edit raw cursors while the job is running.
@@ -220,5 +225,5 @@ in linked release evidence. Keep document contents, tokens and credentials out.
 
 Production activation remains a separate rollout decision after these gates.
 
-The local [implementation review](DISCOVERY-REVIEW.md) records offline verification
-and the rationale for each changed file; it is not staging evidence.
+Offline verification and the rationale for each changed file are recorded in
+[PR #293](https://github.com/UTMIST/Misty/pull/293); they are not staging evidence.
