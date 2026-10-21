@@ -11,6 +11,7 @@ def test_defaults_are_local_and_dev():
     assert s.api_key.get_secret_value() == DEFAULT_DEV_API_KEY
     assert s.consumer_keys.get_secret_value() == ""
     assert s.google_credentials_json.get_secret_value() == ""
+    assert s.github_token.get_secret_value() == ""
     assert s.max_file_bytes == 25 * 1024 * 1024
 
 
@@ -44,6 +45,23 @@ def test_missing_google_credentials_never_blocks_startup():
     # A connectors service that cannot reach Drive is degraded, not broken.
     s = Settings(connectors_env="production", api_key="strong", google_credentials_json="")
     verify_production_secrets(s)
+
+
+def test_missing_github_token_never_blocks_startup():
+    # Public repositories work without a token, so its absence is a supported
+    # production state rather than a misconfiguration.
+    s = Settings(connectors_env="production", api_key="strong", github_token="")
+    verify_production_secrets(s)
+
+
+def test_github_token_never_leaks_via_string_conversion():
+    secret = "github_pat_super-secret"
+    s = Settings(github_token=secret)
+
+    assert secret not in repr(s)
+    assert secret not in str(s)
+    assert secret not in str(s.github_token)
+    assert s.github_token.get_secret_value() == secret
 
 
 def test_google_credentials_json_never_leaks_via_string_conversion():

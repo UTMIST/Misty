@@ -137,7 +137,7 @@ documentation-system/
 │   │
 │   ├── fetch/                 Concrete Fetcher implementations + registry
 │   │   ├── web.py             Generic web page fetcher (SSRF egress guard: scheme allowlist, private/metadata-IP block, IP pinning)
-│   │   ├── github.py          GitHub-aware fetcher
+│   │   ├── connectors.py      ConnectorsFetcher — github + Google sources via the connectors service
 │   │   └── registry.py        FetcherRegistry: source_id -> Fetcher
 │   │
 │   ├── directory/
@@ -209,7 +209,7 @@ documentation-system/
 The service is built around three swappable Protocols, so no concrete dependency (a specific database, a specific fetch strategy, a specific directory service) leaks into the ingest/API layers:
 
 - **`StorageAdapter`** (`contracts/storage.py`) — persistence for docs, sources, and API keys. Two implementations: `InMemoryStorageAdapter` (tests) and `PostgresStorageAdapter` (production). Swapping to Postgres in Task 15 required zero changes to `src/ingest.py` or the routers.
-- **`Fetcher`** (`contracts/fetcher.py`) — `fetch(url) -> FetchResult`. `FetcherRegistry` maps a `source_id` to a concrete fetcher (`web.py`, `github.py`); unknown or auth-required sources simply skip fetching. The web fetcher applies SSRF egress protection (http/https scheme allowlist, public-address validation that blocks private/reserved/link-local/CGN/metadata IPs, per-hop redirect revalidation, pinned connections) and rejects a blocked or malformed URL as a `BlockedURLError` (a `FetchError` subclass). Fetch failures raise `FetchError`, which `ingest_doc` catches and turns into a warning — a doc is still created with the URL as its title.
+- **`Fetcher`** (`contracts/fetcher.py`) — `fetch(url) -> FetchResult`. `FetcherRegistry` maps a `source_id` to a concrete fetcher (`web.py` in-process; `connectors.py` for `github` and the Google sources); unknown or auth-required sources simply skip fetching. The web fetcher applies SSRF egress protection (http/https scheme allowlist, public-address validation that blocks private/reserved/link-local/CGN/metadata IPs, per-hop redirect revalidation, pinned connections) and rejects a blocked or malformed URL as a `BlockedURLError` (a `FetchError` subclass). Fetch failures raise `FetchError`, which `ingest_doc` catches and turns into a warning — a doc is still created with the URL as its title.
 - **`DirectoryClient`** (`contracts/directory.py`) — resolves owner labels, verified email identities, active memberships, and only membership-synced Google Group mappings. Owner-label outages degrade; an outage during ACL reconciliation aborts the whole reconciliation so a partial result can never revoke or broaden access.
 
 ## Auth model

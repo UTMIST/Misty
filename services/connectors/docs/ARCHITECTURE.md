@@ -83,7 +83,7 @@ Relatedly, `build_registry` gives all four Google source ids (`gdocs`/`gsheets`/
 
 ## Degradation: no credential is a valid running state
 
-`GOOGLE_CREDENTIALS_JSON` may be empty in **any** tier, including production. It is deliberately excluded from `verify_production_secrets()`. A connectors deploy with no Google project yet still boots, serves `/health`, passes auth, and returns 503 for Google fetches.
+`GOOGLE_CREDENTIALS_JSON` may be empty in **any** tier, including production. It is deliberately excluded from `verify_production_secrets()`, as is the optional `GITHUB_TOKEN` (public repositories need none). A connectors deploy with no Google project yet still boots, serves `/health`, passes auth, and returns 503 for Google fetches.
 
 That is what lets connectors be deployed and wired to documentation-system *before* the Google Cloud project exists — turning on Google support later is a variable edit plus a redeploy, not a code change or a deploy-order dependency. documentation-system is built to tolerate exactly this: a failed fetch is a warning on the ingested doc, never an error.
 
@@ -95,7 +95,7 @@ Two clamps exist, and only one of them is meant to fire:
 
 - connectors' `MAX_CONTENT_CHARS` defaults to **1,200,000**.
 - documentation-system's own `MAX_CONTENT_CHARS` is **1,000,000**.
-- connectors' `MAX_FILE_BYTES` defaults to **25 MiB** and rejects oversized uploaded PDF, `.docx`, and `text/*` files before media download.
+- connectors' `MAX_FILE_BYTES` defaults to **25 MiB** and rejects oversized uploaded PDF, `.docx`, `text/*`, and GitHub files before their bytes are downloaded.
 
 The gap is deliberate. The consumer's clamp trips first and reports a truncation warning to whoever ingested the doc; connectors' clamp is a transport backstop that should never be the visible one. If you change either, keep connectors' the larger of the two.
 

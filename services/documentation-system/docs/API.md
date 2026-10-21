@@ -687,8 +687,8 @@ A **source** describes a kind of URL and how the catalog treats it:
 
 The seven seeded sources: `web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`,
 `youtube`. All but `youtube` have a fetcher and
-`content_fetch_enabled: true` — migration `006` enabled the four Google sources, which
-fetch through the connectors service.
+`content_fetch_enabled: true` — migration `006` enabled the four Google sources. `github`
+and the Google sources fetch through the connectors service.
 
 ## `GET /sources/{id}` — get one source
 

@@ -680,7 +680,7 @@ def test_a_title_only_fetch_is_reported_empty_against_the_real_app(monkeypatch):
             raise FetchError("unreachable")
 
     class TitleOnlyFetchers:
-        """GithubFetcher's real shape: a title, no content."""
+        """A README-less GitHub repository: a title, no content."""
 
         def fetch_for(self, source_id, url):
             return FetchResult(title="owner/repo", content_snapshot=None)

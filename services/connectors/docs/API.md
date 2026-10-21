@@ -42,9 +42,11 @@ Resolve a document URL to plain text.
 | `url` | string | yes | Non-empty. The document URL. |
 | `source_id` | string | yes | Non-empty. Which source to use. |
 
-`source_id` is **supplied by the caller, not derived here.** documentation-system already resolves a URL's source kind during ingest, so re-deriving it would be duplicated logic that could disagree. Registered ids today: `gdocs`, `gsheets`, `gslides`, `gdrive` — all four map to the same Google source instance.
+`source_id` is **supplied by the caller, not derived here.** documentation-system already resolves a URL's source kind during ingest, so re-deriving it would be duplicated logic that could disagree. Registered ids today: `gdocs`, `gsheets`, `gslides`, `gdrive` — all four map to the same Google source instance — and `github`.
 
 `gdrive` is the catch-all for anything that isn't a native Google editor file: uploaded PDFs, `.docx`, and `text/*` uploads. In practice any of the four ids will fetch any Google file, since the extractor is chosen by the file's actual MIME type rather than by `source_id`; the id only selects *which source implementation* handles the URL.
+
+`github` takes a repository URL (`github.com/{owner}/{repo}`, optionally `/tree/{ref}`) and returns its README, titled `owner/repo`, or a `/blob/{ref}/{path}` URL and returns that text file. The ref may contain `/` (`feature/docs`); it is matched against the repository's branches and tags (longest match wins), or taken as a commit SHA once GitHub confirms that commit exists; an unknown ref or an empty repository is 404. A renamed repository's redirect is followed. A repository without a README returns `content: null` with a warning. `permissions` is omitted for GitHub.
 
 **Response** (`FetchResponse`) — `200`:
 
@@ -125,7 +127,7 @@ The `/forms/d/e/<id>/viewform` published link carries a *published id*, not a Dr
 
 Every tab of a spreadsheet is read — there is no first-tab-only limitation. Docs and Slides have no size cap.
 
-The `MAX_FILE_BYTES` guard applies before download to uploaded PDFs, `.docx` files, and `text/*` files. Native Google editor types use their APIs and are not rejected when Drive metadata omits `size`.
+The `MAX_FILE_BYTES` guard applies before download to uploaded PDFs, `.docx` files, `text/*` files, and GitHub files (the size GitHub reports on a `HEAD` of the raw file; a file whose size is not reported is rejected too, and the download is additionally capped at the limit). Native Google editor types use their APIs and are not rejected when Drive metadata omits `size`.
 
 ### Errors
 
@@ -135,7 +137,7 @@ The `MAX_FILE_BYTES` guard applies before download to uploaded PDFs, `.docx` fil
 | File's MIME type has no text form | 422 | `no text form for mime type: <mime>` |
 | PDF is encrypted | 422 | `pdf is encrypted and cannot be read` |
 | PDF could not be parsed | 422 | `pdf could not be parsed: <ExceptionType>` |
-| Uploaded PDF, `.docx`, or `text/*` file exceeds `MAX_FILE_BYTES` | 422 | File-size limit detail; bytes are not downloaded |
+| Uploaded PDF, `.docx`, `text/*`, or GitHub file exceeds `MAX_FILE_BYTES` | 422 | File-size limit detail; bytes are not downloaded |
 | Malformed request body | 422 | Pydantic validation error |
 | Source not configured (`GOOGLE_CREDENTIALS_JSON` empty or malformed) | 503 | `source not configured` |
 | Service account denied access to the file | 403 | `source denied access to this file` |
