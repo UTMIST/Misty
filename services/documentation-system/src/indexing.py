@@ -28,7 +28,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from contracts.embedder import Embedder, EmbedderRejected, EmbedderUnavailable
 from contracts.storage import StorageAdapter
 from contracts.types import DocChunk
-from src.chunking import Chunk, chunk_text
+from src.chunking import Chunk, ChunkSettings, chunk_text
 from src.content import content_hash
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,12 @@ class IndexOutcome:
 
 
 def index_doc(
-    doc_id: UUID, *, storage: StorageAdapter, embedder: Embedder, force: bool = False
+    doc_id: UUID,
+    *,
+    storage: StorageAdapter,
+    embedder: Embedder,
+    force: bool = False,
+    settings: ChunkSettings = ChunkSettings(),
 ) -> IndexOutcome:
     """Bring one doc's chunk set in line with its stored content and title.
 
@@ -57,6 +62,13 @@ def index_doc(
     model-change path). Never raises for provider or storage failures; they
     come back as `failed` so callers can report them without losing the
     catalog write that triggered indexing.
+
+    `settings` chooses the splitter's chunk size and overlap. Every caller in the
+    service uses the default recorded in docs/ARCHITECTURE.md; it is a parameter so
+    the #178 retrieval harness can re-index a fixed corpus at other sizes and compare
+    the results. Note that the hashes guarding the `unchanged` short circuit cover the
+    content and title, not the settings, so re-indexing the same text at a different
+    size needs `force=True`.
     """
     try:
         doc = storage.get_doc(doc_id)
@@ -80,7 +92,7 @@ def index_doc(
         ):
             return IndexOutcome("unchanged", chunk_count=state.chunk_count)
 
-        chunks = chunk_text(text).chunks
+        chunks = chunk_text(text, settings).chunks
         if not chunks:
             # Whitespace-only text: nothing to embed. Still conditional, so a
             # concurrent write of real text is not wiped.
