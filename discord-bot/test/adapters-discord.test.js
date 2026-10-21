@@ -76,6 +76,8 @@ test('interactionToIntent extracts flat options', () => {
   const interaction = {
     commandName: 'link',
     guildId: 'guild-1',
+    channelId: 'channel-9',
+    channel: { id: 'channel-9', isThread: () => false },
     user: { id: '1', username: 'alex' },
     options: {
       getString: (n) => (n === 'email' ? 'a@x' : null),
@@ -86,6 +88,8 @@ test('interactionToIntent extracts flat options', () => {
   assert.equal(intent.commandName, 'link');
   assert.equal(intent.surface, 'discord');
   assert.equal(intent.discordGuildId, 'guild-1');
+  assert.equal(intent.discordChannelId, 'channel-9');
+  assert.equal(intent.channelUsedParent, false);
   assert.equal(intent.options.email, 'a@x');
   assert.equal(intent.discordUserId, '1');
   assert.equal(intent.discordHandle, 'alex');

@@ -71,6 +71,14 @@ export class GoogleGroupSyncConflict extends Error {
   }
 }
 
+export class ChannelTeamsInvalid extends Error {
+  constructor(detail) {
+    super(detail);
+    this.name = 'ChannelTeamsInvalid';
+    this.detail = detail;
+  }
+}
+
 export function createDirectoryClient({ baseUrl, apiKey, fetchImpl = fetch }) {
   const headers = { 'X-API-Key': apiKey, 'Content-Type': 'application/json' };
   const { send, parseJson } = createHttpClient({
@@ -268,6 +276,34 @@ export function createDirectoryClient({ baseUrl, apiKey, fetchImpl = fetch }) {
           throw new GoogleGroupsNotConfigured(body.detail);
         }
       }
+      throw new DirectoryUnavailable(`directory returned ${resp.status}`);
+    },
+
+    getChannelTeams(guildId, channelId) {
+      return getByPath(
+        `/channels/${encodeURIComponent(guildId)}/${encodeURIComponent(channelId)}/teams`,
+      );
+    },
+
+    async replaceChannelTeams(guildId, channelId, teamIds) {
+      const resp = await send(
+        `/channels/${encodeURIComponent(guildId)}/${encodeURIComponent(channelId)}/teams`,
+        { method: 'PUT', body: JSON.stringify({ team_ids: teamIds }) },
+      );
+      if (resp.status === 200) return parseJson(resp);
+      if (resp.status === 400) {
+        const body = await resp.json().catch(() => ({}));
+        throw new ChannelTeamsInvalid(body.detail ?? 'invalid channel teams');
+      }
+      throw new DirectoryUnavailable(`directory returned ${resp.status}`);
+    },
+
+    async clearChannelTeams(guildId, channelId) {
+      const resp = await send(
+        `/channels/${encodeURIComponent(guildId)}/${encodeURIComponent(channelId)}/teams`,
+        { method: 'DELETE' },
+      );
+      if (resp.status === 204 || resp.ok) return;
       throw new DirectoryUnavailable(`directory returned ${resp.status}`);
     },
   };

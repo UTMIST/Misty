@@ -31,7 +31,8 @@ issue_key() {
 echo "▶ discord-bot: issuing scoped directory key ($ENVIRONMENT)…"
 BOT_KEY="$(issue_key "discord-bot-$ENVIRONMENT" \
   people:read people:write people:elevate identifiers:read identifiers:write \
-  teams:read teams:write memberships:read memberships:write role_kinds:read)" \
+  teams:read teams:write memberships:read memberships:write role_kinds:read \
+  channels:read channels:write)" \
   || { echo "ERROR: failed to mint discord-bot key" >&2; exit 1; }
 [ -n "$BOT_KEY" ] || { echo "ERROR: discord-bot key came back empty" >&2; exit 1; }
 railway variables --service discord-bot --environment "$ENVIRONMENT" --set "DIRECTORY_API_KEY=$BOT_KEY"

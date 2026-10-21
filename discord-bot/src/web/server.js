@@ -186,6 +186,9 @@ export async function buildServer({ commands, appContext, onReset }) {
       }
     }
 
+    // Playground has no Discord channel; use fixed snowflakes (overridable) so
+    // /channel-access can exercise the #238 API against the scratch directory.
+    const { guildId, channelId } = req.body ?? {};
     const intent = {
       surface: 'web',
       commandName: command.name,
@@ -193,6 +196,11 @@ export async function buildServer({ commands, appContext, onReset }) {
       subcommand,
       discordUserId: String(actingAs),
       discordHandle: `spoof-${actingAs}`,
+      discordGuildId:
+        typeof guildId === 'string' && guildId.trim() ? guildId.trim() : '111111111111111111',
+      discordChannelId:
+        typeof channelId === 'string' && channelId.trim() ? channelId.trim() : '222222222222222222',
+      channelUsedParent: false,
     };
     const payload = await dispatch(intent, { commands, appContext });
     return payload ?? {};

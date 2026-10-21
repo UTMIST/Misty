@@ -32,6 +32,8 @@ export function issueDevSpoofKey({ teamTrackingDir, databaseUrl, name }) {
       'memberships:read',
       'memberships:write',
       'role_kinds:read',
+      'channels:read',
+      'channels:write',
       'dev:spoof',
     ];
     const child = spawn('uv', args, {

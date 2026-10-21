@@ -5,6 +5,7 @@ import { createLinkService } from './services/linkService.js';
 import { createEmailService } from './services/emailService.js';
 import { createSeedService } from './services/seedService.js';
 import { createTeamService } from './services/teamService.js';
+import { createChannelAccessService } from './services/channelAccessService.js';
 import { createDocService } from './services/docService.js';
 import { createLlmClient } from './clients/llmClient.js';
 import { createHelperService } from './services/helperService.js';
@@ -45,6 +46,7 @@ export function createAppContext(config, { poster, notify } = {}) {
   const emailService = createEmailService({ directory, verification });
   const seedService = createSeedService({ directory });
   const teamService = createTeamService({ directory });
+  const channelAccessService = createChannelAccessService({ directory });
   const docService = createDocService({ docClient, directory });
   const llmClient = createLlmClient({
     baseUrl: config.llmBaseUrl,
@@ -89,6 +91,7 @@ export function createAppContext(config, { poster, notify } = {}) {
     emailService,
     seedService,
     teamService,
+    channelAccessService,
     docService,
     llmClient,
     helperService,
