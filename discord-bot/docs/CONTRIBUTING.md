@@ -217,6 +217,14 @@ answers. The rules the loop enforces:
   deduplicated independently of whether the model includes citations.
 - **Opaque replay within a turn.** Assistant `content_blocks` are replayed
   verbatim only within the current authorized loop, preserving provider state.
+- **Retrieved content is untrusted.** Snippets and document bodies come back as
+  tool results, so an authorized document can carry instructions the model may
+  follow (prompt injection). Scope binding contains it: injected text cannot
+  widen the context or reach a document outside it, so the worst case is a
+  steered answer within the asker's own scope, never disclosure of anything they
+  could not already see. There is no content-level sanitization; `get_document`
+  bodies are length-capped (`MAX_DOC_CONTENT_LEN`) only to keep a large doc under
+  the service's tool-payload limit, not to neutralize their content.
 
 The document service remains the authorization boundary. Revalidation observes
 its current grants and source snapshot, subject to the upstream ACL refresh

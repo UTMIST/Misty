@@ -110,3 +110,25 @@ test('get_document reports not-found (never forbidden) for a null doc', async ()
   const out = await get.run({ doc_id: 'secret' }, { context: { onBehalfOf: 'person-1' } });
   assert.deepEqual(out.content, { found: false });
 });
+
+test('get_document caps an oversized body and flags it truncated', async () => {
+  const { get } = tools({
+    async getDoc(id) {
+      return { id, title: 'T', content: 'x'.repeat(50000) };
+    },
+  });
+  const out = await get.run({ doc_id: 'big' }, { context: { onBehalfOf: 'person-1' } });
+  assert.equal(out.content.truncated, true);
+  assert.equal(out.content.content.length, 20000);
+});
+
+test('get_document leaves a within-limit body whole and unflagged', async () => {
+  const { get } = tools({
+    async getDoc(id) {
+      return { id, title: 'T', content: 'short body' };
+    },
+  });
+  const out = await get.run({ doc_id: 'd1' }, { context: { onBehalfOf: 'person-1' } });
+  assert.equal(out.content.content, 'short body');
+  assert.equal('truncated' in out.content, false);
+});

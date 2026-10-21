@@ -11,11 +11,26 @@
 // Context shape (exactly one, matching docClient.searchDocs):
 //   { onBehalfOf: personId }   -> DM / person
 //   { guildId, channelId }     -> shared channel
+//
+// Residual risk, prompt injection via retrieved content: snippets and document
+// bodies flow back to the model as tool results, so a document the asker is
+// authorized to see can carry instructions the model may follow. Scope binding
+// (above) contains the blast radius. Injected text cannot widen the context or
+// reach a document outside it, so the worst case is a steered answer within the
+// asker's own scope, never disclosure of anything they could not already see.
+// There is no content-level sanitization here; treat model output as untrusted.
 export const llmSafe = true;
 
 const MAX_QUERY_LEN = 2000; // service caps query at 2000 code points
 const MAX_RESULTS = 10; // service default k
 const SNIPPET_LEN = 400;
+// Cap a fetched document body before it rides back in a tool_result (and into
+// the revalidation fingerprint). The service rejects any tool payload over 1 MiB
+// (MAX_TOOL_PAYLOAD_BYTES), which would fail the *next* /chat request wholesale,
+// not just the one tool call; bound well under that and flag truncation so the
+// model knows it is not seeing the whole document. Generous vs. SNIPPET_LEN,
+// since get_document exists to read past a snippet.
+const MAX_DOC_CONTENT_LEN = 20000;
 
 function normalizeString(value, max) {
   if (typeof value !== 'string') return '';
@@ -51,11 +66,16 @@ function retrievalArgs(context) {
 }
 
 function projectDoc(doc, docId) {
+  const body = typeof doc.content === 'string' ? doc.content : (doc.content_snapshot ?? null);
+  const truncated = typeof body === 'string' && body.length > MAX_DOC_CONTENT_LEN;
   return {
     found: true,
     doc_id: doc.id ?? docId,
     title: doc.title ?? null,
-    content: typeof doc.content === 'string' ? doc.content : (doc.content_snapshot ?? null),
+    content: truncated ? body.slice(0, MAX_DOC_CONTENT_LEN) : body,
+    // Tell the model the body was cut so it does not treat a partial read as the
+    // whole document. Part of the fingerprint too, so revalidation stays exact.
+    ...(truncated ? { truncated: true } : {}),
   };
 }
 
