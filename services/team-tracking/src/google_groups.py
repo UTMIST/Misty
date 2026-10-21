@@ -25,8 +25,9 @@ from contracts.types import GoogleGroupStatus, PendingGroupChange, Person, Team,
 _lock = threading.Lock()
 
 EXTERNAL_MEMBERS_HINT = (
-    "group rejects external members: a group owner must enable "
-    "'Allow external members' in Google Groups, then re-sync"
+    "group still rejects external members after automatic settings verification: "
+    "ask UTMIST's Google administrator to check 'Allow external members' and "
+    "external-member policy, then re-sync"
 )
 
 
@@ -145,6 +146,16 @@ def sync_team(
             # revoking someone else, so removals go first and errors accumulate.
             errors: list[str] = []
             external_blocked = False
+            settings_ready = True
+            if team.active:
+                # Persist the new group's identity and invalidate a previous
+                # synced result before a settings call can fail or be interrupted.
+                record("failed", "Google group settings awaiting verification")
+                try:
+                    groups.ensure_external_members(email)
+                except GroupProviderError as e:
+                    settings_ready = False
+                    errors.append(str(e))
             changes = [
                 PendingGroupChange(action="remove", email=addr, membership_name=current[addr])
                 for addr in sorted(current.keys() - want - blocked)
@@ -153,6 +164,8 @@ def sync_team(
                 for addr in sorted(want - current.keys() - blocked)
             ]
             for change in changes:
+                if change.action == "add" and not settings_ready:
+                    continue
                 existing = next((p for p in pending if p.email == change.email), None)
                 if existing is not None:
                     change = existing

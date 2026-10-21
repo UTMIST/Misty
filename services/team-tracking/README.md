@@ -128,7 +128,7 @@ team-tracking/
 │   │   └── postgres.py     PostgresStorageAdapter — used in production
 │   │
 │   ├── providers/
-│   │   └── google_groups.py  GoogleGroupsProvider — Cloud Identity Groups API
+│   │   └── google_groups.py  GoogleGroupsProvider — Cloud Identity + Groups Settings APIs
 │   ├── google_groups.py    sync_team(): reconcile a team's Google Group with its members
 │   ├── groups_cli.py       team-tracking-groups CLI (backfill / scheduled sync)
 │   ├── cli.py              team-tracking-keys CLI (issue / list / revoke API keys)
@@ -165,6 +165,12 @@ team-tracking/
 **Eight routers, 32 endpoints.** **Ten migrations (001–010);** the latest, 010, persists unconfirmed Google membership writes.
 
 **Dependency direction:** `contracts/` imports nothing from `src/`. The API layer imports only from `contracts/` and `src/config`. The storage layer imports `contracts/` for types and defines its own schema. Nothing imports from `src/storage/` except `src/api/deps.py` (the single wiring point). This is the **Protocol boundary** — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+Managed Google Groups use the five optional `GOOGLE_*` variables in `.env.example`.
+The owning account's refresh token needs both `cloud-identity.groups` and
+`apps.groups.settings`. Sync configures and verifies external-member settings
+before additions, including for empty groups; settings failure holds additions
+while removals continue. See [credentials and rollout](docs/DEPLOYMENT.md#managed-google-groups).
 
 ## API at a glance
 

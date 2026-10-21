@@ -245,6 +245,12 @@ and skips them.
 - `/team add user:<@mention> team:<slug> [role:<...>] [team_admin:<bool>]` (admin) — add a member. The mentioned user must have already run `/link`.
 - `/team remove user:<@mention> team:<slug>` (admin) — soft-end a membership as of today.
 - `/team roster team:<slug> [as_of:<YYYY-MM-DD>]` (linked) — show a team's current roster.
+- `/team google-status team:<slug>` (admin) — show the team's managed Google Group sync status. Settings failures offer automatic retry and a manual recovery fallback.
+- `/team google-sync team:<slug>` (admin) — retry the same group's automatic settings verification and membership reconciliation. See [recovery and rollout](../services/team-tracking/docs/DEPLOYMENT.md#external-member-setup-and-recovery).
+  - `/team create` probes sync after directory create, separating team creation from Google status. The probe waits at most two seconds before reporting provisioning in progress; use `/team google-status` afterward. Aborting the probe does not cancel backend provisioning.
+  - The backend verifies settings even for empty active groups before recording `synced`. Success needs no manual toggle. An actual external addition still needs live acceptance; an older stored `synced` result requires a new sync after backend rollout.
+  - Recovery links appear only for confirmed managed groups with settings/external-member failures, using the stored email/domain. UTMIST's own Google administrator handles authorization or policy recovery. Generic directory outages are not reported as disabled Google integration.
+  - Deploy the automatic-settings backend and authorize both OAuth scopes before rolling out these replies. Keep the existing status/retry commands; manual instructions are recovery guidance, not the normal onboarding flow.
 - `/my-teams` (linked) — list your active memberships.
 - `/doc <add|list|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
 - `/doc search query:<text>` (linked) — search the documents you can access and get the top matches

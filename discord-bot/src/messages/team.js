@@ -3,13 +3,136 @@ import { FALLBACK, DIRECTORY_DOWN_MSG } from './common.js';
 const USER_NOT_LINKED_MSG =
   "That user hasn't linked their directory account yet. Ask them to run `/link` first, then try again.";
 
+function googleGroupSettingsUrl(email) {
+  if (typeof email !== 'string') return null;
+  const parts = email.split('@');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  const [local, domain] = parts;
+  return `https://groups.google.com/a/${encodeURIComponent(domain)}/g/${encodeURIComponent(local)}/settings`;
+}
+
+function externalMembersSetupHint(settingsUrl) {
+  return [
+    'Misty configures external membership automatically. Retry with `/team google-sync`.',
+    "If setup still fails, ask UTMIST's Google administrator to check API authorization and organization policy.",
+    `For manual recovery, check **Allow external members** and **Who can add external members** in [Group settings](${settingsUrl}) as this environment's Misty group owner, then retry sync.`,
+  ].join('\n');
+}
+
+function renderGoogleGroupState(team, state) {
+  const email = state.group_email;
+  const settingsUrl = googleGroupSettingsUrl(email);
+  const header = `Google Group for **${team.label}**${email ? ` (\`${email}\`)` : ''}`;
+  // Keep recovery instructions visible even when several membership errors accumulate.
+  const error = state.last_error?.slice(0, 600);
+  let content;
+  switch (state.status) {
+    case 'synced':
+      content = `✅ ${header} is **synced**.`;
+      break;
+    case 'needs_external_members':
+      content = [
+        `⚠️ ${header} needs external-member recovery.`,
+        error ? `_Directory note:_ ${error}` : null,
+      ]
+        .filter(Boolean)
+        .join('\n');
+      break;
+    case 'failed':
+      content = [
+        `❌ ${header} sync **failed**.`,
+        error ? `_${error}_` : null,
+        'Re-run `/team google-sync` after fixing the issue, or ask infrastructure for help.',
+      ]
+        .filter(Boolean)
+        .join('\n');
+      break;
+    default:
+      content = `${header}: status \`${state.status}\`.`;
+  }
+  // A recorded email alone can be an attempted address belonging to another group.
+  if (
+    state.group_name &&
+    settingsUrl &&
+    (state.status === 'needs_external_members' ||
+      (state.status === 'failed' &&
+        /group settings|external members/i.test(state.last_error ?? '')))
+  ) {
+    return [content, '', externalMembersSetupHint(settingsUrl)].join('\n');
+  }
+  return content;
+}
+
+function renderGoogleAfterCreate(team, google) {
+  switch (google?.outcome) {
+    case 'SYNC_RESULT':
+      return renderGoogleGroupState(team, google.state);
+    case 'PENDING':
+      return 'Google Group provisioning may still be in progress. Run `/team google-status` in a moment to check automatic setup.';
+    case 'NOT_CONFIGURED':
+      return 'Google Groups is not configured on the directory, so no group was created. The team exists in Misty only.';
+    case 'RETIRED_NO_GROUP':
+      return 'Google Group sync was skipped (retired team with no group).';
+    case 'DIRECTORY_DOWN':
+      return 'The team was created, but Google Group status could not be checked. Try `/team google-status` in a moment.';
+    default:
+      return 'The team was created, but Google Group status was not returned. Try `/team google-status`.';
+  }
+}
+
 export function renderCreateTeamResult(result) {
   const content = (() => {
     switch (result.outcome) {
-      case 'CREATED':
-        return `✅ Created team **${result.team.label}** (\`${result.team.slug}\`).`;
+      case 'CREATED': {
+        return [
+          `✅ Created team **${result.team.label}** (\`${result.team.slug}\`).`,
+          '',
+          renderGoogleAfterCreate(result.team, result.google),
+        ].join('\n');
+      }
       case 'SLUG_EXISTS':
         return `A team with that slug already exists: ${result.detail}`;
+      case 'DIRECTORY_DOWN':
+        return DIRECTORY_DOWN_MSG;
+      default:
+        return FALLBACK;
+    }
+  })();
+  return { content, ephemeral: true };
+}
+
+export function renderGoogleGroupStatusResult(result) {
+  const content = (() => {
+    switch (result.outcome) {
+      case 'STATUS':
+        return renderGoogleGroupState(result.team, result.state);
+      case 'NO_MAPPING':
+        return [
+          `No Google Group mapping yet for **${result.team.label}** (\`${result.team.slug}\`).`,
+          'Provisioning runs after team creation — wait a moment, then try `/team google-sync`, or ask infrastructure if it stays missing.',
+        ].join('\n');
+      case 'TEAM_NOT_FOUND':
+        return "There's no team with that slug.";
+      case 'DIRECTORY_DOWN':
+        return DIRECTORY_DOWN_MSG;
+      default:
+        return FALLBACK;
+    }
+  })();
+  return { content, ephemeral: true };
+}
+
+export function renderGoogleGroupSyncResult(result) {
+  const content = (() => {
+    switch (result.outcome) {
+      case 'SYNC_RESULT':
+        return renderGoogleGroupState(result.team, result.state);
+      case 'NOT_CONFIGURED':
+        return 'Google Groups integration is not configured on the directory service.';
+      case 'RETIRED_NO_GROUP':
+        return 'That team is retired and never had a Google Group, so there is nothing to sync.';
+      case 'TEAM_NOT_FOUND':
+        return "There's no team with that slug.";
       case 'DIRECTORY_DOWN':
         return DIRECTORY_DOWN_MSG;
       default:
