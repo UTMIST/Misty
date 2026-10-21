@@ -29,6 +29,18 @@ the Postgres contention regression was also checked against an isolated archive 
 the original PR revision. Conditional listing-token lifetime concerns remain part of
 the live continuation acceptance gate, not a verified code defect.
 
+The [re-review of `5ad55da`](https://github.com/UTMIST/Misty/pull/293#pullrequestreview-5594984698)
+confirmed two remaining edge cases, addressed in the follow-up:
+
+- Both identity parsers recognize editor `u/<number>/d/` aliases while still rejecting
+  published ids. Shared adapter cases cover legacy lookup and normalization.
+- Manual Forms edit imports now default to `gdrive`. Discovery corrects active legacy
+  `web` records in place, preserving manual grants and leaving content/ACL recovery
+  to the existing refresh pipeline. Missing initial ACL reconciliation remains visible
+  as `registered`, including when old web content has already been indexed. Regressions
+  cover source persistence on both adapters, retired/disabled cases, failed ACL reads,
+  successful scheduled recovery, and authorized chunk access without duplicate records.
+
 Corrections made during implementation/review:
 
 - Alias lookup covers old manual Google URLs; new ingests use one canonical identity
@@ -106,13 +118,13 @@ Paths below are relative to the repository root. Every changed/new file has a pu
 | `services/connectors/docs/API.md` | Document enumeration, strict input, response categories and ACL bounds. |
 | `services/connectors/docs/ARCHITECTURE.md` | Explain metadata discovery's provider boundary and stateless ownership. |
 | `services/connectors/docs/DEPLOYMENT.md` | Document the consumer scope and complete-ACL sharing prerequisite. |
-| `services/documentation-system/contracts/storage.py` | Specify identity lookup and atomic discovery insertion for both adapters. |
+| `services/documentation-system/contracts/storage.py` | Specify identity lookup, atomic discovery insertion, and validated source corrections for both adapters. |
 | `services/documentation-system/src/google_identity.py` | Centralize supported alias extraction for Python/Postgres. |
-| `services/documentation-system/src/url_norm.py` | Give new Google aliases one active-URL dedup key. |
+| `services/documentation-system/src/url_norm.py` | Give Google aliases one active-URL dedup key and derive Forms edit URLs to the registered Google fallback. |
 | `services/documentation-system/src/storage/in_memory.py` | Implement identity lookup and coordinate discovery insertion in the fast adapter. |
 | `services/documentation-system/src/storage/postgres.py` | Implement identity lookup and serialize Google inserts so discovery honors retirement. |
 | `services/documentation-system/src/ingest.py` | Reuse identity lookup and permit discovery to skip existing/retired provider work. |
-| `services/documentation-system/src/api/routers/discovery.py` | Import through existing ingest/index paths with truthful status and no claimed grants. |
+| `services/documentation-system/src/api/routers/discovery.py` | Import through existing ingest/index paths, correct legacy web sources for refresh, and report truthful status without claimed grants. |
 | `services/documentation-system/src/api/app.py` | Register discovery before the document-id catch-all. |
 | `services/documentation-system/src/discovery.py` | Provide bounded, resumable HTTP traversal and safe operator status. |
 | `services/documentation-system/pyproject.toml` | Install the CLI and include contracts needed by the installed API. |
@@ -120,6 +132,7 @@ Paths below are relative to the repository root. Every changed/new file has a pu
 | `services/documentation-system/.env.example` | Expose runner-only settings with disabled local defaults. |
 | `services/documentation-system/.gitignore` | Keep local checkpoint ids/tokens and lock/temp files out of Git. |
 | `services/documentation-system/tests/google_identity_cases.py` | Share alias/retirement/non-alias behavior between adapters. |
+| `services/documentation-system/tests/test_url_norm.py` | Verify Forms source derivation, published-link exclusions, and explicit-pattern precedence. |
 | `services/documentation-system/tests/test_in_memory_adapter.py` | Apply identity cases to memory storage. |
 | `services/documentation-system/tests/test_postgres_adapter.py` | Apply identical cases to real Postgres. |
 | `services/documentation-system/tests/test_api_discovery.py` | Verify authenticated ingestion, visibility, races, recovery and HTTP integration. |

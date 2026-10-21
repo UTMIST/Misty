@@ -134,7 +134,8 @@ Exit codes:
   retained. Bounded continuation is expected for a large corpus but must converge.
 
 Counts distinguish `indexed`, `existing` (current stored index), `registered`
-(no usable content), `index_failed`, `retired`, `disabled`, unsupported types,
+(missing content or initial Google ACL sync), `index_failed`, `retired`, `disabled`,
+unsupported types,
 shortcuts, Shared Drives, exclusions, deferred `import_retries` and listing/import
 failures. A full scan's last counts remain available while another scan runs. Unresolved audience/extraction
 warnings are counted, not printed. Do not log upstream bodies, source URLs, content,
@@ -150,7 +151,8 @@ is provisioned by this code change.
 
 Existing catalog entries are identified by Google file id across supported Docs,
 Sheets, Slides, Forms edit, Drive file and `open?id=` URL aliases, including old
-manual records. New ingests normalize those aliases to one key, so concurrent new
+manual records and editor URLs with `u/<number>/` account selectors. New ingests
+normalize those aliases to one key, so concurrent new
 imports share the existing active-URL uniqueness constraint. Published `/d/e/` links
 are not Drive file identities and keep their distinct URL keys. Legacy duplicates are
 not merged or deleted: lookup prefers the active, earliest record. Explicitly retired
@@ -165,6 +167,16 @@ use [source refresh](DEPLOYMENT.md#source-access-refresh-schedule) or
 `POST /docs/{id}/refetch` to recover content/ACLs; use `POST /docs/index` with a separate
 `docs:index` operator key for index failures. Both reuse the existing pipeline and its
 unchanged-content guard. Do not add a second content refresh loop to discovery.
+
+Old Forms edit URLs may have been catalogued as `web`. Discovery corrects an active
+Google identity with that source to the enabled Google source from its MIME listing,
+preserving the record id, URL, content, tags and manual grants. It reports `registered`
+until the first successful Google ACL reconciliation, even if an old web index exists.
+The existing source-refresh schedule can now select the record; an operator can use
+`POST /docs/{id}/refetch` to run reconciliation sooner. Failed ACL reads add no grants
+or fetched content and retain the normal refresh retry cadence. Retired records and
+disabled discovery sources are not reclassified. New manual Forms edit imports use
+`gdrive` by default; explicit caller sources and configured URL patterns still win.
 
 An inaccessible folder or a failed page is counted; later queued folders continue.
 A later full scan retries it. Rejected/expired Drive tokens become failed listings;

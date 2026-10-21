@@ -109,7 +109,9 @@ drive.google.com/file/d/<id>
 drive.google.com/open?id=<id>
 ```
 
-The `/forms/d/e/<id>/viewform` published link carries a *published id*, not a Drive file id, and the Forms API cannot resolve it. The pattern excludes that shape on purpose so it returns a clean `404` instead of a confusing error from Google.
+Editor URLs also accept the account selector before `d/`, for example
+`docs.google.com/document/u/0/d/<id>/edit` and `docs.google.com/forms/u/12/d/<id>/edit`.
+The `/forms/d/e/<id>/viewform` published link carries a *published id*, not a Drive file id, and the Forms API cannot resolve it. The pattern excludes that shape, including account-indexed variants, so it returns a clean `404` instead of a confusing error from Google.
 
 ### Warnings
 

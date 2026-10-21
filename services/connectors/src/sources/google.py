@@ -36,9 +36,9 @@ _ID = r"([a-zA-Z0-9_-]+)"
 
 _FILE_ID_PATTERNS = (
     # Published /d/e/ links carry a publication id, not a Drive file id.
-    re.compile(rf"docs\.google\.com/document/d/(?!e/){_ID}"),
-    re.compile(rf"docs\.google\.com/spreadsheets/d/(?!e/){_ID}"),
-    re.compile(rf"docs\.google\.com/presentation/d/(?!e/){_ID}"),
+    re.compile(rf"docs\.google\.com/document/(?:u/[0-9]+/)?d/(?!e/){_ID}"),
+    re.compile(rf"docs\.google\.com/spreadsheets/(?:u/[0-9]+/)?d/(?!e/){_ID}"),
+    re.compile(rf"docs\.google\.com/presentation/(?:u/[0-9]+/)?d/(?!e/){_ID}"),
     re.compile(rf"drive\.google\.com/file/d/{_ID}"),
     re.compile(rf"drive\.google\.com/open\?(?:[^#]*&)?id={_ID}"),
     # The published/response link is docs.google.com/forms/d/e/{published_id}/
@@ -46,7 +46,7 @@ _FILE_ID_PATTERNS = (
     # cannot resolve, not the Drive file id. The negative lookahead on "e/"
     # excludes that shape so it correctly falls through to None rather than
     # capturing the literal "e" and causing a confusing 404 from Google.
-    re.compile(rf"docs\.google\.com/forms/d/(?!e/){_ID}"),
+    re.compile(rf"docs\.google\.com/forms/(?:u/[0-9]+/)?d/(?!e/){_ID}"),
 )
 
 

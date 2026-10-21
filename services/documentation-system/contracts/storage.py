@@ -121,7 +121,8 @@ class StorageAdapter(Protocol):
 
     def update_doc(self, doc_id: UUID, values: dict, *, actor: str) -> Doc | None:
         """Patch scalar columns (title, description, active, owning_* ids/labels,
-        content_snapshot, fetched_at). `values` holds already-resolved columns.
+        content_snapshot, fetched_at, source_id). `values` holds already-resolved
+        columns; callers validate source_id against the source registry.
         Returns None if no such doc."""
         ...
 

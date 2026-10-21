@@ -745,7 +745,11 @@ accepted. The trusted discovery caller supplies the source from the connector's
 MIME classification. The catalog checks active/fetch-enabled source status before
 fetching, then deduplicates by Drive identity, including legacy/manual URL aliases.
 New records use the normal ingest, complete source-ACL reconciliation and indexer.
-Existing records are inspected without refetching or re-embedding. Retirement is
+Existing records are inspected without refetching or re-embedding. An active legacy
+Google URL catalogued as `web` is reassigned to the enabled Google source supplied
+by discovery, preserving its id, content, tags and manual grants. The existing source
+refresh job (or explicit refetch) then reconciles its actual Google ACL and content;
+until the first successful ACL sync it is reported as `registered`. Retirement is
 honored, including a manual registration/retirement while discovery is fetching:
 the final storage insert checks identity atomically with other Google inserts and
 returns the existing record without applying discovery's fetched data. Scopes and
@@ -758,15 +762,19 @@ Always returns 200 for a classified outcome:
 ```
 
 `indexed` means new usable chunks were written; `existing` means a current stored
-index already exists. `registered` means catalogued without usable indexed content;
+index already exists and a Google source has completed its initial ACL sync.
+`registered` means catalogued but missing content or initial Google ACL reconciliation;
 `index_failed` reports failed, missing or stale indexing; `retired` is skipped;
 `disabled` means source fetching is disabled/inactive (no doc id). Warnings are a
 count, with no content/principals/raw upstream details. An empty/whitespace extraction,
 unmapped ACL or fetch failure must not be counted as indexed.
 
 Use the existing refetch/source-refresh and `/docs/index` recovery endpoints; discovery
-never repairs existing records itself. See [operations and limits](DISCOVERY.md).
+only corrects the legacy source classification. See [operations and limits](DISCOVERY.md).
 All new Google URL ingests now use file identity for normalized dedup keys; displayed
-original URLs and existing stored keys are preserved. Published `/d/e/` URLs are
+original URLs and existing stored keys are preserved. Editor aliases with an optional
+`u/<number>/` account selector share the same identity. Forms edit URLs without an
+explicit source use `gdrive` when no more-specific source pattern matches and that
+source is registered. Published `/d/e/` URLs are
 excluded from Drive identity extraction and keep distinct URL keys. Preexisting
 duplicate records are not merged. The active earliest record wins identity lookup.

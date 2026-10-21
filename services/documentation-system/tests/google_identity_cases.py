@@ -18,14 +18,19 @@ ALIASES = [
     "https://docs.google.com/forms/d/identity/edit",
     "https://drive.google.com/file/d/identity/view",
     "https://drive.google.com/open?usp=sharing&id=identity&other=1",
+    "https://docs.google.com/document/u/0/d/identity/edit",
+    "https://docs.google.com/spreadsheets/u/12/d/identity/edit",
+    "https://docs.google.com/presentation/u/0/d/identity/edit",
+    "https://docs.google.com/forms/u/12/d/identity/edit",
 ]
 
 
 class GoogleIdentityCases:
     @pytest.mark.parametrize("kind", ["document", "spreadsheets", "presentation", "forms"])
-    def test_published_links_never_merge_documents_or_grants(self, adapter, kind):
-        first_url = f"https://docs.google.com/{kind}/d/e/2PACX-first/pub"
-        second_url = f"https://docs.google.com/{kind}/d/e/2PACX-second/pub"
+    @pytest.mark.parametrize("account", ["", "u/0/"])
+    def test_published_links_never_merge_documents_or_grants(self, adapter, kind, account):
+        first_url = f"https://docs.google.com/{kind}/{account}d/e/2PACX-first/pub"
+        second_url = f"https://docs.google.com/{kind}/{account}d/e/2PACX-second/pub"
         fetchers = FakeFetchers(error=FetchError("unsupported published URL"))
         first = ingest_doc(
             DocIngest(url=first_url, tags=["first"]),
@@ -117,6 +122,30 @@ class GoogleIdentityCases:
         assert adapter.get_doc_by_google_file_id("identity").id == doc.id
         assert normalize_url(url) == "https://drive.google.com/file/d/identity"
         assert adapter.get_doc_by_google_file_id("ident") is None
+
+    @pytest.mark.parametrize("retired", [False, True])
+    def test_discovery_repairs_legacy_web_source_without_replacing_record(self, adapter, retired):
+        from src.api.routers.discovery import _existing_result
+
+        doc = self.make(adapter, "https://docs.google.com/forms/u/0/d/identity/edit")
+        adapter.add_tag(doc.id, "legacy")
+        adapter.add_grant(doc.id, grantee_type="person", grantee_id=UUID(int=1), actor="manual")
+        if retired:
+            adapter.update_doc(doc.id, {"active": False}, actor="operator")
+        doc = adapter.get_doc(doc.id)
+        result = _existing_result(doc, adapter, source_id="gdrive", actor="discovery")
+        repaired = adapter.get_doc(doc.id)
+        assert result.doc_id == doc.id
+        assert result.status == ("retired" if retired else "registered")
+        assert repaired.source_id == ("web" if retired else "gdrive")
+        assert repaired.active is not retired
+        assert repaired.created_by == doc.created_by
+        assert repaired.updated_by == ("operator" if retired else "discovery")
+        assert repaired.tags == ["legacy"]
+        assert repaired.grants == doc.grants
+        assert repaired.source_access_synced_at is None
+        assert adapter.get_doc_content_meta(doc.id) is None
+        assert len(adapter.list_docs(active_only=False)) == 1
 
     @pytest.mark.parametrize(
         "url",

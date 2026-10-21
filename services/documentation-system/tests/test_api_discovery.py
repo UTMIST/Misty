@@ -159,6 +159,84 @@ def test_manual_ingest_aliases_reuse_discovered_file_identity(ctx):
     assert len(store.list_docs()) == 1
 
 
+@pytest.mark.parametrize("account", ["", "u/0/"])
+def test_manual_form_uses_google_acl_and_deduplicates_discovery(ctx, account):
+    client, store, fetchers = ctx
+    response = client.post(
+        "/docs", headers=AUTH, json={"url": f"https://docs.google.com/forms/{account}d/form/edit"}
+    )
+    doc = response.json()["doc"]
+    assert doc["source_id"] == "gdrive"
+    assert fetchers.calls == [("gdrive", doc["url"])]
+    assert all(g.origin == "google_drive" for g in store.list_grants(UUID(doc["id"])))
+    assert discover(client, "form", "gdrive")["doc_id"] == doc["id"]
+    assert len(store.list_docs()) == len(fetchers.calls) == 1
+
+
+def test_legacy_web_form_enters_refresh_and_preserves_identity_and_manual_grants(ctx):
+    client, store, fetchers = ctx
+    # Explicit web simulates a row created before Forms source derivation was fixed.
+    fetchers.result = FetchResult(title="Old web title", content="Old web content")
+    old = client.post(
+        "/docs",
+        headers=AUTH,
+        json={
+            "url": "https://docs.google.com/forms/u/0/d/form/edit",
+            "source_id": "web",
+            "tags": ["legacy"],
+            "grants": [{"grantee_type": "person", "grantee_id": str(P2)}],
+        },
+    ).json()["doc"]
+    doc_id = UUID(old["id"])
+    grants = store.list_grants(doc_id)
+    assert store.get_doc_index_state(doc_id) is not None
+    assert discover(client, "form", "gdrive")["status"] == "registered"
+    assert discover(client, "form", "gdrive")["status"] == "registered"
+    assert len(fetchers.calls) == 1
+    repaired = store.get_doc(doc_id)
+    assert repaired.source_id == "gdrive"
+    assert repaired.tags == ["legacy"]
+    assert repaired.grants == grants
+    assert repaired.source_access_synced_at is None
+    assert store.get_doc_content(doc_id) == "Old web content"
+
+    # Missing ACL fails closed; the repaired record stays eligible for recovery.
+    fetchers.result = FetchResult(title="Private", content="private without ACL")
+    failed = client.post("/docs/source-access/refresh-due", headers=AUTH).json()
+    assert failed["failed"] == 1
+    assert store.list_grants(doc_id) == grants
+    assert store.get_doc_content(doc_id) == "Old web content"
+    assert discover(client, "form", "gdrive")["status"] == "registered"
+    store.update_doc(
+        doc_id,
+        {"source_access_attempted_at": datetime.now(timezone.utc) - timedelta(days=2)},
+        actor="test",
+    )
+    fetchers.result = _result("alice@example.com", content="Recovered Form")
+    refreshed = client.post("/docs/source-access/refresh-due", headers=AUTH).json()
+    assert refreshed["refreshed"] == 1
+    assert refreshed["index_failed"] == 0
+    assert discover(client, "form", "gdrive")["status"] == "existing"
+    assert len(store.list_docs()) == 1
+    assert store.get_doc_content(doc_id) == "Recovered Form"
+    assert [g for g in store.list_grants(doc_id) if g.origin == "manual"] == grants
+    assert store.list_doc_chunks(doc_id, visibility=Actor(P1, frozenset()))
+    assert not store.list_doc_chunks(doc_id, visibility=Actor(UUID(int=3), frozenset()))
+    assert fetchers.calls[-1] == ("gdrive", old["url"])
+
+
+def test_disabled_discovery_source_does_not_reclassify_legacy_record(ctx):
+    client, store, _ = ctx
+    old = client.post(
+        "/docs",
+        headers=AUTH,
+        json={"url": "https://docs.google.com/forms/d/form/edit", "source_id": "web"},
+    ).json()["doc"]
+    store._sources["gdrive"].content_fetch_enabled = False
+    assert discover(client, "form", "gdrive")["status"] == "disabled"
+    assert store.get_doc(UUID(old["id"])).source_id == "web"
+
+
 def test_discovered_content_is_searchable_only_with_actual_person_permission(ctx):
     from types import SimpleNamespace
 

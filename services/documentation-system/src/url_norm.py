@@ -70,8 +70,9 @@ def derive_source(url: str, sources: list[Source]) -> str:
     A pattern is either a bare host (`github.com`) or host + path prefix
     (`docs.google.com/document`). A pattern matches when the URL host equals
     or ends with the pattern host AND the URL path starts with the pattern
-    path prefix. The longest matching pattern wins; the empty-pattern source
-    ('web') is the fallback.
+    path prefix. The longest matching pattern wins. Recognized Google file
+    identities without a matching pattern (Forms edit URLs) use 'gdrive' when
+    registered; otherwise the empty-pattern source ('web') is the fallback.
     """
     host, path = _host_and_path(url)
     best_id = "web"
@@ -85,4 +86,7 @@ def derive_source(url: str, sources: list[Source]) -> str:
             if host_ok and path_ok and len(pattern) > best_len:
                 best_id = source.id
                 best_len = len(pattern)
+    if best_len == -1 and google_file_id(normalize_url(url)) is not None:
+        if any(source.id == "gdrive" for source in sources):
+            return "gdrive"
     return best_id

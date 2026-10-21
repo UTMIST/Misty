@@ -17,6 +17,7 @@ from src.content import content_hash
 from src.fetch.registry import FetcherRegistry
 from src.indexing import index_doc
 from src.ingest import ingest_doc
+from src.source_access import GOOGLE_SOURCE_IDS
 
 router = APIRouter(prefix="/docs/discovery", tags=["docs"])
 
@@ -34,11 +35,23 @@ class DiscoveryResult(BaseModel):
     warnings: int = 0
 
 
-def _existing_result(doc: Doc, storage: StorageAdapter) -> DiscoveryResult:
+def _existing_result(
+    doc: Doc, storage: StorageAdapter, *, source_id: str, actor: str
+) -> DiscoveryResult:
     if not doc.active:
         return DiscoveryResult(status="retired", doc_id=doc.id)
+    if doc.source_id == "web":
+        # Old manual Forms imports fell back to web. Preserve their identity
+        # and manual grants, but let the existing Google refresh path reconcile
+        # content/ACLs. Listing metadata is never used as permission evidence.
+        doc = storage.update_doc(doc.id, {"source_id": source_id}, actor=actor)
+        assert doc is not None
+        if not doc.active:
+            return DiscoveryResult(status="retired", doc_id=doc.id)
     content = storage.get_doc_content_meta(doc.id)
-    if content is None:
+    if content is None or (
+        doc.source_id in GOOGLE_SOURCE_IDS and doc.source_access_synced_at is None
+    ):
         return DiscoveryResult(status="registered", doc_id=doc.id)
     index = storage.get_doc_index_state(doc.id)
     current = (
@@ -64,7 +77,7 @@ def import_discovered(
         return DiscoveryResult(status="disabled")
     existing = storage.get_doc_by_google_file_id(payload.file_id)
     if existing is not None:
-        return _existing_result(existing, storage)
+        return _existing_result(existing, storage, source_id=payload.source_id, actor=actor)
     result = ingest_doc(
         DocIngest(
             url=f"https://drive.google.com/file/d/{payload.file_id}",
@@ -78,7 +91,7 @@ def import_discovered(
         refresh_existing=False,
     )
     if not result.created:
-        return _existing_result(result.doc, storage)
+        return _existing_result(result.doc, storage, source_id=payload.source_id, actor=actor)
     outcome = index_doc(result.doc.id, storage=storage, embedder=embedder)
     status = (
         "indexed"

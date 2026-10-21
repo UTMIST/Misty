@@ -22,6 +22,13 @@ def test_recognized_forms_yield_the_file_id(url):
     assert parse_file_id(url) == FILE_ID
 
 
+@pytest.mark.parametrize("kind", ["document", "spreadsheets", "presentation", "forms"])
+@pytest.mark.parametrize("account", [0, 12])
+def test_account_indexed_editor_urls(kind, account):
+    assert parse_file_id(f"https://docs.google.com/{kind}/u/{account}/d/{FILE_ID}/edit") == FILE_ID
+    assert parse_file_id(f"https://docs.google.com/{kind}/u/{account}/d/e/published/pub") is None
+
+
 @pytest.mark.parametrize(
     "url",
     [

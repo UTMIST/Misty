@@ -7,9 +7,9 @@ Published editor/Forms response ids are intentionally not Drive file identities.
 import re
 
 GOOGLE_ID_PATTERNS = (
-    r"^https?://docs\.google\.com/(?:document|spreadsheets|presentation)/d/"
+    r"^https?://docs\.google\.com/(?:document|spreadsheets|presentation)/(?:u/[0-9]+/)?d/"
     r"(?!e/)([A-Za-z0-9_-]+)(?:[/?#]|$)",
-    r"^https?://docs\.google\.com/forms/d/(?!e/)([A-Za-z0-9_-]+)(?:[/?#]|$)",
+    r"^https?://docs\.google\.com/forms/(?:u/[0-9]+/)?d/(?!e/)([A-Za-z0-9_-]+)(?:[/?#]|$)",
     r"^https?://drive\.google\.com/file/d/([A-Za-z0-9_-]+)(?:[/?#]|$)",
     r"^https?://drive\.google\.com/open\?(?:[^#]*&)?id=([A-Za-z0-9_-]+)(?:[&#]|$)",
 )
