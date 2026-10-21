@@ -1,3 +1,4 @@
+from tests.google_identity_cases import GoogleIdentityCases
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -422,3 +423,11 @@ def test_get_doc_content_meta_scoped_to_requested_doc(store):
     # The actor can see `visible` but NOT `secret`. A cross join would leak
     # `secret`'s content metadata because *some* doc is visible to this actor.
     assert store.get_doc_content_meta(secret.id, visibility=actor) is None
+
+
+class TestGoogleIdentity(GoogleIdentityCases):
+    @pytest.fixture
+    def adapter(self):
+        from tests.conftest import build_seed_sources
+
+        return InMemoryStorageAdapter(seed_sources=build_seed_sources())

@@ -151,7 +151,7 @@ connectors reads Google Docs/Sheets/Slides/Forms/Drive files as a **service acco
    - **Google Forms API** — required for the native Forms extractor.
 3. **Create a service account** in that project (IAM & Admin → Service Accounts).
 4. **Create a JSON key** for the service account and download it. Treat this file as a secret — do not commit it.
-5. **Share each Drive folder/file connectors needs to read** with the service account's email address (looks like `name@project-id.iam.gserviceaccount.com`), granting **Viewer** access. Nothing is readable until it's explicitly shared.
+5. **Share each Drive folder/file connectors needs to read** with the service account's email address (looks like `name@project-id.iam.gserviceaccount.com`), granting sufficient access to inspect the complete ACL (the verified setup uses **Editor**). Nothing is readable until it's explicitly shared.
 6. **Base64-encode the key file** and set it as `GOOGLE_CREDENTIALS_JSON`:
    ```bash
    base64 -i service-account.json | tr -d '\n'
@@ -258,3 +258,6 @@ v0.1: a stateless `POST /fetch` adapter over a Google Drive/Docs/Slides/Sheets/F
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — contributor orientation: why the service is shaped this way, boundaries, trade-offs
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — task walkthroughs and the pre-push checklist
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — deploy shape, variables, key provisioning, troubleshooting
+
+Automatic sharing discovery also exposes [`POST /discover/google`](docs/API.md#post-discovergoogle)
+with a separate `discover` scope. See the [operator/member runbook](../documentation-system/docs/DISCOVERY.md).

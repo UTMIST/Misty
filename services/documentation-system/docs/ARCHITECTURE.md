@@ -127,7 +127,8 @@ heals on the next read or update.
   path prefix (`docs.google.com/document`). A pattern matches when the URL host equals or is a
   subdomain of the pattern host **and** the path starts with its prefix. The **longest match
   wins**, so `docs.google.com/spreadsheets/…` resolves to `gsheets`, not `gdocs`/`web`. `web`
-  (empty pattern) is the universal fallback.
+  (empty pattern) is the fallback after recognized Google file identities: Forms
+  edit URLs without a matching pattern use the registered `gdrive` source.
 
 ## Data model
 
@@ -715,3 +716,40 @@ The one place concrete adapters meet their Protocols. `get_storage` builds a
 offline fake). Tests override `get_storage`
 (and inject fake fetchers/directory) via `app.dependency_overrides` — which is why these are
 injected functions, not module globals.
+
+## Automatic discovery (#291)
+
+`doc-discover` is an external HTTP runner, checkpointed on its own volume. It calls
+connectors' bounded metadata enumeration and the catalog's `/docs/discovery` import
+endpoint. It never connects to the catalog database or imports another service's
+code. Listing metadata is not ACL evidence: imports reuse `ingest_doc` and `index_doc`,
+so grants still come only from each file's complete, resolved source ACL.
+
+`StorageAdapter.get_doc_by_google_file_id` matches supported URL aliases in both
+adapters, including old manual records and editor `u/<number>/d/` URLs. New normalized
+Google keys collapse to a
+canonical Drive file URL, reusing the active-URL uniqueness constraint for concurrent
+new ingests. Published `/d/e/` editor/Forms links retain their distinct URL keys:
+publication ids are not Drive file identities. No migration or rewriting of existing
+keys/grants is needed. Legacy
+alias lookup currently evaluates URL expressions in Postgres; measure catalog growth
+before introducing an indexed identity column and its duplicate-data migration.
+
+Discovery imports new identities and reports existing content/index gaps. It also
+corrects active legacy Google identities with source `web` to the enabled Google
+source supplied by discovery, retaining their id and manual grants. No content or
+ACL fetch occurs in this correction: #292 continues to own refresh. Records lacking
+an initial Google ACL sync report `registered` even if old web chunks exist. Retired
+records stay retired. Complete or incomplete
+listings never remove records, chunks or grants. The [runbook](DISCOVERY.md) owns the
+checkpoint, scheduling, recovery and topology contract.
+
+All Google inserts take a transaction-scoped Postgres advisory lock derived from the
+file id (a process lock in memory). Discovery's `create_doc(skip_existing_google=True)`
+then checks active and retired aliases in that same transaction before inserting.
+An existing identity raises `ExistingGoogleDoc`; ingest returns it without applying
+the in-flight fetch's content or grants. This closes the registration/retirement race
+during fetching, including aliases that do not share a normalized URL. Retirement
+preserves rows, so it cannot invalidate the existence check. Manual re-ingest retains
+its existing semantics. Provider and directory calls finish before this short lock;
+it never spans network fetching or embedding.

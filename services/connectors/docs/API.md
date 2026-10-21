@@ -2,10 +2,11 @@
 
 Base URL (local): `http://localhost:8005` · Swagger UI: `/docs` · Schema: `/openapi.json`
 
-Two endpoints. Everything except `/health` requires `X-API-Key`.
+Three endpoints. Everything except `/health` requires `X-API-Key`.
 
 | Method | Path | Scope | Description |
 |---|---|---|---|
+| POST | `/discover/google` | `discover` | List one metadata page of direct shares or folder children |
 | POST | `/fetch` | `fetch` | Fetch a document's text content from a source |
 | GET | `/health` | — | Liveness probe |
 
@@ -34,7 +35,7 @@ Resolve a document URL to plain text.
 
 **Request** (`FetchRequest`, `contracts/fetch.py`):
 
-> Unlike team-tracking, documentation-system, and verification, this service does **not** set `extra="forbid"` on its input model. An unknown field is silently ignored, not rejected with a 422. Don't rely on a typo'd field name surfacing as an error.
+> Unlike team-tracking, documentation-system, and verification, the `/fetch` input does **not** set `extra="forbid"` on its input model. An unknown field is silently ignored, not rejected with a 422. Don't rely on a typo'd field name surfacing as an error.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -108,7 +109,9 @@ drive.google.com/file/d/<id>
 drive.google.com/open?id=<id>
 ```
 
-The `/forms/d/e/<id>/viewform` published link carries a *published id*, not a Drive file id, and the Forms API cannot resolve it. The pattern excludes that shape on purpose so it returns a clean `404` instead of a confusing error from Google.
+Editor URLs also accept the account selector before `d/`, for example
+`docs.google.com/document/u/0/d/<id>/edit` and `docs.google.com/forms/u/12/d/<id>/edit`.
+The `/forms/d/e/<id>/viewform` published link carries a *published id*, not a Drive file id, and the Forms API cannot resolve it. The pattern excludes that shape, including account-indexed variants, so it returns a clean `404` instead of a confusing error from Google.
 
 ### Warnings
 
@@ -164,3 +167,42 @@ Answers `200` even when `GOOGLE_CREDENTIALS_JSON` is unset — no credential is 
 ## Audit log
 
 Every request emits one JSON line with the resolved actor, endpoint, status, and duration. `/fetch` additionally records `source_id`, and on success the number of `warnings` returned (`request.state.audit_extra`). The document's URL and content are never logged.
+
+## `POST /discover/google`
+
+Requires a dedicated `discover` scope (`fetch` alone cannot enumerate). Returns
+metadata only, using the same configured service-account identity as `/fetch`.
+The strict request rejects extra fields:
+
+```json
+{"folder_id": null, "page_token": null, "page_size": 100}
+```
+
+With no folder, list directly shared, non-trashed items in Drive's user corpus.
+With a folder id, list its immediate non-trashed children. Folder/file ids contain
+letters, digits, `_` and `-`, at most 200 characters. Page size is 1–100; page tokens
+are opaque, nonempty strings up to 4096 characters. Each call makes one listing
+request; callers traverse folders and continue using the returned token.
+
+```json
+{
+  "items": [{"file_id": "example", "kind": "file", "source_id": "gdocs"}],
+  "next_page_token": null,
+  "incomplete": false
+}
+```
+
+`kind` is `file`, `folder`, `unsupported`, `shortcut`, or `shared_drive`. Only supported
+files have a source id (`gdocs`, `gsheets`, `gslides`, `gdrive`), selected from the
+extractor registry. Names, text, principals and permissions are not returned.
+Shared Drive items and shortcuts are reported for exclusion, not followed. An empty
+page can still have a next token. `incomplete=true` is a partial result, never proof
+that absent items were deleted or access revoked. Invalid/repeated cursors and
+malformed Google results fail safely. Authentication/scope errors are 401/403;
+source denied listing is 403, missing source folder 404, missing configuration 503,
+and upstream/invalid listing 502. Bodies and audit extras contain no raw Google data.
+
+See the [discovery runbook](../../documentation-system/docs/DISCOVERY.md) for
+supported topology, cadence, resumption, exclusions and staging acceptance.
+`/fetch` still reads a complete ACL before extraction; its ACL pagination is capped
+at 20 pages of 100 entries and fails if completeness cannot be established.

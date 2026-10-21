@@ -74,7 +74,7 @@ The full runbook is in the [README](../README.md#google-service-account-setup-ru
 1. Create or reuse a Google Cloud project.
 2. Enable **Drive, Docs, Slides, Sheets, and Forms** APIs on it.
 3. Create a service account, then create and download a JSON key.
-4. Share every Drive folder/file connectors must read with the service account's `…@….iam.gserviceaccount.com` address, as **Viewer**. Nothing is readable until explicitly shared — there is no folder allowlist in the service because Drive's sharing *is* the access control.
+4. Share every Drive folder/file connectors must read with the service account's `…@….iam.gserviceaccount.com` address, with sufficient access to inspect the complete ACL (the verified setup uses **Editor**). Nothing is readable until explicitly shared — there is no folder allowlist in the service because Drive's sharing *is* the access control.
 5. `base64 -i service-account.json | tr -d '\n'` → set as `GOOGLE_CREDENTIALS_JSON`.
 
 If you add an extractor that needs a new Google API, both the API and its OAuth scope must be enabled/granted on that project — code alone won't do it. See [CONTRIBUTING.md](CONTRIBUTING.md#walkthrough-add-an-extractor-for-a-new-mime-type).
@@ -91,3 +91,13 @@ If you add an extractor that needs a new Google API, both the API and its OAuth 
 - **Container dies at boot with a `CONSUMER_KEYS` error.** It must be a JSON **array** (`[{...}]`), not a bare object or a comma-separated string. This is by design — fail at boot, not per request.
 - **Container dies at boot complaining about `API_KEY`.** `CONNECTORS_ENV` is non-`local` and `API_KEY` is still the dev default.
 - **`no discovery API version mapped for '<name>'`.** An extractor declared a service with no `_API_VERSIONS` entry. Code bug, not config — see CONTRIBUTING step 3.
+
+## Discovery consumer
+
+Automatic sharing discovery needs a separate consumer key with scope `discover`;
+`fetch` does not permit enumeration. Mint and install it using the consumer-key steps
+above, setting the plaintext only on the dedicated discovery runner. No new Google
+OAuth scope is introduced; Drive enumeration uses the existing `drive.readonly`.
+The catalog API keeps its own `fetch` key. See the
+[discovery runbook](../../documentation-system/docs/DISCOVERY.md#enable-inspect-and-disable)
+for deployment order, identity, supported topology and acceptance requirements.

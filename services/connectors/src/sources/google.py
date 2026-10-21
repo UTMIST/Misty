@@ -10,6 +10,10 @@ import json
 import re
 import threading
 
+from pydantic import ValidationError
+
+from contracts.discovery import DiscoveryItem, DiscoveryPage, DiscoveryRequest
+
 from src.sources.base import (
     SourceNotConfigured,
     SourceNotFound,
@@ -31,9 +35,10 @@ from src.sources.google_extractors.slides import SlidesExtractor
 _ID = r"([a-zA-Z0-9_-]+)"
 
 _FILE_ID_PATTERNS = (
-    re.compile(rf"docs\.google\.com/document/d/{_ID}"),
-    re.compile(rf"docs\.google\.com/spreadsheets/d/{_ID}"),
-    re.compile(rf"docs\.google\.com/presentation/d/{_ID}"),
+    # Published /d/e/ links carry a publication id, not a Drive file id.
+    re.compile(rf"docs\.google\.com/document/(?:u/[0-9]+/)?d/(?!e/){_ID}"),
+    re.compile(rf"docs\.google\.com/spreadsheets/(?:u/[0-9]+/)?d/(?!e/){_ID}"),
+    re.compile(rf"docs\.google\.com/presentation/(?:u/[0-9]+/)?d/(?!e/){_ID}"),
     re.compile(rf"drive\.google\.com/file/d/{_ID}"),
     re.compile(rf"drive\.google\.com/open\?(?:[^#]*&)?id={_ID}"),
     # The published/response link is docs.google.com/forms/d/e/{published_id}/
@@ -41,7 +46,7 @@ _FILE_ID_PATTERNS = (
     # cannot resolve, not the Drive file id. The negative lookahead on "e/"
     # excludes that shape so it correctly falls through to None rather than
     # capturing the literal "e" and causing a confusing 404 from Google.
-    re.compile(rf"docs\.google\.com/forms/d/(?!e/){_ID}"),
+    re.compile(rf"docs\.google\.com/forms/(?:u/[0-9]+/)?d/(?!e/){_ID}"),
 )
 
 
@@ -85,16 +90,20 @@ def _read_permissions(drive, file_id: str) -> list[SourcePermission]:
     """Read the complete effective ACL before any document content is extracted."""
     permissions: list[SourcePermission] = []
     page_token = None
-    while True:
+    seen_tokens = set()
+    for _ in range(20):
         response = execute(
             drive.permissions().list(
                 fileId=file_id,
                 supportsAllDrives=True,
                 fields=_PERMISSION_FIELDS,
                 pageToken=page_token,
+                pageSize=100,
             )
         )
-        for raw in (response or {}).get("permissions", []):
+        if not isinstance(response, dict) or not isinstance(response.get("permissions"), list):
+            raise SourceUnavailable("google returned incomplete permission metadata")
+        for raw in response["permissions"]:
             if raw.get("deleted"):
                 continue
             principal_type = raw.get("type")
@@ -132,6 +141,10 @@ def _read_permissions(drive, file_id: str) -> list[SourcePermission]:
         page_token = (response or {}).get("nextPageToken")
         if not page_token:
             return permissions
+        if not isinstance(page_token, str) or page_token in seen_tokens:
+            raise SourceUnavailable("google returned repeated permission cursor")
+        seen_tokens.add(page_token)
+    raise SourceUnavailable("google permission page limit exceeded")
 
 
 def required_scopes() -> tuple[str, ...]:
@@ -303,3 +316,68 @@ class GoogleSource:
             warnings=list(extracted.warnings),
             permissions=permissions,
         )
+
+    def discover(self, request: DiscoveryRequest) -> DiscoveryPage:
+        """One page of direct shares or folder children, never file contents/ACLs.
+
+        Explicit traversal is required: sharedWithMe alone excludes descendants.
+        Shared Drives and shortcuts are deliberately reported but not followed.
+        """
+        if self._services is not None:
+            services = self._services
+        else:
+            if not self._credentials_json_b64:
+                raise SourceNotConfigured("google credentials not configured")
+            services = self._build_services(self._get_credentials())
+        scope = f"'{request.folder_id}' in parents" if request.folder_id else "sharedWithMe = true"
+        raw = execute(
+            services["drive"]
+            .files()
+            .list(
+                q=f"trashed = false and ({scope})",
+                corpora="user",
+                spaces="drive",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
+                pageSize=request.page_size,
+                pageToken=request.page_token,
+                fields="nextPageToken,incompleteSearch,files(id,mimeType,driveId)",
+            )
+        )
+        try:
+            if not isinstance(raw, dict) or not isinstance(raw.get("files"), list):
+                raise ValueError("invalid listing")
+            if len(raw["files"]) > request.page_size:
+                raise ValueError("oversized listing")
+            items = []
+            for file in raw["files"]:
+                mime = file["mimeType"]
+                source_id = None
+                if file.get("driveId"):
+                    kind = "shared_drive"
+                elif mime == "application/vnd.google-apps.folder":
+                    kind = "folder"
+                elif mime == "application/vnd.google-apps.shortcut":
+                    kind = "shortcut"
+                elif mime in EXTRACTORS or mime.startswith("text/"):
+                    kind = "file"
+                    source_id = {
+                        GOOGLE_DOC: "gdocs",
+                        GOOGLE_SHEET: "gsheets",
+                        GOOGLE_SLIDES: "gslides",
+                    }.get(mime, "gdrive")
+                else:
+                    kind = "unsupported"
+                items.append(DiscoveryItem(file_id=file["id"], kind=kind, source_id=source_id))
+            if type(raw.get("incompleteSearch", False)) is not bool:
+                raise ValueError("invalid completeness")
+            page = DiscoveryPage(
+                items=items,
+                next_page_token=raw.get("nextPageToken"),
+                incomplete=raw.get("incompleteSearch", False),
+            )
+            if page.next_page_token and page.next_page_token == request.page_token:
+                raise ValueError("repeated cursor")
+            return page
+        except (KeyError, TypeError, AttributeError, ValueError, ValidationError):
+            raise SourceUnavailable("google returned malformed listing") from None

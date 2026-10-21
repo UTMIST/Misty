@@ -244,6 +244,7 @@ All endpoints require `X-API-Key` with the appropriate scope.
 | POST | `/docs/{id}/tags` | `docs:write` | Add a tag |
 | DELETE | `/docs/{id}/tags/{tag}` | `docs:write` | Remove a tag |
 | POST | `/docs/{id}/refetch` | `docs:write` | Re-run content fetch for an existing doc |
+| POST | `/docs/discovery` | `docs:write` | Import a newly discovered Google file identity |
 | POST | `/docs/source-access/refresh-due` | `docs:write` | Refresh a bounded batch whose Google ACL is due |
 | POST | `/docs/index` | `docs:index` | (Re-)index stored content; retry path for indexing failures |
 | GET | `/sources` | `docs:read` | List sources (`?active_only=false`) |
@@ -348,3 +349,34 @@ metadata. Ingest, refetch, refresh, and retirement keep the index current, and
 - Bulk import — ingest is one URL per request; no CSV/bulk endpoint.
 - Pagination — list endpoints return all matching rows, adequate for current catalog size.
 - Admin UI — no dashboard; catalog browsing goes through the API or a future thin client.
+
+## Automatic sharing discovery
+
+When an operator enables discovery for your environment, share a supported Google
+file or My Drive folder with Misty's connector email; nested supported files are
+included. No `/doc add` or folder-root registration is needed. Use the
+[member instructions](docs/DISCOVERY.md#members-sharing-with-misty) for sharing
+prerequisites and expected search behavior.
+
+The HTTP-only `doc-discover` runner has separate settings from the API. It reads
+**process environment only**, including the existing `DOCS_BASE_URL`,
+`DOCS_API_KEY`, `CONNECTORS_BASE_URL`, and `CONNECTORS_API_KEY`. Its two keys default
+to empty and must be configured when enabled. No database/Google credential is
+needed by the runner. Startup validates settings and credentials before requests;
+the API's production boot check does not read these runner-only settings.
+
+| Runner setting | Default | Purpose |
+|---|---|---|
+| `DISCOVERY_ENABLED` | `false` | Explicit operator enable/disable |
+| `DISCOVERY_STATE_PATH` | `discovery-state.json` | Durable checkpoint; mount a volume in staging |
+| `DISCOVERY_IDENTITY` | `default` | Environment/connector identity label; changing it requires a new checkpoint |
+| `DISCOVERY_PAGE_SIZE` | `100` | Drive results per page, 1–100 |
+| `DISCOVERY_MAX_PAGES` | `20` | Listing requests per invocation, 1–1000 |
+| `DISCOVERY_MAX_ITEMS` | `100` | Items handled per invocation, 1–10000 |
+| `DISCOVERY_MAX_FOLDERS` | `10000` | Unique folders per full scan, 1–100000 |
+| `DISCOVERY_MAX_SECONDS` | `900` | Budget for starting requests; finite and positive |
+| `DISCOVERY_TIMEOUT_SECONDS` | `120` | HTTP phase timeout; finite and positive |
+| `DISCOVERY_EXCLUDED_IDS` | `[]` | JSON array of file/folder ids excluded from discovery |
+
+See the [operator runbook](docs/DISCOVERY.md) for scheduling, bounds, recovery,
+limitations and the staging acceptance gate. Production activation is separate.

@@ -467,3 +467,12 @@ managed-group migration; never infer access from an ordinary team membership.
 Reassigns documents from the retired source to `web` before removing its registry row.
 Downgrade restores only the registry entry; it does not undo the data cleanup.
 Use a database backup to recover the previous assignments.
+
+## Automatic discovery schedule
+
+The dedicated, disabled-by-default `doc-discover` runner and
+`railway.discovery.json` provide initial and recurring sharing discovery over HTTP.
+This is separate from the existing-document refresh schedule above. Follow the
+[discovery runbook](DISCOVERY.md) for its two scoped keys, persistent checkpoint,
+15-minute schedule, enable/status/disable commands, recovery and staging acceptance.
+Production activation requires a separate rollout decision.
