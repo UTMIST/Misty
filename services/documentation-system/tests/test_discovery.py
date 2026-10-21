@@ -259,6 +259,72 @@ def test_timeout_no_immediate_retry():
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("code", [500, 502, 503, 504, 408, 429, "timeout"])
+def test_persistent_import_failure_is_bounded_across_restarts(tmp_path, code):
+    attempted = []
+    recovered = False
+
+    def handler(request):
+        if request.url.path == "/api-keys/self":
+            return httpx.Response(200, json={"scopes": ["docs:write"]})
+        if request.url.path == "/discover/google":
+            return httpx.Response(
+                200, json={"items": [file("bad").model_dump(), file("good").model_dump()]}
+            )
+        file_id = json.loads(request.content)["file_id"]
+        attempted.append(file_id)
+        if file_id == "bad" and not recovered:
+            if code == "timeout":
+                raise httpx.ReadTimeout("private diagnostics")
+            return httpx.Response(code, text="private diagnostics")
+        return httpx.Response(
+            200, json={"status": "indexed", "doc_id": "11111111-1111-1111-1111-111111111111"}
+        )
+
+    client, settings, state = api(handler), Settings(), State(identity="default")
+    path = tmp_path / "state.json"
+    for attempt in range(2):
+        with pytest.raises(DiscoveryError):
+            run_discovery(client, settings, state, lambda: save_state(path, state))
+        state = State.model_validate_json(path.read_text())
+        assert attempted == ["bad"] * (attempt + 1)
+        assert state.pending[0].file_id == "bad"
+    assert run_discovery(client, settings, state, lambda: save_state(path, state)) == 1
+    assert attempted == ["bad", "bad", "bad", "good"]
+    assert state.counts["import_failed"] == 1
+    assert state.counts["indexed"] == 1
+    assert state.pending == []
+    # Exhaustion applies to one scan; a later scan can recover the file.
+    recovered = True
+    state = State.model_validate_json(path.read_text())
+    assert run_discovery(client, settings, state, lambda: save_state(path, state)) == 0
+    assert attempted[-2:] == ["bad", "good"]
+    assert state.counts.get("import_failed", 0) == 0
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_auth_failure_never_exhausts_or_skips_pending_import(code):
+    def handler(request):
+        if request.url.path == "/api-keys/self":
+            return httpx.Response(200, json={"scopes": ["docs:write"]})
+        return httpx.Response(code, text="private diagnostics")
+
+    state = State(identity="default", pending=[file("bad"), file("good")])
+    for _ in range(4):
+        with pytest.raises(DiscoveryError, match=str(code)):
+            run_discovery(api(handler), Settings(), state, lambda: None)
+        assert [item.file_id for item in state.pending] == ["bad", "good"]
+    assert state.counts.get("import_failed", 0) == 0
+
+
+@pytest.mark.parametrize("code", [403, 404])
+@pytest.mark.parametrize("detail", [{"error": "private detail"}, ["private detail"]])
+def test_structured_listing_error_is_sanitized(code, detail):
+    with pytest.raises(DiscoveryError, match=f"HTTP request returned {code}") as error:
+        api(lambda request: httpx.Response(code, json={"detail": detail})).list_page(Listing(), 1)
+    assert "private" not in str(error.value)
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

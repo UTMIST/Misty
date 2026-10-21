@@ -427,5 +427,7 @@ def test_get_doc_content_meta_scoped_to_requested_doc(store):
 
 class TestGoogleIdentity(GoogleIdentityCases):
     @pytest.fixture
-    def adapter(self, store):
-        return store
+    def adapter(self):
+        from tests.conftest import build_seed_sources
+
+        return InMemoryStorageAdapter(seed_sources=build_seed_sources())

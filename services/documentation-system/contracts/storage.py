@@ -24,6 +24,14 @@ class DuplicateActiveUrl(Exception):
     such constraint and is single-threaded, so it never raises this."""
 
 
+class ExistingGoogleDoc(Exception):
+    """Discovery's insert found an existing Google identity, active or retired."""
+
+    def __init__(self, doc: Doc):
+        super().__init__("Google identity already catalogued")
+        self.doc = doc
+
+
 class StorageAdapter(Protocol):
     """Stable contract between the service and persistence. Concrete adapters
     (Postgres, in-memory) implement these with identical semantics."""
@@ -79,7 +87,18 @@ class StorageAdapter(Protocol):
         fetched_at,
         tags: list[str],
         actor: str,
-    ) -> Doc: ...
+        skip_existing_google: bool = False,
+    ) -> Doc:
+        """Insert a doc, coordinating all Google inserts by supported file identity.
+
+        With skip_existing_google=True, atomically check all matching aliases
+        (including retired records) before inserting; raise ExistingGoogleDoc
+        without modifying that record if found. Requires a supported Google URL.
+        The default preserves explicit manual re-ingest after retirement.
+        No provider/network work is performed while coordinating the insertion.
+        """
+        ...
+
     def get_doc(self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL) -> Doc | None: ...
     def get_doc_by_normalized_url(self, url_normalized: str) -> Doc | None: ...
     def list_docs(

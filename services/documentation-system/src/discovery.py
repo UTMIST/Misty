@@ -27,6 +27,13 @@ class DiscoveryError(Exception):
     """Sanitized error safe to print. Never carries an upstream response body."""
 
 
+class RetryableDiscoveryError(DiscoveryError):
+    """Transport/server failure; an import may already have committed remotely."""
+
+
+MAX_IMPORT_ATTEMPTS = 3
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
     discovery_enabled: bool = False
@@ -96,6 +103,8 @@ class State(BaseModel):
     identity: str
     frontier: list[Listing] = Field(default_factory=list)
     pending: list[Item] = Field(default_factory=list)
+    # Consecutive retryable failures of pending[0], retained across invocations.
+    pending_attempts: int = Field(default=0, ge=0)
     seen_folders: set[str] = Field(default_factory=set)
     counts: dict[str, int] = Field(default_factory=dict)
     started_at: str | None = None
@@ -158,7 +167,7 @@ class DiscoveryClient:
                 follow_redirects=False,
             )
         except httpx.HTTPError:
-            raise DiscoveryError("HTTP request failed; no immediate retry") from None
+            raise RetryableDiscoveryError("HTTP request failed; no immediate retry") from None
         # Authentication/configuration errors stop; isolated listing/import errors
         # advance the checkpoint and are revisited on the next full scan.
         if response.status_code != 200:
@@ -167,10 +176,15 @@ class DiscoveryClient:
                     detail = response.json().get("detail")
                 except (ValueError, AttributeError):
                     detail = None
-                if detail in {"source denied listing", "source folder not found"}:
+                if isinstance(detail, str) and detail in {
+                    "source denied listing",
+                    "source folder not found",
+                }:
                     return None
-            if response.status_code in {400, 422, 502}:
+            if response.status_code in {400, 422} or connector and response.status_code == 502:
                 return None
+            if response.status_code in {408, 429} or response.status_code >= 500:
+                raise RetryableDiscoveryError(f"HTTP request returned {response.status_code}")
             raise DiscoveryError(f"HTTP request returned {response.status_code}")
         try:
             result = response.json()
@@ -273,6 +287,7 @@ def run_discovery(client, settings: Settings, state: State, save) -> int:
     client.check_scope(timeout())
     if not state.frontier and not state.pending:
         state.frontier = [Listing()]
+        state.pending_attempts = 0
         state.seen_folders = set()
         state.counts = {}
         state.started_at = _now()
@@ -302,11 +317,22 @@ def run_discovery(client, settings: Settings, state: State, save) -> int:
             elif item.kind != "file":
                 counts[item.kind] += 1
             else:
-                result = client.import_file(item, timeout())
+                try:
+                    result = client.import_file(item, timeout())
+                except RetryableDiscoveryError:
+                    state.pending_attempts += 1
+                    if state.pending_attempts < MAX_IMPORT_ATTEMPTS:
+                        counts["import_retries"] += 1
+                        persist()
+                        # Do not immediately replay an ambiguous POST. The next
+                        # invocation rechecks catalog identity before paid work.
+                        raise
+                    result = None
                 counts[result.status if result else "import_failed"] += 1
                 if result:
                     counts["warnings"] += result.warnings
             state.pending.pop(0)
+            state.pending_attempts = 0
             items += 1
             persist()
         else:

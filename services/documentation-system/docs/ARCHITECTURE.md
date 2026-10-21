@@ -727,7 +727,9 @@ so grants still come only from each file's complete, resolved source ACL.
 `StorageAdapter.get_doc_by_google_file_id` matches supported URL aliases in both
 adapters, including old manual records. New normalized Google keys collapse to a
 canonical Drive file URL, reusing the active-URL uniqueness constraint for concurrent
-new ingests. No migration or rewriting of existing keys/grants is needed. Legacy
+new ingests. Published `/d/e/` editor/Forms links retain their distinct URL keys:
+publication ids are not Drive file identities. No migration or rewriting of existing
+keys/grants is needed. Legacy
 alias lookup currently evaluates URL expressions in Postgres; measure catalog growth
 before introducing an indexed identity column and its duplicate-data migration.
 
@@ -735,3 +737,13 @@ Discovery only imports new identities and reports existing content/index gaps;
 #292 continues to own refresh. Retired records stay retired. Complete or incomplete
 listings never remove records, chunks or grants. The [runbook](DISCOVERY.md) owns the
 checkpoint, scheduling, recovery and topology contract.
+
+All Google inserts take a transaction-scoped Postgres advisory lock derived from the
+file id (a process lock in memory). Discovery's `create_doc(skip_existing_google=True)`
+then checks active and retired aliases in that same transaction before inserting.
+An existing identity raises `ExistingGoogleDoc`; ingest returns it without applying
+the in-flight fetch's content or grants. This closes the registration/retirement race
+during fetching, including aliases that do not share a normalized URL. Retirement
+preserves rows, so it cannot invalidate the existence check. Manual re-ingest retains
+its existing semantics. Provider and directory calls finish before this short lock;
+it never spans network fetching or embedding.

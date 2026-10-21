@@ -31,6 +31,9 @@ def test_recognized_forms_yield_the_file_id(url):
         "not a url at all",
         "",
         "https://docs.google.com/forms/d/e/1FAIpQLSfExample/viewform",
+        "https://docs.google.com/document/d/e/2PACX-published/pub",
+        "https://docs.google.com/spreadsheets/d/e/2PACX-published/pubhtml",
+        "https://docs.google.com/presentation/d/e/2PACX-published/pub",
         "https://forms.gle/abc123",
     ],
 )

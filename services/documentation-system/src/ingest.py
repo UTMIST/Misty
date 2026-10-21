@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from contracts.directory import DirectoryClient, DirectoryUnavailable
 from contracts.fetcher import FetchError, SourceGone
-from contracts.storage import DuplicateActiveUrl, StorageAdapter
+from contracts.storage import DuplicateActiveUrl, ExistingGoogleDoc, StorageAdapter
 from contracts.types import DocIngest, IngestResult
 from src.content import clamp_content, content_hash
 from src.google_identity import google_file_id
@@ -265,7 +265,12 @@ def ingest_doc(
             fetched_at=fetched_at,
             tags=payload.tags,
             actor=actor,
+            skip_existing_google=not refresh_existing,
         )
+    except ExistingGoogleDoc as exc:
+        # Discovery never applies this fetch's content, grants or tags to a
+        # record registered while the provider call was in flight.
+        return IngestResult(doc=exc.doc, created=False, warnings=warnings)
     except DuplicateActiveUrl:
         existing = storage.get_doc_by_normalized_url(url_normalized)
         if existing is not None and existing.active:

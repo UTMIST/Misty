@@ -746,7 +746,10 @@ MIME classification. The catalog checks active/fetch-enabled source status befor
 fetching, then deduplicates by Drive identity, including legacy/manual URL aliases.
 New records use the normal ingest, complete source-ACL reconciliation and indexer.
 Existing records are inspected without refetching or re-embedding. Retirement is
-honored. Scopes and validation precede provider work.
+honored, including a manual registration/retirement while discovery is fetching:
+the final storage insert checks identity atomically with other Google inserts and
+returns the existing record without applying discovery's fetched data. Scopes and
+validation precede provider work.
 
 Always returns 200 for a classified outcome:
 
@@ -764,5 +767,6 @@ unmapped ACL or fetch failure must not be counted as indexed.
 Use the existing refetch/source-refresh and `/docs/index` recovery endpoints; discovery
 never repairs existing records itself. See [operations and limits](DISCOVERY.md).
 All new Google URL ingests now use file identity for normalized dedup keys; displayed
-original URLs and existing stored keys are preserved. Preexisting duplicate records
-are not merged. The active earliest record wins identity lookup.
+original URLs and existing stored keys are preserved. Published `/d/e/` URLs are
+excluded from Drive identity extraction and keep distinct URL keys. Preexisting
+duplicate records are not merged. The active earliest record wins identity lookup.

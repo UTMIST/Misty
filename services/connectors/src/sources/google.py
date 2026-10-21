@@ -35,9 +35,10 @@ from src.sources.google_extractors.slides import SlidesExtractor
 _ID = r"([a-zA-Z0-9_-]+)"
 
 _FILE_ID_PATTERNS = (
-    re.compile(rf"docs\.google\.com/document/d/{_ID}"),
-    re.compile(rf"docs\.google\.com/spreadsheets/d/{_ID}"),
-    re.compile(rf"docs\.google\.com/presentation/d/{_ID}"),
+    # Published /d/e/ links carry a publication id, not a Drive file id.
+    re.compile(rf"docs\.google\.com/document/d/(?!e/){_ID}"),
+    re.compile(rf"docs\.google\.com/spreadsheets/d/(?!e/){_ID}"),
+    re.compile(rf"docs\.google\.com/presentation/d/(?!e/){_ID}"),
     re.compile(rf"drive\.google\.com/file/d/{_ID}"),
     re.compile(rf"drive\.google\.com/open\?(?:[^#]*&)?id={_ID}"),
     # The published/response link is docs.google.com/forms/d/e/{published_id}/

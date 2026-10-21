@@ -428,6 +428,81 @@ def test_ingest_race_fallback_merges_into_existing(adapter):
     assert len(active) == 1
 
 
+def test_discovery_insert_waits_for_uncommitted_manual_alias(adapter):
+    from contracts.fetcher import FetchResult
+    from tests.test_ingest import FakeDirectory, FakeFetchers
+
+    inserted, release, discovery_started = Event(), Event(), Event()
+    worker = local()
+    discovery_pid = []
+
+    def before_execute(conn, cursor, statement, parameters, context, executemany):
+        if getattr(worker, "name", None) == "discovery" and not discovery_pid:
+            discovery_pid.append(conn.connection.driver_connection.info.backend_pid)
+            discovery_started.set()
+
+    def after_execute(conn, cursor, statement, parameters, context, executemany):
+        if (
+            getattr(worker, "name", None) == "manual"
+            and context.isinsert
+            and context.compiled.statement.table.name == "docs"
+        ):
+            inserted.set()
+            assert release.wait(10), "manual insert was not released"
+
+    def manual():
+        worker.name = "manual"
+        return GoogleIdentityCases.make(adapter, "https://docs.google.com/document/d/race/edit")
+
+    def discovery():
+        worker.name = "discovery"
+        return ingest_doc(
+            DocIngest(url="https://drive.google.com/file/d/race", source_id="gdocs"),
+            storage=adapter,
+            fetchers=FakeFetchers(result=FetchResult(permissions=[])),
+            directory=FakeDirectory(),
+            actor="discovery",
+            refresh_existing=False,
+        )
+
+    engine = adapter._engine
+    event.listen(engine, "before_cursor_execute", before_execute)
+    event.listen(engine, "after_cursor_execute", after_execute)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(manual)
+            try:
+                assert inserted.wait(5)
+                second = executor.submit(discovery)
+                assert discovery_started.wait(5)
+                # Different URL aliases bypass the active-URL unique index.
+                # The file-identity lock must wait for the uncommitted writer.
+                blocked = False
+                deadline = monotonic() + 5
+                while not second.done() and monotonic() < deadline:
+                    with engine.connect() as conn:
+                        blocked = conn.execute(
+                            text(
+                                "SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"
+                            ),
+                            {"pid": discovery_pid[0]},
+                        ).scalar_one()
+                    if blocked:
+                        break
+                    sleep(0.01)
+            finally:
+                release.set()
+            winner = first.result(timeout=5)
+            result = second.result(timeout=5)
+    finally:
+        event.remove(engine, "before_cursor_execute", before_execute)
+        event.remove(engine, "after_cursor_execute", after_execute)
+    assert blocked is True
+    assert result.created is False
+    assert result.doc.id == winner.id
+    assert len(adapter.list_docs(active_only=False)) == 1
+
+
 _P1 = UUID("11111111-1111-1111-1111-111111111111")
 _T1 = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 

@@ -108,8 +108,8 @@ one checkpoint across accounts, API environments, or independent services.
 Each invocation defaults to at most 20 Drive listing pages and 100 handled items,
 with 100 results per page and 10,000 unique folders per full scan. A metadata page
 is checkpointed before its files are imported. Each confirmed import result advances
-that checkpoint. Pending work and visited folders survive interruption; an OS lock
-rejects overlapping runs on the same volume. Run only one service: locks on separate
+that checkpoint. Pending work, retry attempts and visited folders survive interruption;
+an OS lock rejects overlapping runs on the same volume. Run only one service: locks on separate
 volumes do not coordinate. Checkpoints contain file ids and opaque page tokens and
 are operator-only (mode 0600); they contain no content or credentials.
 
@@ -117,8 +117,13 @@ The 900-second budget gates new requests; HTTP phase timeouts do not cancel serv
 work already accepted. Catalog requests execute the existing fetch/index pipeline;
 Google transport timeouts, extractor caps and an ACL limit of 20 pages of 100
 permissions bound that path. A missing or looping ACL page fails closed before
-content extraction. Listing has no internal retries. HTTP timeouts stop the runner
-without an immediate replay; the next scheduled invocation safely rechecks identity.
+content extraction. Listing has no internal retries. Import transport failures,
+HTTP 408/429 and server errors (5xx) allow at most three attempts per pending item
+across invocations. The first two failures stop without an immediate replay; the next
+invocation safely rechecks identity. The third failure counts as `import_failed` and
+advances to later work. A later full scan retries the file. Authentication,
+configuration and malformed-response errors stop without consuming this retry budget
+or skipping the pending item. Existing checkpoints default to zero retry attempts.
 
 Exit codes:
 
@@ -130,8 +135,8 @@ Exit codes:
 
 Counts distinguish `indexed`, `existing` (current stored index), `registered`
 (no usable content), `index_failed`, `retired`, `disabled`, unsupported types,
-shortcuts, Shared Drives, exclusions and listing/import failures. A full scan's last
-counts remain available while another scan runs. Unresolved audience/extraction
+shortcuts, Shared Drives, exclusions, deferred `import_retries` and listing/import
+failures. A full scan's last counts remain available while another scan runs. Unresolved audience/extraction
 warnings are counted, not printed. Do not log upstream bodies, source URLs, content,
 checkpoint payloads, or API keys.
 
@@ -146,9 +151,13 @@ is provisioned by this code change.
 Existing catalog entries are identified by Google file id across supported Docs,
 Sheets, Slides, Forms edit, Drive file and `open?id=` URL aliases, including old
 manual records. New ingests normalize those aliases to one key, so concurrent new
-imports share the existing active-URL uniqueness constraint. Legacy duplicates are
+imports share the existing active-URL uniqueness constraint. Published `/d/e/` links
+are not Drive file identities and keep their distinct URL keys. Legacy duplicates are
 not merged or deleted: lookup prefers the active, earliest record. Explicitly retired
 records are skipped, preventing recurring discovery from undoing an operator action.
+The final discovery identity check and insert coordinate with all Google inserts in
+storage, so a manual registration/retirement during fetching also prevents discovery
+from creating a replacement. Explicit manual re-ingest after retirement stays allowed.
 
 Discovery does not refetch/re-embed existing records. It reports missing content or
 stale/missing chunks for recovery. Registration can succeed before fetching/indexing:

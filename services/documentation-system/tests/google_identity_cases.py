@@ -1,8 +1,14 @@
 """Identical alias lookup contract exercised by both adapters."""
 
+from uuid import UUID
+
 import pytest
 
+from contracts.fetcher import FetchError, FetchResult, SourcePermission
+from contracts.types import DocIngest
+from src.ingest import ingest_doc
 from src.url_norm import normalize_url
+from tests.test_ingest import FakeDirectory, FakeFetchers
 
 
 ALIASES = [
@@ -16,6 +22,95 @@ ALIASES = [
 
 
 class GoogleIdentityCases:
+    @pytest.mark.parametrize("kind", ["document", "spreadsheets", "presentation", "forms"])
+    def test_published_links_never_merge_documents_or_grants(self, adapter, kind):
+        first_url = f"https://docs.google.com/{kind}/d/e/2PACX-first/pub"
+        second_url = f"https://docs.google.com/{kind}/d/e/2PACX-second/pub"
+        fetchers = FakeFetchers(error=FetchError("unsupported published URL"))
+        first = ingest_doc(
+            DocIngest(url=first_url, tags=["first"]),
+            storage=adapter,
+            fetchers=fetchers,
+            directory=FakeDirectory(),
+            actor="first",
+        )
+        second = ingest_doc(
+            DocIngest(url=second_url, tags=["second"], grants=[{"grantee_type": "org"}]),
+            storage=adapter,
+            fetchers=fetchers,
+            directory=FakeDirectory(),
+            actor="second",
+        )
+        assert second.created is True
+        assert first.doc.id != second.doc.id
+        assert normalize_url(first_url) == first_url
+        assert normalize_url(second_url) == second_url
+        assert adapter.get_doc(first.doc.id).tags == ["first"]
+        assert adapter.list_grants(first.doc.id) == []
+        assert [g.grantee_type for g in adapter.list_grants(second.doc.id)] == ["org"]
+
+    @pytest.mark.parametrize("kind", ["document", "spreadsheets", "presentation"])
+    def test_legacy_published_link_is_not_file_e(self, adapter, kind):
+        self.make(adapter, f"https://docs.google.com/{kind}/d/e/2PACX-published/pub")
+        assert adapter.get_doc_by_google_file_id("e") is None
+
+    @pytest.mark.parametrize("retired", [False, True])
+    def test_discovery_skips_registration_during_fetch(self, adapter, retired):
+        winner = []
+
+        class InterleavedFetcher:
+            def fetch_for(self, source_id, url):
+                # A manual registration commits while discovery fetches. Its
+                # legacy alias deliberately differs from discovery's canonical URL.
+                doc = GoogleIdentityCases.make(adapter, ALIASES[0])
+                if retired:
+                    doc = adapter.update_doc(doc.id, {"active": False}, actor="operator")
+                winner.append(doc)
+                return FetchResult(
+                    title="Fetched",
+                    content="Fetched text",
+                    permissions=[
+                        SourcePermission(
+                            permission_id="person-share",
+                            principal_type="user",
+                            role="reader",
+                            principal="reader@example.com",
+                        )
+                    ],
+                )
+
+        result = ingest_doc(
+            DocIngest(url="https://drive.google.com/file/d/identity", source_id="gdocs"),
+            storage=adapter,
+            fetchers=InterleavedFetcher(),
+            directory=FakeDirectory(people={"reader@example.com": UUID(int=1)}),
+            actor="discovery",
+            refresh_existing=False,
+        )
+        assert result.created is False
+        assert result.doc.id == winner[0].id
+        assert result.doc.active is not retired
+        assert len(adapter.list_docs(active_only=False)) == 1
+        assert adapter.get_doc(result.doc.id).created_by == "test"
+        assert adapter.get_doc(result.doc.id).title == "Legacy"
+        assert adapter.get_doc_content_meta(result.doc.id) is None
+        assert adapter.list_grants(result.doc.id) == []
+
+    def test_manual_reingest_after_retirement_still_creates(self, adapter):
+        old = self.make(adapter, ALIASES[0])
+        adapter.update_doc(old.id, {"active": False}, actor="operator")
+        result = ingest_doc(
+            DocIngest(url="https://drive.google.com/file/d/identity", source_id="gdocs"),
+            storage=adapter,
+            fetchers=FakeFetchers(result=FetchResult(permissions=[])),
+            directory=FakeDirectory(),
+            actor="manual",
+        )
+        assert result.created is True
+        assert result.doc.id != old.id
+        assert result.doc.active is True
+        assert adapter.get_doc(old.id).active is False
+
     @pytest.mark.parametrize("url", ALIASES)
     def test_legacy_alias_lookup(self, adapter, url):
         doc = self.make(adapter, url)

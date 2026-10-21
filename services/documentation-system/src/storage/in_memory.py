@@ -1,8 +1,10 @@
 from datetime import datetime, timezone
 from math import sqrt
+from threading import Lock
 from uuid import UUID, uuid4
 
 from contracts.retrieval import ChunkCitation, QueryEmbedding, SearchHit
+from contracts.storage import ExistingGoogleDoc
 from contracts.types import (
     ApiKey,
     Doc,
@@ -32,6 +34,7 @@ class InMemoryStorageAdapter:
         return True
 
     def __init__(self, seed_sources: list[Source] | None = None) -> None:
+        self._doc_creation_lock = Lock()
         self._docs: dict[UUID, Doc] = {}
         self._tags: dict[UUID, set[str]] = {}
         self._sources: dict[str, Source] = {s.id: s for s in (seed_sources or [])}
@@ -124,33 +127,42 @@ class InMemoryStorageAdapter:
         fetched_at,
         tags,
         actor,
+        skip_existing_google=False,
     ) -> Doc:
-        now = _now()
-        doc = Doc(
-            id=uuid4(),
-            url=url,
-            url_normalized=url_normalized,
-            source_id=source_id,
-            title=title,
-            description=description,
-            owning_team_id=owning_team_id,
-            owning_team_label=owning_team_label,
-            owning_person_id=owning_person_id,
-            owning_person_label=owning_person_label,
-            content_snapshot=content_snapshot,
-            fetched_at=fetched_at,
-            source_access_synced_at=None,
-            source_access_attempted_at=None,
-            active=True,
-            tags=[],
-            created_at=now,
-            updated_at=now,
-            created_by=actor,
-            updated_by=actor,
-        )
-        self._docs[doc.id] = doc
-        self._tags[doc.id] = set(tags)
-        return self._hydrate(doc)
+        file_id = google_file_id(url_normalized)
+        if skip_existing_google and file_id is None:
+            raise ValueError("Google identity required for discovery insertion")
+        with self._doc_creation_lock:
+            if skip_existing_google:
+                existing = self.get_doc_by_google_file_id(file_id)
+                if existing is not None:
+                    raise ExistingGoogleDoc(existing)
+            now = _now()
+            doc = Doc(
+                id=uuid4(),
+                url=url,
+                url_normalized=url_normalized,
+                source_id=source_id,
+                title=title,
+                description=description,
+                owning_team_id=owning_team_id,
+                owning_team_label=owning_team_label,
+                owning_person_id=owning_person_id,
+                owning_person_label=owning_person_label,
+                content_snapshot=content_snapshot,
+                fetched_at=fetched_at,
+                source_access_synced_at=None,
+                source_access_attempted_at=None,
+                active=True,
+                tags=[],
+                created_at=now,
+                updated_at=now,
+                created_by=actor,
+                updated_by=actor,
+            )
+            self._docs[doc.id] = doc
+            self._tags[doc.id] = set(tags)
+            return self._hydrate(doc)
 
     def get_doc(self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL) -> Doc | None:
         doc = self._docs.get(doc_id)

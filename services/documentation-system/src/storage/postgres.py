@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from hashlib import sha256
 from uuid import UUID
 
 from sqlalchemy import (
@@ -23,7 +24,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from contracts.retrieval import ChunkCitation, RetrievalUnavailable, SearchHit
-from contracts.storage import DuplicateActiveUrl
+from contracts.storage import DuplicateActiveUrl, ExistingGoogleDoc
 from contracts.types import (
     ApiKey,
     Doc,
@@ -36,7 +37,7 @@ from contracts.types import (
 )
 from contracts.visibility import Actor, ActorContext, Channel, DENY, SEE_ALL
 from src.content import content_hash
-from src.google_identity import GOOGLE_ID_PATTERNS
+from src.google_identity import GOOGLE_ID_PATTERNS, google_file_id
 from src.retrieval import candidate_limit, fuse, terms, validate_search
 from src.storage.chunks import validate_chunks_for_content, validate_doc_chunks
 from src.storage.schema import (
@@ -334,8 +335,25 @@ class PostgresStorageAdapter:
         fetched_at,
         tags,
         actor,
+        skip_existing_google=False,
     ) -> Doc:
+        file_id = google_file_id(url_normalized)
+        if skip_existing_google and file_id is None:
+            raise ValueError("Google identity required for discovery insertion")
         with self._engine.begin() as conn:
+            if file_id is not None:
+                # Every Google insert (manual and discovery) takes the same
+                # transaction-scoped lock. A row need not exist yet to lock it.
+                # Retirements preserve rows, so checking both active and retired
+                # identities here cannot miss an operator retirement during fetch.
+                lock_key = int.from_bytes(
+                    sha256(f"google-file:{file_id}".encode()).digest()[:8], signed=True
+                )
+                conn.execute(select(func.pg_advisory_xact_lock(lock_key)))
+                if skip_existing_google:
+                    existing = self._get_doc_by_google_file_id(conn, file_id)
+                    if existing is not None:
+                        raise ExistingGoogleDoc(existing)
             # New docs are always active, so they fall under the partial unique
             # index on url_normalized WHERE active. A concurrent ingest that
             # already inserted an active row for this URL makes this a no-op:
@@ -404,20 +422,23 @@ class PostgresStorageAdapter:
 
     def get_doc_by_google_file_id(self, file_id: str) -> Doc | None:
         with self._engine.connect() as conn:
-            row = conn.execute(
-                select(docs)
-                .where(
-                    or_(
-                        *(
-                            func.substring(docs.c.url_normalized, p) == file_id
-                            for p in GOOGLE_ID_PATTERNS
-                        )
+            return self._get_doc_by_google_file_id(conn, file_id)
+
+    def _get_doc_by_google_file_id(self, conn, file_id: str) -> Doc | None:
+        row = conn.execute(
+            select(docs)
+            .where(
+                or_(
+                    *(
+                        func.substring(docs.c.url_normalized, p) == file_id
+                        for p in GOOGLE_ID_PATTERNS
                     )
                 )
-                .order_by(docs.c.active.desc(), docs.c.created_at, docs.c.id)
-                .limit(1)
-            ).first()
-            return self._row_to_doc(conn, row) if row else None
+            )
+            .order_by(docs.c.active.desc(), docs.c.created_at, docs.c.id)
+            .limit(1)
+        ).first()
+        return self._row_to_doc(conn, row) if row else None
 
     def list_docs(
         self,
