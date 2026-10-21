@@ -41,6 +41,7 @@ platform-auth = { workspace = true }
 [project.scripts]
 doc-keys = "src.cli:main"
 doc-backfill = "src.backfill:main"
+doc-source-refresh = "src.source_refresh:main"
 
 [dependency-groups]
 dev = [

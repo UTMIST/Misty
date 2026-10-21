@@ -202,6 +202,15 @@ expire after the configured maximum age, so a prolonged refresh outage fails clo
 Manual grants are independent and are never silently created or deleted by source
 reconciliation. Ownership fields are attribution metadata and do not authorize access.
 
+`doc-source-refresh` is an external HTTP client of the bounded refresh endpoint.
+It keeps database/provider credentials in the API, checks its scoped key before
+refreshing, and never replays an ambiguous POST. Separate refresh and index failure
+counts preserve the distinction between source freshness and searchable content.
+Railway failure notifications and independent start/finish heartbeat pings cover
+process failures and missing runs; monitoring failure does not undo or replay API
+work. Deployment, recovery and monitoring setup live in the
+[refresh runbook](DEPLOYMENT.md#source-access-refresh-schedule).
+
 Visibility keeps two team sets in the actor context: ordinary active directory memberships
 for manual grants, and separately confirmed synchronized Google memberships for
 source-derived team grants. This prevents a newly added directory member from inheriting a
