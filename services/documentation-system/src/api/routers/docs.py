@@ -194,6 +194,29 @@ def list_docs(
     )
 
 
+@router.post("/source-access/refresh-runs/{run_id}")
+def acquire_source_refresh_run(
+    run_id: UUID,
+    storage: StorageAdapter = Depends(get_storage),
+    actor: str = Depends(get_actor),
+    _: AuthedKey = Depends(require_scope("docs:write")),
+) -> dict[str, UUID]:
+    if not storage.acquire_source_refresh_run(run_id, actor=actor):
+        raise HTTPException(status_code=409, detail="source refresh run already active")
+    return {"run_id": run_id}
+
+
+@router.delete("/source-access/refresh-runs/{run_id}")
+def release_source_refresh_run(
+    run_id: UUID,
+    storage: StorageAdapter = Depends(get_storage),
+    _: AuthedKey = Depends(require_scope("docs:write")),
+) -> dict[str, UUID]:
+    if not storage.release_source_refresh_run(run_id):
+        raise HTTPException(status_code=409, detail="source refresh run owner does not match")
+    return {"run_id": run_id}
+
+
 @router.post("/source-access/refresh-due", response_model=SourceAccessRefreshResult)
 def refresh_due_source_access(
     limit: int = Query(default=10, ge=1, le=100),

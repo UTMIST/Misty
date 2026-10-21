@@ -166,6 +166,9 @@ Migration history:
   Drain that endpoint once per environment to refresh existing chunks; this spends
   embedding budget. The migration itself makes no provider calls. Downgrading to `009`
   removes only the title fingerprint and preserves vectors, text, and citation offsets.
+- **`011_source_refresh_run`** — adds the singleton refresh-runner guard. Apply before
+  starting the new runner; stop runners before downgrading. See the
+  [refresh recovery procedure](#recovery-credential-rotation-and-disablerollback).
 
 Downgrading `008` removes the chunk table/index, preserving catalog records and full
 content. The database-level `vector` extension remains installed, even if `008`
@@ -498,11 +501,12 @@ POST may still finish in the API; the runner never immediately retries it. Faile
 document attempts are recorded by the API and become due again after the configured
 refresh interval. Per-document failures do not stop draining other batches.
 
-Output contains only aggregate counts and sanitized errors. Exit `0` means a short
-batch was observed and no refresh/index failures occurred; `1` means the queue was
-drained with failures; `2` means configuration/auth/HTTP/response failure or an exhausted
-budget. An unacknowledged monitor ping also exits `2`; `drained` still records whether
-the API work completed. Previously completed batch counts remain in the
+Output contains aggregate counts, nonsecret run UUIDs and sanitized errors. Exit `0`
+means a short batch was observed and no refresh/index failures occurred; `1` means
+the queue was drained with failures; `2` means configuration/auth/HTTP/response
+failure, an exhausted budget, or a conflicting runner. An unacknowledged monitor
+ping also exits `2`; `drained` still records whether the API work completed.
+Previously completed batch counts remain in the
 summary after an HTTP failure. `index_failed` requires the normal `POST /docs/index`
 recovery workflow and its separately scoped key; the refresh runner does not re-index
 repeatedly. Alert on either nonzero exit and on no completed run for 24 hours.
@@ -516,6 +520,8 @@ Misty. Use repository `UTMIST/Misty`, branch `staging`, repository-root build co
 and config path `/services/documentation-system/railway.source-refresh.json`.
 Record and compare the deployed commit SHA of the API and runner; a matching branch
 name alone is insufficient. Enable wait-for-CI and use the API's watch paths.
+The API must apply migration `011` before starting the new runner; the cron still
+has no database credentials and does not run migrations.
 
 The config reuses the API Dockerfile, clears migrations and HTTP healthchecks,
 sets one replica and restart policy `NEVER`, and runs
@@ -536,8 +542,14 @@ aggregate summary, deployment/run IDs, timestamps and matching revision.
 
 [Railway skips a cron invocation while its previous execution is active](https://docs.railway.com/cron-jobs#service-execution-requirements).
 That does not serialize a second cron service, a manual HTTP caller, or a rollout.
-Keep one service and one region, check no run is active before manual execution
-or deployment, and never launch a second runner to clear a stuck first one.
+The runner also acquires a shared database guard through
+`POST /docs/source-access/refresh-runs/{run_id}` before its first heartbeat.
+Only one runner can enter, including across containers or API restarts. A duplicate
+gets `409`, exits `2`, and sends `/fail` without sending `/start` or success.
+Keep one service and one region. Use the CLI for manual execution; a raw HTTP
+batch caller must follow the [same guard protocol](API.md#source-refresh-runner-guard).
+Never launch an older runner that lacks the guard or use a second runner to clear
+a stuck first one. One heartbeat check must correspond to exactly one catalog database.
 
 ### Failure and missed-run alerts
 
@@ -557,13 +569,17 @@ Use two independent signals, routed to the same operations destination:
    notification integration. Store its base HTTPS ping URL as the secret
    `SOURCE_REFRESH_MONITOR_URL`. The runner sends empty `POST` pings to `/start`,
    the base URL for a clean drain, or `/fail` for an incomplete/failed run, with a
-   per-run UUID. It sends no catalog key, counts, document content or source URL
-   to the monitor. The check detects a missing finish, a missed invocation, or a
+   per-run UUID. UUIDs correlate durations; [Healthchecks only times the most
+   recently started run](https://healthchecks.io/docs/measuring_script_run_time/#alerting-logic-when-using-run-ids),
+   so the database guard supplies overlap protection. It sends no catalog key,
+   counts, document content or source URL to the monitor. The check detects a
+   missing finish, a missed invocation, or a
    process killed before it can report; its alert fires before 24 hours without
    a clean completed run. See the [ping API](https://healthchecks.io/docs/http_api/).
 
-A start without completion for 55 minutes is a stuck-run incident, including the
-risk of skipped/overlapping jobs. The 3000-second budget is not a hard deadline:
+A start without completion for 55 minutes is a stuck-run incident. A second runner
+is rejected and reports failure immediately, so it cannot hide that incident with
+a later start or success. The 3000-second budget is not a hard deadline:
 HTTP phase timeouts can extend it. Investigate before stopping a run; terminating
 the client does not cancel the API request. Compare run/deployment history and
 remove duplicate scheduling before resuming. Test missed-run alerts on a disposable
@@ -584,8 +600,29 @@ No destination is installed by this repository change.
 
 ### Recovery, credential rotation and disable/rollback
 
+The guard remains held through the final acknowledged heartbeat. A completed drain
+(including counted document/index failures) releases it; a crash, incomplete drain,
+API error or uncertain heartbeat leaves it held for inspection. It has no automatic
+expiry because a timed-out request can still be doing work in the API. If admission
+or release times out, inspect ownership: the request may have committed.
+
+To recover a stranded guard, stop the old runner and confirm all its API requests
+and monitor deliveries have finished or failed. Find its UUID in `event=acquire`
+or `event=start` logs; if admission was ambiguous, the API database's
+`source_refresh_run` row records the current `run_id`, `started_at` and attested
+`created_by`. Then use an authorized `docs:write` key to call
+`DELETE /docs/source-access/refresh-runs/{run_id}` for that exact owner. Expect
+`200`; a `409` means ownership differs or is already absent, so inspect again.
+Do not delete an arbitrary current owner, expire it based on age, or suppress the
+failure alert. Resume one runner and observe its complete run and recovery signal.
+
+Migration `011` is reversible (`upgrade head` → `downgrade -1` → `upgrade head`),
+but dropping its table removes coordination. Disable and drain every runner before
+an API schema rollback; ordinary cron disablement does not require a DB downgrade.
+
 | Symptom | Operator action |
 |---|---|
+| Admission `409` / overlapping runner | Inspect the existing owner and duplicate schedules. The rejected runner has sent `/fail` without replacing the original heartbeat start. Do not release a live owner; use the recovery procedure above only after quiescence. |
 | `exit_code=2`, API connection/HTTP failure | Restore the API/network/key. Retain confirmed counts. For a timed-out POST, inspect the API's sanitized audit log and wait until the request is known to have finished before starting another run; never immediately replay it. |
 | `drained=true`, `failed>0` | Inspect sanitized API/connector/directory status. Failed documents retain their previous grants until expiry and wait for the next eligibility window; successful/later documents still advance. After restoring the dependency, let the next eligible refresh run or use the documented operator refetch flow. |
 | `index_failed>0` | Restore the llm/index dependency, then use a separate `docs:index` key with `POST /docs/index`, paging `after: next_after` until null. Verify no failed results and a subsequent empty stale-only pass. Refresh alone will not retry a now-fresh document's index. |
@@ -620,7 +657,7 @@ Record sanitized evidence in the issue or this table before the release go/no-go
 
 | Evidence | Status / required record |
 |---|---|
-| Review / publication | Pending PR URL, approval and merged staging SHA. |
+| Review / publication | [PR #294](https://github.com/UTMIST/Misty/pull/294) targets staging; approval and merged staging SHA remain pending. |
 | Staging resource | No cron provisioned during implementation; record service/environment IDs and identical API/runner deployment SHAs. |
 | Alert ownership | Pending named responsible operator and backup. |
 | Alert destination | Existing Discord webhook `9af3f11e-b6b9-4ffa-beb5-29b1ac18791d` verified with `Deployment.failed`, `Deployment.crashed`, and `Deployment.oom_killed`; previews excluded, existing volume/monitor alerts preserved. Healthchecks integration `Misty staging refresh - Discord` is assigned to the refresh check and sends JSON POSTs to the same destination on down/up events, with mentions disabled; the existing email integration is retained. Channel name and delivery tests remain pending; never paste secret URLs. |
@@ -629,6 +666,7 @@ Record sanitized evidence in the issue or this table before the release go/no-go
 | Multi-batch + partial failure | Offline runner/API test exercises three documents across batches with one refresh failure and one index failure; record controlled staging evidence separately. |
 | Content/access + recovery | Offline test checks updated content/grants, preservation on transient failure, separate indexing recovery and next-eligible refresh. Staging proof must use approved synthetic documents and access assertions; record outcomes without content/URLs. |
 | API unavailable / ambiguous timeout | Offline transport tests verify exit `2`, preserved progress and no POST retry; record a controlled staging outage/recovery without disrupting shared services. |
+| Overlap / stranded guard | Offline real-API tests prove a second runner cannot send start/success or release the owner; Postgres tests cover concurrent admission through separate connections. Record controlled staging overlap, exit/alert and explicit recovery evidence. |
 | Alert delivery + silence | Pending observed nonzero-exit webhook, stuck/missed-run alert and recovery notification at the chosen destination. |
 | Production | Not authorized by #292. |
 

@@ -1,7 +1,7 @@
 """External, bounded HTTP runner for the source-access refresh schedule.
 
 Like doc-backfill, this client needs only DOCS_BASE_URL and DOCS_API_KEY;
-database and provider credentials stay in the API. Output contains counts only.
+database and provider credentials stay in the API. Output contains counts and run IDs.
 """
 
 import argparse
@@ -109,6 +109,17 @@ class DocsApiClient:
         ):
             raise RefreshError("refresh endpoint returned inconsistent counts")
         return batch
+
+    def acquire_run(self, run_id: str) -> None:
+        self._run_guard_request("POST", run_id)
+
+    def release_run(self, run_id: str) -> None:
+        self._run_guard_request("DELETE", run_id)
+
+    def _run_guard_request(self, method: str, run_id: str) -> None:
+        body = self._request(method, f"/docs/source-access/refresh-runs/{run_id}", timeout=10)
+        if not isinstance(body, dict) or body.get("run_id") != run_id:
+            raise RefreshError("run guard returned an invalid acknowledgement")
 
 
 class RunMonitor:
@@ -222,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     report = Report()
     monitor_failed = False
+    guard_acquired = False
     try:
         # Separate clients keep catalog headers and cookies away from the monitor.
         with httpx.Client() as http, httpx.Client() as monitor_http:
@@ -231,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
                 if monitor_url.get_secret_value()
                 else None
             )
+            run_id = monitor.run_id if monitor else str(uuid4())
             try:
                 _validate_limits(args.batch_size, args.max_batches, args.timeout, args.max_seconds)
                 api_key = SecretStr(os.environ.get("DOCS_API_KEY", ""))
@@ -245,7 +258,13 @@ def main(argv: list[str] | None = None) -> int:
                 if args.require_monitor and monitor is None:
                     raise RefreshError("SOURCE_REFRESH_MONITOR_URL is required for scheduled runs")
                 client = DocsApiClient(base_url=args.base_url, api_key=api_key, client=http)
-                print("source_refresh event=start", flush=True)
+                client.check_scope(timeout=min(args.timeout, args.max_seconds))
+                # Log the ID before admission: even a lost acquire response can
+                # leave an owner that an operator must identify for recovery.
+                print(f"source_refresh event=acquire run_id={run_id}", flush=True)
+                client.acquire_run(run_id)
+                guard_acquired = True
+                print(f"source_refresh event=start run_id={run_id}", flush=True)
                 if monitor:
                     monitor_failed = not monitor.ping("start")
                 report = run_refresh(
@@ -260,6 +279,16 @@ def main(argv: list[str] | None = None) -> int:
             if monitor:
                 event = "success" if report.exit_code == 0 and not monitor_failed else "fail"
                 monitor_failed = not monitor.ping(event) or monitor_failed
+            # Keep ownership through the final ping so a delayed success cannot
+            # mask a new run. Uncertain API/monitor outcomes require inspection;
+            # never expire or release them automatically, including on crashes.
+            if guard_acquired and not report.error and not monitor_failed:
+                try:
+                    client.release_run(run_id)
+                except RefreshError as exc:
+                    report.error = str(exc)
+                    if monitor:
+                        monitor_failed = not monitor.ping("fail")
     except RefreshError as exc:
         report.error = str(exc)
     if monitor_failed:

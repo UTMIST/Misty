@@ -211,6 +211,17 @@ process failures and missing runs; monitoring failure does not undo or replay AP
 work. Deployment, recovery and monitoring setup live in the
 [refresh runbook](DEPLOYMENT.md#source-access-refresh-schedule).
 
+Before its first heartbeat, the runner acquires the database's singleton
+`source_refresh_run` row through authenticated HTTP. The guard covers the whole
+drain and final heartbeat, across containers and API restarts. A conflicting
+runner exits nonzero and sends only `/fail`; it cannot replace the active start
+or send a misleading success. Run IDs alone only correlate Healthchecks durations.
+The guard has no TTL: after a crash or uncertain completion, admitting a new run
+could overlap work still running in the API. An operator must confirm quiescence
+before releasing that exact ID. The bounded refresh endpoint remains independently
+callable; direct API clients must use the same guard protocol for an entire drain.
+Each catalog database must have its own heartbeat check.
+
 Visibility keeps two team sets in the actor context: ordinary active directory memberships
 for manual grants, and separately confirmed synchronized Google memberships for
 source-derived team grants. This prevents a newly added directory member from inheriting a

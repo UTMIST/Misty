@@ -42,6 +42,9 @@ def api(responses, *, scopes=None):
             return httpx.Response(
                 200, json={"scopes": ["docs:write"] if scopes is None else scopes}
             )
+        if request.url.path.startswith("/docs/source-access/refresh-runs/"):
+            assert request.method in {"POST", "DELETE"}
+            return httpx.Response(200, json={"run_id": request.url.path.rsplit("/", 1)[1]})
         assert request.method == "POST"
         assert request.url.path == "/docs/source-access/refresh-due"
         result = next(replies)
@@ -381,7 +384,8 @@ def test_monitor_outage_never_replays_refresh_or_reports_success(monkeypatch, ca
     with api([counts()]) as (client, requests):
         monkeypatch.setattr(source_refresh, "DocsApiClient", lambda **kw: client)
         assert main([]) == 2
-    assert len(requests) == 2  # One preflight and one POST, even when final ping fails.
+    assert sum(r.url.path == source_refresh.REFRESH_PATH for r in requests) == 1
+    assert all(r.method != "DELETE" for r in requests)  # Delivery is uncertain; retain ownership.
     assert events == ["start", "fail" if fail_event == "start" else "success"]
     assert "monitor_failed=true" in capsys.readouterr().out
 
@@ -428,3 +432,126 @@ def test_railway_config_only_schedules_staging_and_never_runs_preview_jobs():
         assert deploy["healthcheckPath"] is None
         assert deploy["restartPolicyType"] == "NEVER"
         assert deploy["numReplicas"] == 1
+
+
+@pytest.mark.parametrize("blocked_event", ["start", "success"])
+def test_overlapping_runner_cannot_mask_or_release_a_stuck_run(monkeypatch, blocked_event):
+    """A second process must fail before replacing the first heartbeat's start."""
+    from fastapi.testclient import TestClient
+
+    from src.api.app import create_app
+    from src.api.deps import get_storage
+    from src.storage.in_memory import InMemoryStorageAdapter
+    from tests.conftest import build_seed_sources
+    from tests.test_api_indexing import _key
+
+    monkeypatch.setenv("API_KEY", "test-key")
+    monkeypatch.setenv("SOURCE_REFRESH_MONITOR_URL", "https://monitor.test/private-token")
+    store = InMemoryStorageAdapter(seed_sources=build_seed_sources())
+    headers = _key(store, "docs:write")
+    token = headers["X-API-Key"]
+    monkeypatch.setenv("DOCS_API_KEY", token)
+    app = create_app()
+    app.dependency_overrides[get_storage] = lambda: store
+    events = []
+    duplicate_exits = []
+
+    def ping(self, event):
+        events.append((self.run_id, event))
+        if event == blocked_event and not duplicate_exits:
+            duplicate_exits.append(main([]))
+            # The owning process dies after its start, without cleanup.
+            raise RuntimeError("simulated process death")
+        return True
+
+    monkeypatch.setattr(RunMonitor, "ping", ping)
+    with TestClient(app) as http:
+        monkeypatch.setattr(
+            source_refresh,
+            "DocsApiClient",
+            lambda **kw: DocsApiClient(
+                base_url="http://testserver", api_key=SecretStr(token), client=http
+            ),
+        )
+        with pytest.raises(RuntimeError, match="simulated process death"):
+            main([])
+        assert duplicate_exits == [2]
+        owner_events = ["start"] if blocked_event == "start" else ["start", "success"]
+        assert [event for _, event in events] == owner_events + ["fail"]
+        assert main([]) == 2  # Process death must not free the shared guard.
+        assert [event for _, event in events] == owner_events + ["fail", "fail"]
+        owner = events[0][0]
+        loser = events[-1][0]
+        path = "/docs/source-access/refresh-runs/"
+        assert http.delete(path + loser, headers=headers).status_code == 409
+        # An operator releases only the recorded owner, after stopping its work.
+        assert http.delete(path + owner, headers=headers).status_code == 200
+        assert main([]) == 0
+        assert [event for _, event in events][-2:] == ["start", "success"]
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["acquire_timeout", "acquire_ack", "api_timeout", "start", "success", "release_timeout"],
+)
+def test_uncertain_completion_retains_guard_until_operator_recovery(monkeypatch, fault):
+    from fastapi.testclient import TestClient
+
+    from src.api.app import create_app
+    from src.api.deps import get_storage
+    from src.storage.in_memory import InMemoryStorageAdapter
+    from tests.conftest import build_seed_sources
+    from tests.test_api_indexing import _key
+
+    store = InMemoryStorageAdapter(seed_sources=build_seed_sources())
+    headers = _key(store, "docs:write")
+    token = headers["X-API-Key"]
+    monkeypatch.setenv("DOCS_API_KEY", token)
+    monkeypatch.setenv("SOURCE_REFRESH_MONITOR_URL", "https://monitor.test/private-token")
+    app = create_app()
+    app.dependency_overrides[get_storage] = lambda: store
+    events = []
+
+    def ping(self, event):
+        events.append((self.run_id, event))
+        return event != fault
+
+    monkeypatch.setattr(RunMonitor, "ping", ping)
+    with TestClient(app) as http:
+        original_request = http.request
+
+        def request(method, url, **kwargs):
+            if fault == "release_timeout" and method == "DELETE":
+                raise httpx.ReadTimeout("private request detail")
+            response = original_request(method, url, **kwargs)
+            if method == "POST" and "refresh-runs/" in url and response.status_code == 200:
+                if fault == "acquire_timeout":
+                    raise httpx.ReadTimeout("private response detail")
+                if fault == "acquire_ack":
+                    return httpx.Response(200, json={"run_id": "invalid acknowledgement"})
+            if fault == "api_timeout" and source_refresh.REFRESH_PATH in url:
+                raise httpx.ReadTimeout("private response detail")
+            return response
+
+        monkeypatch.setattr(http, "request", request)
+        monkeypatch.setattr(
+            source_refresh,
+            "DocsApiClient",
+            lambda **kw: DocsApiClient(
+                base_url="http://testserver", api_key=SecretStr(token), client=http
+            ),
+        )
+        assert main([]) == 2
+        owner = events[0][0]
+        assert events[-1][1] == ("success" if fault == "success" else "fail")
+        boundary = len(events)
+        assert main([]) == 2
+        assert [event for _, event in events[boundary:]] == ["fail"]
+        # Recovery after inspection allows the next run, including after ping failure.
+        monkeypatch.setattr(http, "request", original_request)
+        assert (
+            http.delete(f"/docs/source-access/refresh-runs/{owner}", headers=headers).status_code
+            == 200
+        )
+        monkeypatch.setattr(RunMonitor, "ping", lambda self, event: True)
+        assert main([]) == 0

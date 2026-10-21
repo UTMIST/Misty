@@ -113,7 +113,9 @@ from an external scheduler. It drains the existing refresh endpoint in bounded
 batches, checks `docs:write` before starting, and exits nonzero on document/index
 failures or an incomplete run. It discovers no new documents. See the
 [refresh schedule](docs/DEPLOYMENT.md#source-access-refresh-schedule) for limits,
-exit codes, and the separate Railway cron config.
+exit codes, and the separate Railway cron config. Migration `011` adds the shared
+runner guard: overlapping runners fail before sending a start heartbeat. A crashed
+or incomplete run requires the documented operator recovery before another run.
 
 | CLI environment variable | Default | Purpose |
 |---|---|---|
@@ -182,7 +184,8 @@ documentation-system/
 │       ├── 007_source_document_access.py  Source grant provenance, expiry, sync time
 │       ├── 008_doc_chunks.py      pgvector embeddings and generated keyword metadata
 │       ├── 009_remove_retired_source.py  Retires a source while preserving its documents
-│       └── 010_chunk_title_hash.py  Embedding title provenance and stale-index detection
+│       ├── 010_chunk_title_hash.py  Embedding title provenance and stale-index detection
+│       └── 011_source_refresh_run.py  Persistent singleton runner guard
 │
 ├── tests/                      Fast suite plus gated Postgres integration tests
 │   ├── conftest.py              build_seed_sources() — shared seed matching migration 002
@@ -203,6 +206,7 @@ documentation-system/
 │   ├── test_migration_008.py     pgvector migration, constraints, and round trip
 │   ├── test_migration_009.py     Retired-source cleanup and registry rollback
 │   ├── test_migration_010.py     Title provenance migration and preservation of existing chunks
+│   ├── test_migration_011.py     Runner guard migration and catalog preservation
 │   ├── test_ingest.py
 │   ├── test_postgres_adapter.py   Integration tests (requires running Postgres; gated)
 │   ├── test_protocols.py

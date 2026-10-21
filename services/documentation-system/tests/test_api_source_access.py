@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -87,6 +87,29 @@ def ctx(monkeypatch):
     obo = {"X-API-Key": plaintext, "X-On-Behalf-Of": str(P1)}
     with TestClient(app) as client:
         yield client, store, fetchers, obo
+
+
+def test_source_refresh_guard_http_contract(ctx):
+    from tests.test_api_indexing import _key
+
+    client, store, fetchers, _ = ctx
+    writer = _key(store, "docs:write")
+    reader = _key(store, "docs:read")
+    path = f"/docs/source-access/refresh-runs/{uuid4()}"
+    other = f"/docs/source-access/refresh-runs/{uuid4()}"
+    for method in [client.post, client.delete]:
+        assert method(path).status_code == 401
+        assert method(path, headers=reader).status_code == 403
+        assert method("/docs/source-access/refresh-runs/invalid", headers=writer).status_code == 422
+    assert client.post(path, headers=writer).status_code == 200
+    assert client.post(path, headers=writer).status_code == 409
+    assert client.post(other, headers=writer).status_code == 409
+    assert client.delete(other, headers=writer).status_code == 409
+    assert client.delete(path, headers=writer).status_code == 200
+    assert client.delete(path, headers=writer).status_code == 409
+    assert client.post(other, headers=writer).status_code == 200
+    assert client.delete(other, headers=writer).status_code == 200
+    assert fetchers.calls == []
 
 
 @pytest.mark.parametrize("owner_field", ["owning_person_id", "owning_team_id"])

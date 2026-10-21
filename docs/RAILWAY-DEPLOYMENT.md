@@ -250,7 +250,9 @@ manually (`team-tracking-keys revoke <id>`).
 The dedicated staging `doc-source-refresh` cron uses
 `/services/documentation-system/railway.source-refresh.json` and the same deployed
 revision as documentation-system. It calls the bounded refresh endpoint hourly with
-its own `docs:write` key, without database or Google credentials. Set `DOCS_BASE_URL`,
+its own `docs:write` key, without database or Google credentials. Apply API migration
+`011` first: the runner acquires a persistent guard through HTTP before heartbeats,
+so a duplicate cannot mask a stuck run. Set `DOCS_BASE_URL`,
 `DOCS_API_KEY`, and the secret `SOURCE_REFRESH_MONITOR_URL` on that service only.
 The config disables migrations, HTTP healthchecks, failure restarts, and PR-preview
 schedules; production remains disabled. Review/merge precedes deployment, and manual

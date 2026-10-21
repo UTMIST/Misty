@@ -28,6 +28,18 @@ class StorageAdapter(Protocol):
     """Stable contract between the service and persistence. Concrete adapters
     (Postgres, in-memory) implement these with identical semantics."""
 
+    def acquire_source_refresh_run(self, run_id: UUID, *, actor: str) -> bool:
+        """Atomically claim the single runner slot; False if occupied, even by run_id.
+
+        Ownership has no expiry: process death or ambiguous HTTP completion must
+        not admit another runner. Release explicitly after confirming work stopped.
+        """
+        ...
+
+    def release_source_refresh_run(self, run_id: UUID) -> bool:
+        """Release only a matching owner; False leaves the current owner unchanged."""
+        ...
+
     def is_ready(self) -> bool:
         """Return whether the backing store can answer a trivial query."""
         ...

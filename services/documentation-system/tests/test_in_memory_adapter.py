@@ -38,6 +38,12 @@ def store():
     return InMemoryStorageAdapter(seed_sources=_sources())
 
 
+def test_source_refresh_guard(store):
+    from tests.source_refresh_guard_cases import assert_refresh_guard
+
+    assert_refresh_guard(store, store)
+
+
 def _mk(store, url="https://x.com", tags=None):
     return store.create_doc(
         url=url,

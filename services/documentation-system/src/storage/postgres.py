@@ -45,6 +45,7 @@ from src.storage.schema import (
     doc_grants,
     doc_tags,
     docs,
+    source_refresh_run,
     sources,
 )
 
@@ -91,6 +92,29 @@ class PostgresStorageAdapter:
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+
+    def acquire_source_refresh_run(self, run_id: UUID, *, actor: str) -> bool:
+        with self._engine.begin() as conn:
+            return (
+                conn.execute(
+                    pg_insert(source_refresh_run)
+                    .values(singleton=True, run_id=run_id, created_by=actor)
+                    .on_conflict_do_nothing()
+                    .returning(source_refresh_run.c.run_id)
+                ).scalar_one_or_none()
+                is not None
+            )
+
+    def release_source_refresh_run(self, run_id: UUID) -> bool:
+        with self._engine.begin() as conn:
+            return (
+                conn.execute(
+                    delete(source_refresh_run)
+                    .where(source_refresh_run.c.run_id == run_id)
+                    .returning(source_refresh_run.c.run_id)
+                ).scalar_one_or_none()
+                is not None
+            )
 
     def is_ready(self) -> bool:
         try:
