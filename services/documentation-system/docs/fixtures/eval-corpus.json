@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "_comment": [
+    "The #178 retrieval-evaluation corpus: a fixed set of documents whose only job is",
+    "to be chunked and searched the same way every run. Document text lives in",
+    "eval-corpus/, one Markdown file each -- see eval-corpus/README.md for why none of",
+    "it is copied from a real document.",
+    "",
+    "Grants decide who can retrieve what, and retrieval filters before it ranks, so the",
+    "spread here is deliberate: alice (finance) and bob (exec) see overlapping but",
+    "different subsets, the channel sees only team-granted documents, and the transition",
+    "report is granted to one person so no channel can reach it."
+  ],
+  "contexts": {
+    "alice": {
+      "kind": "person",
+      "person_id": "11111111-1111-1111-1111-111111111111",
+      "team_ids": ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]
+    },
+    "bob": {
+      "kind": "person",
+      "person_id": "22222222-2222-2222-2222-222222222222",
+      "team_ids": ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"]
+    },
+    "members": {
+      "kind": "channel",
+      "source_team_ids": ["bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"]
+    }
+  },
+  "documents": [
+    {
+      "key": "cpsif-finance-guide",
+      "title": "CPSIF funding guide",
+      "url": "https://docs.example.test/cpsif-funding-guide",
+      "source_id": "gdocs",
+      "text_file": "eval-corpus/cpsif-finance-guide.md",
+      "grants": [["team", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "google_drive"]]
+    },
+    {
+      "key": "mlf-funding-policy",
+      "title": "MLF funding policy",
+      "url": "https://docs.example.test/mlf-funding-policy",
+      "source_id": "gdocs",
+      "text_file": "eval-corpus/mlf-funding-policy.md",
+      "grants": [["team", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "google_drive"]]
+    },
+    {
+      "key": "cucai-logistics",
+      "title": "CUCAI 2027 logistics",
+      "url": "https://docs.example.test/cucai-2027-logistics",
+      "source_id": "gdocs",
+      "text_file": "eval-corpus/cucai-logistics.md",
+      "grants": [
+        ["team", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "google_drive"],
+        ["team", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "google_drive"]
+      ]
+    },
+    {
+      "key": "ai2-sponsorship",
+      "title": "AI² sponsorship package",
+      "url": "https://docs.example.test/ai2-sponsorship",
+      "source_id": "gdocs",
+      "text_file": "eval-corpus/ai2-sponsorship.md",
+      "grants": [["team", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "google_drive"]]
+    },
+    {
+      "key": "ai2-vision-doc",
+      "title": "AI² tournament vision document",
+      "url": "https://docs.example.test/ai2-tournament-vision",
+      "source_id": "gdocs",
+      "text_file": "eval-corpus/ai2-vision-doc.md",
+      "grants": [["team", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "google_drive"]]
+    },
+    {
+      "key": "eigenai-infra-notes",
+      "title": "EigenAI infrastructure notes",
+      "url": "https://docs.example.test/eigenai-infrastructure-notes",
+      "source_id": "gdocs",
+      "text_file": "eval-corpus/eigenai-infra-notes.md",
+      "grants": [["team", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "google_drive"]]
+    },
+    {
+      "key": "project-developer-applications",
+      "title": "Project developer applications",
+      "url": "https://docs.example.test/project-developer-applications",
+      "source_id": "gdocs",
+      "text_file": "eval-corpus/project-developer-applications.md",
+      "grants": [
+        ["team", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "google_drive"],
+        ["team", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "google_drive"]
+      ]
+    },
+    {
+      "key": "transition-report-2026",
+      "title": "2025-2026 transition report",
+      "url": "https://docs.example.test/transition-report-2026",
+      "source_id": "gdocs",
+      "grants": [["person", "11111111-1111-1111-1111-111111111111", "google_drive"]],
+      "text_file": "eval-corpus/transition-report-2026.md"
+    }
+  ]
+}

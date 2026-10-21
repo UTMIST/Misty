@@ -1,0 +1,194 @@
+{
+  "version": 1,
+  "_comment": [
+    "The #178 answer key. Each entry names a question, the context asking it, and the",
+    "document that should come back. `rationale` says what the question is for: without",
+    "it a later reader cannot tell a boundary probe from a baseline, and the set rots.",
+    "",
+    "`expected_section` is not scored. It is there so a failure tells you whether the",
+    "right document came back on the wrong chunk, which is the first thing you want to",
+    "know. An empty `expected_doc_keys` means the correct answer is no results at all.",
+    "",
+    "`forbidden_doc_keys` names documents that must NOT come back. An authorization",
+    "question needs this rather than an empty expectation: the asker may legitimately",
+    "see other documents that match loosely, so 'returned nothing' is the wrong bar and",
+    "'never returned this one' is the real rule. A forbidden document appearing is a",
+    "leak, not a ranking miss, and should be read that way.",
+    "",
+    "The embedder is lexical (src/eval/embedding.py), so a question phrased with none of",
+    "its document's vocabulary will miss no matter how well chunking performs. Phrase",
+    "questions the way the documents do, and keep that limitation in mind when reading",
+    "any score produced here."
+  ],
+  "questions": [
+    {
+      "id": "cpsif-what-is",
+      "query": "What is CPSIF?",
+      "context": "alice",
+      "expected_doc_keys": ["cpsif-finance-guide"],
+      "expected_section": "CPSIF funding guide",
+      "rationale": "baseline: the document's own subject, stated in its opening"
+    },
+    {
+      "id": "cucai-when",
+      "query": "When is CUCAI 2027?",
+      "context": "bob",
+      "expected_doc_keys": ["cucai-logistics"],
+      "expected_section": "CUCAI 2027 logistics",
+      "rationale": "baseline: a date in the opening paragraph"
+    },
+    {
+      "id": "project-dev-deadline",
+      "query": "What is the project developer application deadline?",
+      "context": "bob",
+      "expected_doc_keys": ["project-developer-applications"],
+      "expected_section": "Timeline",
+      "rationale": "baseline: a dated answer stated plainly in an early section"
+    },
+    {
+      "id": "cpsif-contact",
+      "query": "Who do I email about CPSIF?",
+      "context": "alice",
+      "expected_doc_keys": ["cpsif-finance-guide"],
+      "expected_section": "Contact",
+      "rationale": "baseline, and docs/ARCHITECTURE.md's own example query; the answer is at the very end of a long document and the document never uses the word 'email'"
+    },
+    {
+      "id": "cpsif-claim-limit",
+      "query": "What is the reimbursement limit for a single CPSIF claim?",
+      "context": "alice",
+      "expected_doc_keys": ["cpsif-finance-guide"],
+      "expected_section": "Submitting a claim",
+      "rationale": "buried: a dollar figure after a long procedure, well past the opening"
+    },
+    {
+      "id": "mlf-unspent",
+      "query": "What happens to unspent MLF budget at year end?",
+      "context": "alice",
+      "expected_doc_keys": ["mlf-funding-policy"],
+      "expected_section": "Year end",
+      "rationale": "buried: a late clause; CPSIF states the same rule, so the wrong fund is a live competitor"
+    },
+    {
+      "id": "eigenai-approval",
+      "query": "Who approves an EigenAI compute request?",
+      "context": "bob",
+      "expected_doc_keys": ["eigenai-infra-notes"],
+      "expected_section": "(unheaded, third paragraph)",
+      "rationale": "buried in loosely structured prose with no headings to chunk on"
+    },
+    {
+      "id": "cpsif-claim-steps",
+      "query": "What are the steps to submit a CPSIF expense claim?",
+      "context": "alice",
+      "expected_doc_keys": ["cpsif-finance-guide"],
+      "expected_section": "Submitting a claim",
+      "rationale": "boundary-straddling: a six-step numbered procedure long enough to split"
+    },
+    {
+      "id": "mlf-eligibility",
+      "query": "What are the eligibility requirements for MLF funding?",
+      "context": "alice",
+      "expected_doc_keys": ["mlf-funding-policy"],
+      "expected_section": "Eligibility requirements",
+      "rationale": "boundary-straddling: a bulleted list plus the qualifying paragraph after it"
+    },
+    {
+      "id": "cpsif-travel-limit",
+      "query": "What is the CPSIF travel reimbursement limit per person?",
+      "context": "alice",
+      "expected_doc_keys": ["cpsif-finance-guide"],
+      "expected_section": "Travel",
+      "rationale": "boundary-straddling: a short section between two longer ones, easily absorbed"
+    },
+    {
+      "id": "mlf-acronym",
+      "query": "MLF",
+      "context": "alice",
+      "expected_doc_keys": ["mlf-funding-policy"],
+      "expected_section": "MLF funding policy",
+      "rationale": "bare acronym: exercises the keyword branch; CPSIF's guide also names MLF"
+    },
+    {
+      "id": "project-dev-assessment",
+      "query": "project developer technical assessment",
+      "context": "bob",
+      "expected_doc_keys": ["project-developer-applications"],
+      "expected_section": "Technical assessment",
+      "rationale": "exact term: a role name plus a section term, no sentence around it; the term also appears in Timeline and How to apply, so the right chunk is not the only candidate"
+    },
+    {
+      "id": "ai2-tiers",
+      "query": "AI² sponsorship tiers",
+      "context": "bob",
+      "expected_doc_keys": ["ai2-sponsorship"],
+      "expected_section": "Tiers",
+      "rationale": "competitor: ARCHITECTURE.md flags AI² / GenAI Genesis / Academic Journal Workshops as events that blur together; CUCAI's document also mentions sponsorship"
+    },
+    {
+      "id": "ai2-submission-deadline",
+      "query": "When are AI² agent submissions due?",
+      "context": "bob",
+      "expected_doc_keys": ["ai2-vision-doc"],
+      "expected_section": "1. Introduction",
+      "rationale": "baseline: a deadline stated in the opening section of a long document; the sponsorship package names the same event but holds no deadline"
+    },
+    {
+      "id": "ai2-parameter-cap",
+      "query": "What is the parameter cap for a submitted AI² agent?",
+      "context": "bob",
+      "expected_doc_keys": ["ai2-vision-doc"],
+      "expected_section": "6.4 Compute",
+      "rationale": "buried: a figure in a bulleted list deep inside a 7,600-character document, after two schedule tables"
+    },
+    {
+      "id": "ai2-finals-schedule",
+      "query": "What happens on the AI² finals day?",
+      "context": "bob",
+      "expected_doc_keys": ["ai2-vision-doc"],
+      "expected_section": "6.3 Finals day",
+      "rationale": "boundary-straddling: a schedule table of ten rows plus the paragraph introducing it, split across chunks at smaller sizes"
+    },
+    {
+      "id": "cucai-registration-fee",
+      "query": "What is the CUCAI registration fee?",
+      "context": "bob",
+      "expected_doc_keys": ["cucai-logistics"],
+      "expected_section": "Registration",
+      "rationale": "competitor: three documents carry dollar figures, only one states this fee"
+    },
+    {
+      "id": "eigenai-lead",
+      "query": "Who is the EigenAI project lead?",
+      "context": "bob",
+      "expected_doc_keys": ["eigenai-infra-notes"],
+      "expected_section": "(unheaded, third paragraph)",
+      "rationale": "competitor: several documents name a lead; ranking, not presence, is the test"
+    },
+    {
+      "id": "budget-authorized",
+      "query": "What is the 2026-2027 departmental budget?",
+      "context": "alice",
+      "expected_doc_keys": ["transition-report-2026"],
+      "expected_section": "Departmental budget",
+      "rationale": "authorization: alice holds the person grant and must see this"
+    },
+    {
+      "id": "budget-unauthorized",
+      "query": "What is the 2026-2027 departmental budget?",
+      "context": "members",
+      "expected_doc_keys": [],
+      "forbidden_doc_keys": ["transition-report-2026"],
+      "expected_section": null,
+      "rationale": "authorization: the same question in a channel. A person grant must never reach a channel, so the transition report is forbidden. The channel can legitimately see other team-granted documents, which is why this is a forbidden-document question and not an expect-nothing one"
+    },
+    {
+      "id": "absent-topic",
+      "query": "What is the parking policy at Bahen?",
+      "context": "alice",
+      "expected_doc_keys": [],
+      "expected_section": null,
+      "rationale": "expected-empty: plausible and genuinely absent; a set that only rewards finding things scores a system that returns everything as perfect"
+    }
+  ]
+}
