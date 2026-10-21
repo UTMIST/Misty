@@ -12,8 +12,10 @@ Plain httpx calls against the REST API — no vendor SDK. Two URL shapes:
 A ref may contain `/` (`feature/docs`), so it is resolved against the
 repository's actual branches and tags rather than guessed from the URL.
 
-File bytes are streamed in the raw media type and the read stops once
-`max_file_bytes` is passed, so an oversized file is never fully downloaded.
+Before any file bytes are fetched, a HEAD request reads the file's size
+(`Content-Length` of the raw representation) and kind; an oversized file, or
+one whose size GitHub does not report, is rejected there. The GET that
+follows is streamed with the same byte cap as a backstop.
 """
 
 import re
@@ -37,8 +39,9 @@ _HOSTS = {"github.com", "www.github.com"}
 _API_VERSION = "2022-11-28"
 _JSON = "application/vnd.github+json"
 _RAW = "application/vnd.github.raw+json"
+_SHA_MEDIA = "application/vnd.github.sha"
 # A full or abbreviated commit SHA, usable as a ref without being a branch/tag.
-_SHA = re.compile(r"[0-9a-f]{7,40}")
+_SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 
 
 def parse_github_title(url: str) -> str | None:
@@ -118,7 +121,9 @@ class GithubSource:
         """Split `segments` into `(ref, path segments)` using the refs the
         repository really has. The longest branch or tag that prefixes the
         segments wins, so `feature/docs` beats `feature` when both exist.
-        A nonexistent ref is SourceNotFound, never a fallback."""
+        Failing that, a SHA-shaped first segment is accepted once GitHub
+        confirms the commit exists. A nonexistent ref is SourceNotFound,
+        never a fallback."""
         first = segments[0]
         names: set[str] = set()
         for namespace in ("heads", "tags"):
@@ -139,7 +144,18 @@ class GithubSource:
             if candidate in names:
                 return candidate, segments[n:]
         if _SHA.fullmatch(first):
-            return first, segments[1:]
+            # GitHub answers an unknown commit with 422, not 404.
+            try:
+                with self._stream(
+                    client,
+                    f"/repos/{_seg(owner)}/{_seg(repo)}/commits/{_seg(first)}",
+                    None,
+                    accept=_SHA_MEDIA,
+                    not_found=(404, 422),
+                ):
+                    return first, segments[1:]
+            except SourceNotFound:
+                pass
         raise SourceNotFound("github ref not found")
 
     def _fetch_readme(
@@ -166,18 +182,13 @@ class GithubSource:
         return SourceResult(title=f"{owner}/{repo}/{path}", content=text[: self._max_content_chars])
 
     def _read_text(self, client: httpx.Client, endpoint: str, ref: str | None) -> str:
-        """Stream the file in the raw media type, stopping as soon as it is
-        known to exceed `max_file_bytes`, and return it decoded as text."""
+        """Size-check the file from HEAD metadata, then stream it in the raw
+        media type (capped at `max_file_bytes`) and return it as text."""
+        with self._stream(client, endpoint, ref, accept=_RAW, method="HEAD") as head:
+            self._check_file_metadata(head)
         with self._stream(client, endpoint, ref, accept=_RAW) as resp:
-            # A file comes back as the raw media type; a directory, submodule
-            # or symlink comes back as a JSON listing/object instead.
-            if not resp.headers.get("content-type", "").startswith("application/vnd.github.raw"):
-                raise SourceUnsupported("github url does not point at a file")
-            length = resp.headers.get("content-length")
-            if length is not None and length.isdigit() and int(length) > self._max_file_bytes:
-                raise SourceUnsupported(
-                    f"github file is {length} bytes, over the limit of {self._max_file_bytes} bytes"
-                )
+            # Re-checked: the file may have changed between the two requests.
+            self._check_file_metadata(resp, require_length=False)
             data = bytearray()
             try:
                 for chunk in resp.iter_bytes():
@@ -195,6 +206,21 @@ class GithubSource:
         except UnicodeDecodeError:
             raise SourceUnsupported("github file is not utf-8 text")
 
+    def _check_file_metadata(self, resp: httpx.Response, *, require_length: bool = True) -> None:
+        # A file comes back as the raw media type; a directory, submodule or
+        # symlink comes back as a JSON listing/object instead.
+        if not resp.headers.get("content-type", "").startswith("application/vnd.github.raw"):
+            raise SourceUnsupported("github url does not point at a file")
+        length = resp.headers.get("content-length", "")
+        if not length.isdigit():
+            if require_length:
+                raise SourceUnsupported("github did not report the file size")
+            return
+        if int(length) > self._max_file_bytes:
+            raise SourceUnsupported(
+                f"github file is {length} bytes, over the limit of {self._max_file_bytes} bytes"
+            )
+
     def _get_json(self, client: httpx.Client, endpoint: str, ref: str | None):
         with self._stream(client, endpoint, ref, accept=_JSON) as resp:
             try:
@@ -207,22 +233,37 @@ class GithubSource:
 
     @contextmanager
     def _stream(
-        self, client: httpx.Client, endpoint: str, ref: str | None, *, accept: str
+        self,
+        client: httpx.Client,
+        endpoint: str,
+        ref: str | None,
+        *,
+        accept: str,
+        method: str = "GET",
+        not_found: tuple[int, ...] = (404,),
     ) -> Iterator[httpx.Response]:
-        headers = {"Accept": accept, "X-GitHub-Api-Version": _API_VERSION}
+        # identity: Content-Length must be the file's own byte size, not a
+        # compressed transfer size.
+        headers = {
+            "Accept": accept,
+            "Accept-Encoding": "identity",
+            "X-GitHub-Api-Version": _API_VERSION,
+        }
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
         params = {"ref": ref} if ref else None
         # GitHub answers a renamed/transferred repository with a 301 to its
         # new location; follow it rather than reading the redirect body.
         request = client.build_request(
-            "GET", f"{self._api_base_url}{endpoint}", headers=headers, params=params
+            method, f"{self._api_base_url}{endpoint}", headers=headers, params=params
         )
         try:
             resp = client.send(request, stream=True, follow_redirects=True)
         except httpx.HTTPError as e:
             raise SourceUnavailable(f"github unreachable: {type(e).__name__}") from e
         try:
+            if resp.status_code in not_found:
+                raise SourceNotFound("github file not found")
             _raise_for_status(resp)
             yield resp
         finally:
@@ -239,6 +280,9 @@ def _raise_for_status(resp: httpx.Response) -> None:
         return
     if status == 404:
         raise SourceNotFound("github file not found")
+    if status == 409:
+        # The git database endpoints answer an empty repository with 409.
+        raise SourceNotFound("github repository is empty")
     # GitHub signals rate limiting as 429, or as 403 with the remaining quota
     # at zero / a retry-after — transient, so it is Unavailable, not Forbidden.
     rate_limited = status == 429 or (

@@ -42,9 +42,12 @@ class _GitHub:
         self.private = private
         self.token = token
         self.status = status  # (code, headers) forced on every request
+        self.commits: set[str] = set()  # SHAs (any case) that exist
+        self.empty = False  # an empty repository: git endpoints answer 409
         self.dirs: set[str] = set()
         self.redirects: dict[str, str] = {}  # api url -> location
-        self.content_length: dict[str, int] = {}  # declared Content-Length override
+        self.content_length: dict[str, int | None] = {}  # declared size; None omits it
+        self.get_without_length: set[str] = set()  # GET is chunked (no Content-Length)
         self.requests: list[httpx.Request] = []
         self.bytes_sent = 0
 
@@ -63,6 +66,13 @@ class _GitHub:
                 headers={"Location": self.redirects[url]},
                 json={"message": "Moved Permanently"},
             )
+        if self.empty and url.startswith((REFS_URL, f"{API}/repos/utmist/site/commits/")):
+            return httpx.Response(409, json={"message": "Git Repository is empty."})
+        if url.startswith(f"{API}/repos/utmist/site/commits/"):
+            sha = url.rsplit("/", 1)[1].lower()
+            if sha not in {c.lower() for c in self.commits}:
+                return httpx.Response(422, json={"message": f"No commit found for SHA: {sha}"})
+            return httpx.Response(200, text=sha)
         if url.startswith(REFS_URL + "/"):
             namespace, _, prefix = url.removeprefix(REFS_URL + "/").partition("/")
             names = self.branches if namespace == "heads" else self.tags
@@ -79,8 +89,14 @@ class _GitHub:
             assert request.headers["Accept"] == RAW
             data = self.files[url]
             headers = {"content-type": f"{RAW}; charset=utf-8"}
-            if url in self.content_length:
-                headers["content-length"] = str(self.content_length[url])
+            # Real GitHub reports the raw file's byte size on HEAD and GET.
+            length = self.content_length.get(url, len(data))
+            if length is not None and not (
+                request.method == "GET" and url in self.get_without_length
+            ):
+                headers["content-length"] = str(length)
+            if request.method == "HEAD":
+                return httpx.Response(200, headers=headers)
             return httpx.Response(200, headers=headers, content=self._chunks(data))
         if url in self.repos:
             return httpx.Response(200, json={"full_name": "utmist/site"})
@@ -93,7 +109,11 @@ class _GitHub:
             yield chunk
 
     def file_requests(self):
-        return [r for r in self.requests if r.headers["Accept"] == RAW]
+        """GETs of file bytes (HEAD metadata lookups excluded)."""
+        return [r for r in self.requests if r.headers["Accept"] == RAW and r.method == "GET"]
+
+    def head_requests(self):
+        return [r for r in self.requests if r.method == "HEAD"]
 
 
 def _source(fake, token="", max_file_bytes=1024, max_content_chars=10_000):
@@ -193,10 +213,35 @@ def test_nonexistent_ref_is_not_found_not_a_readme_less_repo():
 
 def test_commit_sha_is_accepted_as_ref():
     fake = _GitHub(files={README_URL: b"at sha"})
+    fake.commits.add("1a2b3c4d")
     result = _source(fake).fetch("https://github.com/utmist/site/tree/1a2b3c4d")
 
     assert result.content == "at sha"
     assert [r.url.params["ref"] for r in fake.file_requests()] == ["1a2b3c4d"]
+
+
+def test_uppercase_commit_sha_is_accepted_as_ref():
+    fake = _GitHub(files={BLOB_URL: b"x"})
+    fake.commits.add("1a2b3c4d")
+    result = _source(fake).fetch("https://github.com/utmist/site/blob/1A2B3C4D/docs/setup.py")
+    assert result.content == "x"
+
+
+def test_nonexistent_commit_sha_is_not_found_not_a_readme_less_repo():
+    # Empty matching-refs, a SHA-shaped ref GitHub has no commit for (422),
+    # and no README: the repo exists, but the ref does not.
+    fake = _GitHub(files={})
+    with pytest.raises(SourceNotFound, match="ref"):
+        _source(fake).fetch("https://github.com/utmist/site/tree/deadbeef")
+    assert fake.file_requests() == []
+    assert fake.head_requests() == []
+
+
+def test_empty_repository_ref_is_not_found():
+    fake = _GitHub(files={})
+    fake.empty = True
+    with pytest.raises(SourceNotFound, match="empty"):
+        _source(fake).fetch("https://github.com/utmist/site/tree/main")
 
 
 def test_tree_url_into_subdirectory_is_unsupported():
@@ -302,20 +347,40 @@ def test_binary_blob_is_unsupported():
         _source(fake).fetch("https://github.com/utmist/site/blob/main/docs/setup.py")
 
 
-def test_oversized_file_is_rejected_from_content_length_without_reading_body():
+def test_oversized_file_is_rejected_from_metadata_before_bytes_are_fetched():
     fake = _GitHub(files={BLOB_URL: b"x" * 5000})
-    fake.content_length[BLOB_URL] = 5000
     with pytest.raises(SourceUnsupported, match="5000 bytes"):
         _source(fake, max_file_bytes=1024).fetch(
             "https://github.com/utmist/site/blob/main/docs/setup.py"
         )
+    assert len(fake.head_requests()) == 1
+    assert fake.file_requests() == []
     assert fake.bytes_sent == 0
 
 
-def test_oversized_file_download_stops_at_the_limit():
-    # No Content-Length (e.g. chunked): the read stops one chunk past the
-    # limit instead of buffering the whole 512 KiB file.
+def test_oversized_readme_is_rejected_from_metadata_before_bytes_are_fetched():
+    fake = _GitHub(files={README_URL: b"x" * 64 * 1024})
+    with pytest.raises(SourceUnsupported, match="bytes"):
+        _source(fake, max_file_bytes=1024).fetch("https://github.com/utmist/site")
+    assert fake.file_requests() == []
+    assert fake.bytes_sent == 0
+
+
+def test_file_without_size_metadata_is_rejected_before_bytes_are_fetched():
+    fake = _GitHub(files={BLOB_URL: b"small"})
+    fake.content_length[BLOB_URL] = None
+    with pytest.raises(SourceUnsupported, match="size"):
+        _source(fake).fetch("https://github.com/utmist/site/blob/main/docs/setup.py")
+    assert fake.file_requests() == []
+    assert fake.bytes_sent == 0
+
+
+def test_file_that_grew_after_the_size_check_still_stops_at_the_limit():
+    # HEAD said 100 bytes; by the GET the file is 512 KiB and chunked. The
+    # streamed cap is the backstop, reading one chunk past the limit at most.
     fake = _GitHub(files={BLOB_URL: b"x" * 512 * 1024})
+    fake.content_length[BLOB_URL] = 100
+    fake.get_without_length.add(BLOB_URL)
     with pytest.raises(SourceUnsupported, match="limit"):
         _source(fake, max_file_bytes=1024).fetch(
             "https://github.com/utmist/site/blob/main/docs/setup.py"
@@ -323,11 +388,10 @@ def test_oversized_file_download_stops_at_the_limit():
     assert fake.bytes_sent <= 1024 + 256
 
 
-def test_oversized_readme_download_stops_at_the_limit():
-    fake = _GitHub(files={README_URL: b"x" * 64 * 1024})
-    with pytest.raises(SourceUnsupported):
-        _source(fake, max_file_bytes=1024).fetch("https://github.com/utmist/site")
-    assert fake.bytes_sent <= 1024 + 256
+def test_metadata_and_download_use_identity_encoding():
+    fake = _GitHub(files={BLOB_URL: b"x"})
+    _source(fake).fetch("https://github.com/utmist/site/blob/main/docs/setup.py")
+    assert {r.headers["Accept-Encoding"] for r in fake.requests} == {"identity"}
 
 
 def test_file_at_the_limit_is_accepted():
