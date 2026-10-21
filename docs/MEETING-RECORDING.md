@@ -6,7 +6,7 @@ Feature owner: Misty #92. Related: [platform ARCHITECTURE](ARCHITECTURE.md), [`s
 
 ## What it does
 
-A **linked** member (identity resolved via the directory — see "Authorization" below) runs `/record start` in a Discord voice channel, optionally supplying a name up to 100 characters. Before a recording is active, the first human to enter an empty voice channel receives a direct message prompting them to start one. The bot joins, and as people talk it streams their audio to the `meeting` service, which transcribes each speaker live into a rolling transcript. Recording ends on `/record stop` **or automatically when everyone leaves the voice channel** (the bot ends the meeting once no non-bot member remains). On stop the service turns the transcript into minutes (via the `llm` service), renders a PDF, and hands it back; the bot posts the **PDF** to the text channel, @-mentioning whoever started the recording. A supplied name becomes the PDF title and is sanitized into the attachment filename as `<name>_<YYYY-MM-DD_HHMM>.pdf` in America/Toronto; unnamed recordings use `meeting_<YYYY-MM-DD_HHMM>.pdf`, based on the meeting start time. Nothing is persisted — the transcript lives in memory for the meeting and is discarded after the report is returned.
+A **linked** member (identity resolved via the directory — see "Authorization" below) runs `/record start` in a Discord voice channel, optionally supplying a name up to 100 characters. Before a recording is active, the first human to enter an empty voice channel receives a direct message prompting them to start one. The bot joins, and as people talk it streams their audio to the `meeting` service, which transcribes each speaker live into a rolling transcript. Recording ends on `/record stop` **or automatically when everyone leaves the voice channel** (the bot ends the meeting once no non-bot member remains). On stop the service turns the transcript into minutes (via the `llm` service), renders a PDF, and hands it back; the bot posts the **PDF** to the text channel, @-mentioning whoever started the recording. A supplied name becomes the PDF title and is sanitized into the attachment filename as `<name>_<YYYY-MM-DD_HHMM>.pdf` in America/Toronto; unnamed recordings use `meeting_<YYYY-MM-DD_HHMM>.pdf`, based on the meeting start time. Nothing is persisted — the transcript lives in memory for the meeting and is discarded after the report is returned. *Planned (#222/#223):* save the full transcript and generated minutes in one Google Doc, catalog its URL, and post the Doc link to the originating channel. Audio is never persisted. See "Durable records" below.
 
 ## The boundary, and the one constraint that forces it
 
@@ -48,6 +48,149 @@ Discord voice  ──Opus──▶  bot recorder ──sendFrame──▶  meeti
 **Stop:** `POST /meetings/{id}/stop` closes each speaker's Transcribe stream (concurrently, so latency is one flush and not N), assembles the transcript, calls the `llm` service for minutes, renders the PDF, returns it base64-encoded, and discards the session.
 
 **Timeline correctness:** each forwarded frame carries `ts_ms` = milliseconds since the meeting started. AWS Transcribe reports word times relative to *each speaker's own* stream, and a speaker's stream carries only the frames they actually spoke — silence is never sent. So the service records an **anchor** whenever a frame arrives later than the audio already streamed accounts for, and maps word times through the nearest preceding anchor. Anchoring on the first `ts_ms` alone is not enough: it fixes only the speaker's first word, leaving cross-speaker order wrong past the opening minute and collapsing each speaker into one segment (the gap rule never sees a gap). `ts_ms` must always be sent and honored.
+
+## Durable records (design, #212)
+
+**Status: draft design — not built.** Google Docs is the agreed destination.
+#222 creates and catalogs the record; #223 delivers its existing link. Until
+those ship, the current behavior above still applies. #212 remains open until
+the integration and policy decisions listed below are settled.
+
+### Artifact, ownership, and identity
+
+**One native Google Doc per completed meeting.** Save generated minutes,
+decisions, action items, and the full transcript in separate readable sections.
+Preserve transcript speaker labels, timestamps, and order. Include the meeting
+title, channel, and start/end times. Both explicit stop and automatic stop use
+the same persistence path. Audio is never persisted or written to disk.
+
+**Google Docs and the catalog have different responsibilities.** The Doc is the
+durable, member-readable transcript and notes. `documentation-system` owns its
+catalog URL, team ownership/grants, and derived content snapshot for #125.
+Catalog-associated meeting metadata retains resolved participant identities
+(raw Discord IDs where lookup fails), channel IDs, start/end times, and
+structured decisions/action items. The metadata schema and authenticated
+hand-off are new work under #212/#222, not capabilities the current catalog
+already provides. `meeting` remains the live-session service, with no new
+meeting database of its own.
+
+The current `StopResponse` already contains `transcript` and structured
+`Minutes` fields (`summary`, `decisions`, `action_items`). Reuse them; no second
+LLM call or PDF parsing is needed. The existing Discord PDF remains supported;
+this design does not require a second PDF copy in Drive. Any future export can
+be a separate feature, rather than making PDF the stored transcript.
+
+**Identity is the session UUID, not a title or filename.** The bot already
+generates a UUID at recording start. Retain it as `meeting_id` through stop and
+every retry, with a durable mapping to the Google document ID, canonical URL
+(`https://docs.google.com/document/d/{document_id}/edit`), and catalog entity.
+Titles and folder names are presentation; two meetings in the same minute must
+still have different identities. The real Doc URL goes through normal catalog
+ingest; the UUID is never presented as a fetchable source URL.
+
+### Google writes and recovery
+
+**Writer: `connectors`.** Google API calls stay behind its injected provider
+and an authenticated write endpoint, following #60/#82. The existing Google
+connector only reads content; creating a native Doc, writing its body, and
+placing it in the configured team folder are new capabilities. Google supports
+[creating a native Doc in a folder through the Drive API](https://developers.google.com/workspace/docs/api/how-tos/documents).
+#212 must specify the caller, endpoint/consumer scope, required Google write
+scopes, and deployment configuration before implementation.
+
+**File ownership must work with UTMIST's actual Google setup.** A service account
+must create files in a Shared Drive; otherwise use OAuth on behalf of a user
+who can own them. Sharing an ordinary My Drive folder with the existing service
+account does not give it file ownership or storage quota. See Google's
+[service-account storage constraint](https://developers.google.com/workspace/drive/api/guides/about-shareddrives).
+Google Group administration (#236/#237) is separate from this authentication
+choice; it becomes a dependency when using automated team-group provisioning.
+
+**Persistence and delivery have separate outcomes.** #222 owns Doc creation,
+content, permissions, catalog registration, and recoverable partial failures.
+Serialize attempts for a meeting and retain the returned document ID before
+continuing. If a create call times out with an unknown outcome, reconcile that
+attempt before creating again; URL dedup alone cannot prevent duplicate Docs.
+Retries resume the existing artifact and do not overwrite later human edits.
+#223 posts the saved URL and retains the Discord message reference for delivery
+retries. A Discord failure never reruns transcription or creates another Doc.
+
+**The current stop contract is not a durable hand-off.** `/stop` discards the
+session before the caller can confirm an external save. #212 must define where
+the finalized payload and retry state become durable, acknowledgement/cleanup
+ordering, and the remaining crash-loss window. Until that is specified, this
+draft does not promise restart-safe recovery merely because Google Docs is
+the destination. Failed persistence must be surfaced; never announce a partial
+Doc/catalog write as complete or log transcript content.
+
+```mermaid
+flowchart LR
+  meeting[meetingService] -->|"final transcript and structured minutes"| persist["Persistence hand-off: contract pending in #212"]
+  persist -->|"create or resume one Doc"| connectors[connectorsService]
+  connectors -->|"write content with verified access"| docs[GoogleDoc]
+  connectors -->|"document ID and URL"| persist
+  persist -->|"register URL, metadata and grants"| catalog[documentationSystem]
+  catalog -->|"fetch derived content"| connectors
+  persist -->|"completed meeting and Doc reference"| bot[discordBot]
+  bot -->|"post Doc link"| channel[DiscordTextChannel]
+```
+
+The hand-off box is a contract to assign in #212, not a new service or scheduler.
+Live subtitles (#224) and current-meeting Q&A (#225) still read in-memory session
+state and do not wait for Google Docs persistence.
+
+### Visibility, retention, and removal
+
+**Effective Drive permissions and catalog grants must agree.** Resolve the
+meeting's team audience through trusted channel settings (#238) and verified
+Google access. An absent mapping grants no member access. A missing or broader
+destination is an explicit persistence failure, not a reason to use public
+link sharing. Posting a link does not grant Drive access, and the originating
+Discord channel must be appropriate for the meeting's audience.
+
+The proposed `Interdepartmental/Meeting Notes/{voiceChannelSnowflake}/` layout
+is only suitable if its effective access matches the intended team audience.
+A channel-keyed folder survives renames but is not an authorization boundary.
+Validate ancestor and Shared Drive permissions before writing private content:
+removing a child's direct shares cannot remove inherited access. Use a
+restricted parent or a supported limited-access folder, and fail closed if the
+intended effective permissions cannot be established. See Google's
+[permission propagation rules](https://developers.google.com/workspace/drive/api/guides/manage-sharing#how_permissions_propagate).
+Historical records must not be silently broadened when channel teams change;
+reconciliation must cover both Drive access and catalog grants (#76).
+
+**Consent and retention remain proposals for review.** The earlier draft proposed
+a recording-start notice with no opt-out and indefinite retention. Saving the
+full transcript makes those policy choices material: #212 must confirm the
+notice/consent behavior, lifetime, and expiry policy before rollout. Any notice
+must explicitly describe transcript and minutes storage, intended audience, and
+the removal path. Member departure revokes access through the chosen Google
+membership/grant path; it does not itself remove that person's speech.
+
+**Member removal path.** A member contacts a Misty admin with the Doc link or
+meeting ID. The admin coordinates with the Drive owner/admin and bot/catalog
+maintainers, and confirms completion only after all Misty-managed copies are
+removed or made inaccessible: the source Doc, catalog content and participant
+metadata, downstream index entries, retained retry payloads, and the bot's
+Discord PDF/link message. Keep only the minimal non-content audit/tombstone
+needed to prevent a retry or refetch from recreating a removed record. Deleting
+the Drive file alone is insufficient: failed catalog refetches preserve old
+snapshots. Copies already downloaded by members cannot be recalled; explain
+that limitation to the requester. Automated expiry/removal and its runbook need
+explicit implementation owners before rollout.
+
+### Remaining #212 decisions
+
+- Specify the metadata schema, service caller, authenticated endpoint/scope,
+  durable retry state, and finalization acknowledgement described above.
+- Confirm available Google credentials and folder IDs, which voice/text channel
+  setting defines the meeting audience, and safe behavior while managed Google
+  Groups are unavailable. Do not assume an unconfigured destination is private.
+- Decide how human edits update fetched catalog content and structured metadata,
+  including how a generation-time minutes snapshot is distinguished from later
+  edited notes. Decide handling of source deletion and access revocation.
+- Confirm consent, retention/expiry, and removal enforcement ownership. Keep
+  #222/#223 blocked on #212 until the remaining design is reviewable and accepted.
 
 ## The wire contract (keep both sides in lock-step)
 
