@@ -166,10 +166,10 @@ Two kinds of key are accepted:
 
 | Scope | Grants |
 |-------|--------|
-| `docs:read` | Read endpoints (`GET`) — but see visibility below: **alone, it returns nothing** |
+| `docs:read` | Read endpoints (`GET`, except `GET /docs/index/status`) — but see visibility below: **alone, it returns nothing** |
 | `docs:read:all` | Read endpoints, bypassing per-doc visibility (sees every doc) |
 | `docs:write` | All mutating endpoints (`POST`, `PATCH`, `DELETE`) except `POST /docs/index` |
-| `docs:index` | `POST /docs/index` — admin (re-)indexing, which spends embedding-provider budget |
+| `docs:index` | `POST /docs/index` — admin (re-)indexing, which spends embedding-provider budget — and `GET /docs/index/status` |
 | `admin` | Wildcard — satisfies any scope check |
 
 A request with a valid key but the wrong scope is rejected with **403 Forbidden**
@@ -237,6 +237,7 @@ lacking a read scope is `403`. Neither falls through to `SEE_ALL`.
 | `POST` | `/docs/{id}/refetch` | `docs:write` | Re-run the content fetch |
 | `POST` | `/docs/source-access/refresh-due` | `docs:write` | Refresh due Google ACLs/content in a bounded batch |
 | `POST` | `/docs/index` | `docs:index` | (Re-)index stored content for retrieval; retry path |
+| `GET` | `/docs/index/status` | `docs:index` | Chunk coverage per embedding model; re-embed progress |
 | `GET` | `/sources` | `docs:read` | List source kinds |
 | `GET` | `/sources/{id}` | `docs:read` | Get one source |
 | `GET` | `/api-keys/self` | *(any valid key)* | The calling key's own name and scopes |
@@ -620,16 +621,19 @@ not expire. Ownership never authorizes access. `MAX_AGE` must be greater than `R
 
 Scope: `docs:index` (or `admin`). Builds each doc's search index from its **stored**
 `doc_content` — it never fetches. A doc's text is split by the chunker, embedded through the
-llm service's `/embed`, and its whole chunk set is replaced in one transaction. Ingest,
+llm service's `/embed`, and its whole chunk set is replaced in one transaction. Each
+embedding model has its own set: the one search serves (`SEARCH_EMBED_MODEL`) and,
+during a re-embed, the target's (`EMBED_MODEL`). Ingest,
 refetch, scheduled refresh, and `PATCH active` or `PATCH title` run the same step inline; this endpoint is
-the retry path for their failures and the entry point for re-embedding after a model
-change (#209). Synchronous and bounded.
+the retry path for their failures and the driver for
+[re-embedding after a model change](DEPLOYMENT.md#re-embedding-after-a-model-change-209).
+Synchronous and bounded.
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
 | `doc_ids` | UUID[] \| null | null | 1–100 docs to index. Every id must exist (else **404** before any work) |
-| `stale_only` | bool | `true` | Listing mode (no `doc_ids`): only docs whose chunks are missing, built from older body/title context, lack title provenance, or should not exist (retired or no content). `false` lists every doc with content |
-| `force` | bool | `false` | Re-embed even when the content is unchanged (e.g. a new embedding model) |
+| `stale_only` | bool | `true` | Listing mode (no `doc_ids`): only docs that lack a set for the served or target model, hold one built from older body/title context or without title provenance, hold a set for any other model, or should not have chunks (retired or no content). `false` lists every doc with content |
+| `force` | bool | `false` | Re-embed even when a set's content and title are unchanged. Not needed for a model change: a missing target set is already stale |
 | `after` | UUID \| null | null | Listing-mode cursor: the previous response's `next_after`. Not allowed with `doc_ids` |
 | `limit` | int | 25 | 1–100 docs per call in listing mode |
 
@@ -641,7 +645,7 @@ The response counts each doc's outcome and lists them:
   "results": [
     {"doc_id": "…", "status": "indexed", "chunk_count": 7, "detail": null},
     {"doc_id": "…", "status": "failed", "chunk_count": 0,
-     "detail": "embedding service unavailable: llm service returned 503"}
+     "detail": "embedding service unavailable for text-embedding-3-small: llm service returned 503"}
   ],
   "next_after": null
 }
@@ -649,11 +653,11 @@ The response counts each doc's outcome and lists them:
 
 | `status` | Meaning |
 |----------|---------|
-| `indexed` | A new chunk set replaced the old one |
-| `unchanged` | Chunks already match the stored content and title; no embedding call, no write (unless `force`) |
+| `indexed` | A new chunk set replaced the old one (for at least one model) |
+| `unchanged` | Every model's chunks already match the stored content and title; no embedding call (unless `force`). Sets for models no longer served or targeted are still deleted |
 | `cleared` | The doc is retired, missing, or has no indexable text; its chunks were removed |
 | `skipped` | The content or title changed while embedding; nothing written (the newer write re-indexes) |
-| `failed` | Embedding or storage failed; nothing written, the previous chunk set is intact |
+| `failed` | Embedding or storage failed for a model (named in `detail`); that model's previous set is intact. The served set is written first, so a failing re-embed target leaves it current |
 
 To drain, repeat with `after: next_after` until `next_after` is null. A failing doc is
 reported and passed over rather than blocking the batch. Reindexing never creates
@@ -665,6 +669,37 @@ duplicates, and a shorter text never leaves chunks from the longer one behind.
 | **404 Not Found** | A `doc_ids` entry does not exist (nothing was indexed) |
 | **401 / 403** | Auth failure / missing `docs:index` — checked before any provider call |
 | **422** | Malformed body — also rejected before any provider call |
+
+## `GET /docs/index/status` — chunk coverage per embedding model
+
+Scope: `docs:index` (or `admin`). Read-only: no provider call. Reports how far a
+[re-embed](DEPLOYMENT.md#re-embedding-after-a-model-change-209) has progressed and whether
+any doc has dropped out of search because it is indexed only under another model.
+
+```json
+{
+  "serving_model": "text-embedding-3-small",
+  "target_model": "text-embedding-3-large",
+  "indexable_docs": 120,
+  "pending_docs": 37,
+  "models": [
+    {"model": "text-embedding-3-large", "docs": 83, "chunks": 610,
+     "chunk_chars": 1180000, "missing_docs": 37},
+    {"model": "text-embedding-3-small", "docs": 120, "chunks": 884,
+     "chunk_chars": 1712000, "missing_docs": 0}
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `serving_model` | Resolved id of `SEARCH_EMBED_MODEL`: the only set search reads |
+| `target_model` | Resolved id of `EMBED_MODEL` when it differs (a re-embed is configured), else `null` |
+| `indexable_docs` | Active docs with stored content |
+| `pending_docs` | Docs a stale-only `POST /docs/index` would list now. A re-embed is ready to cut over at `0` |
+| `models[]` | Every stored model plus the served and target ones, by model id |
+| `models[].docs` / `chunks` / `chunk_chars` | Docs with a set for the model, its chunks, and their total text length (input size for a cost estimate) |
+| `models[].missing_docs` | Active docs with content indexed under some other model but not this one. Nonzero for `serving_model` means those docs are excluded from search |
 
 ---
 

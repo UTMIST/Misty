@@ -4,12 +4,8 @@ import json
 
 import httpx
 
+from contracts.embedder import RESOLVED_EMBED_MODELS
 from contracts.retrieval import EmbeddingError, QueryEmbedding
-
-RESOLVED_MODELS = {
-    "openai-embed-3-small": "text-embedding-3-small",
-    "openai-embed-3-large": "text-embedding-3-large",
-}
 
 
 def _unique_fields(pairs):
@@ -49,7 +45,7 @@ class HttpEmbeddingClient:
             raise EmbeddingError()
         try:
             body = json.loads(response.content, object_pairs_hook=_unique_fields)
-            if body["model"] != RESOLVED_MODELS[self._model]:
+            if body["model"] != RESOLVED_EMBED_MODELS[self._model]:
                 raise ValueError("incompatible model")
             if type(body["dimensions"]) is not int or body["dimensions"] != 1536:
                 raise ValueError("incompatible dimensions")

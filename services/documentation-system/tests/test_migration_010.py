@@ -12,6 +12,7 @@ from src.content import content_hash
 from src.storage.postgres import PostgresStorageAdapter
 from src.storage.schema import docs
 from tests.chunk_storage_cases import make_chunk, make_doc
+from tests.fake_embedder import FAKE_MODEL
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_PG_TESTS") != "1" or os.environ.get("RUN_PG_MIGRATION_TESTS") != "1",
@@ -47,7 +48,7 @@ def test_migration_010_preserves_chunks_and_marks_unknown_title_stale():
             assert adapter.list_doc_chunks(doc.id) == [
                 chunk.model_copy(update={"source_title_hash": None})
             ]
-            assert doc.id in adapter.list_docs_for_indexing()
+            assert doc.id in adapter.list_docs_for_indexing(models=[FAKE_MODEL])
             assert (
                 adapter.replace_doc_chunks_if_current(
                     doc.id,
@@ -57,7 +58,7 @@ def test_migration_010_preserves_chunks_and_marks_unknown_title_stale():
                 )
                 is True
             )
-            assert doc.id not in adapter.list_docs_for_indexing()
+            assert doc.id not in adapter.list_docs_for_indexing(models=[FAKE_MODEL])
 
             command.downgrade(cfg, "009")
             assert "source_title_hash" not in {

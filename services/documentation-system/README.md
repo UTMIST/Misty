@@ -259,7 +259,7 @@ Machine-readable OpenAPI schema: `GET /openapi.json`. Interactive Swagger UI: `G
 | `LLM_BASE_URL` | `http://localhost:8002` | Platform LLM service for chunk and query embeddings |
 | `LLM_API_KEY` | empty | Secret consumer key with `embed`; missing key makes search return 503 |
 | `SEARCH_EMBED_MODEL` | `openai-embed-3-small` | Neutral embedding alias; `openai-embed-3-large` is also supported at 1536 dimensions |
-| `EMBED_MODEL` | unset | Indexing override; defaults to `SEARCH_EMBED_MODEL`. Keep models aligned for retrieval |
+| `EMBED_MODEL` | unset | Re-embed target; while it names another model, indexing also builds that model's sets beside the served ones. See [re-embedding](docs/DEPLOYMENT.md#re-embedding-after-a-model-change-209) |
 | `EMBED_MAX_REQUEST_CHARS` | `400000` | Indexing request character budget; keep at or below the LLM service's limit |
 | `SEARCH_MIN_COSINE` | `0.3` | Absolute vector relevance floor, greater than 0 and at most 1; complete keyword matches qualify independently |
 

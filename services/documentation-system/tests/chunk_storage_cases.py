@@ -8,6 +8,9 @@ import pytest
 from contracts.types import MAX_CHUNK_CHARS, DocChunk, SourceGrant
 from contracts.visibility import Actor, DENY, SEE_ALL
 from src.content import content_hash
+from tests.fake_embedder import FAKE_MODEL
+
+LARGE_MODEL = "text-embedding-3-large"
 
 
 def make_chunk(ordinal=0, *, text="UTMIST CPSIF", start=0, source_text=None, **values):
@@ -239,16 +242,16 @@ class ChunkStorageCases:
 
     def test_index_state_reports_the_current_set(self, adapter):
         doc = self._with_content(adapter)
-        assert adapter.get_doc_index_state(doc.id) is None
-        assert adapter.get_doc_index_state(uuid4()) is None
+        assert adapter.get_doc_index_states(doc.id) == {}
+        assert adapter.get_doc_index_states(uuid4()) == {}
         adapter.replace_doc_chunks(doc.id, [make_chunk(0), make_chunk(1)])
-        state = adapter.get_doc_index_state(doc.id)
+        state = adapter.get_doc_index_states(doc.id)["text-embedding-3-small"]
         assert state.source_content_hash == content_hash("UTMIST CPSIF")
         assert state.source_title_hash == content_hash(doc.title)
         assert state.embedding_model == "text-embedding-3-small"
         assert state.chunk_count == 2
         adapter.replace_doc_chunks(doc.id, [])
-        assert adapter.get_doc_index_state(doc.id) is None
+        assert adapter.get_doc_index_states(doc.id) == {}
 
     def test_conditional_replace_writes_only_for_current_active_content(self, adapter):
         doc = self._with_content(adapter)
@@ -354,16 +357,131 @@ class ChunkStorageCases:
         adapter.replace_doc_chunks(orphaned.id, [make_chunk()])
 
         stale_ids = sorted([unindexed.id, stale.id, retired_indexed.id, orphaned.id])
-        assert adapter.list_docs_for_indexing() == stale_ids
-        assert adapter.list_docs_for_indexing(stale_only=False) == sorted([current.id, *stale_ids])
-        assert no_content.id not in adapter.list_docs_for_indexing(stale_only=False)
-        assert retired_clean.id not in adapter.list_docs_for_indexing(stale_only=False)
+        assert adapter.list_docs_for_indexing(models=[FAKE_MODEL]) == stale_ids
+        assert adapter.list_docs_for_indexing(models=[FAKE_MODEL], stale_only=False) == sorted(
+            [current.id, *stale_ids]
+        )
+        assert no_content.id not in adapter.list_docs_for_indexing(
+            models=[FAKE_MODEL], stale_only=False
+        )
+        assert retired_clean.id not in adapter.list_docs_for_indexing(
+            models=[FAKE_MODEL], stale_only=False
+        )
 
     def test_docs_for_indexing_pages_by_id(self, adapter):
         ids = sorted(self._with_content(adapter).id for _ in range(5))
-        assert adapter.list_docs_for_indexing(limit=2) == ids[:2]
-        assert adapter.list_docs_for_indexing(after=ids[1], limit=2) == ids[2:4]
-        assert adapter.list_docs_for_indexing(after=ids[4]) == []
+        assert adapter.list_docs_for_indexing(models=[FAKE_MODEL], limit=2) == ids[:2]
+        assert (
+            adapter.list_docs_for_indexing(models=[FAKE_MODEL], after=ids[1], limit=2) == ids[2:4]
+        )
+        assert adapter.list_docs_for_indexing(models=[FAKE_MODEL], after=ids[4]) == []
+
+    # --- Chunk sets per embedding model (#209) ---
+
+    def _write_set(self, adapter, doc, model, **values):
+        chunks = [make_chunk(0, embedding_model=model, **values)]
+        return adapter.replace_doc_chunks_if_current(
+            doc.id,
+            chunks[0].source_content_hash,
+            chunks,
+            expected_title_hash=content_hash("Chunk storage test"),
+        )
+
+    def test_model_sets_coexist_and_conditional_replace_keeps_other_models(self, adapter):
+        doc = self._with_content(adapter)
+        assert self._write_set(adapter, doc, FAKE_MODEL) is True
+        assert self._write_set(adapter, doc, LARGE_MODEL) is True
+        # Ordered by model id, then ordinal ("-large" sorts before "-small").
+        assert [(c.embedding_model, c.ordinal) for c in adapter.list_doc_chunks(doc.id)] == [
+            (LARGE_MODEL, 0),
+            (FAKE_MODEL, 0),
+        ]
+        assert list(adapter.get_doc_index_states(doc.id)) == [LARGE_MODEL, FAKE_MODEL]
+
+        # Rewriting one model's set leaves the other untouched.
+        large = adapter.list_doc_chunks(doc.id)[0]
+        assert self._write_set(adapter, doc, FAKE_MODEL, embedding=[0.5] + [0.0] * 1535) is True
+        assert adapter.list_doc_chunks(doc.id)[0] == large
+        assert adapter.list_doc_chunks(doc.id)[1].embedding[0] == pytest.approx(0.5)
+
+        # Whitespace-only text clears every set; an unconditional replace
+        # leaves exactly the one set it was given.
+        assert self._write_set(adapter, doc, LARGE_MODEL) is True
+        adapter.replace_doc_chunks(doc.id, [make_chunk()])
+        assert [c.embedding_model for c in adapter.list_doc_chunks(doc.id)] == [FAKE_MODEL]
+        self._write_set(adapter, doc, LARGE_MODEL)
+        assert (
+            adapter.replace_doc_chunks_if_current(
+                doc.id,
+                content_hash("UTMIST CPSIF"),
+                [],
+                expected_title_hash=content_hash("Chunk storage test"),
+            )
+            is True
+        )
+        assert adapter.list_doc_chunks(doc.id) == []
+
+    def test_delete_doc_chunks_except_keeps_listed_models(self, adapter):
+        doc = self._with_content(adapter)
+        self._write_set(adapter, doc, FAKE_MODEL)
+        self._write_set(adapter, doc, LARGE_MODEL)
+        assert adapter.delete_doc_chunks_except(doc.id, [FAKE_MODEL, LARGE_MODEL]) is False
+        assert adapter.delete_doc_chunks_except(doc.id, [LARGE_MODEL]) is True
+        assert list(adapter.get_doc_index_states(doc.id)) == [LARGE_MODEL]
+        assert adapter.delete_doc_chunks_except(doc.id, []) is True
+        assert adapter.get_doc_index_states(doc.id) == {}
+        assert adapter.delete_doc_chunks_except(uuid4(), []) is False
+
+    def test_docs_for_indexing_is_model_aware(self, adapter):
+        doc = self._with_content(adapter)
+        self._write_set(adapter, doc, FAKE_MODEL)
+        both = [FAKE_MODEL, LARGE_MODEL]
+        assert doc.id not in adapter.list_docs_for_indexing(models=[FAKE_MODEL])
+        # A configured re-embed target without a set is due ...
+        assert doc.id in adapter.list_docs_for_indexing(models=both)
+        self._write_set(adapter, doc, LARGE_MODEL)
+        # ... and no longer once its set is current, so a rerun resumes.
+        assert doc.id not in adapter.list_docs_for_indexing(models=both)
+        # After cutover the old model's set is due for deletion.
+        assert doc.id in adapter.list_docs_for_indexing(models=[LARGE_MODEL])
+        # A target set built from older text is stale like any other set.
+        _update = "UTMIST CPSIF v2"
+        adapter.upsert_doc_content(
+            doc.id, content_text=_update, content_hash=content_hash(_update), fetched_at=None
+        )
+        self._write_set(adapter, doc, FAKE_MODEL, text=_update)
+        assert doc.id in adapter.list_docs_for_indexing(models=both)
+
+    def test_index_coverage_counts_sets_per_model(self, adapter):
+        migrated = self._with_content(adapter)
+        self._write_set(adapter, migrated, FAKE_MODEL)
+        self._write_set(adapter, migrated, LARGE_MODEL)
+        pending = self._with_content(adapter)
+        self._write_set(adapter, pending, FAKE_MODEL)
+        self._with_content(adapter)  # unindexed: missing from no model
+        retired = self._with_content(adapter)
+        self._write_set(adapter, retired, FAKE_MODEL)
+        adapter.update_doc(retired.id, {"active": False}, actor="test")
+
+        coverage = adapter.get_index_coverage([LARGE_MODEL, "unused-model"])
+        assert coverage.indexable_docs == 3
+        by_model = {c.model: c for c in coverage.models}
+        assert [c.model for c in coverage.models] == sorted(by_model)
+        assert by_model[FAKE_MODEL].model_dump() == {
+            "model": FAKE_MODEL,
+            "docs": 3,
+            "chunks": 3,
+            "chunk_chars": 3 * len("UTMIST CPSIF"),
+            "missing_docs": 0,
+        }
+        assert (by_model[LARGE_MODEL].docs, by_model[LARGE_MODEL].missing_docs) == (1, 1)
+        assert by_model["unused-model"].model_dump() == {
+            "model": "unused-model",
+            "docs": 0,
+            "chunks": 0,
+            "chunk_chars": 0,
+            "missing_docs": 2,
+        }
 
     @pytest.mark.parametrize("title", ["New project 😀", None, ""])
     def test_title_change_is_stale_and_rejects_old_title_writes(self, adapter, title):
@@ -371,7 +489,7 @@ class ChunkStorageCases:
         chunks = [make_chunk()]
         adapter.replace_doc_chunks(doc.id, chunks)
         adapter.update_doc(doc.id, {"title": title}, actor="test")
-        assert doc.id in adapter.list_docs_for_indexing()
+        assert doc.id in adapter.list_docs_for_indexing(models=[FAKE_MODEL])
         for replacement in [chunks, []]:
             assert (
                 adapter.replace_doc_chunks_if_current(
@@ -395,7 +513,7 @@ class ChunkStorageCases:
             is True
         )
         assert adapter.list_doc_chunks(doc.id) == updated
-        assert doc.id not in adapter.list_docs_for_indexing()
+        assert doc.id not in adapter.list_docs_for_indexing(models=[FAKE_MODEL])
 
     @pytest.mark.parametrize("title", ["Project 😀", None, ""])
     def test_unknown_title_provenance_is_stale_until_replaced(self, adapter, title):
@@ -403,8 +521,8 @@ class ChunkStorageCases:
         adapter.update_doc(doc.id, {"title": title}, actor="test")
         legacy = make_chunk(source_title_hash=None)
         adapter.replace_doc_chunks(doc.id, [legacy])
-        assert adapter.get_doc_index_state(doc.id).source_title_hash is None
-        assert doc.id in adapter.list_docs_for_indexing()
+        assert adapter.get_doc_index_states(doc.id)[FAKE_MODEL].source_title_hash is None
+        assert doc.id in adapter.list_docs_for_indexing(models=[FAKE_MODEL])
         updated = make_chunk(source_title_hash=content_hash(title or ""))
         assert (
             adapter.replace_doc_chunks_if_current(
@@ -415,7 +533,7 @@ class ChunkStorageCases:
             )
             is True
         )
-        assert doc.id not in adapter.list_docs_for_indexing()
+        assert doc.id not in adapter.list_docs_for_indexing(models=[FAKE_MODEL])
 
     @pytest.mark.parametrize("title_hash", [None, "a" * 64])
     def test_conditional_replace_rejects_chunks_from_other_title(self, adapter, title_hash):
@@ -441,7 +559,7 @@ class ChunkStorageCases:
         assert adapter.get_doc(doc.id) is not None
         assert adapter.delete_doc_content(doc.id, expected=None) is True
         assert adapter.delete_doc_content(uuid4(), expected=None) is False
-        assert doc.id not in adapter.list_docs_for_indexing(stale_only=False)
+        assert doc.id not in adapter.list_docs_for_indexing(models=[FAKE_MODEL], stale_only=False)
 
     @pytest.mark.parametrize("change", ["text", "fetched_at", "first_fetch"])
     def test_delete_doc_content_preserves_a_newer_fetch(self, adapter, change):

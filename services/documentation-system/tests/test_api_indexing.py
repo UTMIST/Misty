@@ -20,6 +20,7 @@ from src.embedding import HttpEmbeddingClient
 from src.storage.in_memory import InMemoryStorageAdapter
 from tests.conftest import build_seed_sources
 from tests.test_api_source_access import ADMIN, P1, FakeDirectory, _result
+from tests.fake_embedder import FAKE_MODEL
 
 URL = "https://docs.google.com/document/d/sponsors/edit"
 LONG = "\n\n".join(
@@ -96,7 +97,7 @@ def test_title_only_patch_reindexes_and_identical_title_is_unchanged(ctx, fake_e
     assert _chunks(store, doc_id)[0].embedding != previous[0].embedding
     assert store.get_doc_content(UUID(doc_id)) == LONG
     assert all(c.source_content_hash == content_hash(LONG) for c in _chunks(store, doc_id))
-    assert UUID(doc_id) not in store.list_docs_for_indexing()
+    assert UUID(doc_id) not in store.list_docs_for_indexing(models=[FAKE_MODEL])
 
     response = client.patch(f"/docs/{doc_id}", headers=ADMIN, json={"title": title})
     assert response.status_code == 200
@@ -125,13 +126,13 @@ def test_failed_title_refresh_preserves_chunks_and_default_retry_finds_it(ctx, f
     assert response.status_code == 200
     assert len(fake_embedder.calls) == 2
     assert _chunks(store, doc_id) == previous
-    assert UUID(doc_id) in store.list_docs_for_indexing()
+    assert UUID(doc_id) in store.list_docs_for_indexing(models=[FAKE_MODEL])
 
     response = client.post("/docs/index", headers=ADMIN, json={})
     assert response.status_code == 200
     assert response.json()["indexed"] == 1
     assert _chunks(store, doc_id)[0].embedding != previous[0].embedding
-    assert UUID(doc_id) not in store.list_docs_for_indexing()
+    assert UUID(doc_id) not in store.list_docs_for_indexing(models=[FAKE_MODEL])
 
 
 @pytest.mark.parametrize("model", ["openai-embed-3-small", "openai-embed-3-large"])
@@ -458,3 +459,123 @@ def test_index_listing_pages_with_next_after(ctx, fake_embedder):
     assert rest["attempted"] == 1
     assert rest["next_after"] is None
     assert sorted(r["doc_id"] for r in first["results"] + rest["results"]) == sorted(ids)
+
+
+# --- Re-embedding after a model change (#209) ---
+
+LARGE_MODEL = "text-embedding-3-large"
+
+
+@pytest.fixture
+def embedders(monkeypatch):
+    """One fake per configured alias, as deps would build HttpEmbedders."""
+    from contracts.embedder import RESOLVED_EMBED_MODELS
+    from src.api import deps
+    from tests.fake_embedder import FakeEmbedder
+
+    built = {}
+
+    def build(*args, model, **kwargs):
+        return built.setdefault(model, FakeEmbedder(model=RESOLVED_EMBED_MODELS[model]))
+
+    monkeypatch.setattr(deps, "HttpEmbedder", build)
+    return built
+
+
+def _configure(monkeypatch, search, target=None):
+    from src.api import deps
+
+    monkeypatch.setenv("SEARCH_EMBED_MODEL", search)
+    if target is None:
+        monkeypatch.delenv("EMBED_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("EMBED_MODEL", target)
+    deps.get_settings.cache_clear()
+    deps._embedder.cache_clear()
+
+
+def _reembed(client, headers):
+    # The documented operator loop: stale-only pages until nothing is listed.
+    body = {"stale_only": True}
+    while True:
+        result = client.post("/docs/index", headers=headers, json=body).json()
+        if result["next_after"] is None:
+            return result
+        body["after"] = result["next_after"]
+
+
+def test_reembed_builds_target_beside_served_set_then_cuts_over(ctx, monkeypatch, embedders):
+    client, store, _ = ctx
+    headers = _key(store, "docs:index")
+    _configure(monkeypatch, "openai-embed-3-small")
+    doc_id = UUID(_ingest(client)["doc"]["id"])
+    assert client.get("/docs/index/status", headers=_key(store, "docs:write")).status_code == 403
+    status = client.get("/docs/index/status", headers=headers).json()
+    assert (status["serving_model"], status["target_model"], status["pending_docs"]) == (
+        FAKE_MODEL,
+        None,
+        0,
+    )
+
+    # Start the re-embed: the target is pending, search still serves the old set.
+    _configure(monkeypatch, "openai-embed-3-small", "openai-embed-3-large")
+    status = client.get("/docs/index/status", headers=headers).json()
+    assert (status["target_model"], status["pending_docs"]) == (LARGE_MODEL, 1)
+    large = {c["model"]: c for c in status["models"]}[LARGE_MODEL]
+    assert (large["docs"], large["missing_docs"]) == (0, 1)
+
+    result = _reembed(client, headers)
+    assert result["indexed"] == 1
+    assert len(embedders["openai-embed-3-small"].calls) == 1  # served set untouched
+    assert sorted(store.get_doc_index_states(doc_id)) == [LARGE_MODEL, FAKE_MODEL]
+    status = client.get("/docs/index/status", headers=headers).json()
+    assert status["pending_docs"] == 0
+    assert all(c["missing_docs"] == 0 for c in status["models"])
+
+    # Cut over, then the same loop deletes the old set without embedding.
+    _configure(monkeypatch, "openai-embed-3-large")
+    status = client.get("/docs/index/status", headers=headers).json()
+    assert (status["serving_model"], status["pending_docs"]) == (LARGE_MODEL, 1)
+    result = _reembed(client, headers)
+    assert result["unchanged"] == 1
+    assert len(embedders["openai-embed-3-large"].calls) == 1
+    assert list(store.get_doc_index_states(doc_id)) == [LARGE_MODEL]
+    status = client.get("/docs/index/status", headers=headers).json()
+    assert status["pending_docs"] == 0
+    assert [c["model"] for c in status["models"]] == [LARGE_MODEL]
+
+
+def test_search_warns_when_docs_are_indexed_only_under_another_model(
+    ctx, monkeypatch, embedders, caplog
+):
+    from src.api.routers import search
+
+    client, store, _ = ctx
+    _configure(monkeypatch, "openai-embed-3-small")
+    _ingest(client)
+    monkeypatch.setattr(search, "_next_mismatch_check", 0.0)
+
+    def warnings():
+        return [r.getMessage() for r in caplog.records if r.name == search.logger.name]
+
+    with caplog.at_level("WARNING", logger=search.logger.name):
+        search._warn_on_excluded_docs(store, FAKE_MODEL)
+        assert warnings() == []
+        # A premature switch: the served model has no sets yet.
+        monkeypatch.setattr(search, "_next_mismatch_check", 0.0)
+        search._warn_on_excluded_docs(store, LARGE_MODEL)
+        assert "1 docs are indexed only under other embedding models" in caplog.text
+        # Rate-limited: the next search within the window does not query again.
+        caplog.clear()
+        monkeypatch.setattr(store, "get_index_coverage", lambda models: pytest.fail("queried"))
+        search._warn_on_excluded_docs(store, LARGE_MODEL)
+        assert warnings() == []
+
+        # A failing check is logged and never fails the search.
+        def broken(models):
+            raise RuntimeError("database down")
+
+        monkeypatch.setattr(store, "get_index_coverage", broken)
+        monkeypatch.setattr(search, "_next_mismatch_check", 0.0)
+        search._warn_on_excluded_docs(store, LARGE_MODEL)
+        assert "coverage check failed: RuntimeError" in caplog.text

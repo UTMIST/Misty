@@ -16,6 +16,12 @@ with one conditional replacement:
   intact and consistent, and retrying is calling index_doc again.
 - If content or title changes while we embed, the write is refused (`skipped`): the
   writer of the newer content/title triggers its own index.
+
+Model changes (#209): each embedding model keeps its own complete set. Search
+reads only the set for the model it serves; while a re-embed target is
+configured, the target's set is built beside it, and sets for any other model
+are deleted. A set that is current for its model is never re-embedded, so an
+interrupted re-embed resumes where it stopped.
 """
 
 import logging
@@ -49,14 +55,21 @@ class IndexOutcome:
 
 
 def index_doc(
-    doc_id: UUID, *, storage: StorageAdapter, embedder: Embedder, force: bool = False
+    doc_id: UUID,
+    *,
+    storage: StorageAdapter,
+    embedder: Embedder,
+    target: Embedder | None = None,
+    force: bool = False,
 ) -> IndexOutcome:
-    """Bring one doc's chunk set in line with its stored content and title.
+    """Bring one doc's chunk sets in line with its stored content and title.
 
-    `force` re-embeds even when the body/title hashes are unchanged (#209's
-    model-change path). Never raises for provider or storage failures; they
-    come back as `failed` so callers can report them without losing the
-    catalog write that triggered indexing.
+    `embedder` produces the set search serves; `target`, during a re-embed,
+    the set for the model search will switch to. Sets for any other model are
+    deleted. `force` re-embeds even when a set's body/title hashes are
+    unchanged. Never raises for provider or storage failures; they come back
+    as `failed` so callers can report them without losing the catalog write
+    that triggered indexing.
     """
     try:
         doc = storage.get_doc(doc_id)
@@ -71,52 +84,92 @@ def index_doc(
         # the stored hash against exactly what these chunks were built from.
         expected_hash = content_hash(text)
         expected_title_hash = content_hash(doc.title or "")
-        state = storage.get_doc_index_state(doc_id)
-        if (
-            not force
-            and state is not None
-            and state.source_content_hash == expected_hash
-            and state.source_title_hash == expected_title_hash
-        ):
-            return IndexOutcome("unchanged", chunk_count=state.chunk_count)
-
-        chunks = chunk_text(text).chunks
-        if not chunks:
-            # Whitespace-only text: nothing to embed. Still conditional, so a
-            # concurrent write of real text is not wiped.
-            written = storage.replace_doc_chunks_if_current(
-                doc_id, expected_hash, [], expected_title_hash=expected_title_hash
-            )
-            return IndexOutcome("cleared") if written else _skipped()
-
-        batch = embedder.embed([embedding_input(doc.title, chunk) for chunk in chunks])
-        doc_chunks = [
-            DocChunk(
-                ordinal=chunk.ordinal,
-                chunk_text=chunk.text,
-                start_offset=chunk.start,
-                end_offset=chunk.end,
-                source_content_hash=expected_hash,
-                source_title_hash=expected_title_hash,
-                embedding=vector,
-                embedding_model=batch.model,
-                dimensions=batch.dimensions,
-            )
-            for chunk, vector in zip(chunks, batch.vectors, strict=True)
+        states = storage.get_doc_index_states(doc_id)
+        embedders = index_embedders(embedder, target)
+        keep = [e.model for e in embedders]
+        due = [
+            e
+            for e in embedders
+            if force
+            or e.model not in states
+            or states[e.model].source_content_hash != expected_hash
+            or states[e.model].source_title_hash != expected_title_hash
         ]
-        if not storage.replace_doc_chunks_if_current(
-            doc_id, expected_hash, doc_chunks, expected_title_hash=expected_title_hash
-        ):
-            return _skipped()
-        return IndexOutcome("indexed", chunk_count=len(doc_chunks))
-    except EmbedderUnavailable as e:
-        return _failed(doc_id, f"embedding service unavailable: {e}")
-    except EmbedderRejected as e:
-        return _failed(doc_id, f"embedding request rejected: {e}")
+
+        indexed_count = None
+        if due:
+            chunks = chunk_text(text).chunks
+            if not chunks:
+                # Whitespace-only text: nothing to embed in any model. Still
+                # conditional, so a concurrent write of real text is not wiped.
+                written = storage.replace_doc_chunks_if_current(
+                    doc_id, expected_hash, [], expected_title_hash=expected_title_hash
+                )
+                return IndexOutcome("cleared") if written else _skipped()
+            inputs = [embedding_input(doc.title, chunk) for chunk in chunks]
+            # The served set first: a failing re-embed target never holds back
+            # the set search reads.
+            for e in due:
+                outcome = _write_set(
+                    e, doc_id, storage, chunks, inputs, expected_hash, expected_title_hash
+                )
+                if outcome is not None:
+                    return outcome
+            indexed_count = len(chunks)
+
+        if set(states) - set(keep):
+            storage.delete_doc_chunks_except(doc_id, keep)
+        if indexed_count is not None:
+            return IndexOutcome("indexed", chunk_count=indexed_count)
+        return IndexOutcome("unchanged", chunk_count=states[embedder.model].chunk_count)
     except (SQLAlchemyError, ValueError) as e:
         # ValueError: a chunk failed DocChunk validation. Neither error text is
         # safe to return (SQL, chunk text), so report only the type.
         return _failed(doc_id, f"index write failed: {type(e).__name__}")
+
+
+def index_embedders(embedder: Embedder, target: Embedder | None) -> list[Embedder]:
+    """The served model's embedder, then a distinct re-embed target if any."""
+    if target is not None and target.model != embedder.model:
+        return [embedder, target]
+    return [embedder]
+
+
+def _write_set(
+    embedder: Embedder,
+    doc_id: UUID,
+    storage: StorageAdapter,
+    chunks: list[Chunk],
+    inputs: list[str],
+    expected_hash: str,
+    expected_title_hash: str,
+) -> IndexOutcome | None:
+    """Embed and store one model's set; an outcome only when it did not land."""
+    try:
+        batch = embedder.embed(inputs)
+    except EmbedderUnavailable as e:
+        return _failed(doc_id, f"embedding service unavailable for {embedder.model}: {e}")
+    except EmbedderRejected as e:
+        return _failed(doc_id, f"embedding request rejected for {embedder.model}: {e}")
+    doc_chunks = [
+        DocChunk(
+            ordinal=chunk.ordinal,
+            chunk_text=chunk.text,
+            start_offset=chunk.start,
+            end_offset=chunk.end,
+            source_content_hash=expected_hash,
+            source_title_hash=expected_title_hash,
+            embedding=vector,
+            embedding_model=batch.model,
+            dimensions=batch.dimensions,
+        )
+        for chunk, vector in zip(chunks, batch.vectors, strict=True)
+    ]
+    if not storage.replace_doc_chunks_if_current(
+        doc_id, expected_hash, doc_chunks, expected_title_hash=expected_title_hash
+    ):
+        return _skipped()
+    return None
 
 
 def embedding_input(title: str | None, chunk: Chunk) -> str:

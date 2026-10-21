@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -7,6 +8,7 @@ from sqlalchemy import (
     and_,
     cast,
     delete,
+    exists,
     false,
     func,
     insert,
@@ -31,6 +33,8 @@ from contracts.types import (
     DocContentMeta,
     DocGrant,
     DocIndexState,
+    IndexCoverage,
+    IndexModelCoverage,
     Source,
     SourceGrant,
 )
@@ -694,12 +698,18 @@ class PostgresStorageAdapter:
             ).scalar_one_or_none()
             if current_hash != expected_content_hash:
                 return False
-            self._write_chunks(conn, doc_id, validated)
+            self._write_chunks(conn, doc_id, validated, keep_other_models=True)
         return True
 
     @staticmethod
-    def _write_chunks(conn, doc_id: UUID, validated: list[DocChunk]) -> None:
-        conn.execute(delete(doc_chunks).where(doc_chunks.c.doc_id == doc_id))
+    def _write_chunks(
+        conn, doc_id: UUID, validated: list[DocChunk], *, keep_other_models: bool = False
+    ) -> None:
+        stmt = delete(doc_chunks).where(doc_chunks.c.doc_id == doc_id)
+        # An empty set clears every model: there is no text left to embed.
+        if keep_other_models and validated:
+            stmt = stmt.where(doc_chunks.c.embedding_model == validated[0].embedding_model)
+        conn.execute(stmt)
         if validated:
             conn.execute(
                 insert(doc_chunks),
@@ -745,58 +755,74 @@ class PostgresStorageAdapter:
             conn.execute(delete(doc_content).where(doc_content.c.doc_id == doc_id))
         return True
 
-    def get_doc_index_state(self, doc_id: UUID) -> DocIndexState | None:
-        # One hash and model per set (validate_doc_chunks), so min() just
-        # picks the shared value.
-        stmt = select(
-            func.min(doc_chunks.c.source_content_hash).label("source_content_hash"),
-            func.min(doc_chunks.c.source_title_hash).label("source_title_hash"),
-            func.min(doc_chunks.c.embedding_model).label("embedding_model"),
-            func.count().label("chunk_count"),
-        ).where(doc_chunks.c.doc_id == doc_id)
+    def get_doc_index_states(self, doc_id: UUID) -> dict[str, DocIndexState]:
+        # One hash per set (validate_doc_chunks), so min() just picks the
+        # shared value.
+        stmt = (
+            select(
+                func.min(doc_chunks.c.source_content_hash).label("source_content_hash"),
+                func.min(doc_chunks.c.source_title_hash).label("source_title_hash"),
+                doc_chunks.c.embedding_model,
+                func.count().label("chunk_count"),
+            )
+            .where(doc_chunks.c.doc_id == doc_id)
+            .group_by(doc_chunks.c.embedding_model)
+            .order_by(doc_chunks.c.embedding_model)
+        )
         with self._engine.connect() as conn:
-            row = conn.execute(stmt).one()
-        if row.chunk_count == 0:
-            return None
-        return DocIndexState(**row._mapping)
+            rows = conn.execute(stmt).mappings()
+            return {row["embedding_model"]: DocIndexState(**row) for row in rows}
+
+    def delete_doc_chunks_except(self, doc_id: UUID, keep_models: Sequence[str]) -> bool:
+        with self._engine.begin() as conn:
+            # The chunk writers' parent lock.
+            conn.execute(select(docs.c.id).where(docs.c.id == doc_id).with_for_update())
+            result = conn.execute(
+                delete(doc_chunks).where(
+                    doc_chunks.c.doc_id == doc_id,
+                    doc_chunks.c.embedding_model.not_in(list(keep_models)),
+                )
+            )
+        return result.rowcount > 0
 
     def list_docs_for_indexing(
-        self, *, stale_only: bool = True, after: UUID | None = None, limit: int = 100
+        self,
+        *,
+        models: Sequence[str],
+        stale_only: bool = True,
+        after: UUID | None = None,
+        limit: int = 100,
     ) -> list[UUID]:
-        indexed = (
-            select(
-                doc_chunks.c.doc_id,
-                func.min(doc_chunks.c.source_content_hash).label("content_hash"),
-                func.min(doc_chunks.c.source_title_hash).label("title_hash"),
-            )
-            .group_by(doc_chunks.c.doc_id)
-            .subquery()
-        )
         has_content = doc_content.c.doc_id.is_not(None)
-        has_chunks = indexed.c.doc_id.is_not(None)
+        has_chunks = exists().where(doc_chunks.c.doc_id == docs.c.id)
         wanted = and_(docs.c.active.is_(True), has_content)
         if stale_only:
+            title_hash = func.encode(
+                func.sha256(func.convert_to(func.coalesce(docs.c.title, ""), "UTF8")), "hex"
+            )
+
+            # One hash pair per set, so any row of a model's set speaks for it.
+            # A NULL (unknown) title hash never matches, so it stays due.
+            def current_set(model: str):
+                return exists().where(
+                    doc_chunks.c.doc_id == docs.c.id,
+                    doc_chunks.c.embedding_model == model,
+                    doc_chunks.c.source_content_hash == doc_content.c.content_hash,
+                    doc_chunks.c.source_title_hash == title_hash,
+                )
+
+            other_model = exists().where(
+                doc_chunks.c.doc_id == docs.c.id,
+                doc_chunks.c.embedding_model.not_in(list(models)),
+            )
             wanted = and_(
                 wanted,
-                or_(
-                    indexed.c.content_hash.is_(None),
-                    indexed.c.content_hash != doc_content.c.content_hash,
-                    indexed.c.title_hash.is_distinct_from(
-                        func.encode(
-                            func.sha256(func.convert_to(func.coalesce(docs.c.title, ""), "UTF8")),
-                            "hex",
-                        )
-                    ),
-                ),
+                or_(*(~current_set(model) for model in models), other_model, ~has_chunks),
             )
         orphaned = and_(has_chunks, or_(docs.c.active.is_(False), ~has_content))
         stmt = (
             select(docs.c.id)
-            .select_from(
-                docs.outerjoin(doc_content, doc_content.c.doc_id == docs.c.id).outerjoin(
-                    indexed, indexed.c.doc_id == docs.c.id
-                )
-            )
+            .select_from(docs.outerjoin(doc_content, doc_content.c.doc_id == docs.c.id))
             .where(or_(wanted, orphaned))
             .order_by(docs.c.id)
             .limit(limit)
@@ -806,6 +832,47 @@ class PostgresStorageAdapter:
         with self._engine.connect() as conn:
             return list(conn.execute(stmt).scalars())
 
+    def get_index_coverage(self, models: Sequence[str]) -> IndexCoverage:
+        indexable = and_(docs.c.active.is_(True), exists().where(doc_content.c.doc_id == docs.c.id))
+        totals = select(
+            doc_chunks.c.embedding_model,
+            func.count(func.distinct(doc_chunks.c.doc_id)).label("docs"),
+            func.count().label("chunks"),
+            func.coalesce(func.sum(func.char_length(doc_chunks.c.chunk_text)), 0).label(
+                "chunk_chars"
+            ),
+        ).group_by(doc_chunks.c.embedding_model)
+        with self._engine.connect() as conn:
+            indexable_docs = conn.execute(
+                select(func.count()).select_from(docs).where(indexable)
+            ).scalar_one()
+            stored = {row.embedding_model: row for row in conn.execute(totals)}
+            coverage = []
+            for model in sorted({*stored, *models}):
+                missing = conn.execute(
+                    select(func.count())
+                    .select_from(docs)
+                    .where(
+                        indexable,
+                        exists().where(doc_chunks.c.doc_id == docs.c.id),
+                        ~exists().where(
+                            doc_chunks.c.doc_id == docs.c.id,
+                            doc_chunks.c.embedding_model == model,
+                        ),
+                    )
+                ).scalar_one()
+                row = stored.get(model)
+                coverage.append(
+                    IndexModelCoverage(
+                        model=model,
+                        docs=row.docs if row else 0,
+                        chunks=row.chunks if row else 0,
+                        chunk_chars=row.chunk_chars if row else 0,
+                        missing_docs=missing,
+                    )
+                )
+        return IndexCoverage(indexable_docs=indexable_docs, models=coverage)
+
     def list_doc_chunks(
         self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL
     ) -> list[DocChunk]:
@@ -813,7 +880,7 @@ class PostgresStorageAdapter:
             select(*(doc_chunks.c[name] for name in DocChunk.model_fields))
             .select_from(doc_chunks.join(docs, docs.c.id == doc_chunks.c.doc_id))
             .where(doc_chunks.c.doc_id == doc_id)
-            .order_by(doc_chunks.c.ordinal)
+            .order_by(doc_chunks.c.embedding_model, doc_chunks.c.ordinal)
         )
         clause = self._visibility_clause(visibility)
         if clause is not None:

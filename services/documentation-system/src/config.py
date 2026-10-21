@@ -47,8 +47,9 @@ class Settings(BaseSettings):
         "openai-embed-3-small"
     )
     search_min_cosine: float = Field(default=0.3, gt=0, le=1, allow_inf_nan=False)
-    # Indexing follows search by default so their vectors use the same model.
-    # Override only for an explicit model migration/re-embedding pass.
+    # A re-embed target (#209). Indexing always maintains the SEARCH_EMBED_MODEL
+    # set; while this names another model, it also builds that model's set
+    # beside it, ready for SEARCH_EMBED_MODEL to switch to.
     embed_model: Literal["openai-embed-3-small", "openai-embed-3-large"] | None = None
     # Keep at or below the llm service's EMBED_MAX_REQUEST_CHARS.
     embed_max_request_chars: int = Field(default=400_000, gt=0)

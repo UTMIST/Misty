@@ -59,7 +59,7 @@ Violating any of these is a bug even if tests pass.
 - **`down_revision` points at the current head**, and `downgrade()` must actually reverse `upgrade()` except for the explicit retirement exceptions below. Verify the round trip: `upgrade head` → `downgrade -1` → `upgrade head`.
 - **Retirement exceptions:** documentation-system [009](services/documentation-system/docs/DEPLOYMENT.md#registry-cleanup-migration-009) and team-tracking [011](services/team-tracking/docs/DEPLOYMENT.md#registry-cleanup-migration-011) intentionally preserve their data cleanup on downgrade; only the registry entries are restored. Follow the linked backup/recovery guidance and verify the round trip with existing rows, checking that unrelated data survives. These exceptions do not waive reversibility for other migrations.
 - **New columns on existing tables are nullable or have a `server_default`**, mirrored in the Pydantic model and both adapters.
-- Current heads: team-tracking **011**, documentation-system **010**, verification **001**, gateway **001**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
+- Current heads: team-tracking **011**, documentation-system **011**, verification **001**, gateway **001**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
 
 ### Configuration
 
