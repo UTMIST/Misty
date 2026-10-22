@@ -107,7 +107,7 @@ test('start opens a stream, starts the recorder, and returns recording + session
   assert.equal(fakes.openStreamCalls[0].opts.guildId, 'g1');
   assert.equal(typeof fakes.openStreamCalls[0].opts.onError, 'function');
   assert.equal(fakes.makeRecorderCalls.length, 1);
-  assert.equal(fakes.makeRecorderCalls[0].sink.sendFrame, fakes.stream.sendFrame);
+  assert.equal(typeof fakes.makeRecorderCalls[0].sink.sendFrame, 'function');
   // allow the fire-and-forget recorder.start promise to settle
   await Promise.resolve();
   assert.deepEqual(fakes.recorderStartCalls, [voiceChannel]);
@@ -572,4 +572,63 @@ test('stop hands off identities and context; save:false keeps PDF only', async (
       assert.equal(fakes.notifies.length, 0);
     }
   }
+});
+
+test('a saved recording stops forwarding immediately on a channel move', async () => {
+  const fakes = makeFakes();
+  const frames = [];
+  const stops = [];
+  fakes.stream.sendFrame = (...args) => frames.push(args);
+  fakes.meetingClient.stop = async (id, body) => {
+    stops.push(body);
+    return {};
+  };
+  const surface = createMeetingSurface({ ...fakes });
+  await surface.start({
+    guildId: '1',
+    voiceChannel: { id: '3' },
+    textChannel: { id: '2' },
+    requesterId: '4',
+  });
+  const sink = fakes.makeRecorderCalls[0].sink;
+  sink.sendControl({ speakerId: '4', displayName: 'Original speaker' });
+  sink.sendFrame('4', 0, Buffer.from('original'));
+  surface.updateVoiceChannel('1', { id: '3' });
+  assert.equal(surface.status('1').status, 'recording');
+  // Draining the recorder can deliver buffered destination-channel audio.
+  // Both it and new frames must be refused before the first stop await.
+  fakes.recorder.stop = async () => {
+    sink.sendFrame('5', 1, Buffer.from('destination drain'));
+    await settle();
+  };
+  const stopping = surface.updateVoiceChannel('1', { id: '99' });
+  sink.sendControl({ speakerId: '5', displayName: 'Destination speaker' });
+  sink.sendFrame('5', 2, Buffer.from('destination'));
+  surface.updateVoiceChannel('1', { id: '100' });
+  assert.equal(surface.status('1').status, 'not-recording');
+  assert.equal((await stopping).status, 'stopped');
+  assert.equal(frames.length, 1);
+  assert.equal(stops.length, 1);
+  assert.equal(stops[0].record.voice_channel_id, '3');
+  assert.deepEqual(stops[0].record.participants, [
+    { discord_id: '4', display_name: 'Original speaker' },
+  ]);
+  assert.equal(fakes.posterCalls.length, 1);
+  assert.match(fakes.notifies.at(-1).content, /moved voice channels/);
+});
+
+test('save:false recordings continue to follow channel moves', async () => {
+  const fakes = makeFakes();
+  const surface = createMeetingSurface({ ...fakes });
+  await surface.start({
+    guildId: '1',
+    voiceChannel: { id: '3' },
+    textChannel: { id: '2' },
+    save: false,
+  });
+  surface.updateVoiceChannel('1', { id: '99' });
+  assert.equal(surface.activeSession('1').voiceChannel.id, '99');
+  assert.equal(surface.status('1').status, 'recording');
+  assert.equal(fakes.stopCalls.length, 0);
+  await surface.stop('1');
 });

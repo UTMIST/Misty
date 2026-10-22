@@ -139,15 +139,20 @@ export function createMeetingSurface({
       return { status: 'error' };
     }
     const participants = new Map();
+    let captureAllowed = true;
     recorder = makeRecorder({
       sink: {
         ...stream,
         sendControl(control) {
+          if (!captureAllowed) return;
           participants.set(control.speakerId, {
             discord_id: control.speakerId,
             display_name: control.displayName,
           });
           stream.sendControl(control);
+        },
+        sendFrame(...args) {
+          if (captureAllowed) stream.sendFrame(...args);
         },
       },
       // The voice connection is gone for good (a 4014 park, or retries
@@ -184,6 +189,9 @@ export function createMeetingSurface({
       save,
       participants,
       recordVoiceChannelId: voiceChannel.id,
+      stopCapture: () => {
+        captureAllowed = false;
+      },
       startedAt: now(),
     });
     registered = true;
@@ -232,11 +240,22 @@ export function createMeetingSurface({
     return { sessionId: session.sessionId, voiceChannel: session.voiceChannel };
   }
 
-  // Discord can move the bot while recording. The adapter supplies the new
-  // opaque channel so status, stop permissions, and auto-stop share its location.
+  // A saved recording belongs to one channel audience. Close its forwarding
+  // gate synchronously on a move, before recorder.stop() drains receive streams.
+  // This prevents destination-channel audio entering the original team's Doc.
   function updateVoiceChannel(guildId, voiceChannel) {
     const session = sessions.get(guildId);
-    if (session) session.voiceChannel = voiceChannel;
+    if (!session || session.voiceChannel.id === voiceChannel.id) return;
+    session.voiceChannel = voiceChannel;
+    if (!session.save) return;
+    session.stopCapture();
+    const stopping = stop(guildId);
+    notify({
+      channel: session.textChannel,
+      content:
+        '⚠️ The recording ended because I moved voice channels. Start a new recording in the destination channel to save it for that channel’s teams.',
+    }).catch((err) => console.error('meetingSurface: channel-move notify failed:', err));
+    return stopping;
   }
 
   async function stop(guildId) {

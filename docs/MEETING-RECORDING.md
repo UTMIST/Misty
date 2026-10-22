@@ -415,6 +415,10 @@ recorded and is OK with it. Misty makes that explicit:
   <teams | admins only>, plus a reminder that everyone present should consent; ask a Misty admin to remove a record.
 - `/record start` gains `save:false` to skip the Google Doc for that meeting
   (PDF only, as today). Any participant may ask the requester to stop.
+- Moving the bot ends a saved recording. Audio forwarding stops synchronously
+  before receive-stream draining, so destination-channel speech cannot enter the
+  original audience's record. Start a new recording for the destination audience.
+  PDF-only (`save:false`) recordings continue to follow moves.
 - Posting a link in Discord never grants Drive access (#223).
 
 ### Retention and removal *(proposed)*

@@ -35,6 +35,12 @@ as the compatibility output and recovery fallback.
 
 ## File necessity
 
+The bot surface gates audio and finalizes saved recordings on moves; its lifecycle
+tests verify that destination speech is excluded and PDF-only moves still work.
+The Discord adapter's move comment now matches that lifecycle behavior.
+Its integration tests cover saved finalization and preserve PDF-only move/auto-stop coverage.
+The bot README and shared recording design describe the audience boundary.
+
 | File | Why it changes |
 |---|---|
 | [Makefile](../Makefile) | Fix shell quoting so the Node version precheck runs instead of passing literal line continuations to JavaScript. |

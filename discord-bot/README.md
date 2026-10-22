@@ -653,4 +653,7 @@ same record context. Failed hand-off still posts the PDF and a delayed-save
 notice; keep that PDF and contact an admin with the meeting ID for recovery.
 Google Docs remain admin-only when complete voice-channel team coverage is
 unavailable. Doc-link delivery is the separate #223 change.
+Moving the bot to another voice channel ends a saved recording immediately;
+start a new recording there to use its audience. `save:false` recordings continue
+to follow moves.
 See [setup and recovery](../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).
