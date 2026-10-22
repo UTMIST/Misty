@@ -333,6 +333,7 @@ class PostgresStorageAdapter:
         fetched_at,
         tags,
         actor,
+        doc_id=None,
     ) -> Doc:
         with self._engine.begin() as conn:
             # New docs are always active, so they fall under the partial unique
@@ -344,6 +345,8 @@ class PostgresStorageAdapter:
             row = conn.execute(
                 pg_insert(docs)
                 .values(
+                    # Omitted when None so the column's gen_random_uuid() default applies.
+                    **({"id": doc_id} if doc_id is not None else {}),
                     url=url,
                     url_normalized=url_normalized,
                     source_id=source_id,

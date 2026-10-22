@@ -70,7 +70,17 @@ class StorageAdapter(Protocol):
         fetched_at,
         tags: list[str],
         actor: str,
-    ) -> Doc: ...
+        doc_id: UUID | None = None,
+    ) -> Doc:
+        """Create a doc. `doc_id` defaults to a generated UUID.
+
+        Pass one only where the identity must be reproducible across runs: retrieval
+        breaks ranking ties with the doc id, so a generated id makes the order of
+        equally scored documents vary between runs. The evaluation harness
+        (src/eval/) depends on that order being stable.
+        """
+        ...
+
     def get_doc(self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL) -> Doc | None: ...
     def get_doc_by_normalized_url(self, url_normalized: str) -> Doc | None: ...
     def list_docs(

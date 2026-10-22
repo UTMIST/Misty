@@ -123,10 +123,11 @@ class InMemoryStorageAdapter:
         fetched_at,
         tags,
         actor,
+        doc_id=None,
     ) -> Doc:
         now = _now()
         doc = Doc(
-            id=uuid4(),
+            id=doc_id or uuid4(),
             url=url,
             url_normalized=url_normalized,
             source_id=source_id,

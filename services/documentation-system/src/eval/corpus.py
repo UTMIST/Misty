@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from contracts.types import Doc, SourceGrant
 from contracts.visibility import Actor, Channel, RetrievalContext
@@ -31,6 +31,18 @@ from src.indexing import index_doc
 GRANT_LIFETIME = timedelta(days=365)
 
 ACTOR = "eval-harness"
+
+# Document ids are derived from the corpus key rather than generated, because
+# retrieval breaks ranking ties with the doc id (src/retrieval.py:fuse). Generated ids
+# would reorder equally scored documents between runs, and at small k that turns a hit
+# into a miss and back -- randomness that reads as a chunking difference. A tie is still
+# broken arbitrarily; the point is that it is broken the same way every run.
+ID_NAMESPACE = uuid5(NAMESPACE_URL, "utmist.eval-corpus")
+
+
+def doc_id_for(key: str) -> UUID:
+    """The stable id a corpus document always seeds under."""
+    return uuid5(ID_NAMESPACE, key)
 
 
 @dataclass(frozen=True)
@@ -134,6 +146,7 @@ def seed(adapter, corpus: Corpus, *, embedder, settings: ChunkSettings) -> Seede
             fetched_at=None,
             tags=[],
             actor=ACTOR,
+            doc_id=doc_id_for(item.key),
         )
         docs[item.key] = doc
         _apply_grants(adapter, doc.id, item.grants, now=now)

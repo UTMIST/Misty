@@ -15,9 +15,17 @@ from contracts.retrieval import QueryEmbedding
 from contracts.visibility import Actor, Channel
 from src.chunking import ChunkSettings
 from src.eval import harness
-from src.eval.corpus import load_corpus, seed
+from src.eval.corpus import doc_id_for, load_corpus, seed
 from src.eval.embedding import DIMENSIONS, MODEL, LexicalEmbedder
-from src.eval.harness import Question, Run, check, load_questions, run, score
+from src.eval.harness import (
+    Question,
+    Run,
+    calibration_rows,
+    check,
+    load_questions,
+    run,
+    score,
+)
 from src.storage.in_memory import InMemoryStorageAdapter
 
 PERSON = "11111111-1111-1111-1111-111111111111"
@@ -388,3 +396,86 @@ def test_calibrate_reports_the_separation_between_right_and_wrong_documents(caps
     assert harness.main(["calibrate"]) == 0
     out = capsys.readouterr().out
     assert "margin" in out and "correct kept" in out
+
+
+# --- stable identity ------------------------------------------------------------------
+
+
+def test_a_document_seeds_under_the_same_id_every_run(tmp_path):
+    # Retrieval breaks ranking ties with the doc id, so a generated id would reorder
+    # equally scored documents between runs -- at small k, a hit one run and a miss the
+    # next, which reads as a chunking difference and is not one.
+    corpus = load_corpus(write_corpus(tmp_path))
+    seen = []
+    for _ in range(2):
+        seeded = seed(
+            InMemoryStorageAdapter(),
+            corpus,
+            embedder=LexicalEmbedder(),
+            settings=ChunkSettings(),
+        )
+        seen.append({key: doc.id for key, doc in seeded.docs.items()})
+    assert seen[0] == seen[1]
+    assert seen[0]["cpsif"] == doc_id_for("cpsif")
+
+
+def test_the_adapter_honours_a_supplied_document_id():
+    adapter = InMemoryStorageAdapter()
+    wanted = doc_id_for("fixed")
+    doc = adapter.create_doc(
+        url="https://x.test/fixed",
+        url_normalized="https://x.test/fixed",
+        source_id="gdocs",
+        title="Fixed",
+        description=None,
+        owning_team_id=None,
+        owning_team_label=None,
+        owning_person_id=None,
+        owning_person_label=None,
+        content_snapshot=None,
+        fetched_at=None,
+        tags=[],
+        actor="test",
+        doc_id=wanted,
+    )
+    assert doc.id == wanted
+
+
+def test_identical_runs_produce_identical_results(tmp_path):
+    corpus = load_corpus(write_corpus(tmp_path))
+    asked = questions(question(id="tie", query="CPSIF expense claim", expected_doc_keys=("cpsif",)))
+    first, second = (
+        run(corpus, asked, settings=ChunkSettings(), k=1, min_cosine=0.05) for _ in range(2)
+    )
+    assert [item.returned for item in first.results] == [item.returned for item in second.results]
+
+
+# --- calibration ----------------------------------------------------------------------
+
+
+def test_calibration_ignores_documents_the_asker_cannot_retrieve(tmp_path):
+    # The orchid document is granted to one person, and its text is the question's own
+    # vocabulary, so it would be the strongest competitor if visibility were skipped.
+    # A channel cannot reach a personal grant, so for that asker it is not competition.
+    corpus = load_corpus(write_corpus(tmp_path))
+    asked = questions(
+        question(
+            id="as-person", query="orchid growing", context="alice", expected_doc_keys=("cpsif",)
+        ),
+        question(
+            id="as-channel", query="orchid growing", context="members", expected_doc_keys=("cpsif",)
+        ),
+    )
+    _, rows = calibration_rows(corpus, asked, ChunkSettings())
+    wrong = {name: competitor for name, _, competitor in rows}
+    assert wrong["as-person"] > wrong["as-channel"]
+
+
+def test_calibration_reports_a_row_per_answerable_question(tmp_path):
+    corpus = load_corpus(write_corpus(tmp_path))
+    asked = questions(
+        question(id="answerable", query="CPSIF", expected_doc_keys=("cpsif",)),
+        question(id="expects-nothing", query="CPSIF", expected_doc_keys=()),
+    )
+    _, rows = calibration_rows(corpus, asked, ChunkSettings())
+    assert [name for name, _, _ in rows] == ["answerable"]

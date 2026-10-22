@@ -235,17 +235,30 @@ def format_comparison(runs: list[Run]) -> str:
     return "\n".join(lines)
 
 
-def calibrate(corpus: Corpus, questions: tuple[Question, ...], settings: ChunkSettings) -> str:
-    """Report how well cosine separates correct documents from incorrect ones.
+def calibration_rows(
+    corpus: Corpus, questions: tuple[Question, ...], settings: ChunkSettings
+) -> tuple[Seeded, list[tuple[str, float, float]]]:
+    """Per question: the best cosine against the expected document, and against the
+    best wrong one the asking context can actually retrieve.
 
-    docs/DEPLOYMENT.md points here for calibrating `search_min_cosine`. This is the
-    measurement behind that: the best cosine against the expected document, against the
-    best wrong document, and what each candidate floor would admit.
+    Scoring against the whole corpus would count a document the floor never gets to see,
+    since visibility is applied before ranking, and would overstate how much competition
+    the floor has to separate.
     """
     embedder = LexicalEmbedder()
     adapter = InMemoryStorageAdapter()
     seeded = seed(adapter, corpus, embedder=embedder, settings=settings)
     cosine = lambda a, b: sum(x * y for x, y in zip(a, b))  # noqa: E731
+
+    def best(query, ids) -> float:
+        return max(
+            (
+                cosine(query, chunk.embedding)
+                for doc_id in ids
+                for chunk in adapter.list_doc_chunks(doc_id)
+            ),
+            default=0.0,
+        )
 
     rows = []
     for question in questions:
@@ -253,15 +266,22 @@ def calibrate(corpus: Corpus, questions: tuple[Question, ...], settings: ChunkSe
             continue
         query = embedder.embed_query(question.query).vector
         wanted = {seeded.docs[key].id for key in question.expected_doc_keys}
-        best = lambda ids: max(  # noqa: E731
-            cosine(query, chunk.embedding)
-            for doc_id in ids
-            for chunk in adapter.list_doc_chunks(doc_id)
-        )
-        rows.append(
-            (question.id, best(wanted), best({d.id for d in seeded.docs.values()} - wanted))
-        )
+        # list_docs applies the same visibility rule as retrieval and omits retired
+        # documents, so the competition measured here is the competition that exists.
+        visible = {
+            doc.id for doc in adapter.list_docs(visibility=corpus.contexts[question.context])
+        }
+        rows.append((question.id, best(query, wanted), best(query, visible - wanted)))
+    return seeded, rows
 
+
+def calibrate(corpus: Corpus, questions: tuple[Question, ...], settings: ChunkSettings) -> str:
+    """Report how well cosine separates correct documents from incorrect ones.
+
+    docs/DEPLOYMENT.md points here for calibrating `search_min_cosine`.
+    """
+    seeded, rows = calibration_rows(corpus, questions, settings)
+    embedder = LexicalEmbedder()
     width = max(len(row[0]) for row in rows)
     lines = [_config_line(_config(seeded, embedder, DEFAULT_K, DEFAULT_MIN_COSINE, len(rows))), ""]
     lines.append(f"  {'question':<{width}} {'correct':>8} {'best wrong':>11}  margin")
