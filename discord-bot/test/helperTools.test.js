@@ -228,3 +228,65 @@ test('search bounds service-controlled title and url in the model content', asyn
   assert.ok(hit.title.length <= 300);
   assert.ok(hit.url.length <= 2048);
 });
+
+// The service's per-block MAX_JSON_BYTES is 65_536. Per-field caps bound one
+// hit; this guards the combined block, which ten fat multibyte hits can push
+// past the limit even when every field is individually within its cap.
+const MAX_JSON_BYTES = 65536;
+// Ten hits, each a fat multibyte (3-byte) title/url/text well over the per-field
+// caps, so each projected hit is near its max and the ten together overflow.
+const fatHits = () =>
+  Array.from({ length: 10 }, (_, i) => ({
+    doc_id: `d${i}`,
+    title: '界'.repeat(1000),
+    url: 'https://x.test/' + '界'.repeat(2000),
+    text: '界'.repeat(1000),
+    chunk: { ordinal: i },
+  }));
+
+test('search caps the combined result block under the per-block byte limit', async () => {
+  const { search } = tools({
+    async searchDocs() {
+      return fatHits();
+    },
+  });
+  const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
+  // The whole serialized block (what rides in the tool_result) stays under the
+  // service limit, not merely each field.
+  assert.ok(u8(JSON.stringify(out.content)) <= MAX_JSON_BYTES);
+  // The aggregate budget actually bit: the overflow tail was dropped.
+  assert.ok(out.content.results.length < 10);
+  assert.ok(out.content.results.length >= 1);
+  // Citations match the kept hits, not the raw ten.
+  assert.equal(out.citations.length, out.content.results.length);
+  // Every kept string is still well-formed UTF-8.
+  for (const hit of out.content.results) {
+    assert.equal(hit.title.isWellFormed(), true);
+    assert.equal(hit.url.isWellFormed(), true);
+    assert.equal(hit.snippet.isWellFormed(), true);
+  }
+});
+
+test('revalidation covers kept hits and ignores the dropped tail', async () => {
+  const { search } = tools({
+    async searchDocs() {
+      return fatHits();
+    },
+  });
+  const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
+  // Same hits still visible -> every kept fingerprint is found.
+  assert.equal(await out.revalidate(), true);
+});
+
+test('revalidation fails when a kept hit disappears', async () => {
+  let calls = 0;
+  const { search } = tools({
+    async searchDocs() {
+      calls += 1;
+      // Second pass drops the top-ranked (kept) hit.
+      return calls === 1 ? fatHits() : fatHits().slice(1);
+    },
+  });
+  const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
+  assert.equal(await out.revalidate(), false);
+});

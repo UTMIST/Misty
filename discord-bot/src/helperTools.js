@@ -33,8 +33,16 @@ const SNIPPET_LEN = 400; // UTF-16 units; a display snippet, not the real limite
 const MAX_DOC_CONTENT_BYTES = 49152; // 48 KiB
 const MAX_TITLE_LEN = 300; // units; a label, bounded so a fat title can't blow the block
 const MAX_URL_LEN = 2048; // units; real links fit, pathological ones can't bloat a hit
+// Aggregate byte budget for the whole `{ results: [...] }` block a search
+// returns. Per-field caps bound a single hit, but ten hits (each a fat title +
+// a ~2 KB url + a snippet, all multibyte) still sum past the service's 64 KiB
+// per-block MAX_JSON_BYTES, so the combined result 422s the next /chat request.
+// Budget the serialized block (a conservative upper bound on the string bytes
+// the service actually counts) and keep it under the limit with headroom.
+const MAX_SEARCH_RESULT_BYTES = 61440; // 60 KiB
 
 const utf8Len = (value) => Buffer.byteLength(value, 'utf8');
+const jsonLen = (value) => utf8Len(JSON.stringify(value));
 
 // Truncate to at most `max` UTF-16 code units without splitting a surrogate
 // pair. A naive slice can cut an astral character (e.g. an emoji) in half,
@@ -99,6 +107,33 @@ function projectHit(hit) {
   };
 }
 
+// The model-visible shape of a hit: the citation descriptor rides alongside the
+// content (surfaced by the executor), it is not sent back to the model.
+function forModelShape({ citation, ...rest }) {
+  return rest;
+}
+
+// Admit projected hits in rank order while the serialized results block stays
+// within `maxBytes`. Per-field caps bound one hit, but ten can still sum past
+// the service's per-block limit, so cap the aggregate here, before fingerprints
+// are recorded. We drop whole trailing hits rather than trimming a kept hit's
+// fields: a kept hit must stay byte-for-byte equal to projectHit(), or
+// revalidation (which re-projects each current hit and matches fingerprints)
+// would reject it. A dropped hit is never shown, cited, or fingerprinted, so
+// withholding it is safe. Later hits only add bytes, so the first overflow ends
+// admission.
+function packHits(projected, maxBytes) {
+  const kept = [];
+  const forModel = [];
+  for (const hit of projected) {
+    const candidate = [...forModel, forModelShape(hit)];
+    if (jsonLen({ results: candidate }) > maxBytes) break;
+    kept.push(hit);
+    forModel.push(candidate[candidate.length - 1]);
+  }
+  return { kept, forModel };
+}
+
 // Person context forwards an actor; channel context forwards guild+channel. The
 // executor binds exactly one; docClient fails closed on both/neither.
 function retrievalArgs(context) {
@@ -152,15 +187,19 @@ export function createDocumentTools({ docClient }) {
         const read = (signal) => docClient.searchDocs(args, { signal });
         const results = await readDocument(key, read);
         const projected = (results ?? []).map(projectHit);
+        // Enforce the aggregate block budget: keep as many ranked hits as fit
+        // under the 64 KiB per-block limit, dropping the overflow tail so the
+        // combined result can't 422 the next /chat request.
+        const { kept, forModel } = packHits(projected, MAX_SEARCH_RESULT_BYTES);
         // `citations` ride alongside the model-visible content so the executor
         // can surface sources without the model having to echo them back.
-        const citations = projected.filter((r) => r.doc_id).map((r) => r.citation);
-        const forModel = projected.map(({ citation, ...rest }) => rest);
+        const citations = kept.filter((r) => r.doc_id).map((r) => r.citation);
         // Re-run the same authorized search before replay/publication. Require
-        // every original chunk and its metadata to remain visible unchanged.
-        // Ranking changes can conservatively withhold an answer; missing hits
-        // must never be treated as proof of continued access.
-        const fingerprints = projected.map((hit) => JSON.stringify(hit));
+        // every kept chunk and its metadata to remain visible unchanged. Ranking
+        // changes can conservatively withhold an answer; missing hits must never
+        // be treated as proof of continued access. Only kept hits are
+        // fingerprinted: a hit we dropped for size was never used to answer.
+        const fingerprints = kept.map((hit) => JSON.stringify(hit));
         return {
           content: { results: forModel },
           citations,
