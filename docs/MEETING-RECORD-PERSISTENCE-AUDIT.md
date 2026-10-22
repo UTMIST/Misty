@@ -163,3 +163,16 @@ deployment docs describe the response and rollout order.
 | [services/meeting/src/sessions.py](../services/meeting/src/sessions.py) | Finalize once under cancellation and hand off before cleanup without retaining audio. |
 | [services/meeting/tests/test_config.py](../services/meeting/tests/test_config.py) | Verify the affected behavior offline, including adapter parity, recovery, auth, consent or configuration as applicable. |
 | [docs/MEETING-RECORD-PERSISTENCE-AUDIT.md](MEETING-RECORD-PERSISTENCE-AUDIT.md) | Record scope, verification limits and the required justification for every changed file. |
+
+## PR 306 recovery follow-up
+
+The meeting contract, storage Protocol documentation, shared transition validator,
+coordinator and schema now retain per-file Google deletion intent and confirmations.
+Both adapters already persist every meeting field through the same versioned
+transition, so neither needs a separate implementation change. Migration 016 adds
+the JSON state with an empty default; its round-trip test verifies retained records.
+Shared meeting cases cover delayed deletion after explicit retry, restart recovery,
+and clearing reconciliation errors on both adapters. Earlier migration tests exclude
+this newly introduced field when downgrading past its introduction.
+API, architecture and deployment docs describe deletion progress, recovery and the rollback constraint;
+the Railway runbook and AGENTS migration head now point at 016.

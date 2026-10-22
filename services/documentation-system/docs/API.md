@@ -843,7 +843,11 @@ Google write; the hourly runner picks up due retries.
 
 `google_deleted_at` is a durable receipt for a confirmed canonical deletion,
 allowing removal to resume after later cleanup fails. An ambiguous 404 never
-sets that receipt.
+sets that receipt. `google_deletions` maps each cleanup identity to `pending`
+(before the external delete) or `confirmed` (after acknowledgement). Both states
+permanently exclude that identity from canonical adoption; explicit retry can
+create a fresh Doc from the retained payload. Successful reconciliation clears
+`reconcile_failed`, so recovered scans stop reporting cleanup failures.
 
 Removal retries the version check before acknowledging its removal marker.
 
