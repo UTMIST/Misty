@@ -95,12 +95,35 @@ every step and maps 1:1 to:
 Titles and folder names are presentation only. The Doc's real URL goes through
 the normal catalog ingest; the UUID is never presented as a fetchable URL.
 
-**No duplicate Docs.** connectors is stateless, so idempotency lives in Drive
-itself: the Doc is created with `appProperties: {misty_meeting_id: <uuid>}`.
-Before any create, connectors searches the destination folder for that
-property and returns the existing Doc if one is found. This also resolves a
-create that timed out with an unknown outcome. Catalog dedup by Drive identity
-(already used by discovery, #291) prevents a second catalog entry.
+**No duplicate Docs: creation is coordinated through the meeting record.**
+A Drive search followed by a create is not atomic — two overlapping attempts
+can both find nothing, and a timed-out create can still be in flight when a
+retry searches. So documentation-system serializes creation itself:
+
+1. **One attempt at a time.** Before calling Google, documentation-system
+   claims the record in one conditional update: `persistence_status` moves to
+   `creating`, with a fresh `create_attempt_id` and `create_lease_until`
+   (now + `MEETING_DOC_CREATE_LEASE_S`, default 10 min). The update only
+   succeeds if no unexpired lease exists, so a concurrent `PUT`, inline
+   attempt, or `retry-due` run skips the record instead of creating.
+2. **Every create is tagged.** The Doc is created with
+   `appProperties: {misty_meeting_id, misty_attempt_id}`.
+3. **Known outcome.** On success the Google document ID is stored immediately
+   and the record moves to `doc_created`. A definite failure (Google 4xx)
+   releases the lease for a later retry.
+4. **Uncertain outcome.** On a timeout, connection reset, or 5xx, the record
+   moves to `create_uncertain` and **no new create is allowed** until it is
+   reconciled.
+5. **Reconcile before creating again.** Once the lease has expired (so any
+   in-flight request has finished or failed), the next attempt searches the
+   meeting's folder for `misty_meeting_id` using the writer identity. One match
+   → adopt it. Several matches → keep the oldest and permanently delete the
+   others. None → a new create is allowed, under a new lease.
+
+Docs are created **unshared** and only shared after their ID is recorded (see
+"Google setup"), so a duplicate that slips through is never visible to anyone
+before reconciliation deletes it. Catalog ingest uses the single adopted
+Google document ID, so the catalog never holds two entries for one meeting.
 
 **No overwriting human edits.** The Doc is created *with* its content in one
 Drive `files.create` call (HTML upload converted to a Google Doc), so there is
@@ -150,10 +173,13 @@ documentation-system ── create Doc ──▶ connectors ──▶ Google Dri
 
 **State machine** (`meeting_records.persistence_status`):
 
-`pending` → `doc_created` → `saved` — or `failed` after
-`MEETING_RECORD_MAX_ATTEMPTS` (default 8), which is surfaced to admins via the
-audit log and `GET /meeting-records?status=failed`. Each step is idempotent, so
-any step can be retried after a crash.
+`pending` → `creating` (leased) → `doc_created` → `shared` → `saved`
+(cataloged). `creating` can instead go to `create_uncertain`, which is
+reconciled as above before anything else happens. After
+`MEETING_RECORD_MAX_ATTEMPTS` (default 8) the record becomes `failed`, which is
+surfaced to admins via the audit log and `GET /meeting-records?status=failed`.
+Every step after `doc_created` is idempotent against the stored document ID,
+so it can be retried after a crash.
 
 **Remaining crash-loss window (accepted):** a `meeting` process crash during a
 live meeting (existing limitation — sessions are in memory), or between
@@ -173,16 +199,22 @@ content, participant names, or credentials.
 | documentation-system | `PATCH /meeting-records/{meeting_id}/delivery` — `{status, discord_message_id}` | `meetings:write` | bot (#223) |
 | documentation-system | `POST /meeting-records/retry-due?limit=N` | `meetings:write` | Railway cron |
 | documentation-system | `POST /meeting-records/{meeting_id}/remove` — removal cascade (below) | `meetings:admin` | admin / cron expiry |
-| connectors | `POST /google/docs` — `{meeting_id, voice_channel_id, title, html, commenters: [group emails]}` → `{document_id, url, created}`; also shares viewer to the read service account | `write` | documentation-system |
-| connectors | `POST /google/docs/{document_id}/trash` | `write` | documentation-system |
+| connectors | `POST /google/docs` — `{meeting_id, attempt_id, voice_channel_id, title, html}` → `{document_id, url}`; creates the Doc **unshared** | `meeting-write` | documentation-system |
+| connectors | `POST /google/docs/search` — `{meeting_id}` → every Doc tagged with it (ID, attempt ID, created time) | `meeting-write` | documentation-system |
+| connectors | `PUT /google/docs/{document_id}/sharing` — `{commenters: [group emails]}`; makes the direct shares exactly this set and returns the resulting permissions | `meeting-write` | documentation-system |
+| connectors | `POST /google/docs/{document_id}/fetch` — content **and complete ACL**, read with the writer identity; refuses files without `misty_meeting_id` | `meeting-fetch` | documentation-system |
+| connectors | `GET /google/docs/{document_id}/status` — `exists` / `trashed` / `deleted`, as seen by the owner | `meeting-fetch` | documentation-system |
+| connectors | `DELETE /google/docs/{document_id}` — removes every share, then permanently deletes | `meeting-write` | documentation-system |
 
 `meeting` gets a documentation-system consumer key with `meetings:write`;
-documentation-system gets a connectors key with `write`. Vendor calls stay
+documentation-system gets a connectors key with `meeting-write` and
+`meeting-fetch`. Vendor calls stay
 behind connectors' injected provider (#60/#82 pattern); write-path credentials
 (the infrastructure account's OAuth token, see "Google setup") are separate
 from the read path's service account, so `/fetch` keeps read-only scopes.
 **Google OAuth scope: `drive.file`** (create and manage only files Misty
-created — enough for create, search by `appProperties`, share, and trash).
+created — enough for create, search by `appProperties`, reading the full ACL
+as owner, sharing, and permanent deletion).
 Confirm during #222 implementation; fall back to `drive` only if a required
 call is refused.
 
@@ -217,7 +249,8 @@ stays database-free):
 | `action_items` | JSONB `string[]` | Generation-time snapshot, queryable |
 | `generated_at` | timestamptz | Distinguishes snapshot from later Doc edits |
 | `pending_payload` | JSONB, null | Transcript awaiting Doc creation; **cleared as soon as the Doc exists** |
-| `persistence_status` | text | `pending` / `doc_created` / `saved` / `failed` / `removed` |
+| `persistence_status` | text | `pending` / `creating` / `create_uncertain` / `doc_created` / `shared` / `saved` / `failed` / `inaccessible` / `removed` |
+| `create_attempt_id`, `create_lease_until` | UUID, timestamptz, null | Creation lease; only the holder may call Google create |
 | `attempts`, `next_attempt_at`, `last_error` | int, timestamptz, text | `last_error` is a code, never content |
 | `delivery_status` | text | `pending` / `posted` / `failed` (#223) |
 | `discord_message_id` | text, null | Link message, for retry/update and removal |
@@ -256,18 +289,23 @@ snowflake (stable across renames), created on first use and found again by
 `appProperties.misty_voice_channel_id`. Folders are for organization only and
 are shared with no members.
 
-**Permissions: per-Doc shares, not folder inheritance.** Each Doc gets direct
-shares:
+**Permissions: per-Doc shares, not folder inheritance.** After its ID is
+recorded, each Doc gets direct *commenter* shares to the managed Google Group
+(`team_google_groups.group_email`) of each audience team — members can read
+and comment but not edit the record (2026-10-02: meeting files should not be
+edited). Nothing else is shared. Direct per-Doc shares avoid inherited access
+exposing a private meeting, and later changes to a channel's teams do not
+silently broaden old records.
 
-- *commenter* to the managed Google Group (`team_google_groups.group_email`)
-  of each audience team — members can read and comment but not edit the record
-  (2026-10-02: meeting files should not be edited);
-- *viewer* to the connectors read service account, so the catalog's existing
-  Google fetch can read the content and ACL. That share maps to no catalog
-  grant (unknown emails create none).
-
-Direct per-Doc shares avoid inherited access exposing a private meeting, and
-later changes to a channel's teams do not silently broaden old records.
+**The catalog reads meeting Docs as the owner.** Google only shows full
+permission details (principal emails) to users who can manage sharing, and the
+catalog's ACL resolution rejects user/group permissions without an email. So
+meeting Docs are **not** shared with the read service account. For any catalog
+doc linked to a `meeting_records` row, documentation-system fetches content and
+ACL through connectors' `POST /google/docs/{id}/fetch` (writer identity) — at
+first ingest, on refetch, and in `source-access/refresh-due`. All other
+documents keep the existing `/fetch` path. Because the service account never
+sees meeting Docs, discovery (#291) cannot catalog them a second time.
 
 **Audience = the teams configured for the voice channel** where the meeting
 happened, via `/channel-access` (team-tracking
@@ -294,8 +332,8 @@ is still created but shared with **no members** — admins only. The record is
 admin-only until `/channel-access` is configured for that voice channel. Misty
 never uses domain-wide or anyone-with-link sharing. After creation, connectors
 reads back the Doc's permissions; if any principal other than the owner,
-admins, the intended groups, and the read service account has access, the Doc
-is trashed and the attempt fails.
+admins, and the intended groups has access, all shares are removed, the Doc is
+permanently deleted, and the attempt fails.
 
 **Catalog grants follow Drive automatically.** Because access is Drive group
 shares, the existing source-ACL sync (#76/#261) turns them into catalog grants
@@ -323,17 +361,28 @@ recorded and is OK with it. Misty makes that explicit:
 - **Deletion authority:** Misty admins (infra leads). Drive admins can also
   delete in Drive.
 - **Member removal path:** a member DMs or pings a Misty admin with the Doc link
-  or meeting ID. The admin calls `POST /meeting-records/{id}/remove`, which:
-  1. trashes the Doc (connectors),
-  2. deactivates the catalog doc (`active=false`, which removes its search
-     chunks),
-  3. clears the record's content columns (summary, decisions, action items,
-     participants, payload), keeping only a tombstone (`meeting_id`,
-     `removed_at`, `removed_by`) so retries or discovery cannot recreate it,
-  4. has the bot delete its link message (`discord_message_id`).
+  or meeting ID. The admin calls `POST /meeting-records/{id}/remove`. Removal
+  must leave **no readable copy** in Google or the catalog:
+  1. **Google:** connectors removes every share, then **permanently deletes**
+     the Doc (`DELETE /google/docs/{id}`). Trash is not enough: in My Drive,
+     people who already had access can still open a trashed file until it is
+     permanently deleted. No recoverable Google copy is kept.
+  2. **Catalog:** a new documentation-system purge (`POST /docs/{id}/purge`,
+     privileged `docs:purge` scope, used internally by `/remove`) deletes the
+     doc's `content_snapshot`, its `doc_content` row, its `doc_chunks`, and
+     **all** its grants, then sets `active=false` and `purged_at`. Today's
+     `active=false` alone only removes search chunks — the snapshot, full
+     content, and grants survive it — so it is not used for removal. Only the
+     row ID, normalized URL, and Drive file ID remain, and ingest, refetch,
+     refresh, and discovery refuse a purged doc.
+  3. **Meeting record:** content columns (summary, decisions, action items,
+     participants, payload) are cleared, keeping only a tombstone
+     (`meeting_id`, Google document ID, `removed_at`, `removed_by`) so retries
+     cannot recreate it.
+  4. **Discord:** the bot deletes its link message (`discord_message_id`).
   The admin deletes the Discord PDF message by hand (the bot does not track
   it today). Copies members already downloaded cannot be recalled; the admin
-  tells the requester so.
+  tells the requester so. Expiry runs the same cascade.
 - **Members who leave** lose access when they leave the managed Google Group;
   their past speech is not removed from records.
 
@@ -345,10 +394,16 @@ recorded and is OK with it. Misty makes that explicit:
   refetch and `refresh-due` paths.
 - **Structured metadata is a generation-time snapshot** (`generated_at`) and is
   never updated from Doc edits. Consumers that want current notes read the Doc.
-- **Doc deleted or trashed in Drive by a person:** today a failed refetch keeps
-  the old snapshot. Follow-up (documentation-system): when Google reports the
-  file as trashed or not found, mark the catalog doc inactive and the meeting
-  record `removed`, as if `/remove` had run.
+- **A 404 is not proof of deletion.** Google returns `404 notFound` both when
+  a file is gone and when the caller has lost access. A failed fetch therefore
+  never triggers cleanup on its own: the record becomes `inaccessible`, is
+  reported to admins, and the catalog keeps today's behavior (last snapshot and
+  grants until they expire). Destructive cleanup runs only after connectors'
+  `GET /google/docs/{id}/status` — asked as the owning writer identity —
+  confirms the Doc is `deleted` or `trashed`. Then documentation-system runs
+  the same cascade as `/remove` (permanently deleting a trashed Doc). If the
+  writer identity itself has lost access, nothing is deleted and admins
+  investigate.
 - **Access changed in Drive:** the source-ACL sync revokes or adds catalog
   grants on the next refresh; `audience_team_ids` keeps the original snapshot
   for audit.
@@ -357,8 +412,9 @@ recorded and is OK with it. Misty makes that explicit:
 
 | Work | Zone (owner) | Issue |
 |---|---|---|
-| `meeting_records` table + migration, `PUT/GET/PATCH /meeting-records`, `retry-due`, `/remove` cascade, identity resolution, Doc HTML rendering | `services/documentation-system` (@angelayzheng) | #222 |
-| `POST /google/docs` (create with `appProperties`, search, share, permission read-back) and `/trash`, per-voice-channel folders, Workspace OAuth write credentials, `write` scope | `services/connectors` (@michelle-yl) | #222 |
+| `meeting_records` table + migration, `PUT/GET/PATCH /meeting-records`, creation lease and reconciliation, `retry-due`, `/remove` cascade, identity resolution, Doc HTML rendering, owner-identity fetch for meeting docs in ingest/refetch/refresh | `services/documentation-system` (@angelayzheng) | #222 |
+| Catalog purge (`POST /docs/{id}/purge`, `docs:purge`) and refusing purged docs in ingest/refetch/refresh/discovery | `services/documentation-system` (@angelayzheng) | new follow-up, required before rollout |
+| `POST /google/docs` (unshared create with `appProperties`), `search`, `sharing` with read-back, owner `fetch` (content + full ACL), `status`, permanent `DELETE`, per-voice-channel folders, Workspace OAuth write credentials, `meeting-write`/`meeting-fetch` scopes | `services/connectors` (@michelle-yl) | #222 |
 | `StopRequest.record`, hand-off before discard, hold-and-retry, `StopResponse.record` | `services/meeting` (@andrei-akopian) | #222 |
 | Send record context on stop; post the Doc link; `delivery` PATCH; consent notice; `save:false` | `discord-bot` (@pusheen5000000) | #223 (+ the bot half of the wire change in #222) |
 | This document | `docs` (@qiuethan) | #212 |
@@ -371,10 +427,10 @@ deliberately; ship both halves together and update "The wire contract" below.
 1. Infra issues a connectors OAuth refresh token for the infrastructure
    Workspace account with `drive.file`, confirms the location (Shared Drive or
    that account's My Drive), creates `Misty Meeting Records/`, and sets
-   `GOOGLE_MEETING_ROOT_FOLDER_ID`. Confirm the Workspace allows sharing with
-   the external read service account.
+   `GOOGLE_MEETING_ROOT_FOLDER_ID`. In a Shared Drive, the account needs a role
+   that can permanently delete files (Manager).
 2. New consumer keys: `meeting` → documentation-system (`meetings:write`);
-   documentation-system → connectors (`write`); bot → documentation-system
+   documentation-system → connectors (`meeting-write`, `meeting-fetch`); bot → documentation-system
    (`meetings:read`, `meetings:write`).
 3. The Railway cron also calls `POST /meeting-records/retry-due`.
 4. Admins configure `/channel-access` on voice channels used for meetings.
