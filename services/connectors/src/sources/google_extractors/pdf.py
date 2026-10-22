@@ -25,7 +25,7 @@ class PdfExtractor:
     services = ("drive",)
 
     def extract(self, services: dict, file_id: str, mime: str) -> ExtractedText:
-        payload = execute(services["drive"].files().get(fileId=file_id, alt="media"))
+        payload = execute(services["drive"].files().get_media(fileId=file_id))
 
         # Parsing failures are properties of the FILE, not of the upstream
         # call, so they map to SourceUnsupported (422) rather than

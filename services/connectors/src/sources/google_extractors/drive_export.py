@@ -21,7 +21,7 @@ class DriveExportExtractor:
     def extract(self, services: dict, file_id: str, mime: str) -> ExtractedText:
         files = services["drive"].files()
         if self._export_mime is None:
-            payload = execute(files.get(fileId=file_id, alt="media"))
+            payload = execute(files.get_media(fileId=file_id))
         else:
             payload = execute(files.export(fileId=file_id, mimeType=self._export_mime))
         text = (

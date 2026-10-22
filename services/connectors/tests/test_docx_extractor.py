@@ -11,7 +11,7 @@ class _FakeFiles:
     def __init__(self, payload):
         self._payload = payload
 
-    def get(self, *, fileId, alt=None):
+    def get_media(self, *, fileId):
         return self
 
     def execute(self):

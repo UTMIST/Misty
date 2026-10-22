@@ -105,7 +105,7 @@ class DocxExtractor:
     services = ("drive",)
 
     def extract(self, services: dict, file_id: str, mime: str) -> ExtractedText:
-        payload = execute(services["drive"].files().get(fileId=file_id, alt="media"))
+        payload = execute(services["drive"].files().get_media(fileId=file_id))
 
         # A parse failure is a property of the file, not of the upstream
         # call, so it maps to SourceUnsupported (422) rather than
