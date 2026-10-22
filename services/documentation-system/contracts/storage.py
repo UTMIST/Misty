@@ -24,6 +24,21 @@ class DuplicateActiveUrl(Exception):
     such constraint and is single-threaded, so it never raises this."""
 
 
+class DuplicateDocId(Exception):
+    """Raised by create_doc when the supplied doc_id is already catalogued.
+
+    Only reachable when a caller supplies `doc_id`; a generated one cannot collide.
+    Both adapters reject it rather than overwrite, because the alternatives diverge:
+    the in-memory store would replace the existing document while its content, chunks
+    and grants stayed attached to that id, and Postgres would raise a primary-key
+    violation. Retired documents keep their rows, so a retired id is taken too.
+    """
+
+    def __init__(self, doc_id):
+        super().__init__("doc id already catalogued")
+        self.doc_id = doc_id
+
+
 class ExistingGoogleDoc(Exception):
     """Discovery's insert found an existing Google identity, active or retired."""
 
@@ -88,6 +103,7 @@ class StorageAdapter(Protocol):
         tags: list[str],
         actor: str,
         skip_existing_google: bool = False,
+        doc_id: UUID | None = None,
     ) -> Doc:
         """Insert a doc, coordinating all Google inserts by supported file identity.
 
@@ -96,6 +112,13 @@ class StorageAdapter(Protocol):
         without modifying that record if found. Requires a supported Google URL.
         The default preserves explicit manual re-ingest after retirement.
         No provider/network work is performed while coordinating the insertion.
+
+        `doc_id` defaults to a generated UUID. Pass one only where the identity must be
+        reproducible across runs: retrieval breaks ranking ties with the doc id, so a
+        generated id makes the order of equally scored documents vary between runs. The
+        evaluation harness (src/eval/) depends on that order being stable. A supplied id
+        that is already catalogued, active or retired, raises DuplicateDocId; it is
+        never allowed to overwrite the existing document.
         """
         ...
 

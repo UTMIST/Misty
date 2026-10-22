@@ -148,6 +148,10 @@ documentation-system/
 │   │
 │   ├── ingest.py               ingest_doc(): normalize, dedup, source, fetch, own, persist
 │   ├── indexing.py             index_doc(): chunk, embed, and replace a doc's chunk set
+│   ├── eval/                   Retrieval quality harness — dev tooling, not a service path
+│   │   ├── embedding.py        Deterministic offline lexical embedder; a measuring stand-in, not a model
+│   │   ├── corpus.py           Load the fixed corpus and seed it through the real index_doc
+│   │   └── harness.py          Ask the question set, report hit@k with its configuration; `calibrate` mode
 │   ├── retrieval.py            Shared keyword normalization, validation, and rank fusion
 │   ├── embedding.py            Authenticated LLM /embed client
 │   ├── url_norm.py             URL normalization + source derivation from patterns
@@ -183,6 +187,7 @@ documentation-system/
 │   ├── fake_embedder.py          Offline /embed stand-in (autouse `fake_embedder` fixture)
 │   ├── test_indexing.py          index_doc lifecycle: unchanged, replace, clear, failure, races
 │   ├── test_api_indexing.py      Triggers, source deletion, and POST /docs/index
+│   ├── test_eval_harness.py      embedder, seeding, scoring, leaks, fixture integrity, CLI
 │   ├── test_embed_client.py      HttpEmbedder batching and error mapping
 │   ├── test_migration_007.py     Source-access migration round trip
 │   ├── test_migration_008.py     pgvector migration, constraints, and round trip
@@ -322,6 +327,7 @@ uv run ruff format --check .
 | Doc | Audience | Contents |
 |-----|----------|----------|
 | [`docs/API.md`](docs/API.md) | Consumers (bots, dashboards, HTTP clients) | Every endpoint, auth, scopes, ingest idempotency, degrade behavior, error semantics |
+| [`docs/EVALUATION.md`](docs/EVALUATION.md) | Contributors tuning retrieval | The harness: seeding the corpus, running it, reading `hit@k`, calibrating the relevance floor, and what the lexical stand-in embedder does and does not measure |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Contributors | The three Protocols, adapters, ingest orchestrator, URL normalization, fetcher registry, directory client, data model |
 | [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) | Contributors | Task walkthroughs: add an endpoint, add a fetcher, add an adapter method, write a migration, run the tests |
 | [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Operators | Running in prod: Postgres, env vars, migrations, issuing keys, enabling fetchers, the directory dependency |

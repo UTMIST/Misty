@@ -1,3 +1,4 @@
+from tests.doc_identity_cases import DocIdentityCases
 from tests.google_identity_cases import GoogleIdentityCases
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
@@ -426,6 +427,14 @@ def test_get_doc_content_meta_scoped_to_requested_doc(store):
 
 
 class TestGoogleIdentity(GoogleIdentityCases):
+    @pytest.fixture
+    def adapter(self):
+        from tests.conftest import build_seed_sources
+
+        return InMemoryStorageAdapter(seed_sources=build_seed_sources())
+
+
+class TestDocIdentity(DocIdentityCases):
     @pytest.fixture
     def adapter(self):
         from tests.conftest import build_seed_sources
