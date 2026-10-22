@@ -64,7 +64,7 @@ test('direct messages isolate the user and preserve the triggering prompt bounda
   });
   assert.deepEqual(
     seen.map((turn) => turn.text),
-    ['first', 'answer', 'second'],
+    ['first', 'second'],
   );
   assert.deepEqual(channel.sent, ['new answer']);
 });
@@ -285,7 +285,6 @@ test('handleMention in a thread: every speaker reaches the service separately at
     seen.map((t) => [t.role, t.authorId]),
     [
       ['user', '1'],
-      ['assistant', undefined],
       ['user', '2'],
       ['user', '3'],
     ],
@@ -317,7 +316,6 @@ test('handleMention in a thread: replays the starter message that lives in the p
     seen.map((t) => t.text),
     [
       'how do I get repo access?', // would have been lost entirely
-      'Ask Infra.', // and this with it, as a leading assistant turn
       'and for staging?',
     ],
   );
@@ -347,7 +345,7 @@ test('handleMention in a thread: a starter already in the fetch is not duplicate
 
   assert.deepEqual(
     seen.map((t) => t.text),
-    ['first post', 'an answer', 'follow up'],
+    ['first post', 'follow up'],
   );
 });
 
@@ -557,7 +555,7 @@ test('isReplyToBotInOwnedThread requires a pinged bot reply in a Misty-owned thr
   assert.equal(outsideThread.referenceFetches, 0);
 });
 
-test('messageCreate listener answers a pinged Misty reply with full thread context', async () => {
+test('messageCreate listener answers a pinged Misty reply using the thread questions', async () => {
   const handlers = {};
   let seen;
   const answer = async ({ turns }) => {
@@ -591,7 +589,7 @@ test('messageCreate listener answers a pinged Misty reply with full thread conte
   assert.deepEqual(thread.sent, ['reply']);
   assert.deepEqual(
     seen.map((turn) => turn.text),
-    ['original question', 'original answer', 'pinged follow up'],
+    ['original question', 'pinged follow up'],
   );
 });
 

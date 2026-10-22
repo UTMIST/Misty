@@ -1,5 +1,27 @@
-import { answerHelperTurns, resolveHelperCaller } from '../../helperFlow.js';
+import { prepareHelperReply, resolveHelperCaller, WITHHELD_ANSWER } from '../../helperFlow.js';
 import { sendDiscordMessage } from './messages.js';
+
+// Recheck immediately before each send, including later parts of a long reply.
+// A check failure is terminal for this reply; no remaining source text is sent.
+export async function sendHelperReply(send, reply) {
+  let withheld = false;
+  await sendDiscordMessage(async (part) => {
+    if (withheld) return;
+    if (reply.canPublish) {
+      let allowed = false;
+      try {
+        allowed = (await reply.canPublish()) === true;
+      } catch {
+        // Access lookup outages fail closed.
+      }
+      if (!allowed) {
+        withheld = true;
+        return send(WITHHELD_ANSWER);
+      }
+    }
+    return send(part);
+  }, reply.content);
+}
 
 export function startsWithBotMention(content, botId) {
   const trimmed = (content ?? '').trimStart();
@@ -129,8 +151,8 @@ async function prependStarterMessage(thread, ordered) {
 
 // Handle a helper request: either a leading mention or a reply that pings Misty
 // in a Misty-owned thread. Linked-only. In a channel it opens a thread; in a
-// thread it replays the full recent history, including the starter message, as
-// memory.
+// thread it fetches recent history, including the starter message. The flow
+// retains user questions and removes unverified bot answers before model use.
 // Never throws to discord.js.
 export async function handleMention(message, { appContext, botId }) {
   const question = stripLeadingMention(message.content, botId);
@@ -183,8 +205,17 @@ export async function handleMention(message, { appContext, botId }) {
   if (!turns.length) return;
 
   await target.sendTyping().catch(() => {});
-  const content = await answerHelperTurns(appContext, turns, caller.principal);
-  await sendDiscordMessage((part) => target.send(part), content).catch(() =>
+  // Shared-channel scope keys on the configured channel, not the thread Misty
+  // opens inside it: in a thread, that's the parent channel. A tool-enabled
+  // answer is scoped to that channel's configured team union (resolved by the
+  // doc service); the asking person's own privileges never widen it.
+  const channelId = message.channel.isThread() ? message.channel.parentId : message.channel.id;
+  const reply = await prepareHelperReply(appContext, turns, caller.principal, {
+    kind: 'channel',
+    guildId: message.guild?.id ?? message.guildId ?? null,
+    channelId: channelId ?? null,
+  });
+  await sendHelperReply((part) => target.send(part), reply).catch(() =>
     console.error('Could not deliver helper reply'),
   );
 }
@@ -225,8 +256,10 @@ export async function handleDirectMessage(message, { appContext, botId }) {
   if (!turns.length) return;
 
   await message.channel.sendTyping().catch(() => {});
-  const content = await answerHelperTurns(appContext, turns, caller.principal);
-  await sendDiscordMessage((part) => message.channel.send(part), content).catch(() =>
+  // DM: a tool-enabled answer is scoped to the asking person — their own
+  // authorized documents, including anything privately shared with them.
+  const reply = await prepareHelperReply(appContext, turns, caller.principal, { kind: 'person' });
+  await sendHelperReply((part) => message.channel.send(part), reply).catch(() =>
     console.error('Could not deliver helper DM reply'),
   );
 }

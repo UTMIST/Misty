@@ -178,9 +178,10 @@ Set these per environment (staging vs production) per service.
 | `DISCORD_GUILD_ID` | test guild (staging) / blank (prod) |
 | `ENABLE_DISCORD` / `ENABLE_WEB` | `true` / `false` |
 | `HELPER_USER_MAX_REQUESTS` / `HELPER_USER_WINDOW_SECONDS` | optional helper allowance overrides; see [bot configuration and reset semantics](../discord-bot/README.md#helper-bot-request-limits) |
+| `HELPER_TOOLS_ENABLED` | defaults to `false`; literal `true` enables Discord document tools after retrieval/channel setup; see [helper configuration and access checks](../discord-bot/README.md#helper-document-tools) |
 | `PORT` | Railway-injected port for the Discord readiness listener; defaults to `3002` locally |
 | `DIRECTORY_BASE_URL` / `DIRECTORY_API_KEY` | team-tracking; key set by the provisioning script |
-| `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system; key scopes `docs:read docs:write act-as-user` (see its [key docs](../services/documentation-system/docs/DEPLOYMENT.md#issuing-api-keys-doc-keys-cli)) |
+| `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system; key scopes `docs:read docs:write act-as-user`, plus literal `act-as-channel` for shared-channel helper retrieval (see its [key docs](../services/documentation-system/docs/DEPLOYMENT.md#issuing-api-keys-doc-keys-cli)) |
 | `VERIFICATION_BASE_URL` / `VERIFICATION_API_KEY` | verification |
 | `INFRASTRUCTURE_DISCORD_USERNAME` | *optional* — Discord username or ID shown by `/bug` for infrastructure support |
 | `MEETING_BASE_URL` / `MEETING_API_KEY` | meeting; a `meetings`-scoped consumer key |

@@ -124,8 +124,10 @@ npm start                                # or: npm run dev for both surfaces
 
 Before starting Discord mode, enable **Message Content Intent** under Discord
 Developer Portal → your application → **Bot** → **Privileged Gateway Intents**.
-The bot requests this intent so it can include the full recent thread history in
-helper requests, including messages that did not mention Misty.
+The bot requests this intent so it can include recent user questions in helper
+requests, including messages that did not mention Misty. Old bot answers are
+omitted because they have no verifiable source provenance; document follow-ups
+retrieve their evidence again.
 
 Wait for `Logged in as <bot name>` in terminal 2, then use the slash commands
 in whichever Discord server you invited the bot to.
@@ -267,7 +269,7 @@ and skips them.
   Needs the bot's doc key to carry the literal `act-as-user` scope (an `admin` key does not imply it).
 
 - `@Misty <question>` (linked) — opens a helper thread and answers using the
-  thread's recent history. In a thread Misty created, replying directly to one of
+  thread's recent user questions. In a thread Misty created, replying directly to one of
   Misty's messages continues the conversation when the reply ping is enabled.
   Ping-off replies, replies to other users, replies in regular channels, and replies
   in threads Misty did not create do not trigger the helper. A typed leading
@@ -391,6 +393,52 @@ parallel to team-tracking's scoped-key auth.
    propagate); **testing-guild-only** commands go only to that guild. See
    "Registration scope" above.
 5. `npm start` — then invite the bot to any server via its OAuth2 URL.
+
+## Helper document tools
+
+| Configuration | Default | Meaning |
+| --- | --- | --- |
+| `HELPER_TOOLS_ENABLED` | `false` | Literal `true` enables authorized document search and DM document reads for Discord helper answers |
+
+Enable only after retrieval and the destination's channel configuration are
+ready. `DOC_API_KEY` needs `docs:read`, literal `act-as-user` for DMs, and literal
+`act-as-channel` for shared channels. Existing command write scopes still apply.
+The bot checks source access during generation and immediately before sending,
+appends source links, and withholds an answer if those checks fail. Previous user
+questions remain available for follow-ups; earlier bot answers are not replayed,
+even after the flag is disabled. The web playground remains text-only.
+
+See the [helper tool contract](docs/CONTRIBUTING.md#the-authorized-helper-tool-loop-71)
+for replay, cost limits, revalidation tradeoffs, and offline coverage.
+
+### Channel scope and activation
+
+A helper reply in a thread uses its **parent channel's** configuration. A
+mention in an ordinary channel uses that channel's configuration, including
+when Misty creates a thread for the reply. Configuration commands in
+[#239](https://github.com/UTMIST/Misty/issues/239) must use the same rule; the
+[directory API](../services/team-tracking/docs/API.md#channel-team-access)
+looks up the exact guild/channel pair and does not resolve thread parents.
+Pass Discord snowflakes as their original decimal strings throughout. Do not
+convert them to JavaScript numbers, which can lose precision.
+
+An unconfigured or cleared channel returns an empty search result, without
+embedding the query or searching a wider scope. Missing assertion scopes and
+unavailable channel settings are errors, not empty-channel results; see the
+[retrieval contract](../services/documentation-system/docs/API.md#authorized-retrieval-post-search).
+An empty result gives the model no document evidence and adds no source links.
+
+Activation is coordinated through
+[#278](https://github.com/UTMIST/Misty/issues/278): William leads helper/retrieval
+integration and acceptance; Guneev owns channel configuration and its change
+cases. Keep the flag off until #239 and the real retrieval integration are ready.
+The maintainer with access to the target environment provisions the bot's doc
+key with the scopes above, preserving existing command scopes, and installs it
+as `DOC_API_KEY`; coordinate that operator with the #278 lead. Enable the flag
+in staging for the controlled DM/channel, follow-up, and revocation acceptance.
+Production activation follows recorded acceptance, including the automatic
+sharing flow required by #278. Merging this executor does not flip the flag or
+provision credentials. Disable the flag to stop new tool-enabled answers.
 
 ## Helper-bot request limits
 

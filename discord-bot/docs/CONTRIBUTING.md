@@ -153,6 +153,90 @@ CI runs `node-test` (`npm ci` + `npm test`) plus a Docker build with a boot smok
 - **Registering commands happens in the pre-deploy step, not at boot.** `railway.json`'s `preDeployCommand` runs `registerCommands.js` before the new process starts, so a deploy that fails there never starts the new process (Discord's global set may still have been overwritten — [RAILWAY-DEPLOYMENT.md §5](../../docs/RAILWAY-DEPLOYMENT.md#5-register-discord-slash-commands) covers recovery). Don't add a `rest.put(...)` to `index.js` to "make sure" — that would re-register on every restart. And don't tell a release note to run `register:production` by hand; the deploy already did.
 - **Beta commands only appear in the testing guild.** If a `beta: true` command isn't showing up, check `DISCORD_GUILD_ID`.
 
+## The authorized helper tool loop (#71)
+
+When `HELPER_TOOLS_ENABLED=true`, a helper answer runs through a client-executed
+tool loop (`src/toolExecutor.js`) instead of a single `/chat` call. The model can
+call document tools (`src/helperTools.js`) to search and read docs before it
+answers. The rules the loop enforces:
+
+- **Only `llmSafe` tools are reachable.** `src/toolRegistry.js` includes a
+  provider's tools only when it exports `llmSafe === true` (a literal `true`, not
+  just truthy). `linkService`/`emailService` can never become model tools.
+- **Scope comes from the surface, never the model.** `helperFlow.js` derives the
+  retrieval context from where the answer is going — a DM scopes to the asking
+  person (`X-On-Behalf-Of`), a shared channel scopes to that channel's configured
+  teams (`X-Guild-ID` + `X-Channel-ID`, resolved server-side). The executor binds
+  that context once and passes it to every tool call; any scope-shaped field the
+  model puts in a tool's `input` is ignored.
+  The [channel scope and activation rules](../README.md#channel-scope-and-activation)
+  define parent-channel selection, lossless snowflake strings, and rollout ownership.
+- **Fail closed.** `docClient.searchDocs` throws before sending a request if the
+  context is missing, empty, or ambiguous. There is no unfiltered search to fall
+  back to. `get_document` is person-scoped only; in a channel the model cites the
+  source link from `search_documents` instead.
+- **Revalidate evidence.** Each document tool result supplies a `revalidate`
+  callback. It repeats the authorized lookup with the same destination context
+  and checks that all original text, source links, and chunk descriptors remain
+  visible unchanged. The executor checks before model calls and returning a
+  final answer. Each tool read is itself authorized by the document API;
+  earlier evidence is not re-read before each individual tool call. Discord
+  checks again immediately before each
+  message part is sent. A missing result, changed content, denial, or lookup
+  outage withholds the answer; no document text is logged. New retrieval tools
+  must supply this callback for every result containing protected content.
+  Identical lookups share a single fresh response within one revalidation pass;
+  every callback still compares its own original evidence. Nothing is reused
+  across passes or answers.
+- **History contains user questions only.** Old bot answers have no trusted
+  source provenance, including after a restart or disabling the flag. The flow
+  removes them on both tool and text-only paths. Follow-ups re-retrieve using the
+  previous user questions; an ambiguous reference may need a title or link.
+  No document results or generated answers are cached for model replay.
+- **Bounded retrieval work.** At most four tool calls total across four rounds.
+  An oversized batch is rejected before executing any of it, and unknown or
+  failed calls still spend capacity. All document reads must pass through the
+  executor's `readDocument` gate: initial reads and revalidation share a limit
+  of 32 HTTP attempts per answer, including every Discord message part.
+  Failures do not refund attempts. A two-minute deadline covers generation
+  through delivery checks, aborts in-flight HTTP requests, and prevents further
+  work. An already accepted backend operation may still finish. Exhaustion
+  produces a safe fallback; it never skips an access check to send an answer.
+- **Bounded model output.** At most five model calls, with
+  at most 1,024 output tokens per call and an 8,000-token cumulative ceiling.
+  Each call requests the smaller of its per-call cap and remaining budget;
+  absent/invalid usage reserves the requested allocation. Exhaustion stops
+  before more tool work. The default round limit makes the effective output
+  maximum 5,120 tokens. These are output-token limits, not a dollar-spend cap:
+  input tokens and the bounded search embeddings for access checks also cost.
+- **Only completed answers are published.** `end_turn` is required for final
+  text. `max_tokens` exhausts the turn; `incomplete`, `content_filtered`, and
+  missing/unknown stop reasons produce no answer. Partial responses are never
+  replayed, retried automatically, or used to execute tool calls.
+- **Sources are rendered by the bot.** Available HTTP(S) links are appended and
+  deduplicated independently of whether the model includes citations.
+- **Opaque replay within a turn.** Assistant `content_blocks` are replayed
+  verbatim only within the current authorized loop, preserving provider state.
+- **Retrieved content is untrusted.** Snippets and document bodies come back as
+  tool results, so an authorized document can carry instructions the model may
+  follow (prompt injection). Scope binding contains it: injected text cannot
+  widen the context or reach a document outside it, so the worst case is a
+  steered answer within the asker's own scope, never disclosure of anything they
+  could not already see. There is no content-level sanitization; `get_document`
+  bodies are length-capped (`MAX_DOC_CONTENT_LEN`) only to keep a large doc under
+  the service's tool-payload limit, not to neutralize their content.
+
+The document service remains the authorization boundary. Revalidation observes
+its current grants and source snapshot, subject to the upstream ACL refresh
+window in the [retrieval contract](../../services/documentation-system/docs/API.md#authorized-retrieval-post-search).
+Search ranking changes can conservatively withhold a still-authorized answer.
+The final lookup and Discord send are separate requests, not an atomic operation;
+checks cannot retract a message part that was already delivered.
+
+This builds on the shared `POST /search` contract (#176) and the member-search
+client shape from #210/#289; channel configuration (#239) and the DM/channel
+integration that flips the flag on (#278) land separately.
+
 ## Checklist before you push
 
 - [ ] Command is registered in `commands/index.js`.
