@@ -231,6 +231,7 @@ meeting_records = Table(
     Column("doc_id", UUID(as_uuid=True), ForeignKey("docs.id"), nullable=True),
     Column("google_document_id", Text, nullable=True, unique=True),
     Column("google_deleted_at", DateTime(timezone=True), nullable=True),
+    Column("google_deletions", JSONB, nullable=False, server_default=text("'{}'")),
     Column("removed_google_document_ids", ARRAY(Text), nullable=False, server_default=text("'{}'")),
     Column("index_pending", Boolean, nullable=False, server_default=text("false")),
     Column("doc_url", Text, nullable=True),

@@ -126,7 +126,11 @@ class MeetingRecords:
         )
 
     def _adopt(self, record, document_id):
-        if not self._owns(record) or record.google_document_id:
+        if (
+            not self._owns(record)
+            or record.google_document_id
+            or document_id in record.google_deletions
+        ):
             return None
         return self._change(
             record,
@@ -218,6 +222,7 @@ class MeetingRecords:
                 matches = self.writer.search(r.meeting_id)
                 if not self._owns(r):
                     return
+                matches = [f for f in matches if f.document_id not in r.google_deletions]
                 candidates = sorted(
                     (f for f in matches if not f.trashed),
                     key=lambda f: (f.created_at, f.document_id),
@@ -327,7 +332,7 @@ class MeetingRecords:
                         self.storage.purge_meeting_catalog(
                             meeting_id, [match.document_id], actor="meeting-reconcile"
                         )
-                    self._delete(meeting_id, match.document_id)
+                    self._delete(meeting_id, match.document_id, cleanup_attempt=r.create_attempt_id)
         except Exception:
             error = "reconcile_failed"
             logger.warning("meeting.reconcile_failed meeting_id=%s", meeting_id)
@@ -338,22 +343,41 @@ class MeetingRecords:
                     current,
                     create_lease_until=None,
                     next_reconcile_at=self.now() + timedelta(hours=1),
-                    last_error=error or current.last_error,
+                    last_error=error
+                    or (None if current.last_error == "reconcile_failed" else current.last_error),
                 )
 
-    def _delete(self, meeting_id, document_id):
-        current = self.storage.get_meeting(meeting_id)
-        if current.google_document_id == document_id and current.google_deleted_at:
-            return
-        self.writer.delete(document_id)
-        # Only the canonical ID is added back to later cleanup searches. Persist
-        # its successful deletion separately from the final removal transition.
-        # Concurrent delivery/reconciliation updates must not lose this receipt.
+    def _delete(self, meeting_id, document_id, *, cleanup_attempt=None):
+        # Fence adoption before the external call: even a timed-out delete can
+        # complete after this worker releases its lease. Keep uncertain intents.
         while True:
             current = self.storage.get_meeting(meeting_id)
-            if current.google_document_id != document_id or current.google_deleted_at:
+            if current.google_deletions.get(document_id) == "confirmed" or (
+                current.google_document_id == document_id and current.google_deleted_at
+            ):
                 return
-            if self._change(current, google_deleted_at=self.now()) is not None:
+            if cleanup_attempt is not None and (
+                current.create_attempt_id != cleanup_attempt
+                or not current.create_lease_until
+                or current.create_lease_until <= self.now()
+            ):
+                return
+            if document_id in current.google_deletions:
+                break
+            if (
+                self._change(
+                    current, google_deletions=current.google_deletions | {document_id: "pending"}
+                )
+                is not None
+            ):
+                break
+        self.writer.delete(document_id)
+        while True:
+            current = self.storage.get_meeting(meeting_id)
+            values = {"google_deletions": current.google_deletions | {document_id: "confirmed"}}
+            if current.google_document_id == document_id and not current.google_deleted_at:
+                values["google_deleted_at"] = self.now()
+            if self._change(current, **values) is not None:
                 return
 
     def remove(self, meeting_id, *, actor):

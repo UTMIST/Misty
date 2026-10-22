@@ -9,6 +9,15 @@ from src.url_norm import normalize_url
 
 
 def changed(record, values, actor):
+    deletions = values.get("google_deletions", record.google_deletions)
+    for document_id, state in record.google_deletions.items():
+        if document_id not in deletions or (
+            state == "confirmed" and deletions[document_id] != "confirmed"
+        ):
+            raise ValueError("Google deletion progress cannot be forgotten")
+    canonical = values.get("google_document_id")
+    if canonical and canonical != record.google_document_id and canonical in deletions:
+        raise ValueError("cannot adopt a document with a deletion intent")
     if not set(record.removed_google_document_ids).issubset(
         values.get("removed_google_document_ids", record.removed_google_document_ids)
     ):

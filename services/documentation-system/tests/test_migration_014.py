@@ -49,7 +49,12 @@ def test_deletion_receipt_round_trip_preserves_tombstone_and_index_state():
             restored = PostgresStorageAdapter(engine).get_meeting(meeting.meeting_id)
             assert restored.google_deleted_at is None
             # Migration 015 backfills identity fences and reschedules removal.
-            newer_fields = {"google_deleted_at", "removed_google_document_ids", "next_reconcile_at"}
+            newer_fields = {
+                "google_deleted_at",
+                "removed_google_document_ids",
+                "next_reconcile_at",
+                "google_deletions",
+            }
             assert restored.model_dump(exclude=newer_fields) == removed.model_dump(
                 exclude=newer_fields
             )

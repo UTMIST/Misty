@@ -51,7 +51,7 @@ def test_removed_identities_round_trip_preserves_pending_meetings_and_catalog():
             restored = PostgresStorageAdapter(engine).get_meeting(ids[1])
             assert restored.removed_google_document_ids == [removed.google_document_id]
             assert restored.next_reconcile_at is not None
-            fields = {"next_reconcile_at"}
+            fields = {"next_reconcile_at", "google_deletions"}
             assert restored.model_dump(exclude=fields) == removed.model_dump(exclude=fields)
             assert adapter.get_meeting(ids[0]) == pending
             assert adapter.get_doc(unrelated.id) == unrelated

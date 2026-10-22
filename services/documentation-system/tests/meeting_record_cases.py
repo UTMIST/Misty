@@ -532,6 +532,123 @@ class MeetingRecordCases:
         r = records.remove(original.meeting_id, actor="admin")
         assert r.persistence_status == "removing" and r.google_deleted_at is None
 
+    def test_expired_cleanup_cannot_fence_a_new_canonical(self, flow):
+        records, writer, clock, original = flow
+        attempt_id = uuid4()
+        records.storage.change_meeting(
+            original,
+            {
+                "persistence_status": "failed",
+                "create_attempt_id": attempt_id,
+                "create_lease_until": NOW + timedelta(minutes=10),
+            },
+            actor="test",
+        )
+        writer.docs["late"] = TaggedDoc(
+            document_id="late", attempt_id=uuid4(), created_at=NOW, trashed=False
+        )
+        clock[0] += timedelta(minutes=11)
+        records.advance(original.meeting_id, explicit=True)
+        saved = records.storage.get_meeting(original.meeting_id)
+        assert saved.google_document_id == "late"
+        records._delete(original.meeting_id, "late", cleanup_attempt=attempt_id)
+        assert "late" in writer.docs
+        assert not records.storage.get_meeting(original.meeting_id).google_deletions
+
+    def test_confirmed_duplicate_deletion_is_idempotent_and_immutable(self, flow):
+        records, writer, clock, original = flow
+        writer.docs["duplicate"] = TaggedDoc(
+            document_id="duplicate", attempt_id=uuid4(), created_at=NOW, trashed=False
+        )
+        records._delete(original.meeting_id, "duplicate")
+        records._delete(original.meeting_id, "duplicate")
+        assert writer.deleted == ["duplicate"]
+        current = records.storage.get_meeting(original.meeting_id)
+        assert current.google_deletions == {"duplicate": "confirmed"}
+        with pytest.raises(ValueError, match="deletion progress"):
+            records.storage.change_meeting(
+                current, {"google_deletions": {"duplicate": "pending"}}, actor="test"
+            )
+
+    def test_uncertain_late_deletion_cannot_delete_retried_canonical(self, flow, monkeypatch):
+        records, writer, clock, original = flow
+        records.storage.change_meeting(
+            original,
+            {"persistence_status": "failed", "next_reconcile_at": NOW},
+            actor="test",
+        )
+        writer.docs["late"] = TaggedDoc(
+            document_id="late", attempt_id=uuid4(), created_at=NOW, trashed=False
+        )
+        delete = writer.delete
+
+        def timeout(document_id):
+            intent = records.storage.get_meeting(original.meeting_id)
+            assert intent.google_deletions[document_id] == "pending"
+            raise WriterError("google_transport", uncertain=True)
+
+        monkeypatch.setattr(writer, "delete", timeout)
+        records.reconcile(original.meeting_id)
+        # Restart after the failed deletion releases its lease. Google still
+        # lists the old file, whose delayed deletion has not completed yet.
+        restarted = MeetingRecords(
+            records.storage,
+            writer,
+            records.directory,
+            records.settings,
+            embedder=FakeEmbedder(),
+            now=lambda: clock[0],
+        )
+        restarted.advance(original.meeting_id, explicit=True)
+        saved = records.storage.get_meeting(original.meeting_id)
+        assert saved.persistence_status == "saved"
+        assert saved.google_document_id != "late"
+        assert "late" not in writer.shares
+        delete("late")  # The timed-out Google request finally completes.
+        assert saved.google_document_id in writer.docs
+        assert saved.pending_payload is None
+        with pytest.raises(ValueError, match="deletion progress"):
+            records.storage.change_meeting(saved, {"google_deletions": {}}, actor="test")
+
+    @pytest.mark.parametrize("saved", [True, False])
+    def test_reconciliation_clears_only_its_own_error_after_recovery(
+        self, flow, monkeypatch, saved
+    ):
+        records, writer, clock, original = flow
+        if saved:
+            records.advance(original.meeting_id)
+        else:
+            records.storage.change_meeting(
+                original,
+                {
+                    "persistence_status": "failed",
+                    "last_error": "attempt_limit",
+                    "next_reconcile_at": NOW,
+                },
+                actor="test",
+            )
+        search = writer.search
+
+        def unavailable(meeting_id):
+            raise WriterError("google_transport")
+
+        clock[0] += timedelta(hours=2)
+        monkeypatch.setattr(writer, "search", unavailable)
+        assert records.retry_due(10).cleanup_failed == 1
+        monkeypatch.setattr(writer, "search", search)
+        clock[0] += timedelta(hours=2)
+        result = records.retry_due(10)
+        assert result.cleanup_failed == 0
+        current = records.storage.get_meeting(original.meeting_id)
+        assert current.last_error != "reconcile_failed"
+        if saved:
+            assert result.failed == 0 and result.succeeded == 1
+        # A successful scan must not clear a persistence failure.
+        records.storage.change_meeting(current, {"last_error": "denied"}, actor="test")
+        clock[0] += timedelta(hours=2)
+        records.reconcile(original.meeting_id)
+        assert records.storage.get_meeting(original.meeting_id).last_error == "denied"
+
     def test_success_survives_new_coordinator_and_replay(self, flow):
         records, writer, clock, original = flow
         records.advance(original.meeting_id)
