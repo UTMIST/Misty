@@ -13,6 +13,33 @@ function extractOptions(interaction, activeOptions) {
 }
 
 /**
+ * Guild + scope channel for directory channel settings (#238 / #239).
+ * Threads inherit the parent channel's scope; DMs have no guild and no scope.
+ *
+ * @param {object} interaction Discord interaction.
+ * @returns {{ discordGuildId: string|null, discordChannelId: string|null, channelUsedParent: boolean }}
+ */
+export function channelScopeFromInteraction(interaction) {
+  const discordGuildId = interaction.guildId ?? null;
+  if (!discordGuildId) {
+    return { discordGuildId: null, discordChannelId: null, channelUsedParent: false };
+  }
+  const channel = interaction.channel;
+  if (channel && typeof channel.isThread === 'function' && channel.isThread()) {
+    return {
+      discordGuildId,
+      discordChannelId: channel.parentId ?? null,
+      channelUsedParent: Boolean(channel.parentId),
+    };
+  }
+  return {
+    discordGuildId,
+    discordChannelId: interaction.channelId ?? channel?.id ?? null,
+    channelUsedParent: false,
+  };
+}
+
+/**
  * Convert a Discord chat-input interaction into a surface-neutral intent.
  *
  * @param {object} interaction Discord interaction.
@@ -24,9 +51,10 @@ export function interactionToIntent(interaction, command) {
   const activeOptions = subcommand
     ? (command.subcommands.find((s) => s.name === subcommand)?.options ?? [])
     : command.options;
+  const scope = channelScopeFromInteraction(interaction);
   return {
     surface: 'discord',
-    discordGuildId: interaction.guildId ?? null,
+    ...scope,
     commandName: interaction.commandName,
     options: extractOptions(interaction, activeOptions),
     subcommand,

@@ -70,11 +70,10 @@ Goal: give a source without a fetcher (e.g. YouTube) a real content snapshot.
    `WebFetcher` for the httpx pattern.
 2. **Register it by `source_id`** in `default_registry()` (`src/fetch/registry.py`):
    ```python
-   return FetcherRegistry({
+   mapping: dict[str, Fetcher] = {
        "web": WebFetcher(),
-       "github": GithubFetcher(),
        "youtube": YouTubeFetcher(),   # new
-   })
+   }
    ```
    The key **must** equal the source's `id` — that's how `fetch_for` finds it.
 3. **Enable fetching for that source.** Flip `content_fetch_enabled` to `true` for the

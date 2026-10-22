@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # boundary that hands the raw value to GoogleSource) should ever call
     # .get_secret_value() on it.
     google_credentials_json: SecretStr = SecretStr("")
+    # Optional GitHub token (a fine-grained, read-only PAT). Empty is valid:
+    # public repositories are fetched unauthenticated, so this is never part
+    # of verify_production_secrets. SecretStr for the same reason as
+    # google_credentials_json; only the registry unwraps it.
+    github_token: SecretStr = SecretStr("")
     # Transport guard only. documentation-system's own clamp decides what is
     # actually stored; this just stops a pathological file becoming a huge
     # HTTP response. Deliberately set ABOVE documentation-system's
@@ -44,7 +49,8 @@ class Settings(BaseSettings):
     # truncated" warning can never fire.
     max_content_chars: int = Field(default=1_200_000, gt=0)
     # Pre-download guard for uploaded files whose bytes are fetched through
-    # Drive media. Native Google editor types use their APIs and do not need a
+    # Drive media, and for GitHub files (a HEAD request's size metadata, with a
+    # byte cap on the streamed body as backstop). Native Google editor types use their APIs and do not need a
     # Drive byte-size check. A missing Drive size is treated as unknown.
     max_file_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
     request_timeout_s: float = Field(default=30.0, gt=0)
@@ -58,9 +64,10 @@ def get_settings() -> Settings:
 def verify_production_secrets(settings: Settings | None = None) -> None:
     """Fail fast if a non-local environment still uses the built-in dev secret.
 
-    Google credentials are deliberately NOT checked here: a connectors service
-    that cannot reach Drive is degraded, not broken, and must still start and
-    serve /health so it can be deployed before the service account exists.
+    Google credentials and the GitHub token are deliberately NOT checked here:
+    a connectors service that cannot reach Drive (or private GitHub repos) is
+    degraded, not broken, and must still start and serve /health so it can be
+    deployed before those credentials exist.
     """
     settings = settings or get_settings()
     if settings.connectors_env == "local":

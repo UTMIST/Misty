@@ -157,7 +157,8 @@ Set these per environment (staging vs production) per service.
 | `MAX_MEETING_MS` | — | optional; defaults to the 4h backstop | — |
 | `DISCONNECT_GRACE_S` | — | optional; defaults to 60s. How long a disconnected session is held so `POST /stop` can still finalize it | — |
 | `GOOGLE_CREDENTIALS_JSON` | — | — | base64 Google service-account key; empty is a valid running state (Google fetches 503, rest of the service works) |
-| `MAX_FILE_BYTES` | — | — | optional; defaults to 25 MiB. Pre-download limit for uploaded PDF, `.docx`, and `text/*` files |
+| `GITHUB_TOKEN` | — | — | optional fine-grained read-only PAT; empty fetches public repositories only (private ones 404) |
+| `MAX_FILE_BYTES` | — | — | optional; defaults to 25 MiB. Pre-download limit for uploaded PDF, `.docx`, `text/*`, and GitHub files |
 
 > **Before merging or deploying llm**, configure a real `OPENAI_API_KEY` in the target
 > Railway environment, even for chat-only consumers. The boot check verifies presence,
@@ -238,11 +239,13 @@ TT_DATABASE_URL="<team-tracking Neon branch DATABASE_URL for this env>" \
 
 This issues scoped `team-tracking-keys` for discord-bot + documentation-system
 and sets each service's `DIRECTORY_API_KEY`. The discord-bot key's scopes
-include `people:elevate` (alongside its `people:*`/`teams:*`/`memberships:*`
-scopes) so its `/seed` can promote people to `admin`/`superuser` — plain
-`people:write` cannot set a non-`member` `access_level`. The
-documentation-system key stays read-only (`people:read teams:read memberships:read
-identifiers:read channels:read`) so it can resolve verified emails, active memberships, channel configuration, and the synced-group
+include `people:elevate` (alongside its `people:*`/`teams:*`/`memberships:*`/
+`channels:read`/`channels:write` scopes) so its `/seed` can promote people to
+`admin`/`superuser` — plain `people:write` cannot set a non-`member`
+`access_level` — and so `/channel-access` can read and replace channel team
+settings. The documentation-system key stays read-only (`people:read teams:read
+memberships:read identifiers:read channels:read`) so it can resolve verified
+emails, active memberships, channel configuration, and the synced-group
 mapping supplied by team-tracking. Re-running issues a fresh key and
 repoints the consumer; the previous key stays active until you revoke it
 manually (`team-tracking-keys revoke <id>`).
@@ -516,3 +519,15 @@ by an existing admin running `/seed` from Discord.
   don't "normalize" it, and keep `railway.json` and the Dockerfile `CMD` in step
   with each other. Railway reads `railway.json`, so that file is what actually
   governs the deploy.
+
+## Automatic sharing discovery
+
+The optional dedicated `doc-discover` cron service uses
+`services/documentation-system/railway.discovery.json` and the documentation-system
+image. It requires a persistent checkpoint volume, an environment/connector identity
+label, a catalog `docs:write` key and a connectors `discover` key. It has no migrations,
+HTTP healthcheck or automatic failure restart. Keep `DISCOVERY_ENABLED=false` until
+operators configure and approve staging acceptance. Do not enable PR-preview cron
+copies. Follow the [service runbook](../services/documentation-system/docs/DISCOVERY.md)
+for all settings, schedule, monitoring, recovery, member instructions and the separate
+production activation gate. Keep #292's existing-document refresh scheduled as well.

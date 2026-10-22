@@ -77,7 +77,8 @@ Also issue an API key for the Discord bot (only if you'll use Discord mode):
 cd services/team-tracking
 uv --project . run team-tracking-keys issue --name discord-bot \
   --scopes people:read people:write people:elevate identifiers:read identifiers:write \
-           teams:read teams:write memberships:read memberships:write role_kinds:read
+           teams:read teams:write memberships:read memberships:write role_kinds:read \
+           channels:read channels:write
 # Copy the tt_... key into discord-bot/.env as DIRECTORY_API_KEY.
 # IMPORTANT: this key must be issued against MAIN (port 8000), not scratch.
 # Verify the token starts with tt_ — a doc_-prefixed key means the shared venv
@@ -252,6 +253,14 @@ and skips them.
   - Recovery links appear only for confirmed managed groups with settings/external-member failures, using the stored email/domain. UTMIST's own Google administrator handles authorization or policy recovery. Generic directory outages are not reported as disabled Google integration.
   - Deploy the automatic-settings backend and authorize both OAuth scopes before rolling out these replies. Keep the existing status/retry commands; manual instructions are recovery guidance, not the normal onboarding flow.
 - `/my-teams` (linked) — list your active memberships.
+- `/channel-access show` (admin) — show which teams' documents Misty may use in this
+  channel. In a thread, the setting applies to the parent channel. Drive access stays
+  personal; this only scopes Misty's answers. Backed by team-tracking's
+  `/channels/{guild}/{channel}/teams` API. The playground uses fixed guild/channel
+  snowflakes (`111…` / `222…`) so the command works without Discord.
+- `/channel-access set team:<> [team2:<> … team5:<>]` (admin) — replace the channel's
+  team list (up to five). Team options use slug autocomplete.
+- `/channel-access clear` (admin) — clear the channel's team list (no document access).
 - `/doc <add|list|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
 - `/doc search query:<text>` (linked) — search the documents you can access and get the top matches
   as titles and links. Replies are always private, because results include your own Drive shares.
@@ -359,12 +368,13 @@ parallel to team-tracking's scoped-key auth.
      cd ../services/team-tracking
      uv --project . run team-tracking-keys issue --name discord-bot \
        --scopes people:read people:write people:elevate identifiers:read identifiers:write \
-                teams:read teams:write memberships:read memberships:write role_kinds:read
+                teams:read teams:write memberships:read memberships:write role_kinds:read \
+                channels:read channels:write
      # The token must start with tt_ (a doc_-prefixed key means the shared venv
      # resolved documentation-system's CLI). scripts/provision-directory-key.sh
      # is the source of truth for these scopes — people:elevate is required so
      # /seed can promote people to admin/superuser (without it, /seed to a
-     # privileged level returns 403).
+     # privileged level returns 403). channels:read/write power /channel-access.
      ```
      **Important:** the CLI writes to whichever DB `.env`'s `DATABASE_URL` points
      at, which is your main `team_tracking` DB by default. Do NOT issue this key
@@ -454,15 +464,15 @@ Meetings, Administration, and Help & support. Search matches command names, desc
 and categories. New uncategorized commands remain available under Other commands.
 
 Forms share labeled controls, help text, and Required/Optional indicators.
-Leaving an optional select at **Use default** preserves the command’s server
+Leaving an optional select at **Use default** preserves the command's server
 default; selecting **No** explicitly sends false. Permission badges describe
 the command policy; the server still authorizes every request. Run a command
 to see its reply in **Activity**. Pending requests disable repeat submission.
 
 The layout adapts to narrow screens and supports keyboard navigation. On phones,
 **Commands** opens the category menu; selecting a command closes it.
-**Clear activity** only clears the visible replies; it does not reset Misty’s
-thread context. UTMIST’s existing astronaut logo and cobalt accent are reused
+**Clear activity** only clears the visible replies; it does not reset Misty's
+thread context. UTMIST's existing astronaut logo and cobalt accent are reused
 locally, with no external font, icon, or image requests.
 
 Click **Reset DB** beside the identity picker to re-clone from your main DB
@@ -595,7 +605,7 @@ local `.env`.
 | `scripts/lib/seedDefaultPersonas.js` | Idempotently seeds Dev Superuser/Admin/Member into scratch. |
 | `src/web/server.js` | Fastify web playground (see "Web playground" above). |
 | `src/web/public/catalog.js` | Presentation labels, categories, search, and option serialization; command definitions stay in the registry. |
-| `src/web/public/utmist-logo.png` | Unmodified copy of the meeting service’s UTMIST brand asset, served within the bot image. |
+| `src/web/public/utmist-logo.png` | Unmodified copy of the meeting service's UTMIST brand asset, served within the bot image. |
 | `src/web/public/mentions.js` | Client-side `<@id>` → user pill rendering. |
 | `src/startupGuard.js` | Refuses web-mode boot if the directory key lacks `dev:spoof`. |
 

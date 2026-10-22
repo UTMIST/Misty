@@ -234,13 +234,13 @@ uv --project services/team-tracking run team-tracking-keys issue \
   --scopes people:read people:write people:elevate \
            identifiers:read identifiers:write \
            teams:read teams:write memberships:read memberships:write \
-           role_kinds:read
+           role_kinds:read channels:read channels:write
 ```
 
 That scope list is the one
 [`scripts/provision-directory-key.sh`](../scripts/provision-directory-key.sh)
 uses, and it's the authoritative set. A shorter key still lets the bot boot —
-it just 403s on `/team`, `/seed`, and `/my-teams` at runtime, which is a
+it just 403s on `/team`, `/seed`, `/my-teams`, or `/channel-access` at runtime, which is a
 confusing way to discover the problem. Always pass `--project`; see the
 `src`-collision gotcha in [Troubleshooting](#troubleshooting) for why a bare
 `team-tracking-keys` can mint an unusable key. `llm` and `meeting` mint

@@ -209,9 +209,10 @@ def _verify_repairs(client: DocsApiClient, report: Report, *, source_id: str | N
     """Demote any "repaired" doc that is still contentless.
 
     A 200 from POST /docs/{id}/refetch means the fetch ran, not that content
-    was stored — the endpoint only writes `if result.content`. GithubFetcher is
-    title-only by design, so those docs would otherwise report `repaired` and
-    exit 0 on every run, forever. One listing settles the whole run: the
+    was stored — the endpoint only writes `if result.content`. A fetch can
+    return a title with no content (e.g. a GitHub repository without a
+    README), so those docs would otherwise report `repaired` and exit 0 on
+    every run, forever. One listing settles the whole run: the
     contentless set is exactly the question."""
     repaired = {r.doc_id for r in report.results if r.outcome == REPAIRED}
     if not repaired:

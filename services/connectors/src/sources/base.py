@@ -7,6 +7,8 @@ normalized error hierarchy the router maps to HTTP status codes.
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
+from contracts.discovery import DiscoveryPage, DiscoveryRequest
+
 
 @dataclass(frozen=True)
 class SourcePermission:
@@ -32,6 +34,10 @@ class SourceResult:
 
 class SourceFetcher(Protocol):
     def fetch(self, url: str) -> SourceResult: ...
+
+
+class DiscoverySource(Protocol):
+    def discover(self, request: DiscoveryRequest) -> DiscoveryPage: ...
 
 
 class SourceError(Exception):
