@@ -66,16 +66,16 @@ GoogleSource.fetch(url)
   → SourceResult(title, content[:max], warnings)
 ```
 
-The non-obvious part is that **extractors declare their own requirements**. Each one carries `scopes` and `services` tuples, and `required_scopes()` / `required_services()` union across the registered set. Adding a native extractor therefore does not mean editing a hard-coded scope constant somewhere else — the union picks it up. `_build_services` raises `SourceNotConfigured` for any service name missing from `_API_VERSIONS`, so a forgotten version mapping fails loudly at the first fetch rather than producing a confusing Google error.
-
-A consequence worth internalizing: **a new supported file type does not imply a new OAuth scope.** Uploaded PDFs and `.docx` files are downloaded as raw bytes through the Drive media path that `drive.readonly` already covers, then parsed locally with `pypdf` / `python-docx`. Only a genuinely new *Google API* adds a scope.
-
 Google Docs requests set `includeTabsContent=true` and traverse top-level and
 nested tabs in document order. Without that parameter Google returns only the
 first tab in the legacy `body` field. Multiple tabs receive headings containing
 their title paths; a single tab keeps its existing rendered text. After deploying
 this behavior, refetch previously indexed multi-tab documents through the catalog
 API so their additional text reaches the index; discovery does not refetch them.
+
+The non-obvious part is that **extractors declare their own requirements**. Each one carries `scopes` and `services` tuples, and `required_scopes()` / `required_services()` union across the registered set. Adding a native extractor therefore does not mean editing a hard-coded scope constant somewhere else — the union picks it up. `_build_services` raises `SourceNotConfigured` for any service name missing from `_API_VERSIONS`, so a forgotten version mapping fails loudly at the first fetch rather than producing a confusing Google error.
+
+A consequence worth internalizing: **a new supported file type does not imply a new OAuth scope.** Uploaded PDFs and `.docx` files are downloaded as raw bytes through the Drive media path that `drive.readonly` already covers, then parsed locally with `pypdf` / `python-docx`. Only a genuinely new *Google API* adds a scope.
 
 ## Threading: what is memoized and what is not
 
