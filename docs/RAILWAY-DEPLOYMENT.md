@@ -531,3 +531,35 @@ operators configure and approve staging acceptance. Do not enable PR-preview cro
 copies. Follow the [service runbook](../services/documentation-system/docs/DISCOVERY.md)
 for all settings, schedule, monitoring, recovery, member instructions and the separate
 production activation gate. Keep #292's existing-document refresh scheduled as well.
+
+## Meeting record persistence
+
+Deploy order for the durable Google Doc path:
+
+1. Configure the connector [Workspace OAuth writer and restricted root](../services/connectors/docs/DEPLOYMENT.md#meeting-writer-setup).
+   Use `drive.file`, explicitly grant the root to this OAuth app, and list the
+   owning/inherited infra admin principals. Keep the existing read account separate.
+2. Apply documentation-system migration **012** and deploy its
+   [meeting endpoints](../services/documentation-system/docs/API.md#meeting-records).
+   Its connector key needs `meeting-write,meeting-fetch` plus existing scopes.
+   Its directory key must read identifiers, channel teams and Google Group state.
+3. Issue a catalog key named for `meeting` with `meetings:write`; configure
+   `DOCS_BASE_URL`, `DOCS_API_KEY`, and optionally `RECORD_HANDOFF_HOLD_S` on meeting.
+4. Add `meetings:write` to the source-refresh cron key before deploying its
+   `--meeting-records` start command. The same monitored hourly staging job now
+   retries, reconciles and expires records. Production scheduling remains gated.
+5. Deploy the bot/meeting stop-context wire change together. The bot announces
+   persistence/consent before capture; `/record start save:false` opts out.
+   Configure voice-channel teams through `/channel-access` and healthy synced
+   Google Groups for member access. Missing coverage saves admin-only.
+
+Rollout checks use a consented staging meeting: explicit and empty-channel stop,
+Doc sections and full transcript, native MIME type and configured destination,
+team commenter access, catalog source grants, repeat stop/persistence, recovery
+from a connector outage, and catalog visibility after a restart. Real Google
+credentials are never used by automated tests. Keep the PDF behavior; #223 will
+post the already-created Doc link and track Discord message cleanup. Follow the
+[record removal runbook](../services/documentation-system/docs/DEPLOYMENT.md#meeting-record-persistence)
+for failed, inaccessible or unsafe-ACL records. The generic `docs:purge` endpoint
+remains a rollout follow-up from #212; meeting removal already uses an internal
+atomic purge with restoration guards.
