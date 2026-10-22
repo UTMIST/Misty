@@ -21,6 +21,7 @@ from src.storage.postgres import PostgresStorageAdapter
 from tests.chunk_storage_cases import ChunkStorageCases, make_chunk, make_doc
 from tests.ingestion_retrieval_cases import IngestionRetrievalCases
 from tests.retrieval_cases import RetrievalCases
+from tests.meeting_record_cases import MeetingRecordCases
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_PG_TESTS") != "1", reason="set RUN_PG_TESTS=1 to run Postgres tests"
@@ -28,6 +29,10 @@ pytestmark = pytest.mark.skipif(
 
 
 class TestDocChunks(ChunkStorageCases):
+    pass
+
+
+class TestMeetingRecords(MeetingRecordCases):
     pass
 
 
@@ -448,7 +453,11 @@ def test_discovery_insert_waits_for_uncommitted_manual_alias(adapter):
     discovery_pid = []
 
     def before_execute(conn, cursor, statement, parameters, context, executemany):
-        if getattr(worker, "name", None) == "discovery" and not discovery_pid:
+        if (
+            getattr(worker, "name", None) == "discovery"
+            and not discovery_pid
+            and "pg_advisory_xact_lock" in statement
+        ):
             discovery_pid.append(conn.connection.driver_connection.info.backend_pid)
             discovery_started.set()
 

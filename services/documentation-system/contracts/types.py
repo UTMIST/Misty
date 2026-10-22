@@ -54,6 +54,7 @@ class Doc(DirectoryBase):
     owning_person_label: str | None = None
     content_snapshot: str | None = None
     fetched_at: datetime | None = None
+    purged_at: datetime | None = None
     source_access_synced_at: datetime | None = None
     source_access_attempted_at: datetime | None = None
     active: bool = True

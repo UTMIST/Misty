@@ -88,13 +88,15 @@ class DocsApiClient:
         except ValueError:
             raise RefreshError(f"{method} {path} returned invalid JSON") from None
 
-    def check_scope(self, *, timeout: float) -> None:
+    def check_scope(self, *, timeout: float, meetings: bool = False) -> None:
         body = self._request("GET", "/api-keys/self", timeout=timeout)
         scopes = body.get("scopes") if isinstance(body, dict) else None
         if not isinstance(scopes, list) or any(not isinstance(s, str) for s in scopes):
             raise RefreshError("GET /api-keys/self returned an invalid scope list")
         if "docs:write" not in scopes and "admin" not in scopes:
             raise RefreshError("DOCS_API_KEY requires docs:write")
+        if meetings and "meetings:write" not in scopes and "admin" not in scopes:
+            raise RefreshError("DOCS_API_KEY requires meetings:write for --meeting-records")
 
     def refresh_batch(self, *, limit: int, timeout: float) -> Batch:
         body = self._request("POST", REFRESH_PATH, params={"limit": limit}, timeout=timeout)
@@ -109,6 +111,15 @@ class DocsApiClient:
         ):
             raise RefreshError("refresh endpoint returned inconsistent counts")
         return batch
+
+    def retry_meetings(self, *, limit: int, timeout: float) -> int:
+        body = self._request(
+            "POST", "/meeting-records/retry-due", params={"limit": limit}, timeout=timeout
+        )
+        attempted = body.get("attempted") if isinstance(body, dict) else None
+        if type(attempted) is not int or not 0 <= attempted <= limit:
+            raise RefreshError("meeting retry endpoint returned invalid counts")
+        return attempted
 
     def acquire_run(self, run_id: str) -> None:
         self._run_guard_request("POST", run_id)
@@ -225,6 +236,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--require-monitor", action="store_true", help="require SOURCE_REFRESH_MONITOR_URL"
     )
+    parser.add_argument(
+        "--meeting-records", action="store_true", help="also retry/reconcile/expire meeting records"
+    )
     return parser
 
 
@@ -258,7 +272,9 @@ def main(argv: list[str] | None = None) -> int:
                 if args.require_monitor and monitor is None:
                     raise RefreshError("SOURCE_REFRESH_MONITOR_URL is required for scheduled runs")
                 client = DocsApiClient(base_url=args.base_url, api_key=api_key, client=http)
-                client.check_scope(timeout=min(args.timeout, args.max_seconds))
+                client.check_scope(
+                    timeout=min(args.timeout, args.max_seconds), meetings=args.meeting_records
+                )
                 # Log the ID before admission: even a lost acquire response can
                 # leave an owner that an operator must identify for recovery.
                 print(f"source_refresh event=acquire run_id={run_id}", flush=True)
@@ -274,6 +290,18 @@ def main(argv: list[str] | None = None) -> int:
                     timeout=args.timeout,
                     max_seconds=args.max_seconds,
                 )
+                if args.meeting_records and report.drained:
+                    for _ in range(args.max_batches):
+                        remaining = args.max_seconds - (time.monotonic() - started)
+                        if remaining <= 0:
+                            raise RefreshError("meeting retry budget exhausted")
+                        attempted = client.retry_meetings(
+                            limit=args.batch_size, timeout=min(args.timeout, remaining)
+                        )
+                        if attempted < args.batch_size:
+                            break
+                    else:
+                        raise RefreshError("meeting retry batch limit exhausted")
             except RefreshError as exc:
                 report.error = str(exc)
             if monitor:

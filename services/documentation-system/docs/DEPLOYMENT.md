@@ -693,3 +693,41 @@ This is separate from the existing-document refresh schedule above. Follow the
 [discovery runbook](DISCOVERY.md) for its two scoped keys, persistent checkpoint,
 15-minute schedule, enable/status/disable commands, recovery and staging acceptance.
 Production activation requires a separate rollout decision.
+
+## Meeting record persistence
+
+Apply migration **012** (`uv run alembic upgrade head`) before the new API serves
+traffic. It adds `meeting_records` and nullable `docs.purged_at`; the prior head
+is 011. Verify upgrade → downgrade -1 → upgrade against a disposable database,
+never against live meeting data. Downgrade drops meeting retry payloads and IDs;
+export them before any operational rollback.
+
+Settings: `MEETING_DOC_CREATE_LEASE_S=600` (minimum 60),
+`MEETING_RECORD_MAX_ATTEMPTS=8`, `MEETING_RECORD_RETENTION_DAYS=365`.
+The existing `CONNECTORS_API_KEY` additionally needs `meeting-write` and
+`meeting-fetch`. The directory key needs the existing identifier, channel-team
+and synced Google Group reads. Issue `meeting` a `meetings:write` key and give
+the bot `meetings:read,meetings:write` for #223.
+
+The existing staging Railway cron now runs
+`python -m src.source_refresh --require-monitor --meeting-records`; add
+`meetings:write` to its existing `docs:write` key **before deploying** the runner.
+It validates both scopes before work. The meeting phase uses the same time and
+batch budgets and no direct DB or Google credentials. Production scheduling
+remains explicitly disabled in `railway.source-refresh.json` until rollout.
+
+Recovery: inspect `GET /meeting-records?persistence_status=failed` or
+`persistence_status=inaccessible`; use privileged
+`POST /meeting-records/{id}/retry` after fixing permissions/configuration.
+Do not clear a lease to retry a still-running Google call. Do not replace a
+canonical ID or resubmit changed text under the same UUID. Reconciliation
+continues hourly for terminal records; investigate `reconcile_failed` and
+`removal_pending` by meeting ID. A Google 404 cannot confirm permanent deletion,
+so `delete_unconfirmed` remains pending for admin investigation. After seven
+days in failed state, the pending transcript is cleared; the Discord PDF is the
+fallback if no Google Doc was adopted. Expiry and explicit removal purge the
+catalog even if Google cleanup still needs retries.
+
+Removal/unsafe-ACL notices and the existing PDF attachment are the admin's
+responsibility until the link-delivery cleanup in #223 ships. Never log record
+payloads or credentials. See the [platform rollout](../../../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).

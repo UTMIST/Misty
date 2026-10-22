@@ -4,7 +4,7 @@ from threading import Lock
 from uuid import UUID, uuid4
 
 from contracts.retrieval import ChunkCitation, QueryEmbedding, SearchHit
-from contracts.storage import DuplicateDocId, ExistingGoogleDoc
+from contracts.storage import DuplicateDocId, ExistingGoogleDoc, PurgedDocument
 from contracts.types import (
     ApiKey,
     Doc,
@@ -20,6 +20,8 @@ from src.content import content_hash
 from src.google_identity import google_file_id
 from src.retrieval import candidate_limit, fuse, keyword_density, validate_search
 from src.storage.chunks import validate_chunks_for_content, validate_doc_chunks
+from contracts.meeting import MeetingRecord
+from src.storage.meeting import changed, catalog_values
 
 
 def _now() -> datetime:
@@ -46,6 +48,131 @@ class InMemoryStorageAdapter:
         self._chunks: dict[UUID, list[DocChunk]] = {}
         self._source_refresh_lock = Lock()
         self._source_refresh_run: UUID | None = None
+        self._meeting_lock = Lock()
+        self._meetings: dict[UUID, MeetingRecord] = {}
+
+    def put_meeting(self, record):
+        with self._meeting_lock:
+            existing = self._meetings.get(record.meeting_id)
+            if existing:
+                if existing.payload_hash != record.payload_hash:
+                    raise ValueError("meeting payload conflict")
+                return existing.model_copy(deep=True), False
+            self._meetings[record.meeting_id] = record.model_copy(deep=True)
+            return record.model_copy(deep=True), True
+
+    def get_meeting(self, meeting_id):
+        record = self._meetings.get(meeting_id)
+        return record.model_copy(deep=True) if record else None
+
+    def get_meeting_by_google_id(self, document_id):
+        return next(
+            (
+                r.model_copy(deep=True)
+                for r in self._meetings.values()
+                if r.google_document_id == document_id
+            ),
+            None,
+        )
+
+    def list_meetings(self):
+        return sorted(
+            (r.model_copy(deep=True) for r in self._meetings.values()),
+            key=lambda r: (r.created_at, r.meeting_id),
+        )
+
+    def change_meeting(self, record, values, *, actor, live_at=None):
+        with self._meeting_lock:
+            current = self._meetings.get(record.meeting_id)
+            if current is None or current.version != record.version:
+                return None
+            if live_at is not None and (
+                current.removed_at
+                or not current.create_lease_until
+                or current.create_lease_until <= live_at
+                or current.create_attempt_id != record.create_attempt_id
+            ):
+                return None
+            updated = changed(current, values, actor)
+            if updated.google_document_id and any(
+                r.meeting_id != updated.meeting_id
+                and r.google_document_id == updated.google_document_id
+                for r in self._meetings.values()
+            ):
+                raise ValueError("Google document already linked")
+            self._meetings[record.meeting_id] = updated
+            return updated.model_copy(deep=True)
+
+    def catalog_meeting(self, record, result, grants, *, expires_at, actor):
+        with self._meeting_lock, self._doc_creation_lock:
+            current = self._meetings.get(record.meeting_id)
+            if (
+                not current
+                or current.version != record.version
+                or current.removed_at
+                or not current.google_document_id
+            ):
+                return False
+            values, body, digest, now = catalog_values(current, result, actor)
+            doc_id = values.pop("id")
+            existing = self.get_doc_by_google_file_id(current.google_document_id)
+            if existing:
+                if existing.purged_at or not existing.active:
+                    raise ValueError("meeting catalog identity retired")
+                doc_id = existing.id
+                values.update(created_at=existing.created_at, created_by=existing.created_by)
+            self._docs[doc_id] = Doc(id=doc_id, **values)
+            self._tags[doc_id] = {"meeting"}
+            self._grants[doc_id] = []
+            self._content.pop(doc_id, None)
+            self._chunks.pop(doc_id, None)
+            if body:
+                self.upsert_doc_content(
+                    doc_id, content_text=body, content_hash=digest, fetched_at=now
+                )
+            self.replace_source_grants(
+                doc_id,
+                origin="google_drive",
+                grants=grants,
+                synced_at=now,
+                expires_at=expires_at,
+                actor=actor,
+            )
+            self._meetings[current.meeting_id] = changed(
+                current,
+                {
+                    "doc_id": doc_id,
+                    "persistence_status": "saved",
+                    "last_error": None,
+                },
+                actor,
+            )
+            return True
+
+    def purge_doc(self, doc_id, *, actor):
+        doc = self._docs.get(doc_id)
+        if doc is None:
+            return False
+        self._docs[doc_id] = doc.model_copy(
+            update={
+                "title": None,
+                "description": None,
+                "content_snapshot": None,
+                "owning_team_id": None,
+                "owning_team_label": None,
+                "owning_person_id": None,
+                "owning_person_label": None,
+                "active": False,
+                "purged_at": doc.purged_at or _now(),
+                "updated_at": _now(),
+                "updated_by": actor,
+            }
+        )
+        self._content.pop(doc_id, None)
+        self._chunks.pop(doc_id, None)
+        self._grants.pop(doc_id, None)
+        self._tags.pop(doc_id, None)
+        return True
 
     def acquire_source_refresh_run(self, run_id: UUID, *, actor: str) -> bool:
         with self._source_refresh_lock:
@@ -150,6 +277,17 @@ class InMemoryStorageAdapter:
         if skip_existing_google and file_id is None:
             raise ValueError("Google identity required for discovery insertion")
         with self._doc_creation_lock:
+            existing = (
+                self.get_doc_by_google_file_id(file_id)
+                if file_id
+                else self.get_doc_by_normalized_url(url_normalized)
+            )
+            if existing is not None and existing.purged_at:
+                raise PurgedDocument("document was permanently purged")
+            if file_id:
+                meeting = self.get_meeting_by_google_id(file_id)
+                if meeting and meeting.removed_at:
+                    raise PurgedDocument("meeting was permanently removed")
             if skip_existing_google:
                 existing = self.get_doc_by_google_file_id(file_id)
                 if existing is not None:
@@ -246,7 +384,7 @@ class InMemoryStorageAdapter:
 
     def update_doc(self, doc_id: UUID, values: dict, *, actor: str) -> Doc | None:
         existing = self._docs.get(doc_id)
-        if existing is None:
+        if existing is None or existing.purged_at:
             return None
         data = existing.model_dump()
         data.update(values)
@@ -258,7 +396,7 @@ class InMemoryStorageAdapter:
         return self._hydrate(updated)
 
     def add_tag(self, doc_id: UUID, tag: str) -> bool:
-        if doc_id not in self._docs:
+        if doc_id not in self._docs or self._docs[doc_id].purged_at:
             return False
         self._tags.setdefault(doc_id, set()).add(tag)
         return True
@@ -271,7 +409,7 @@ class InMemoryStorageAdapter:
         return True
 
     def add_grant(self, doc_id, *, grantee_type, grantee_id, actor) -> bool:
-        if doc_id not in self._docs:
+        if doc_id not in self._docs or self._docs[doc_id].purged_at:
             return False
         rows = self._grants.setdefault(doc_id, [])
         if any(
@@ -322,7 +460,7 @@ class InMemoryStorageAdapter:
         actor: str,
     ) -> bool:
         existing = self._docs.get(doc_id)
-        if existing is None:
+        if existing is None or existing.purged_at:
             return False
         rows = [grant for grant in self._grants.get(doc_id, []) if grant.origin != origin]
         rows.extend(
@@ -361,6 +499,8 @@ class InMemoryStorageAdapter:
     def upsert_doc_content(
         self, doc_id: UUID, *, content_text: str, content_hash: str, fetched_at: datetime | None
     ) -> None:
+        if doc_id in self._docs and self._docs[doc_id].purged_at:
+            return
         # No doc-existence check: Postgres enforces this with a FK, but this
         # adapter is a test double and callers always upsert a doc they just
         # created. Content for an unknown doc is simply unreachable via
@@ -388,7 +528,7 @@ class InMemoryStorageAdapter:
 
     def replace_doc_chunks(self, doc_id: UUID, chunks: list[DocChunk]) -> bool:
         validated = validate_doc_chunks(chunks)
-        if doc_id not in self._docs:
+        if doc_id not in self._docs or self._docs[doc_id].purged_at:
             return False
         self._chunks[doc_id] = validated
         return True

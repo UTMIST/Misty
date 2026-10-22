@@ -26,8 +26,8 @@ def test_migration_011_round_trip_preserves_catalog():
     adapter = PostgresStorageAdapter(engine)
     doc = None
     try:
-        command.downgrade(cfg, "010")
         doc = make_doc(adapter)
+        command.downgrade(cfg, "010")
         for _ in range(2):
             command.upgrade(cfg, "head")
             owner = uuid4()
@@ -42,7 +42,11 @@ def test_migration_011_round_trip_preserves_catalog():
             assert adapter.get_doc(doc.id) == doc
             command.downgrade(cfg, "010")
             assert "source_refresh_run" not in inspect(engine).get_table_names()
-            assert adapter.get_doc(doc.id) == doc
+            with engine.connect() as conn:
+                assert (
+                    conn.execute(select(docs.c.id).where(docs.c.id == doc.id)).scalar_one()
+                    == doc.id
+                )
     finally:
         command.upgrade(cfg, "head")
         with engine.begin() as conn:

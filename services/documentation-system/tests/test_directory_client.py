@@ -243,3 +243,50 @@ def test_channel_scope_never_falls_back_on_dependency_errors(status, body):
     )
     with pytest.raises(DirectoryUnavailable):
         dc.get_channel_source_team_ids("100", "200")
+
+
+@pytest.mark.parametrize("synced", [True, False])
+def test_meeting_audience_requires_complete_group_coverage(synced):
+    from tests.retrieval_cases import T1, T2
+
+    def handler(request):
+        assert request.headers["X-API-Key"] == "k"
+        if request.url.path.startswith("/channels/"):
+            return httpx.Response(
+                200, json={"guild_id": "100", "channel_id": "200", "team_ids": [str(T1), str(T2)]}
+            )
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "team_id": str(T1),
+                    "group_email": "a@example.test",
+                    "group_name": "groups/a",
+                    "status": "synced",
+                },
+                {
+                    "team_id": str(T2),
+                    "group_email": "b@example.test",
+                    "group_name": "groups/b",
+                    "status": "synced" if synced else "failed",
+                },
+            ],
+        )
+
+    dc = HttpDirectoryClient("http://dir", "k", client=_client(handler))
+    assert dc.get_meeting_audience("100", "200") == (
+        {T1: "a@example.test", T2: "b@example.test"} if synced else {}
+    )
+
+
+def test_discord_identity_uses_existing_identifier_endpoint():
+    from uuid import uuid4
+
+    person_id = uuid4()
+
+    def handler(request):
+        assert request.url.path == "/people/by-identifier/discord/123"
+        return httpx.Response(200, json={"id": str(person_id)})
+
+    dc = HttpDirectoryClient("http://dir", "k", client=_client(handler))
+    assert dc.get_person_id_by_discord("123") == person_id

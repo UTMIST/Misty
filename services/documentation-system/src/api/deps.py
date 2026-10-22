@@ -12,6 +12,13 @@ from src.directory.http_client import HttpDirectoryClient
 from src.embed.http_client import HttpEmbedder
 from src.embedding import HttpEmbeddingClient
 from src.fetch.registry import FetcherRegistry, default_registry
+from contracts.meeting import MeetingWriter
+from src.fetch.meeting import HttpMeetingWriter
+
+
+def get_meeting_writer() -> MeetingWriter:
+    s = get_settings()
+    return HttpMeetingWriter(s.connectors_base_url, s.connectors_api_key.get_secret_value())
 
 
 @lru_cache(maxsize=1)
@@ -29,7 +36,9 @@ def get_storage() -> StorageAdapter:
 
 
 def get_fetchers() -> FetcherRegistry:
-    return default_registry()
+    registry = default_registry()
+    registry.meeting_writer = get_meeting_writer()
+    return registry
 
 
 @lru_cache(maxsize=None)

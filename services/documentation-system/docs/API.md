@@ -801,3 +801,46 @@ explicit source use `gdrive` when no more-specific source pattern matches and th
 source is registered. Published `/d/e/` URLs are
 excluded from Drive identity extraction and keep distinct URL keys. Preexisting
 duplicate records are not merged. The active earliest record wins identity lookup.
+
+## Meeting records
+
+These service-to-service endpoints use attested key actors and strict input
+models. `meeting_id` is the bot's UUID, independent of the Doc title or URL.
+
+| Method/path | Scope | Behavior |
+|---|---|---|
+| `PUT /meeting-records/{meeting_id}` | `meetings:write` | Durable hand-off: 202 on insert; 200 on identical replay; 409 on changed payload |
+| `GET /meeting-records/{meeting_id}` | `meetings:read` | Status, canonical IDs/URL, generation metadata and delivery state; no pending transcript |
+| `GET /meeting-records` | `meetings:read` | Optional `persistence_status` and `delivery_status` filters |
+| `POST /meeting-records/retry-due?limit=10` | `meetings:write` | Bounded oldest-due persistence, reconciliation and expiry; limit 1–100 |
+| `POST /meeting-records/{meeting_id}/retry` | `meetings:admin` | Explicit retry of a failed/inaccessible record; removal remains terminal |
+| `POST /meeting-records/{meeting_id}/remove` | `meetings:admin` | Mark removal before external calls; purge catalog and permanently delete tagged Docs |
+| `PATCH /meeting-records/{meeting_id}/delivery` | `meetings:write` | `{status: posted\|failed, discord_message_id}`; only saved, nonremoved records; posted requires an ID |
+
+The PUT body contains `guild_id`, `text_channel_id`, `voice_channel_id`,
+`requester_discord_id`, timezone-aware `started_at` and `ended_at`, `title`,
+`participants: [{discord_id, display_name}]`, `summary`, `decisions: string[]`,
+`action_items: string[]`, and the full assembled `transcript`. Decisions and
+action items stay discrete JSON fields. Unknown fields, duplicate participants,
+invalid timestamps/IDs, NUL/invalid UTF-8, and oversized content fail with 422.
+Escaped text is capped at 3,500,000 characters to fit the writer transport.
+The directory resolves participant IDs and the complete voice-channel team
+Google Groups; incomplete group coverage results in an admin-only record.
+A directory outage returns 503 so `meeting` holds and retries the hand-off.
+
+Acceptance commits before Google work starts. A background attempt runs once;
+remaining work belongs to the existing hourly runner. State, leases and the
+immutable canonical ID live in Postgres; repeated acceptance never creates
+another row. A timed-out create keeps its lease until reconciliation. Recurring
+scans continue after save, failure and removal and delete late duplicates without
+rewriting the canonical Doc. Admin-only status is represented by empty
+`audience_team_ids`; no org grant or public sharing fallback exists.
+
+`last_error` contains a short code. Inspect failed records with
+`GET /meeting-records?persistence_status=failed`. `inaccessible` means an owner
+fetch cannot confirm deletion; retained snapshots/content/chunks and existing
+grant expiry remain intact. Only independently confirmed trash/deletion or an
+explicit removal triggers purge. A security removal records
+`removed_by=security:unexpected_acl`; admins notify the requester and retain the
+Discord PDF unless its removal is separately requested. The bot's link delivery
+and Discord cleanup are implemented separately in #223.

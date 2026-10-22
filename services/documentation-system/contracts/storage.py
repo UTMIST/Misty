@@ -14,6 +14,8 @@ from contracts.types import (
     SourceGrant,
 )
 from contracts.visibility import ActorContext, RetrievalContext, SEE_ALL
+from contracts.meeting import MeetingRecord
+from contracts.fetcher import FetchResult
 
 
 class DuplicateActiveUrl(Exception):
@@ -39,6 +41,10 @@ class DuplicateDocId(Exception):
         self.doc_id = doc_id
 
 
+class PurgedDocument(ValueError):
+    """A permanent removal tombstone forbids creating another catalog copy."""
+
+
 class ExistingGoogleDoc(Exception):
     """Discovery's insert found an existing Google identity, active or retired."""
 
@@ -50,6 +56,54 @@ class ExistingGoogleDoc(Exception):
 class StorageAdapter(Protocol):
     """Stable contract between the service and persistence. Concrete adapters
     (Postgres, in-memory) implement these with identical semantics."""
+
+    def put_meeting(self, record: MeetingRecord) -> tuple[MeetingRecord, bool]:
+        """Insert atomically; identical payload_hash returns existing + False.
+
+        Different hash raises ValueError. Never modifies an existing payload.
+        """
+        ...
+
+    def get_meeting(self, meeting_id: UUID) -> MeetingRecord | None: ...
+    def get_meeting_by_google_id(self, document_id: str) -> MeetingRecord | None: ...
+    def list_meetings(self) -> list[MeetingRecord]:
+        """Detached records in created_at/meeting_id order; internal use only."""
+        ...
+
+    def change_meeting(
+        self, record: MeetingRecord, values: dict, *, actor: str, live_at: datetime | None = None
+    ) -> MeetingRecord | None:
+        """Atomic compare-and-swap on version; None on conflict/missing.
+
+        Canonical ID is immutable. Removed records never reopen; stale results
+        cannot clear a removal marker. Every mutation increments version.
+        With live_at, also require the same attempt, an unexpired lease and no
+        removal marker in the atomic write predicate.
+        """
+        ...
+
+    def catalog_meeting(
+        self,
+        record: MeetingRecord,
+        result: FetchResult,
+        grants: list[SourceGrant],
+        *,
+        expires_at: datetime,
+        actor: str,
+    ) -> bool:
+        """Commit Doc, content, source grants, and saved state in one transaction.
+
+        Verify record.version, canonical ID and absence of removal under the
+        same lock. False on conflict. No network calls inside the transaction.
+        """
+        ...
+
+    def purge_doc(self, doc_id: UUID, *, actor: str) -> bool:
+        """Atomically erase content/snapshot/chunks/grants/tags/ownership/title,
+        mark inactive + purged_at. Idempotent, False only for missing docs.
+        All future writes except purge must refuse a purged doc.
+        """
+        ...
 
     def acquire_source_refresh_run(self, run_id: UUID, *, actor: str) -> bool:
         """Atomically claim the single runner slot; False if occupied, even by run_id.

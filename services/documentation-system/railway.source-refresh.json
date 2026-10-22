@@ -12,7 +12,7 @@
   "environments": {
     "staging": {
       "deploy": {
-        "startCommand": "python -m src.source_refresh --require-monitor",
+        "startCommand": "python -m src.source_refresh --require-monitor --meeting-records",
         "cronSchedule": "0 * * * *"
       }
     },

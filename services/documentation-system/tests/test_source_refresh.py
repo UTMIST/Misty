@@ -423,7 +423,10 @@ def test_railway_config_only_schedules_staging_and_never_runs_preview_jobs():
     # PR overrides take precedence over the preview's base environment.
     preview = staging | config["environments"]["pr"]["deploy"]
     assert staging["cronSchedule"] == "0 * * * *"
-    assert staging["startCommand"] == "python -m src.source_refresh --require-monitor"
+    assert (
+        staging["startCommand"]
+        == "python -m src.source_refresh --require-monitor --meeting-records"
+    )
     for disabled in [base, preview]:
         assert disabled["cronSchedule"] is None
         assert "src.source_refresh" not in disabled["startCommand"]
@@ -555,3 +558,35 @@ def test_uncertain_completion_retains_guard_until_operator_recovery(monkeypatch,
         )
         monkeypatch.setattr(RunMonitor, "ping", lambda self, event: True)
         assert main([]) == 0
+
+
+def test_meeting_phase_uses_authenticated_http_and_validates_counts():
+    paths = []
+
+    def handle(request):
+        paths.append(request.url.path)
+        assert request.headers["X-API-Key"] == "offline-key"
+        if request.url.path == "/api-keys/self":
+            return httpx.Response(200, json={"scopes": ["docs:write", "meetings:write"]})
+        return httpx.Response(200, json={"attempted": 2})
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as http:
+        client = DocsApiClient(
+            base_url="http://docs", api_key=SecretStr("offline-key"), client=http
+        )
+        client.check_scope(timeout=5, meetings=True)
+        assert client.retry_meetings(limit=10, timeout=5) == 2
+    assert paths == ["/api-keys/self", "/meeting-records/retry-due"]
+
+
+def test_meeting_phase_requires_its_literal_scope_before_work():
+    with httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, json={"scopes": ["docs:write"]})
+        )
+    ) as http:
+        client = DocsApiClient(
+            base_url="http://docs", api_key=SecretStr("offline-key"), client=http
+        )
+        with pytest.raises(RefreshError, match="meetings:write"):
+            client.check_scope(timeout=5, meetings=True)

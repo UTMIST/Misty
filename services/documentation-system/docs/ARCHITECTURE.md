@@ -804,3 +804,26 @@ during fetching, including aliases that do not share a normalized URL. Retiremen
 preserves rows, so it cannot invalidate the existence check. Manual re-ingest retains
 its existing semantics. Provider and directory calls finish before this short lock;
 it never spans network fetching or embedding.
+
+## Durable meeting records
+
+`contracts/meeting.py` defines the hand-off, metadata and injected writer.
+`meeting_records.py` orchestrates the leased state machine from the
+[shared design](../../../docs/MEETING-RECORDING.md#durable-records-design-212).
+Migration 012 follows the refresh-runner migration 011. Both storage adapters
+implement atomic replay checks, version-checked transitions and catalog commits;
+`catalog_meeting` commits the Doc, source grants, content and saved state together.
+Removal invalidates attempts before erasing content. The canonical Google ID is
+never replaced, and the pending transcript clears only after adoption commits.
+
+Meeting content is fetched with the writer OAuth identity in initial ingest,
+refetch and scheduled refresh. An ambiguous owner 404 follows the nondestructive
+fetch-error path and never extends grant TTLs. `purged_at` prevents subsequent
+content, metadata, grants or chunks from restoring removed catalog data. These
+internal purge protections ship with meeting removal; the generic privileged
+catalog purge API remains a follow-up in the design.
+
+Generation-time decisions/action items/participants remain separate fields;
+readable content follows current Google edits. Google creation is a single HTML
+conversion and later retries never write that body. Audio stays entirely outside
+this persistence boundary. No durable PDF copy is retained by the platform.

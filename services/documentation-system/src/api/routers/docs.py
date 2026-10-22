@@ -19,6 +19,7 @@ from src.fetch.registry import FetcherRegistry
 from src.indexing import IndexStatus, index_doc, index_warning
 from src.ingest import BadReference, ingest_doc
 from src.config import get_settings
+from src.meeting_fetch import fetch_catalog_content
 from src.source_access import (
     GOOGLE_ACCESS_ORIGIN,
     GOOGLE_SOURCE_IDS,
@@ -424,9 +425,11 @@ def _refetch_doc_source(
     actor: str,
     source_access_max_age_hours: int,
 ) -> Doc:
+    if doc.purged_at:
+        raise FetchError("document was permanently purged")
     expected_content = storage.get_doc_content_meta(doc.id)
     try:
-        result = fetchers.fetch_for(doc.source_id, doc.url)
+        result = fetch_catalog_content(doc.source_id, doc.url, storage=storage, fetchers=fetchers)
     except SourceGone:
         # Remove text and chunks together only if no newer fetch stored text
         # while this request was waiting for the connector.
@@ -478,7 +481,8 @@ def _refetch_doc_source(
         },
         actor=actor,
     )
-    assert updated is not None
+    if updated is None:
+        raise FetchError("document is no longer available for refresh")
     return updated
 
 

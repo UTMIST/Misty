@@ -16,7 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 
 metadata = MetaData()
 
@@ -63,6 +63,7 @@ docs = Table(
     Column("owning_person_label", Text, nullable=True),
     Column("content_snapshot", Text, nullable=True),
     Column("fetched_at", DateTime(timezone=True), nullable=True),
+    Column("purged_at", DateTime(timezone=True), nullable=True),
     Column("source_access_synced_at", DateTime(timezone=True), nullable=True),
     Column("source_access_attempted_at", DateTime(timezone=True), nullable=True),
     Column("active", Boolean, nullable=False, server_default=text("true")),
@@ -217,4 +218,49 @@ api_keys = Table(
     Column("updated_by", Text, nullable=False),
     Column("revoked_at", DateTime(timezone=True), nullable=True),
     Column("last_used_at", DateTime(timezone=True), nullable=True),
+)
+
+
+meeting_records = Table(
+    "meeting_records",
+    metadata,
+    Column("failed_at", DateTime(timezone=True), nullable=True),
+    Column("meeting_id", UUID(as_uuid=True), primary_key=True),
+    Column("payload_hash", Text, nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("doc_id", UUID(as_uuid=True), ForeignKey("docs.id"), nullable=True),
+    Column("google_document_id", Text, nullable=True, unique=True),
+    Column("doc_url", Text, nullable=True),
+    Column("guild_id", Text, nullable=True),
+    Column("text_channel_id", Text, nullable=True),
+    Column("voice_channel_id", Text, nullable=True),
+    Column("requester_discord_id", Text, nullable=True),
+    Column("title", Text, nullable=True),
+    Column("summary", Text, nullable=True),
+    Column("last_error", Text, nullable=True),
+    Column("discord_message_id", Text, nullable=True),
+    Column("removed_by", Text, nullable=True),
+    Column("requester_person_id", UUID(as_uuid=True), nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("ended_at", DateTime(timezone=True), nullable=True),
+    Column("generated_at", DateTime(timezone=True), nullable=True),
+    Column("create_lease_until", DateTime(timezone=True), nullable=True),
+    Column("next_reconcile_at", DateTime(timezone=True), nullable=True),
+    Column("next_attempt_at", DateTime(timezone=True), nullable=True),
+    Column("removed_at", DateTime(timezone=True), nullable=True),
+    Column("participants", JSONB, nullable=False),
+    Column("decisions", JSONB, nullable=False),
+    Column("action_items", JSONB, nullable=False),
+    Column("audience_team_ids", ARRAY(UUID(as_uuid=True)), nullable=False),
+    Column("audience_group_emails", ARRAY(Text), nullable=False),
+    Column("pending_payload", JSONB(none_as_null=True), nullable=True),
+    Column("persistence_status", Text, nullable=False),
+    Column("create_attempt_id", UUID(as_uuid=True), nullable=True),
+    Column("attempts", Integer, nullable=False),
+    Column("delivery_status", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("created_by", Text, nullable=False),
+    Column("updated_by", Text, nullable=False),
+    Index("ix_meeting_records_due", "next_attempt_at", "next_reconcile_at"),
 )
