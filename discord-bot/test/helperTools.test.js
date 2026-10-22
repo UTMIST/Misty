@@ -132,3 +132,49 @@ test('get_document leaves a within-limit body whole and unflagged', async () => 
   assert.equal(out.content.content, 'short body');
   assert.equal('truncated' in out.content, false);
 });
+
+// A cap landing mid-emoji must not leave a lone surrogate: that is invalid UTF-8
+// and the /chat service rejects the whole replay (422) before the model runs.
+test('get_document truncation never splits a surrogate pair', async () => {
+  // 19,999 ASCII + one emoji (2 UTF-16 units): the 20,000-unit cut lands between
+  // the surrogate halves.
+  const body = 'a'.repeat(19999) + '😀';
+  const { get } = tools({
+    async getDoc(id) {
+      return { id, title: 'T', content: body };
+    },
+  });
+  const out = await get.run({ doc_id: 'big' }, { context: { onBehalfOf: 'person-1' } });
+  assert.equal(out.content.truncated, true);
+  assert.ok(out.content.content.length <= 20000);
+  assert.equal(out.content.content.isWellFormed(), true);
+  // The dangling high surrogate is dropped rather than kept half.
+  assert.equal(out.content.content, 'a'.repeat(19999));
+});
+
+test('search snippet truncation never splits a surrogate pair', async () => {
+  const text = 'a'.repeat(399) + '😀'; // cut at SNIPPET_LEN (400) splits the emoji
+  const { search } = tools({
+    async searchDocs() {
+      return [{ doc_id: 'd1', title: 'T', url: 'u', text, chunk: {} }];
+    },
+  });
+  const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
+  const snippet = out.content.results[0].snippet;
+  assert.ok(snippet.length <= 400);
+  assert.equal(snippet.isWellFormed(), true);
+});
+
+test('query normalization never splits a surrogate pair at the cap', async () => {
+  let seen;
+  const { search } = tools({
+    async searchDocs(args) {
+      seen = args;
+      return [];
+    },
+  });
+  // 1,999 ASCII + emoji: the 2,000-unit query cap would split the pair.
+  await search.run({ query: 'a'.repeat(1999) + '😀' }, { context: { onBehalfOf: 'p' } });
+  assert.ok(seen.query.length <= 2000);
+  assert.equal(seen.query.isWellFormed(), true);
+});

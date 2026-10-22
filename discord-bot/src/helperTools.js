@@ -32,9 +32,21 @@ const SNIPPET_LEN = 400;
 // since get_document exists to read past a snippet.
 const MAX_DOC_CONTENT_LEN = 20000;
 
+// Truncate to at most `max` UTF-16 code units without splitting a surrogate
+// pair. A naive slice can cut an astral character (e.g. an emoji) in half,
+// leaving a lone surrogate; that is not valid UTF-8, and the /chat service
+// rejects the whole request (422) before the model runs. If the cut would land
+// just after a high surrogate, drop it so the result stays well-formed.
+function truncateUnits(value, max) {
+  if (value.length <= max) return value;
+  const last = value.charCodeAt(max - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? max - 1 : max;
+  return value.slice(0, end);
+}
+
 function normalizeString(value, max) {
   if (typeof value !== 'string') return '';
-  return value.trim().slice(0, max);
+  return truncateUnits(value.trim(), max);
 }
 
 // Project a /search hit (SearchHit) down to what the model needs to answer and
@@ -48,7 +60,7 @@ function projectHit(hit) {
     doc_id: docId,
     title: hit?.title ?? null,
     url: hit?.url ?? null,
-    snippet: text ? text.slice(0, SNIPPET_LEN) : undefined,
+    snippet: text ? truncateUnits(text, SNIPPET_LEN) : undefined,
     citation: {
       doc_id: docId,
       title: hit?.title ?? null,
@@ -72,7 +84,7 @@ function projectDoc(doc, docId) {
     found: true,
     doc_id: doc.id ?? docId,
     title: doc.title ?? null,
-    content: truncated ? body.slice(0, MAX_DOC_CONTENT_LEN) : body,
+    content: truncated ? truncateUnits(body, MAX_DOC_CONTENT_LEN) : body,
     // Tell the model the body was cut so it does not treat a partial read as the
     // whole document. Part of the fingerprint too, so revalidation stays exact.
     ...(truncated ? { truncated: true } : {}),
