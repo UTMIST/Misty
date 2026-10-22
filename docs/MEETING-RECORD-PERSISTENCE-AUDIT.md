@@ -4,21 +4,26 @@ Implements the post-meeting path specified by [issue 212](https://github.com/UTM
 and [issue 222](https://github.com/UTMIST/Misty/issues/222).
 This deliberately spans documentation-system, connectors, meeting, the bot,
 and deployment documentation: the stop wire contract and the authenticated
-writer boundary must ship together. No commit, push, deployment or real
-Google/AWS/LLM request is part of this local implementation.
+writer boundary must ship together. Verification is local, with no deployment
+or real Google/AWS/LLM request.
 
 ## Validation and operational limits
 
 The complete catalog suite runs against an isolated Postgres cluster, including
 adapter parity and upgrade/downgrade/upgrade migration checks. Google, catalog
 transport and transcription/LLM boundaries use offline fakes. The meeting and
-connector suites cover the new hand-off and writer paths. Python test runners
-pin and verify src/contracts/tests module paths to this checkout.
+connector suites cover the new hand-off and writer paths. Each affected service
+uses an isolated Python 3.12 environment with only its declared development
+dependencies; this prevents another workspace member from masking a missing
+test plugin. Meeting tests use the existing `asyncio.run` pattern rather than
+requiring the undeclared `pytest-asyncio` plugin. Python test runners pin and
+verify src/contracts/tests module paths to this checkout.
 
 Bot verification uses the pinned npm lockfile, ESLint and Prettier. Mounted-drive
 startup subprocesses can exceed the existing test timeout in this environment;
-a byte-verified source/test copy on the Linux filesystem is used for the full
-bot suite. No .env credentials are copied.
+the full suite runs from this checkout with `node_modules` linked to dependencies
+installed on the Linux filesystem. Install those dependencies in the Linux
+directory: running `npm ci` in the mounted checkout replaces the link.
 
 Operational prerequisites and accepted crash windows remain in the
 [rollout runbook](RAILWAY-DEPLOYMENT.md#meeting-record-persistence) and
@@ -32,6 +37,7 @@ as the compatibility output and recovery fallback.
 
 | File | Why it changes |
 |---|---|
+| [Makefile](../Makefile) | Fix shell quoting so the Node version precheck runs instead of passing literal line continuations to JavaScript. |
 | [services/connectors/contracts/meeting.py](../services/connectors/contracts/meeting.py) | Define strict writer requests, results, safe errors and the injected writer Protocol. |
 | [services/connectors/src/api/routers/meeting.py](../services/connectors/src/api/routers/meeting.py) | Expose the authenticated meeting-write and meeting-fetch boundary. |
 | [services/connectors/src/sources/meeting_google.py](../services/connectors/src/sources/meeting_google.py) | Implement OAuth native-Doc conversion, destination ACL checks, paging, sharing, owner fetch and deletion. |
