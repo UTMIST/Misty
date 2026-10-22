@@ -617,6 +617,10 @@ class PostgresStorageAdapter:
         with self._engine.begin() as conn:
             self._lock_channel(conn, guild_id, channel_id)
             current = self._read_channel_teams(conn, guild_id, channel_id)
+            # Empty input must not rewrite: a put would stamp updated_by and
+            # drop rows for retired teams that still belong to the configuration.
+            if not team_ids:
+                return current
             merged = list(dict.fromkeys([*current.team_ids, *team_ids]))
             return self._put_channel_teams(conn, guild_id, channel_id, merged, actor=actor)
 

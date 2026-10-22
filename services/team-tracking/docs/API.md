@@ -858,7 +858,7 @@ curl -sS -X PUT "http://localhost:8000/channels/111111111111111111/2222222222222
 
 ### POST /channels/{guild_id}/{channel_id}/teams/append
 
-Atomically union `team_ids` onto the channel's current active set. Same body shape as PUT. An empty list is a no-op that returns the current configuration. Holds the same per-channel write lock as PUT/DELETE for the whole read-merge-write.
+Atomically union `team_ids` onto the channel's current active set. Same body shape as PUT. An empty list is a true no-op: it returns the current configuration without rewriting rows (so `updated_by` and mappings for retired teams are unchanged). Holds the same per-channel write lock as PUT/DELETE for the whole read-merge-write.
 
 **Response:** `ChannelTeams`, HTTP 200.
 

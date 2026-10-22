@@ -213,9 +213,10 @@ class StorageAdapter(Protocol):
         """Atomically union `team_ids` onto the channel's current active set.
         Holds the same per-channel write lock as replace/clear for the whole
         read-merge-write, so a concurrent clear cannot be overwritten with a
-        stale prior set. An empty list is a no-op that returns the current
-        configuration. Raises ValueError('unknown_or_inactive_team') if any id
-        is not an active team, leaving the existing configuration untouched."""
+        stale prior set. An empty list is a true no-op: return the current
+        configuration without rewriting rows. Raises
+        ValueError('unknown_or_inactive_team') if any id is not an active team,
+        leaving the existing configuration untouched."""
         ...
 
     def clear_channel_teams(self, guild_id: str, channel_id: str) -> None:

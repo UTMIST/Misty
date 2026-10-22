@@ -86,6 +86,20 @@ def test_append_rejects_inactive_and_keeps_config(client):
     assert client.get(URL, headers=AUTH).json()["team_ids"] == [a]
 
 
+def test_empty_append_is_true_noop(client):
+    a, b = _team(client, "a"), _team(client, "b")
+    before = client.put(URL, json={"team_ids": [a, b]}, headers=AUTH).json()
+    client.patch(f"/teams/{b}", json={"active": False}, headers=AUTH)
+    headers = _key(client, "later-bot", ["channels:read", "channels:write"])
+    resp = client.post(f"{URL}/append", json={"team_ids": []}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["team_ids"] == [a]
+    assert resp.json()["updated_by"] == before["updated_by"]
+    assert resp.json()["updated_by"] != "later-bot"
+    client.patch(f"/teams/{b}", json={"active": True}, headers=AUTH)
+    assert sorted(client.get(URL, headers=AUTH).json()["team_ids"]) == sorted([a, b])
+
+
 def test_replace_with_empty_list_clears(client):
     a = _team(client, "a")
     client.put(URL, json={"team_ids": [a]}, headers=AUTH)

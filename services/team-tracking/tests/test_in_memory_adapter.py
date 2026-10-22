@@ -690,6 +690,18 @@ def test_channel_teams_append_unions(adapter):
     assert adapter.get_channel_teams("1", "2").team_ids == sorted([a.id, b.id])
 
 
+def test_channel_teams_empty_append_is_true_noop(adapter):
+    a = adapter.create_team(TeamCreate(slug="a", label="A"), actor="t")
+    b = adapter.create_team(TeamCreate(slug="b", label="B"), actor="t")
+    adapter.replace_channel_teams("1", "2", [a.id, b.id], actor="bot")
+    adapter.update_team(b.id, TeamUpdate(active=False), actor="t")
+    out = adapter.append_channel_teams("1", "2", [], actor="other")
+    assert out.team_ids == [a.id]
+    assert out.updated_by == "bot"
+    adapter.update_team(b.id, TeamUpdate(active=True), actor="t")
+    assert adapter.get_channel_teams("1", "2").team_ids == sorted([a.id, b.id])
+
+
 def test_channel_version_survives_out_of_order_retirement(adapter, monkeypatch):
     """Retiring B stamps an *earlier* timestamp than a later edit to A (the
     retire captured its time first but committed last). A timestamp-based
