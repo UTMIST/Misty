@@ -98,7 +98,11 @@ Seed/index chunks with the resolved model matching `SEARCH_EMBED_MODEL`:
 `openai-embed-3-large` -> `text-embedding-3-large`. Both use 1536 dimensions.
 Switching the query model hides incompatible old chunks from both branches
 until reindexing; it never compares them or silently falls back. The absolute
-relevance floor starts at 0.3 and needs #178 calibration before quality claims.
+relevance floor starts at 0.3: against that harness's fixture the
+cosine distributions of correct and incorrect documents overlap across their whole
+range, so no threshold separates them and moving this value trades recall against
+precision. That measurement uses a lexical stand-in embedder, so re-measure against
+real embeddings before changing it. See docs/EVALUATION.md.
 
 No migration or unfiltered-search feature flag is needed. Use the shared
 [contract fixture](API.md#authorized-retrieval-post-search) for consumer mocks;

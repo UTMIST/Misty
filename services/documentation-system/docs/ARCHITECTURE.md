@@ -432,10 +432,15 @@ index described above.
 
 ### Retrieval constraints and open decisions
 
-- **Relevance floor: absolute cosine, implemented in #176; calibrate on #178.**
+- **Relevance floor: absolute cosine, implemented in #176; measured on #178.**
   `SEARCH_MIN_COSINE` starts at 0.3. Complete keyword matches qualify independently;
-  RRF ranks never determine eligibility. The starting threshold is uncalibrated,
-  and evaluation must measure abstention as well as hit-rate.
+  RRF ranks never determine eligibility. #178's `calibrate` mode measures how well
+  cosine separates correct documents from incorrect ones. Against its fixture the two
+  distributions **overlap across their whole range**, so no floor separates them and
+  moving the threshold trades recall against precision with no sweet spot. That
+  measurement uses a lexical stand-in embedder, so it bounds what the floor can do
+  structurally rather than settling the production value; re-measure against real
+  embeddings before changing `SEARCH_MIN_COSINE`. See [EVALUATION.md](EVALUATION.md).
 - **Visibility follows the explicit person or channel context in #77/#176.** Direct search
   and DMs preserve the person's access. Shared-channel answers use the configured teams'
   Google Group entitlement (#238 maps channels to teams) — never the asker's private grants
@@ -556,12 +561,15 @@ cases (connector shapes, Unicode, repeated text, boundaries) and 200 seeded rand
   and consumer integration (#278) remain release gates. #277's automated lifecycle
   verification and controlled staging gate are tracked in the
   [integration audit](INGESTION-RETRIEVAL-AUDIT.md).
-- **#178 (evaluation):** build the question set and measure hit-rate@k, including
-  exact-name/acronym/date queries, before treating the starting parameters as final.
+- **#178 (evaluation):** built; see "Evaluation (#178)" below and
+  [EVALUATION.md](EVALUATION.md). The question set covers exact-name, acronym and date
+  queries alongside buried and boundary-straddling answers. First finding: at the
+  starting floor the relevance threshold, not the chunk size, dominates the score.
 
 ### Indexing (#175): `src/indexing.py`
 
-`index_doc(doc_id, storage=, embedder=, force=False)` makes one doc's chunk set match its
+`index_doc(doc_id, storage=, embedder=, force=False, settings=ChunkSettings())` makes one
+doc's chunk set match its
 stored `doc_content` and title. It is keyed on catalog identity and stored text, never on a URL or a
 fetch, so anything catalogued with stored text (future meetings, #211) indexes the same way.
 
@@ -627,6 +635,27 @@ content; retrieval (#176) applies visibility.
 Indexing uses `SEARCH_EMBED_MODEL` unless `EMBED_MODEL` explicitly overrides it. Keep
 the two aligned: retrieval excludes chunks produced by another model, even at the same
 vector width. An override supports a planned re-embedding pass, not mixed-model search.
+
+### Evaluation (#178): `src/eval/`
+
+A local harness that seeds a fixed corpus at a given chunk configuration, asks a fixed
+question set, and reports `hit@k` with the configuration attached. Full usage, fixture
+format and limitations: **[EVALUATION.md](EVALUATION.md)**.
+
+Three decisions worth knowing here:
+
+- **It drives the real `index_doc`,** not a copy of the pipeline, so what it measures
+  includes `embedding_input`'s title and heading context. `index_doc` takes `settings`
+  for exactly this reason; every caller in the service uses the default.
+- **It embeds with a deterministic lexical stand-in** (`src/eval/embedding.py`), since
+  #178 requires automated tests to avoid paid provider calls. Cosine tracks vocabulary
+  overlap, which makes the score respond to chunking and makes it useless as a claim
+  about production retrieval quality.
+- **A leak is scored apart from the hit rate.** Returning a document the asker may not
+  see is an authorization failure, not a ranking one, and a single averaged number
+  would hide it.
+
+Equal scores across configurations are a valid outcome and are reported as measured.
 
 ## Authorized retrieval
 
