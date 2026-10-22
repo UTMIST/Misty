@@ -108,6 +108,23 @@ DOCS_API_KEY=doc_<prefix>_<secret> uv run doc-backfill
 
 Sources with `content_fetch_enabled=false` (`youtube`) can never have content, so they are reported as skipped rather than failed. A refetch that succeeds but extracts nothing (a title-only `github` doc, an empty page) is reported as `empty`, not `repaired` — a 200 from the refetch endpoint means the fetch ran, not that content was stored, so the run re-lists `has_content=false` to confirm. The tool checks its own scopes (`GET /api-keys/self`) before trusting any listing: without `docs:read:all` the catalog lists as empty rather than 403, which would otherwise read as "nothing to repair". See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli).
 
+For recurring Google content and access refreshes, run `doc-source-refresh` hourly
+from an external scheduler. It drains the existing refresh endpoint in bounded
+batches, checks `docs:write` before starting, and exits nonzero on document/index
+failures or an incomplete run. It discovers no new documents. See the
+[refresh schedule](docs/DEPLOYMENT.md#source-access-refresh-schedule) for limits,
+exit codes, and the separate Railway cron config. Migration `011` adds the shared
+runner guard: overlapping runners fail before sending a start heartbeat. A crashed
+or incomplete run requires the documented operator recovery before another run.
+
+| CLI environment variable | Default | Purpose |
+|---|---|---|
+| `DOCS_BASE_URL` | `http://localhost:8001` | Target documentation-system API for both HTTP CLIs |
+| `DOCS_API_KEY` | required | Caller credential; refresh needs only `docs:write`, backfill needs the scopes above |
+| `SOURCE_REFRESH_MONITOR_URL` | unset | Secret Healthchecks-compatible HTTPS ping URL for refresh start/success/failure; required by the staging cron |
+
+These CLI variables are read from the process environment; the CLIs do not load `.env`.
+
 **Ports:** this service runs on **8001** (team-tracking uses 8000) and its Postgres container is exposed on **5434** — both chosen to avoid colliding with team-tracking's defaults when running both services locally.
 
 ## Folder tour
@@ -171,7 +188,8 @@ documentation-system/
 │       ├── 007_source_document_access.py  Source grant provenance, expiry, sync time
 │       ├── 008_doc_chunks.py      pgvector embeddings and generated keyword metadata
 │       ├── 009_remove_retired_source.py  Retires a source while preserving its documents
-│       └── 010_chunk_title_hash.py  Embedding title provenance and stale-index detection
+│       ├── 010_chunk_title_hash.py  Embedding title provenance and stale-index detection
+│       └── 011_source_refresh_run.py  Persistent singleton runner guard
 │
 ├── tests/                      Fast suite plus gated Postgres integration tests
 │   ├── conftest.py              build_seed_sources() — shared seed matching migration 002
@@ -193,6 +211,7 @@ documentation-system/
 │   ├── test_migration_008.py     pgvector migration, constraints, and round trip
 │   ├── test_migration_009.py     Retired-source cleanup and registry rollback
 │   ├── test_migration_010.py     Title provenance migration and preservation of existing chunks
+│   ├── test_migration_011.py     Runner guard migration and catalog preservation
 │   ├── test_ingest.py
 │   ├── test_postgres_adapter.py   Integration tests (requires running Postgres; gated)
 │   ├── test_protocols.py

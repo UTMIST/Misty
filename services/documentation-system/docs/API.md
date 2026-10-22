@@ -236,6 +236,8 @@ lacking a read scope is `403`. Neither falls through to `SEE_ALL`.
 | `DELETE` | `/docs/{id}/grants` | `docs:write` | Revoke a grant |
 | `POST` | `/docs/{id}/refetch` | `docs:write` | Re-run the content fetch |
 | `POST` | `/docs/source-access/refresh-due` | `docs:write` | Refresh due Google ACLs/content in a bounded batch |
+| `POST` | `/docs/source-access/refresh-runs/{run_id}` | `docs:write` | Acquire the singleton runner guard |
+| `DELETE` | `/docs/source-access/refresh-runs/{run_id}` | `docs:write` | Release only the matching runner guard |
 | `POST` | `/docs/index` | `docs:index` | (Re-)index stored content for retrieval; retry path |
 | `GET` | `/sources` | `docs:read` | List source kinds |
 | `GET` | `/sources/{id}` | `docs:read` | Get one source |
@@ -595,6 +597,27 @@ found for this url`), the route still returns **502**, and also deletes the stor
 and its chunks so the doc stops being searchable, unless a newer fetch has stored content
 meanwhile; the catalog row stays. Any other failure
 (timeouts, 5xx, 403, a different 404) leaves content and chunks untouched.
+
+## Source refresh runner guard
+
+`POST /docs/source-access/refresh-runs/{run_id}` atomically acquires the catalog's
+single runner slot. `run_id` is a fresh UUID chosen by the caller; `created_by`
+comes from the authenticated key. Requires `docs:write` (or `admin`). Returns
+`200 {"run_id": "..."}`; an occupied slot returns `409`, including reuse of its
+current UUID. Invalid UUIDs return `422`. No document or provider work occurs.
+
+`DELETE` on the same path releases only that exact owner, returning the same
+`200` response; a missing or different owner returns `409`. This is also the
+operator recovery operation, so **first confirm the owning process and its API
+requests have stopped**. Releasing a live owner defeats the guard.
+
+Acquire before any start heartbeat or refresh batch, retain through all batches
+and the final heartbeat, and release only after confirmed completion. A rejected
+runner must send failure, never start/success or release another run. The guard
+persists across restarts with no expiry. On ambiguous HTTP/monitor outcomes,
+leave it for [operator recovery](DEPLOYMENT.md#recovery-credential-rotation-and-disablerollback).
+This coordinates participating clients: `refresh-due` itself remains a standalone
+batch endpoint. Manual callers must follow this protocol or use `doc-source-refresh`.
 
 ## `POST /docs/source-access/refresh-due` — scheduled reconciliation
 

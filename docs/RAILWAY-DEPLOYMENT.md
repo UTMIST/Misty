@@ -250,13 +250,20 @@ mapping supplied by team-tracking. Re-running issues a fresh key and
 repoints the consumer; the previous key stays active until you revoke it
 manually (`team-tracking-keys revoke <id>`).
 
-Configure a Railway cron/external scheduler to call documentation-system's
-`POST /docs/source-access/refresh-due?limit=10` hourly (`0 * * * *`) with a `docs:write` key, repeating
-until `attempted < limit`. Source-derived grants stop authorizing reads after 48 hours
-without a complete successful refresh. Eligibility still defaults to 24 hours; hourly checks
-avoid skipping a whole day when a document's prior refresh finished after the job started.
-See the service's [refresh schedule](../services/documentation-system/docs/DEPLOYMENT.md#source-access-refresh-schedule)
-for batching and disabled-source behavior.
+The dedicated staging `doc-source-refresh` cron uses
+`/services/documentation-system/railway.source-refresh.json` and the same deployed
+revision as documentation-system. It calls the bounded refresh endpoint hourly with
+its own `docs:write` key, without database or Google credentials. Apply API migration
+`011` first: the runner acquires a persistent guard through HTTP before heartbeats,
+so a duplicate cannot mask a stuck run. Set `DOCS_BASE_URL`,
+`DOCS_API_KEY`, and the secret `SOURCE_REFRESH_MONITOR_URL` on that service only.
+The config disables migrations, HTTP healthchecks, failure restarts, and PR-preview
+schedules; production remains disabled. Review/merge precedes deployment, and manual
+plus scheduled staging evidence precedes release acceptance. See the service's
+[refresh runbook](../services/documentation-system/docs/DEPLOYMENT.md#source-access-refresh-schedule)
+for provisioning, Railway webhook and heartbeat alerts, limits, rotation, recovery,
+and the pending acceptance record. The 24-hour freshness / 48-hour expiry contract
+is unchanged.
 
 > **Gotcha — `src` package collision when minting keys.** Both
 > `services/team-tracking` and `services/documentation-system` declare a top-level

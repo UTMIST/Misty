@@ -44,6 +44,22 @@ class InMemoryStorageAdapter:
         # doc_id -> (content_text, content_hash, fetched_at)
         self._content: dict[UUID, tuple[str, str, datetime | None]] = {}
         self._chunks: dict[UUID, list[DocChunk]] = {}
+        self._source_refresh_lock = Lock()
+        self._source_refresh_run: UUID | None = None
+
+    def acquire_source_refresh_run(self, run_id: UUID, *, actor: str) -> bool:
+        with self._source_refresh_lock:
+            if self._source_refresh_run is not None:
+                return False
+            self._source_refresh_run = run_id
+            return True
+
+    def release_source_refresh_run(self, run_id: UUID) -> bool:
+        with self._source_refresh_lock:
+            if self._source_refresh_run != run_id:
+                return False
+            self._source_refresh_run = None
+            return True
 
     def _hydrate(self, doc: Doc) -> Doc:
         data = doc.model_dump()

@@ -300,6 +300,16 @@ def test_readiness_query(adapter):
     assert adapter.is_ready() is True
 
 
+def test_source_refresh_guard_across_connections(adapter):
+    from tests.source_refresh_guard_cases import assert_refresh_guard
+
+    peer_engine = create_engine(get_settings().database_url, future=True)
+    try:
+        assert_refresh_guard(adapter, PostgresStorageAdapter(peer_engine))
+    finally:
+        peer_engine.dispose()
+
+
 def _mk(adapter, url="https://x.com", tags=None):
     return adapter.create_doc(
         url=url,

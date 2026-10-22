@@ -205,6 +205,26 @@ expire after the configured maximum age, so a prolonged refresh outage fails clo
 Manual grants are independent and are never silently created or deleted by source
 reconciliation. Ownership fields are attribution metadata and do not authorize access.
 
+`doc-source-refresh` is an external HTTP client of the bounded refresh endpoint.
+It keeps database/provider credentials in the API, checks its scoped key before
+refreshing, and never replays an ambiguous POST. Separate refresh and index failure
+counts preserve the distinction between source freshness and searchable content.
+Railway failure notifications and independent start/finish heartbeat pings cover
+process failures and missing runs; monitoring failure does not undo or replay API
+work. Deployment, recovery and monitoring setup live in the
+[refresh runbook](DEPLOYMENT.md#source-access-refresh-schedule).
+
+Before its first heartbeat, the runner acquires the database's singleton
+`source_refresh_run` row through authenticated HTTP. The guard covers the whole
+drain and final heartbeat, across containers and API restarts. A conflicting
+runner exits nonzero and sends only `/fail`; it cannot replace the active start
+or send a misleading success. Run IDs alone only correlate Healthchecks durations.
+The guard has no TTL: after a crash or uncertain completion, admitting a new run
+could overlap work still running in the API. An operator must confirm quiescence
+before releasing that exact ID. The bounded refresh endpoint remains independently
+callable; direct API clients must use the same guard protocol for an entire drain.
+Each catalog database must have its own heartbeat check.
+
 Visibility keeps two team sets in the actor context: ordinary active directory memberships
 for manual grants, and separately confirmed synchronized Google memberships for
 source-derived team grants. This prevents a newly added directory member from inheriting a

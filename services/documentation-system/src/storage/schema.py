@@ -20,6 +20,16 @@ from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR, UUID
 
 metadata = MetaData()
 
+source_refresh_run = Table(
+    "source_refresh_run",
+    metadata,
+    Column("singleton", Boolean, primary_key=True),
+    Column("run_id", UUID(as_uuid=True), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("created_by", Text, nullable=False),
+    CheckConstraint("singleton", name="ck_source_refresh_run_singleton"),
+)
+
 sources = Table(
     "sources",
     metadata,
