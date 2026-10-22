@@ -221,8 +221,12 @@ cataloging. Reconciliation of late files continues in either state.
 
 **Remaining crash-loss window (accepted):** a `meeting` process crash during a
 live meeting (existing limitation — sessions are in memory), or between
-finalization and the documentation-system insert (seconds). In both cases the
-channel is told the meeting could not be saved.
+finalization and the documentation-system insert. The latter is normally
+seconds but can last the full `RECORD_HANDOFF_HOLD_S` during an outage. If the
+process crashes while holding a `handoff_pending` payload, the channel's last
+notice may still say "delayed"; there is no durable hand-off receipt from which
+to send a later failure notice. The Discord PDF remains the fallback. This
+notification gap is accepted alongside the in-memory loss window.
 
 **Logs** carry `meeting_id`, status, and attempt counts — never transcript
 content, participant names, or credentials.
@@ -367,12 +371,30 @@ parent channel.
 audience team has a group with status `synced`. If the voice channel has no
 teams or a group is not synced (e.g. while #236/#237 are unavailable), the Doc
 is still created but shared with **no members** — admins only. The record is
-`saved` with `audience_team_ids = []`, and the bot says the record is
-admin-only until `/channel-access` is configured for that voice channel. Misty
-never uses domain-wide or anyone-with-link sharing. After creation, connectors
-reads back the Doc's permissions; if any principal other than the owner,
-admins, and the intended groups has access, all shares are removed, the Doc is
-permanently deleted, and the attempt fails.
+`saved` with `audience_team_ids = []`, and the bot says the record is admin-only;
+configuring `/channel-access` affects future recordings. Misty never uses
+domain-wide or anyone-with-link sharing. After creation and sharing, connectors
+reads back the full permissions. Allowed admins are the explicitly configured
+infra/Drive admin principals, including inherited Shared Drive members; a
+principal is not trusted merely because it has an elevated Drive role.
+
+**Unexpected access is a security removal, not a persistence retry.** If any
+other principal has access, connectors immediately revokes direct shares and
+reports `unexpected_acl`. For an adopted canonical Doc, documentation-system
+starts the `/remove` cascade: set the removal marker, disable link delivery,
+permanently delete the Doc, purge any catalog copy, and retain the tombstone.
+Deletion is required even when an unwanted inherited permission cannot be
+revoked directly. Cleanup failures remain `removing` and retry with an admin
+alert; they never resume persistence. An unadopted file is deleted without
+clearing the pending payload. A canonical Doc removed for unsafe permissions
+is deliberately not recreated: expose the removal status through
+`GET /meeting-records/{id}` and emit an `unexpected_acl` audit event and admin
+alert. The responding admin tells the requester that no Google record was
+retained and that the Discord PDF is the fallback, using the same removal
+notification responsibility as below. For this security-only removal, keep the
+existing Discord PDF unless its removal is separately requested. Do not report
+this as a delayed save or offer an automatic retry against the deleted canonical
+ID. Google and catalog copies follow the same purge policy as an admin removal.
 
 **Catalog grants follow Drive automatically.** Because access is Drive group
 shares, the existing source-ACL sync (#76/#261) turns them into catalog grants
@@ -424,8 +446,9 @@ recorded and is OK with it. Misty makes that explicit:
      (`meeting_id`, canonical Google document ID, `removed_at/by`, and cleanup
      status/lease/scheduling fields) so retries cannot recreate it. Mark
      `removed` after known copies are purged; repeated scans still delete
-     late-created files. Keep only identifiers needed to finish any pending
-     catalog or Discord cleanup until those steps succeed.
+     late-created files. Clear every other field, including `title` and
+     `requester_*`; keep only identifiers needed to finish any pending catalog
+     or Discord cleanup until those steps succeed.
   5. **Discord:** the bot deletes its link message (`discord_message_id`).
   The admin deletes the Discord PDF message by hand (the bot does not track
   it today). Copies members already downloaded cannot be recalled; the admin
@@ -444,8 +467,14 @@ recorded and is OK with it. Misty makes that explicit:
 - **A 404 is not proof of deletion.** Google returns `404 notFound` both when
   a file is gone and when the caller has lost access. A failed fetch therefore
   never triggers cleanup on its own: the record becomes `inaccessible`, is
-  reported to admins, and the catalog keeps today's behavior (last snapshot and
-  grants until they expire). Destructive cleanup runs only after connectors'
+  reported to admins, and the catalog retains its snapshot, `doc_content`, and
+  chunks; existing grants still expire on their normal TTL and are not extended
+  by a failed fetch. This requires a meeting-specific change: today's generic
+  `SourceGone` handling immediately deletes `doc_content` and chunks on refetch
+  or refresh. For meeting-linked docs, an unconfirmed 404 from the owner fetch
+  must instead use the non-destructive fetch-failure path in ingest, refetch,
+  and refresh; it must not reach `delete_doc_content`. Destructive cleanup runs
+  only after connectors'
   `GET /google/docs/{id}/status` — asked as the owning writer identity —
   confirms the Doc is `deleted` or `trashed`. Then documentation-system runs
   the same cascade as `/remove` (permanently deleting a trashed Doc). If the
@@ -459,7 +488,7 @@ recorded and is OK with it. Misty makes that explicit:
 
 | Work | Zone (owner) | Issue |
 |---|---|---|
-| `meeting_records` table + migration, `PUT/GET/PATCH /meeting-records`, guarded canonical adoption, recurring reconciliation including terminal records, `retry-due`, `/remove` cascade, identity resolution, Doc HTML rendering, owner-identity fetch for meeting docs in ingest/refetch/refresh | `services/documentation-system` (@angelayzheng) | #222 |
+| `meeting_records` table + migration, `PUT/GET/PATCH /meeting-records`, guarded canonical adoption, recurring reconciliation including terminal records, `retry-due`, `/remove` cascade including unsafe-ACL removal, identity resolution, Doc HTML rendering, owner-identity fetch and non-destructive unconfirmed-404 handling for meeting docs in ingest/refetch/refresh | `services/documentation-system` (@angelayzheng) | #222 |
 | Catalog purge (`POST /docs/{id}/purge`, `docs:purge`) and refusing purged docs in ingest/refetch/refresh/discovery | `services/documentation-system` (@angelayzheng) | new follow-up, required before rollout |
 | `POST /google/docs` (unshared create with `appProperties`), `search`, `sharing` with read-back, owner `fetch` (content + full ACL), `status`, permanent `DELETE`, per-voice-channel folders, Workspace OAuth write credentials, `meeting-write`/`meeting-fetch` scopes | `services/connectors` (@michelle-yl) | #222 |
 | `StopRequest.record`, hand-off before discard, hold-and-retry, `StopResponse.record` | `services/meeting` (@andrei-akopian) | #222 |
@@ -475,7 +504,12 @@ Doc on a later scan. Also cover an older duplicate appearing after canonical
 adoption (preserve the canonical Doc and human edits), late creates after
 failure/removal, repeated empty scans before a late file appears, and cleanup
 failure followed by retry. None may reopen a terminal record or share/catalog
-a duplicate.
+a duplicate. Also cover unexpected access after canonical adoption: removal is
+terminal, cleanup retries cannot restart persistence, and status/audit output
+reports the security deletion for admin follow-up. For owner-fetch 404s in
+ingest, refetch, and refresh, verify that content and chunks survive until deletion or
+trash is independently confirmed, that failed fetches do not extend grant TTLs,
+and that confirmed removal still purges every retained copy.
 
 **Prerequisites:**
 
