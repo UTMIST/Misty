@@ -79,11 +79,32 @@ def _render(elements: list) -> list[str]:
     return lines
 
 
+def _tab_bodies(tabs: list, parent_titles: tuple[str, ...] = ()):
+    """Walk top-level and child tabs in the order returned by Google."""
+    for tab in tabs:
+        title = ((tab.get("tabProperties") or {}).get("title") or "Untitled tab").strip()
+        titles = (*parent_titles, title)
+        body = ((tab.get("documentTab") or {}).get("body") or {}).get("content") or []
+        yield titles, body
+        yield from _tab_bodies(tab.get("childTabs") or [], titles)
+
+
 class DocsExtractor:
     scopes = (DOCS_READONLY,)
     services = ("docs",)
 
     def extract(self, services: dict, file_id: str, mime: str) -> ExtractedText:
-        doc = execute(services["docs"].documents().get(documentId=file_id))
+        doc = execute(services["docs"].documents().get(documentId=file_id, includeTabsContent=True))
+        tabs = list(_tab_bodies((doc or {}).get("tabs") or []))
+        if tabs:
+            lines = []
+            for titles, content in tabs:
+                # Preserve the existing text/hash for ordinary single-tab docs.
+                # Multiple tabs need labels so their boundaries remain visible.
+                if len(tabs) > 1:
+                    lines.append("# Tab: " + " / ".join(titles))
+                lines.extend(_render(content))
+            return ExtractedText(text="\n".join(lines))
+        # Retain compatibility with legacy body-shaped responses.
         body = (doc or {}).get("body") or {}
         return ExtractedText(text="\n".join(_render(body.get("content") or [])))

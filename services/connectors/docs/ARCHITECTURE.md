@@ -70,6 +70,13 @@ The non-obvious part is that **extractors declare their own requirements**. Each
 
 A consequence worth internalizing: **a new supported file type does not imply a new OAuth scope.** Uploaded PDFs and `.docx` files are downloaded as raw bytes through the Drive media path that `drive.readonly` already covers, then parsed locally with `pypdf` / `python-docx`. Only a genuinely new *Google API* adds a scope.
 
+Google Docs requests set `includeTabsContent=true` and traverse top-level and
+nested tabs in document order. Without that parameter Google returns only the
+first tab in the legacy `body` field. Multiple tabs receive headings containing
+their title paths; a single tab keeps its existing rendered text. After deploying
+this behavior, refetch previously indexed multi-tab documents through the catalog
+API so their additional text reaches the index; discovery does not refetch them.
+
 ## Threading: what is memoized and what is not
 
 This is the subtlest thing in the service, and the comments in `google.py` exist because getting it wrong is silent corruption rather than a crash.
