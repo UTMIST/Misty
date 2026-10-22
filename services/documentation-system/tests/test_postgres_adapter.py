@@ -1,3 +1,4 @@
+from tests.doc_identity_cases import DocIdentityCases
 from tests.google_identity_cases import GoogleIdentityCases
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -869,4 +870,8 @@ def test_ownership_requires_valid_grant_and_source_revocation_hides_doc(adapter,
 
 
 class TestGoogleIdentity(GoogleIdentityCases):
+    pass
+
+
+class TestDocIdentity(DocIdentityCases):
     pass

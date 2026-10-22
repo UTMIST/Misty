@@ -4,7 +4,7 @@ from threading import Lock
 from uuid import UUID, uuid4
 
 from contracts.retrieval import ChunkCitation, QueryEmbedding, SearchHit
-from contracts.storage import ExistingGoogleDoc
+from contracts.storage import DuplicateDocId, ExistingGoogleDoc
 from contracts.types import (
     ApiKey,
     Doc,
@@ -138,6 +138,10 @@ class InMemoryStorageAdapter:
                 existing = self.get_doc_by_google_file_id(file_id)
                 if existing is not None:
                     raise ExistingGoogleDoc(existing)
+            # Checked after the Google identity check so both adapters raise the same
+            # error when a call would fail either way.
+            if doc_id is not None and doc_id in self._docs:
+                raise DuplicateDocId(doc_id)
             now = _now()
             doc = Doc(
                 id=doc_id or uuid4(),

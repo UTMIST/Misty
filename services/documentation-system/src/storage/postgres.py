@@ -24,7 +24,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from contracts.retrieval import ChunkCitation, RetrievalUnavailable, SearchHit
-from contracts.storage import DuplicateActiveUrl, ExistingGoogleDoc
+from contracts.storage import DuplicateActiveUrl, DuplicateDocId, ExistingGoogleDoc
 from contracts.types import (
     ApiKey,
     Doc,
@@ -355,13 +355,21 @@ class PostgresStorageAdapter:
                     existing = self._get_doc_by_google_file_id(conn, file_id)
                     if existing is not None:
                         raise ExistingGoogleDoc(existing)
+            # Identity first, so a call that collides on both the id and the url fails
+            # the same way here as in the in-memory adapter, which has no url
+            # constraint to reach. The insert below would otherwise report the url
+            # conflict and never surface the one the caller actually controls.
+            if doc_id is not None:
+                taken = conn.execute(select(docs.c.id).where(docs.c.id == doc_id)).one_or_none()
+                if taken is not None:
+                    raise DuplicateDocId(doc_id)
             # New docs are always active, so they fall under the partial unique
             # index on url_normalized WHERE active. A concurrent ingest that
             # already inserted an active row for this URL makes this a no-op:
             # on_conflict_do_nothing suppresses the IntegrityError (which would
             # otherwise poison the transaction) and RETURNING yields no row.
             # Signal that to the caller so ingest can fall back to dedup/merge.
-            row = conn.execute(
+            insert_doc = (
                 pg_insert(docs)
                 .values(
                     # Omitted when None so the column's gen_random_uuid() default applies.
@@ -385,7 +393,18 @@ class PostgresStorageAdapter:
                     index_where=text("active"),
                 )
                 .returning(docs)
-            ).one_or_none()
+            )
+            try:
+                row = conn.execute(insert_doc).one_or_none()
+            except IntegrityError as e:
+                # The check above has already rejected an id this transaction can see,
+                # so reaching here means a concurrent insert took it in between. The
+                # url_normalized conflict is absorbed by on_conflict_do_nothing, leaving
+                # the primary key as the only unique violation; other integrity failures
+                # (a bad source_id FK) must keep their own type.
+                if doc_id is None or getattr(e.orig, "sqlstate", None) != "23505":
+                    raise
+                raise DuplicateDocId(doc_id) from e
             if row is None:
                 raise DuplicateActiveUrl(url_normalized)
             for tag in set(tags):
