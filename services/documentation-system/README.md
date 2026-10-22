@@ -137,7 +137,7 @@ documentation-system/
 │   │
 │   ├── fetch/                 Concrete Fetcher implementations + registry
 │   │   ├── web.py             Generic web page fetcher (SSRF egress guard: scheme allowlist, private/metadata-IP block, IP pinning)
-│   │   ├── github.py          GitHub-aware fetcher
+│   │   ├── connectors.py      ConnectorsFetcher — github + Google sources via the connectors service
 │   │   └── registry.py        FetcherRegistry: source_id -> Fetcher
 │   │
 │   ├── directory/
@@ -214,7 +214,7 @@ documentation-system/
 The service is built around three swappable Protocols, so no concrete dependency (a specific database, a specific fetch strategy, a specific directory service) leaks into the ingest/API layers:
 
 - **`StorageAdapter`** (`contracts/storage.py`) — persistence for docs, sources, and API keys. Two implementations: `InMemoryStorageAdapter` (tests) and `PostgresStorageAdapter` (production). Swapping to Postgres in Task 15 required zero changes to `src/ingest.py` or the routers.
-- **`Fetcher`** (`contracts/fetcher.py`) — `fetch(url) -> FetchResult`. `FetcherRegistry` maps a `source_id` to a concrete fetcher (`web.py`, `github.py`); unknown or auth-required sources simply skip fetching. The web fetcher applies SSRF egress protection (http/https scheme allowlist, public-address validation that blocks private/reserved/link-local/CGN/metadata IPs, per-hop redirect revalidation, pinned connections) and rejects a blocked or malformed URL as a `BlockedURLError` (a `FetchError` subclass). Fetch failures raise `FetchError`, which `ingest_doc` catches and turns into a warning — a doc is still created with the URL as its title.
+- **`Fetcher`** (`contracts/fetcher.py`) — `fetch(url) -> FetchResult`. `FetcherRegistry` maps a `source_id` to a concrete fetcher (`web.py` in-process; `connectors.py` for `github` and the Google sources); unknown or auth-required sources simply skip fetching. The web fetcher applies SSRF egress protection (http/https scheme allowlist, public-address validation that blocks private/reserved/link-local/CGN/metadata IPs, per-hop redirect revalidation, pinned connections) and rejects a blocked or malformed URL as a `BlockedURLError` (a `FetchError` subclass). Fetch failures raise `FetchError`, which `ingest_doc` catches and turns into a warning — a doc is still created with the URL as its title.
 - **`DirectoryClient`** (`contracts/directory.py`) — resolves owner labels, verified email identities, active memberships, and only membership-synced Google Group mappings. Owner-label outages degrade; an outage during ACL reconciliation aborts the whole reconciliation so a partial result can never revoke or broaden access.
 
 ## Auth model
@@ -249,6 +249,7 @@ All endpoints require `X-API-Key` with the appropriate scope.
 | POST | `/docs/{id}/tags` | `docs:write` | Add a tag |
 | DELETE | `/docs/{id}/tags/{tag}` | `docs:write` | Remove a tag |
 | POST | `/docs/{id}/refetch` | `docs:write` | Re-run content fetch for an existing doc |
+| POST | `/docs/discovery` | `docs:write` | Import a newly discovered Google file identity |
 | POST | `/docs/source-access/refresh-due` | `docs:write` | Refresh a bounded batch whose Google ACL is due |
 | POST | `/docs/index` | `docs:index` | (Re-)index stored content; retry path for indexing failures |
 | GET | `/sources` | `docs:read` | List sources (`?active_only=false`) |
@@ -354,3 +355,34 @@ metadata. Ingest, refetch, refresh, and retirement keep the index current, and
 - Bulk import — ingest is one URL per request; no CSV/bulk endpoint.
 - Pagination — list endpoints return all matching rows, adequate for current catalog size.
 - Admin UI — no dashboard; catalog browsing goes through the API or a future thin client.
+
+## Automatic sharing discovery
+
+When an operator enables discovery for your environment, share a supported Google
+file or My Drive folder with Misty's connector email; nested supported files are
+included. No `/doc add` or folder-root registration is needed. Use the
+[member instructions](docs/DISCOVERY.md#members-sharing-with-misty) for sharing
+prerequisites and expected search behavior.
+
+The HTTP-only `doc-discover` runner has separate settings from the API. It reads
+**process environment only**, including the existing `DOCS_BASE_URL`,
+`DOCS_API_KEY`, `CONNECTORS_BASE_URL`, and `CONNECTORS_API_KEY`. Its two keys default
+to empty and must be configured when enabled. No database/Google credential is
+needed by the runner. Startup validates settings and credentials before requests;
+the API's production boot check does not read these runner-only settings.
+
+| Runner setting | Default | Purpose |
+|---|---|---|
+| `DISCOVERY_ENABLED` | `false` | Explicit operator enable/disable |
+| `DISCOVERY_STATE_PATH` | `discovery-state.json` | Durable checkpoint; mount a volume in staging |
+| `DISCOVERY_IDENTITY` | `default` | Environment/connector identity label; changing it requires a new checkpoint |
+| `DISCOVERY_PAGE_SIZE` | `100` | Drive results per page, 1–100 |
+| `DISCOVERY_MAX_PAGES` | `20` | Listing requests per invocation, 1–1000 |
+| `DISCOVERY_MAX_ITEMS` | `100` | Items handled per invocation, 1–10000 |
+| `DISCOVERY_MAX_FOLDERS` | `10000` | Unique folders per full scan, 1–100000 |
+| `DISCOVERY_MAX_SECONDS` | `900` | Budget for starting requests; finite and positive |
+| `DISCOVERY_TIMEOUT_SECONDS` | `120` | HTTP phase timeout; finite and positive |
+| `DISCOVERY_EXCLUDED_IDS` | `[]` | JSON array of file/folder ids excluded from discovery |
+
+See the [operator runbook](docs/DISCOVERY.md) for scheduling, bounds, recovery,
+limitations and the staging acceptance gate. Production activation is separate.

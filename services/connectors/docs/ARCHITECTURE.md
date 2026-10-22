@@ -4,7 +4,7 @@ Why this service is shaped the way it is. For *what it does* and how to run it, 
 
 ## What it is, in one line
 
-An **outbound adapter**: it holds the credential for an external document source, and turns a URL into text. Nothing else.
+An **outbound adapter**: it holds the credential for an external document source, and turns a URL into text and enumerates bounded source metadata pages.
 
 ## What it deliberately is not
 
@@ -83,7 +83,7 @@ Relatedly, `build_registry` gives all four Google source ids (`gdocs`/`gsheets`/
 
 ## Degradation: no credential is a valid running state
 
-`GOOGLE_CREDENTIALS_JSON` may be empty in **any** tier, including production. It is deliberately excluded from `verify_production_secrets()`. A connectors deploy with no Google project yet still boots, serves `/health`, passes auth, and returns 503 for Google fetches.
+`GOOGLE_CREDENTIALS_JSON` may be empty in **any** tier, including production. It is deliberately excluded from `verify_production_secrets()`, as is the optional `GITHUB_TOKEN` (public repositories need none). A connectors deploy with no Google project yet still boots, serves `/health`, passes auth, and returns 503 for Google fetches.
 
 That is what lets connectors be deployed and wired to documentation-system *before* the Google Cloud project exists — turning on Google support later is a variable edit plus a redeploy, not a code change or a deploy-order dependency. documentation-system is built to tolerate exactly this: a failed fetch is a warning on the ingested doc, never an error.
 
@@ -95,10 +95,21 @@ Two clamps exist, and only one of them is meant to fire:
 
 - connectors' `MAX_CONTENT_CHARS` defaults to **1,200,000**.
 - documentation-system's own `MAX_CONTENT_CHARS` is **1,000,000**.
-- connectors' `MAX_FILE_BYTES` defaults to **25 MiB** and rejects oversized uploaded PDF, `.docx`, and `text/*` files before media download.
+- connectors' `MAX_FILE_BYTES` defaults to **25 MiB** and rejects oversized uploaded PDF, `.docx`, `text/*`, and GitHub files before their bytes are downloaded.
 
 The gap is deliberate. The consumer's clamp trips first and reports a truncation warning to whoever ingested the doc; connectors' clamp is a transport backstop that should never be the visible one. If you change either, keep connectors' the larger of the two.
 
 ## Why no persistence
 
 Caching fetched content here would mean deciding invalidation policy on behalf of every consumer, and holding document text in a service whose entire authorization story is "the caller already checked." Consumers that want a cache own it — documentation-system stores its own content snapshots, with its own staleness rules.
+
+## Metadata discovery
+
+The adapter also exposes bounded Google metadata enumeration through the
+`DiscoverySource` Protocol. `deps.py` wires the configured Google identity; no Google
+SDK enters the API layer. Each request lists one page of direct shares or one
+folder's immediate children. Format classification uses the same `EXTRACTORS` and
+`text/*` fallback as fetch. Discovery returns no ACLs or content and cannot authorize
+a member. The external catalog runner owns traversal, checkpoints and scheduling;
+connectors remains stateless. See [API](API.md#post-discovergoogle) and the
+[discovery runbook](../../documentation-system/docs/DISCOVERY.md).

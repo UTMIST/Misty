@@ -1,9 +1,9 @@
 import httpx
 import pytest
 
-from contracts.fetcher import FetchError
-from src.fetch.github import GithubFetcher, parse_github_title
-from src.fetch.registry import FetchUnsupported, FetcherRegistry
+from contracts.fetcher import FetchError, FetchResult
+from src.fetch.connectors import ConnectorsFetcher
+from src.fetch.registry import FetchUnsupported, FetcherRegistry, default_registry
 from src.content import MAX_CONTENT_CHARS
 from src.fetch.web import FETCH_HARD_CAP, SNAPSHOT_CHARS, WebFetcher, extract_text, parse_title
 
@@ -19,10 +19,6 @@ def test_parse_title_none_when_absent():
 def test_extract_text_strips_tags_and_truncates():
     out = extract_text("<p>Alpha</p><p>Beta</p>", limit=100)
     assert "Alpha" in out and "<p>" not in out
-
-
-def test_parse_github_title_from_path():
-    assert parse_github_title("https://github.com/utmist/site") == "utmist/site"
 
 
 def test_web_fetcher_uses_injected_client():
@@ -45,10 +41,25 @@ def test_web_fetcher_raises_fetcherror_on_http_error():
 
 
 def test_registry_routes_by_source_and_rejects_unknown():
-    reg = FetcherRegistry({"github": GithubFetcher()})
-    assert reg.fetch_for("github", "https://github.com/a/b").title == "a/b"
+    class _Titled:
+        def fetch(self, url):
+            return FetchResult(title=url)
+
+    reg = FetcherRegistry({"github": _Titled()})
+    assert reg.fetch_for("github", "https://github.com/a/b").title == "https://github.com/a/b"
     with pytest.raises(FetchUnsupported):
         reg.fetch_for("web", "https://x.com")
+
+
+@pytest.mark.parametrize("source_id", ["github", "gdocs", "gsheets", "gslides", "gdrive"])
+def test_default_registry_fetches_github_and_google_through_connectors(source_id):
+    fetcher = default_registry()._by_source[source_id]
+    assert isinstance(fetcher, ConnectorsFetcher)
+    assert fetcher._source_id == source_id
+
+
+def test_default_registry_fetches_web_in_process():
+    assert isinstance(default_registry()._by_source["web"], WebFetcher)
 
 
 def test_web_fetcher_returns_full_content_and_bounded_snapshot():

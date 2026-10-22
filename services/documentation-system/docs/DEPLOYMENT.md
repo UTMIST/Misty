@@ -350,7 +350,7 @@ Which sources get fetched is determined by two things that must agree:
 2. A `Fetcher` registered for that `source_id` in `default_registry()`
    (`src/fetch/registry.py`).
 
-`web` and `github` fetch in-process. The four Google sources (`gdrive`, `gdocs`, `gsheets`,
+`web` fetches in-process. `github` and the four Google sources (`gdrive`, `gdocs`, `gsheets`,
 `gslides`) fetch via the [connectors](../../connectors/) service over HTTP
 (`ConnectorsFetcher`, registered in `src/fetch/registry.py`); migration `006` flipped their
 `content_fetch_enabled` to `true` to match. `youtube` remains fetch-disabled:
@@ -360,11 +360,11 @@ the `Fetcher`, register it, and flip `content_fetch_enabled` (see
 [`docs/CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 Fetcher-specific env vars: `CONNECTORS_BASE_URL` / `CONNECTORS_API_KEY` (see above) configure
-the Google sources' fetcher. **Deploy order is recommended, not required:** documentation-system
+the connectors-backed fetchers (`github` and the Google sources). **Deploy order is recommended, not required:** documentation-system
 boots fine with no connectors configuration at all — `verify_production_secrets()` only warns
 on a default `CONNECTORS_API_KEY`, it never blocks startup. Deploying connectors first and
 setting these two vars on documentation-system before deploying it just avoids a window where
-Google-source fetches fail at request time (degraded, not fatal — see the connectors dependency
+GitHub and Google-source fetches fail at request time (degraded, not fatal — see the connectors dependency
 section below) because connectors isn't up yet or isn't yet configured.
 
 ## The team-tracking directory dependency
@@ -387,8 +387,8 @@ steady state.
 
 ## The connectors dependency
 
-The documentation-system fetches content for the Google sources (`gdrive`, `gdocs`,
-`gsheets`, `gslides`) by calling the [connectors](../../connectors/) service over HTTP. It is
+The documentation-system fetches content for `github` and the Google sources (`gdrive`,
+`gdocs`, `gsheets`, `gslides`) by calling the [connectors](../../connectors/) service over HTTP. It is
 a runtime dependency with **two different failure modes** depending on when it's down:
 
 - **At boot, outside `local`:** soft. `verify_production_secrets()` logs a warning, not a
@@ -398,7 +398,7 @@ a runtime dependency with **two different failure modes** depending on when it's
 - **At request time:** soft for ingest, hard for refetch — deliberately different, since
   ingest degrading a whole batch is worse than a single explicit refetch failing loudly.
   On `POST /docs`, if connectors is unreachable or errors, `ConnectorsFetcher` raises
-  `FetchError`, which `ingest_doc` catches the same way it catches a `web`/`github` fetch
+  `FetchError`, which `ingest_doc` catches the same way it catches a `web` fetch
   failure: the doc is still catalogued, just without a content snapshot, and a warning is
   returned — a connectors outage never fails `POST /docs`. On `POST /docs/{id}/refetch`,
   the same `FetchError` is instead surfaced to the caller as an HTTP 502 (see
@@ -471,3 +471,12 @@ managed-group migration; never infer access from an ordinary team membership.
 Reassigns documents from the retired source to `web` before removing its registry row.
 Downgrade restores only the registry entry; it does not undo the data cleanup.
 Use a database backup to recover the previous assignments.
+
+## Automatic discovery schedule
+
+The dedicated, disabled-by-default `doc-discover` runner and
+`railway.discovery.json` provide initial and recurring sharing discovery over HTTP.
+This is separate from the existing-document refresh schedule above. Follow the
+[discovery runbook](DISCOVERY.md) for its two scoped keys, persistent checkpoint,
+15-minute schedule, enable/status/disable commands, recovery and staging acceptance.
+Production activation requires a separate rollout decision.

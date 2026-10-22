@@ -24,9 +24,26 @@ class DuplicateActiveUrl(Exception):
     such constraint and is single-threaded, so it never raises this."""
 
 
+class ExistingGoogleDoc(Exception):
+    """Discovery's insert found an existing Google identity, active or retired."""
+
+    def __init__(self, doc: Doc):
+        super().__init__("Google identity already catalogued")
+        self.doc = doc
+
+
 class StorageAdapter(Protocol):
     """Stable contract between the service and persistence. Concrete adapters
     (Postgres, in-memory) implement these with identical semantics."""
+
+    def get_doc_by_google_file_id(self, file_id: str) -> Doc | None:
+        """Match supported Google URL aliases, including legacy/manual rows.
+
+        Prefer active, then earliest created_at/id. Includes retired rows so
+        discovery can honor operator retirement. No visibility filter: trusted
+        ingest only, like get_doc_by_normalized_url. Never grants access.
+        """
+        ...
 
     def is_ready(self) -> bool:
         """Return whether the backing store can answer a trivial query."""
@@ -70,14 +87,21 @@ class StorageAdapter(Protocol):
         fetched_at,
         tags: list[str],
         actor: str,
+        skip_existing_google: bool = False,
         doc_id: UUID | None = None,
     ) -> Doc:
-        """Create a doc. `doc_id` defaults to a generated UUID.
+        """Insert a doc, coordinating all Google inserts by supported file identity.
 
-        Pass one only where the identity must be reproducible across runs: retrieval
-        breaks ranking ties with the doc id, so a generated id makes the order of
-        equally scored documents vary between runs. The evaluation harness
-        (src/eval/) depends on that order being stable.
+        With skip_existing_google=True, atomically check all matching aliases
+        (including retired records) before inserting; raise ExistingGoogleDoc
+        without modifying that record if found. Requires a supported Google URL.
+        The default preserves explicit manual re-ingest after retirement.
+        No provider/network work is performed while coordinating the insertion.
+
+        `doc_id` defaults to a generated UUID. Pass one only where the identity must be
+        reproducible across runs: retrieval breaks ranking ties with the doc id, so a
+        generated id makes the order of equally scored documents vary between runs. The
+        evaluation harness (src/eval/) depends on that order being stable.
         """
         ...
 
@@ -103,7 +127,8 @@ class StorageAdapter(Protocol):
 
     def update_doc(self, doc_id: UUID, values: dict, *, actor: str) -> Doc | None:
         """Patch scalar columns (title, description, active, owning_* ids/labels,
-        content_snapshot, fetched_at). `values` holds already-resolved columns.
+        content_snapshot, fetched_at, source_id). `values` holds already-resolved
+        columns; callers validate source_id against the source registry.
         Returns None if no such doc."""
         ...
 

@@ -687,8 +687,8 @@ A **source** describes a kind of URL and how the catalog treats it:
 
 The seven seeded sources: `web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`,
 `youtube`. All but `youtube` have a fetcher and
-`content_fetch_enabled: true` — migration `006` enabled the four Google sources, which
-fetch through the connectors service.
+`content_fetch_enabled: true` — migration `006` enabled the four Google sources. `github`
+and the Google sources fetch through the connectors service.
 
 ## `GET /sources/{id}` — get one source
 
@@ -729,3 +729,52 @@ Errors use FastAPI's standard shape:
 
 Validation errors (422) carry the structured `detail` array FastAPI generates. See
 `/openapi.json` for the exact per-endpoint schemas.
+
+## Discovery import — `POST /docs/discovery`
+
+Requires `docs:write`; actor is the authenticated key name. This literal route is
+registered before `/docs/{doc_id}`. Strict body:
+
+```json
+{"file_id": "example", "source_id": "gdocs"}
+```
+
+File ids contain letters, digits, `_` and `-` (1–200 characters); source is one of
+`gdocs`, `gsheets`, `gslides`, `gdrive`. No URLs, owners, grants or claimed actor are
+accepted. The trusted discovery caller supplies the source from the connector's
+MIME classification. The catalog checks active/fetch-enabled source status before
+fetching, then deduplicates by Drive identity, including legacy/manual URL aliases.
+New records use the normal ingest, complete source-ACL reconciliation and indexer.
+Existing records are inspected without refetching or re-embedding. An active legacy
+Google URL catalogued as `web` is reassigned to the enabled Google source supplied
+by discovery, preserving its id, content, tags and manual grants. The existing source
+refresh job (or explicit refetch) then reconciles its actual Google ACL and content;
+until the first successful ACL sync it is reported as `registered`. Retirement is
+honored, including a manual registration/retirement while discovery is fetching:
+the final storage insert checks identity atomically with other Google inserts and
+returns the existing record without applying discovery's fetched data. Scopes and
+validation precede provider work.
+
+Always returns 200 for a classified outcome:
+
+```json
+{"status": "indexed", "doc_id": "11111111-1111-1111-1111-111111111111", "warnings": 0}
+```
+
+`indexed` means new usable chunks were written; `existing` means a current stored
+index already exists and a Google source has completed its initial ACL sync.
+`registered` means catalogued but missing content or initial Google ACL reconciliation;
+`index_failed` reports failed, missing or stale indexing; `retired` is skipped;
+`disabled` means source fetching is disabled/inactive (no doc id). Warnings are a
+count, with no content/principals/raw upstream details. An empty/whitespace extraction,
+unmapped ACL or fetch failure must not be counted as indexed.
+
+Use the existing refetch/source-refresh and `/docs/index` recovery endpoints; discovery
+only corrects the legacy source classification. See [operations and limits](DISCOVERY.md).
+All new Google URL ingests now use file identity for normalized dedup keys; displayed
+original URLs and existing stored keys are preserved. Editor aliases with an optional
+`u/<number>/` account selector share the same identity. Forms edit URLs without an
+explicit source use `gdrive` when no more-specific source pattern matches and that
+source is registered. Published `/d/e/` URLs are
+excluded from Drive identity extraction and keep distinct URL keys. Preexisting
+duplicate records are not merged. The active earliest record wins identity lookup.
