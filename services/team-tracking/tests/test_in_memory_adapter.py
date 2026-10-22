@@ -681,6 +681,15 @@ def test_channel_teams_replace_retire_clear(adapter):
     adapter.clear_channel_teams("1", "2")
 
 
+def test_channel_teams_append_unions(adapter):
+    a = adapter.create_team(TeamCreate(slug="a", label="A"), actor="t")
+    b = adapter.create_team(TeamCreate(slug="b", label="B"), actor="t")
+    adapter.replace_channel_teams("1", "2", [a.id], actor="bot")
+    out = adapter.append_channel_teams("1", "2", [b.id, a.id], actor="bot")
+    assert out.team_ids == sorted([a.id, b.id])
+    assert adapter.get_channel_teams("1", "2").team_ids == sorted([a.id, b.id])
+
+
 def test_channel_version_survives_out_of_order_retirement(adapter, monkeypatch):
     """Retiring B stamps an *earlier* timestamp than a later edit to A (the
     retire captured its time first but committed last). A timestamp-based

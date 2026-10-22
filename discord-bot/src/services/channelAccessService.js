@@ -20,29 +20,28 @@ export function createChannelAccessService({ directory } = {}) {
     return { outcome: 'OK', teams };
   }
 
+  async function labelsFor(config) {
+    const teams = [];
+    for (const id of config.team_ids ?? []) {
+      const team = await directory.getTeam(id);
+      if (team) teams.push(team);
+    }
+    return teams;
+  }
+
   async function show({ guildId, channelId }) {
     try {
       const config = await directory.getChannelTeams(guildId, channelId);
       if (!config) return { outcome: 'SHOWN', teams: [], version: null };
-      const teams = [];
-      for (const id of config.team_ids ?? []) {
-        const team = await directory.getTeam(id);
-        if (team) teams.push(team);
-      }
-      return { outcome: 'SHOWN', teams, version: config.version ?? null };
+      return {
+        outcome: 'SHOWN',
+        teams: await labelsFor(config),
+        version: config.version ?? null,
+      };
     } catch (e) {
       if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
       throw e;
     }
-  }
-
-  async function writeTeams(guildId, channelId, teams, outcome) {
-    const config = await directory.replaceChannelTeams(
-      guildId,
-      channelId,
-      teams.map((t) => t.id),
-    );
-    return { outcome, teams, version: config.version ?? null };
   }
 
   async function set({ guildId, channelId, slugs }) {
@@ -50,7 +49,12 @@ export function createChannelAccessService({ directory } = {}) {
       const resolved = await resolveTeams(slugs);
       if (resolved.outcome !== 'OK') return resolved;
       if (resolved.teams.length === 0) return { outcome: 'NO_TEAMS' };
-      return await writeTeams(guildId, channelId, resolved.teams, 'SET');
+      const config = await directory.replaceChannelTeams(
+        guildId,
+        channelId,
+        resolved.teams.map((t) => t.id),
+      );
+      return { outcome: 'SET', teams: resolved.teams, version: config.version ?? null };
     } catch (e) {
       if (e instanceof ChannelTeamsInvalid) {
         return { outcome: 'INVALID_TEAMS', detail: e.detail };
@@ -65,14 +69,18 @@ export function createChannelAccessService({ directory } = {}) {
       const resolved = await resolveTeams(slugs);
       if (resolved.outcome !== 'OK') return resolved;
       if (resolved.teams.length === 0) return { outcome: 'NO_TEAMS' };
-      const current = await directory.getChannelTeams(guildId, channelId);
-      const byId = new Map();
-      for (const id of current?.team_ids ?? []) {
-        const team = await directory.getTeam(id);
-        if (team) byId.set(team.id, team);
-      }
-      for (const team of resolved.teams) byId.set(team.id, team);
-      return await writeTeams(guildId, channelId, [...byId.values()], 'APPENDED');
+      // Atomic union in the directory (same write lock as replace/clear). A
+      // bot-side GET-then-PUT would race a concurrent clear and resurrect teams.
+      const config = await directory.appendChannelTeams(
+        guildId,
+        channelId,
+        resolved.teams.map((t) => t.id),
+      );
+      return {
+        outcome: 'APPENDED',
+        teams: await labelsFor(config),
+        version: config.version ?? null,
+      };
     } catch (e) {
       if (e instanceof ChannelTeamsInvalid) {
         return { outcome: 'INVALID_TEAMS', detail: e.detail };

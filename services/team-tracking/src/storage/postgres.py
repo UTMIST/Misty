@@ -570,40 +570,55 @@ class PostgresStorageAdapter:
         with self._engine.connect() as conn:
             return self._read_channel_teams(conn, guild_id, channel_id)
 
+    def _put_channel_teams(
+        self, conn, guild_id: str, channel_id: str, team_ids: list[UUID], *, actor: str
+    ) -> ChannelTeams:
+        """Validate and rewrite rows. Caller must already hold `_lock_channel`."""
+        if team_ids:
+            # FOR SHARE blocks a concurrent retire until this transaction commits.
+            active = conn.execute(
+                select(teams.c.id)
+                .where(teams.c.id.in_(team_ids), teams.c.active.is_(True))
+                .with_for_update(read=True)
+            ).all()
+            if len(active) != len(set(team_ids)):
+                raise ValueError("unknown_or_inactive_team")
+        conn.execute(
+            delete(channel_team_access).where(
+                channel_team_access.c.guild_id == guild_id,
+                channel_team_access.c.channel_id == channel_id,
+            )
+        )
+        if team_ids:
+            conn.execute(
+                insert(channel_team_access),
+                [
+                    {
+                        "guild_id": guild_id,
+                        "channel_id": channel_id,
+                        "team_id": t,
+                        "created_by": actor,
+                    }
+                    for t in team_ids
+                ],
+            )
+        return self._read_channel_teams(conn, guild_id, channel_id)
+
     def replace_channel_teams(
         self, guild_id: str, channel_id: str, team_ids: list[UUID], *, actor: str
     ) -> ChannelTeams:
         with self._engine.begin() as conn:
             self._lock_channel(conn, guild_id, channel_id)
-            if team_ids:
-                # FOR SHARE blocks a concurrent retire until this transaction commits.
-                active = conn.execute(
-                    select(teams.c.id)
-                    .where(teams.c.id.in_(team_ids), teams.c.active.is_(True))
-                    .with_for_update(read=True)
-                ).all()
-                if len(active) != len(set(team_ids)):
-                    raise ValueError("unknown_or_inactive_team")
-            conn.execute(
-                delete(channel_team_access).where(
-                    channel_team_access.c.guild_id == guild_id,
-                    channel_team_access.c.channel_id == channel_id,
-                )
-            )
-            if team_ids:
-                conn.execute(
-                    insert(channel_team_access),
-                    [
-                        {
-                            "guild_id": guild_id,
-                            "channel_id": channel_id,
-                            "team_id": t,
-                            "created_by": actor,
-                        }
-                        for t in team_ids
-                    ],
-                )
-            return self._read_channel_teams(conn, guild_id, channel_id)
+            return self._put_channel_teams(conn, guild_id, channel_id, team_ids, actor=actor)
+
+    def append_channel_teams(
+        self, guild_id: str, channel_id: str, team_ids: list[UUID], *, actor: str
+    ) -> ChannelTeams:
+        with self._engine.begin() as conn:
+            self._lock_channel(conn, guild_id, channel_id)
+            current = self._read_channel_teams(conn, guild_id, channel_id)
+            merged = list(dict.fromkeys([*current.team_ids, *team_ids]))
+            return self._put_channel_teams(conn, guild_id, channel_id, merged, actor=actor)
 
     def clear_channel_teams(self, guild_id: str, channel_id: str) -> None:
         with self._engine.begin() as conn:

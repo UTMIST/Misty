@@ -545,6 +545,17 @@ class InMemoryStorageAdapter:
             self._channel_teams.pop((guild_id, channel_id), None)
         return self.get_channel_teams(guild_id, channel_id)
 
+    def append_channel_teams(
+        self, guild_id: str, channel_id: str, team_ids: list[UUID], *, actor: str
+    ) -> ChannelTeams:
+        for t in team_ids:
+            team = self._teams.get(t)
+            if team is None or not team.active:
+                raise ValueError("unknown_or_inactive_team")
+        current = self.get_channel_teams(guild_id, channel_id)
+        merged = list(dict.fromkeys([*current.team_ids, *team_ids]))
+        return self.replace_channel_teams(guild_id, channel_id, merged, actor=actor)
+
     def clear_channel_teams(self, guild_id: str, channel_id: str) -> None:
         self._channel_teams.pop((guild_id, channel_id), None)
 

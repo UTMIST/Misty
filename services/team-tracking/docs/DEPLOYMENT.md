@@ -97,7 +97,7 @@ TT_DATABASE_URL="<team-tracking Neon branch>" \
 | `identifiers:read` | GET /people/by-identifier/{provider}/{external_id}, GET /people/{id}/identifiers |
 | `identifiers:write` | POST / PATCH / DELETE /people/{id}/identifiers[/{provider}] |
 | `channels:read` | GET /channels/{guild_id}/{channel_id}/teams |
-| `channels:write` | PUT / DELETE /channels/{guild_id}/{channel_id}/teams |
+| `channels:write` | PUT / DELETE /channels/{guild_id}/{channel_id}/teams, POST .../teams/append |
 | `dev:spoof` | Allows spoofing arbitrary Discord users (bot web playground). Refused when `TT_ENV=production`. |
 | `admin` | Wildcard — grants every scope. Use only for trusted operators / migrations. |
 

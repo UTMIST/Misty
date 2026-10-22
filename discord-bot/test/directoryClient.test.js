@@ -543,3 +543,17 @@ test('clearChannelTeams DELETEs and tolerates 204', async () => {
   assert.equal(fetchImpl.calls[0].opts.method, 'DELETE');
   assert.match(fetchImpl.calls[0].url, /\/channels\/1\/2\/teams$/);
 });
+
+test('appendChannelTeams POSTs team_ids and maps 400', async () => {
+  const ok = fakeFetch([{ status: 200, body: { team_ids: ['t1', 't2'], version: 'v' } }]);
+  const okClient = createDirectoryClient({ baseUrl: BASE, apiKey: KEY, fetchImpl: ok });
+  const body = await okClient.appendChannelTeams('1', '2', ['t2']);
+  assert.deepEqual(body.team_ids, ['t1', 't2']);
+  assert.equal(ok.calls[0].opts.method, 'POST');
+  assert.match(ok.calls[0].url, /\/channels\/1\/2\/teams\/append$/);
+  assert.deepEqual(JSON.parse(ok.calls[0].opts.body), { team_ids: ['t2'] });
+
+  const bad = fakeFetch([{ status: 400, body: { detail: 'unknown_or_inactive_team' } }]);
+  const badClient = createDirectoryClient({ baseUrl: BASE, apiKey: KEY, fetchImpl: bad });
+  await assert.rejects(() => badClient.appendChannelTeams('1', '2', ['x']), ChannelTeamsInvalid);
+});

@@ -132,21 +132,22 @@ test('service set reports unknown slug before writing', async () => {
   assert.equal(wrote, false);
 });
 
-test('service append unions with the existing set', async () => {
+test('service append uses the atomic directory append', async () => {
   const calls = [];
   const directory = {
     getTeamBySlug: async (slug) => (slug === 'ops' ? ops : null),
-    getChannelTeams: async () => ({ team_ids: ['t1'], version: 'v1' }),
-    getTeam: async (id) => (id === 't1' ? ml : null),
-    replaceChannelTeams: async (g, c, ids) => {
-      calls.push(ids);
-      return { team_ids: ids, version: 'v2' };
+    getTeam: async (id) => (id === 't1' ? ml : id === 't2' ? ops : null),
+    getChannelTeams: async () => assert.fail('must not GET-then-PUT'),
+    replaceChannelTeams: async () => assert.fail('must not replace'),
+    appendChannelTeams: async (g, c, ids) => {
+      calls.push({ g, c, ids });
+      return { team_ids: ['t1', 't2'], version: 'v2' };
     },
   };
   const svc = createChannelAccessService({ directory });
   const result = await svc.append({ guildId: 'g1', channelId: 'c1', slugs: ['ops'] });
   assert.equal(result.outcome, 'APPENDED');
-  assert.deepEqual(calls[0], ['t1', 't2']);
+  assert.deepEqual(calls[0], { g: 'g1', c: 'c1', ids: ['t2'] });
   assert.deepEqual(
     result.teams.map((t) => t.slug),
     ['ml', 'ops'],
