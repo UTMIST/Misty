@@ -6,6 +6,21 @@ from src.config import get_settings
 from src.sources.base import DiscoverySource, SourceFetcher
 from src.sources.google import GoogleSource
 from src.sources.registry import build_registry
+from contracts.meeting import MeetingWriter
+from src.sources.meeting_google import GoogleMeetingWriter
+
+
+@lru_cache(maxsize=1)
+def get_meeting_writer() -> MeetingWriter:
+    s = get_settings()
+    return GoogleMeetingWriter(
+        root_folder_id=s.google_meeting_root_folder_id,
+        admin_emails=s.google_meeting_admin_emails,
+        client_id=s.google_oauth_client_id.get_secret_value(),
+        client_secret=s.google_oauth_client_secret.get_secret_value(),
+        refresh_token=s.google_oauth_refresh_token.get_secret_value(),
+        timeout=s.request_timeout_s,
+    )
 
 
 @lru_cache(maxsize=1)

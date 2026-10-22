@@ -50,7 +50,7 @@ curl -sS http://localhost:8005/fetch \
 
 `CONNECTORS_ENV` declares which environment this instance represents: `local` (default), `staging`, or `production`. Outside `local`, `create_app()` calls `verify_production_secrets()` and **refuses to start** unless `API_KEY` is overridden from the dev default — a misconfigured deploy dies at boot, not on first request. `CONSUMER_KEYS` is also validated at boot (`get_key_store()` is called eagerly in `create_app()`), so a malformed value fails the container immediately rather than on the first `/fetch` call.
 
-Google credentials are deliberately **not** part of that boot check: `GOOGLE_CREDENTIALS_JSON` may be empty in any tier. A connectors deploy with no Google account yet still starts, serves `/health`, and returns 503 for Google source fetches.
+The read account is deliberately **not** part of that boot check: `GOOGLE_CREDENTIALS_JSON` may be empty in any tier. The optional meeting writer may be entirely disabled; partial writer configuration fails boot outside local. A connectors deploy with no Google account yet still starts, serves `/health`, and returns 503 for Google source fetches.
 
 ### Configuration
 
@@ -66,6 +66,9 @@ All settings load from the environment (`src/config.py`, `.env` in dev):
 | `MAX_CONTENT_CHARS` | `1200000` | Transport guard: truncates fetched content above this length. Deliberately set above documentation-system's own `MAX_CONTENT_CHARS` (1,000,000) so that clamp — not this one — is the one that actually trips and reports a truncation warning. |
 | `MAX_FILE_BYTES` | `26214400` | Pre-download limit for uploaded PDFs, `.docx` files, `text/*` media, and GitHub files (25 MiB). Oversized files are rejected before download; native Google editor types are not checked here. |
 | `REQUEST_TIMEOUT_S` | `30` | Per-request timeout to upstream sources (seconds). |
+| `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` | `""` | Optional Workspace user OAuth writer credentials (`drive.file`), separate from the read account. |
+| `GOOGLE_MEETING_ROOT_FOLDER_ID` | `""` | Admin-only root folder accessible to the writer OAuth app. |
+| `GOOGLE_MEETING_ADMIN_EMAILS` | `[]` | JSON array of explicitly trusted infra user/group emails, including inherited Drive admins. |
 
 ## Auth model
 

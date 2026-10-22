@@ -2,7 +2,7 @@
 
 Base URL (local): `http://localhost:8005` · Swagger UI: `/docs` · Schema: `/openapi.json`
 
-Three endpoints. Everything except `/health` requires `X-API-Key`.
+Everything except `/health` requires `X-API-Key`.
 
 | Method | Path | Scope | Description |
 |---|---|---|---|
@@ -208,3 +208,37 @@ See the [discovery runbook](../../documentation-system/docs/DISCOVERY.md) for
 supported topology, cadence, resumption, exclusions and staging acceptance.
 `/fetch` still reads a complete ACL before extraction; its ACL pagination is capped
 at 20 pages of 100 entries and fails if completeness cannot be established.
+
+## Meeting writer (`/google/docs`)
+
+All inputs forbid extra fields. The caller cannot choose a folder or an actor;
+configuration selects the root and the authenticated key attests the actor.
+
+| Method/path | Scope | Request / result |
+|---|---|---|
+| `POST /google/docs` | `meeting-write` | `{meeting_id: UUID, attempt_id: UUID, voice_channel_id, title, html}` → `{document_id, url}` |
+| `POST /google/docs/search` | `meeting-write` | `{meeting_id}` → tagged IDs, attempt IDs, creation times, trashed flags; all pages, including trash and moved files |
+| `PUT /google/docs/{id}/sharing` | `meeting-write` | `{commenters: [group emails]}` → complete read-back ACL |
+| `POST /google/docs/{id}/fetch` | `meeting-fetch` | Owner-read title, text and full ACL in the existing fetch response shape |
+| `GET /google/docs/{id}/status` | `meeting-fetch` | `{status: exists \| trashed \| inaccessible}` |
+| `DELETE /google/docs/{id}` | `meeting-write` | Revoke direct shares, permanently delete; `{status: deleted}` |
+
+Creation converts an in-memory HTML upload to a native Google Doc in one Drive
+request. It does not subsequently write the body. Both the root and voice-channel
+subfolder ACLs must contain only configured admin principals before upload.
+The Doc initially inherits only those admins. Only the canonical ID chosen by
+documentation-system may receive direct team group commenter shares. Read-back
+refuses unexpected access and revokes direct shares before reporting
+`unexpected_acl`; the catalog then removes that record.
+
+Writer failures return a content-free `detail: {code, uncertain}` object: 503
+for an unconfigured writer, 502 for ambiguous upstream outcomes, 409 for a
+definite failure (including denied Google writes or unsafe destinations).
+Authentication still uses 401/403; invalid requests use 422. A caller must never
+blindly retry a create after `uncertain: true`. Documentation-system owns the
+lease, canonical identity and recurring reconciliation.
+
+Drive 404 cannot prove deletion, even for the writer: status returns
+`inaccessible`, preserving catalog content for admin investigation. A trashed
+file is positively identified; cleanup permanently deletes it. An unconfirmed
+404 during deletion returns `delete_unconfirmed`, keeping cleanup pending.

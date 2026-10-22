@@ -113,3 +113,14 @@ folder's immediate children. Format classification uses the same `EXTRACTORS` an
 a member. The external catalog runner owns traversal, checkpoints and scheduling;
 connectors remains stateless. See [API](API.md#post-discovergoogle) and the
 [discovery runbook](../../documentation-system/docs/DISCOVERY.md).
+
+## Meeting writes
+
+`contracts/meeting.py` is the injected writer boundary; only
+`src/sources/meeting_google.py` imports Google OAuth/upload clients.
+`src/api/deps.py` wires it separately from read-only source fetching. Each call
+uses a fresh HTTP transport, with retries disabled for creation. Content is an
+in-memory HTML upload converted in the same Drive create operation; no empty Doc
+is published and retries never replace a human-edited body. See the
+[durable record design](../../../docs/MEETING-RECORDING.md#durable-records-design-212)
+and [writer API](API.md#meeting-writer-googledocs).

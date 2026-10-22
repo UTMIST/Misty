@@ -102,3 +102,30 @@ OAuth scope is introduced; Drive enumeration uses the existing `drive.readonly`.
 The catalog API keeps its own `fetch` key. See the
 [discovery runbook](../../documentation-system/docs/DISCOVERY.md#enable-inspect-and-disable)
 for deployment order, identity, supported topology and acceptance requirements.
+
+## Meeting writer setup
+
+Use the infrastructure **Workspace user**, with its own OAuth refresh token
+and `drive.file` grant. Set `GOOGLE_OAUTH_CLIENT_ID`,
+`GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN`,
+`GOOGLE_MEETING_ROOT_FOLDER_ID`, and JSON `GOOGLE_MEETING_ADMIN_EMAILS`.
+Credentials are `SecretStr`; never paste them into logs or issue comments.
+An entirely disabled writer leaves the read service available; writer requests
+fail with `writer_not_configured`. Partial writer configuration fails boot
+outside local, naming the missing fields.
+
+Create the root with this OAuth app, or explicitly grant that folder to this
+app through Drive Picker: user ownership alone does not grant a `drive.file`
+app access to an arbitrary pre-existing folder. Keep the root and its ancestors
+admin-only. Include the actual owning user and every inherited admin user/group
+in the explicit allowlist. In a Shared Drive, use an admin-only drive and a
+writer identity with Manager access for permanent deletion. A shared My Drive
+folder is not a Shared Drive.
+
+Mint a documentation-system consumer with `meeting-write,meeting-fetch` in
+addition to its existing `fetch` capability; retain `discover` for the separate
+read identity if already used. No writer scope is given to the Discord bot.
+See the [platform rollout](../../../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).
+Google's [upload/conversion guide](https://developers.google.com/workspace/drive/api/guides/manage-uploads)
+and [permission inheritance guide](https://developers.google.com/workspace/drive/api/guides/manage-sharing)
+explain the two boundaries enforced here.
