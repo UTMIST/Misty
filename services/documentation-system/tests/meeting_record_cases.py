@@ -110,6 +110,8 @@ class Writer:
     def delete(self, document_id):
         if self.delete_fails:
             raise WriterError("cleanup_failed")
+        if document_id not in self.docs:
+            raise WriterError("delete_unconfirmed")
         self.deleted.append(document_id)
         self.docs.pop(document_id, None)
 
@@ -179,6 +181,60 @@ class MeetingRecordCases:
         assert len(writer.created) == len(writer.shares) == 1
         restarted.advance(r.meeting_id)
         assert len(restarted.embedder.calls) == 1
+
+    def test_removal_resumes_after_canonical_delete_and_duplicate_failure(self, flow, monkeypatch):
+        records, writer, clock, original = flow
+        records.advance(original.meeting_id)
+        r = records.storage.get_meeting(original.meeting_id)
+        writer.docs["duplicate"] = TaggedDoc(
+            document_id="duplicate", attempt_id=uuid4(), created_at=NOW, trashed=False
+        )
+        delete = writer.delete
+
+        def fail_duplicate(file_id):
+            if file_id == "duplicate":
+                raise WriterError("cleanup_failed")
+            delete(file_id)
+
+        monkeypatch.setattr(writer, "delete", fail_duplicate)
+        removing = records.remove(r.meeting_id, actor="admin")
+        assert removing.persistence_status == "removing" and removing.google_deleted_at == NOW
+        assert r.google_document_id not in writer.docs
+        monkeypatch.setattr(writer, "delete", delete)
+        clock[0] += timedelta(hours=2)
+        records.retry_due(10)
+        removed = records.storage.get_meeting(r.meeting_id)
+        assert removed.persistence_status == "removed" and not writer.docs
+        assert writer.deleted.count(r.google_document_id) == 1
+        with pytest.raises(ValueError, match="deletion is immutable"):
+            records.storage.change_meeting(removed, {"google_deleted_at": None}, actor="late")
+
+    def test_removal_receipt_survives_final_database_write_failure(self, flow, monkeypatch):
+        records, writer, clock, original = flow
+        records.advance(original.meeting_id)
+        change = records.storage.change_meeting
+
+        def fail_final(record, values, **kwargs):
+            if values.get("persistence_status") == "removed":
+                raise RuntimeError("database temporarily unavailable")
+            return change(record, values, **kwargs)
+
+        monkeypatch.setattr(records.storage, "change_meeting", fail_final)
+        with pytest.raises(RuntimeError):
+            records.remove(original.meeting_id, actor="admin")
+        assert records.storage.get_meeting(original.meeting_id).google_deleted_at == NOW
+        monkeypatch.setattr(records.storage, "change_meeting", change)
+        clock[0] += timedelta(hours=2)
+        records.retry_due(10)
+        assert records.storage.get_meeting(original.meeting_id).persistence_status == "removed"
+        assert len(writer.deleted) == 1
+
+    def test_unknown_404_is_not_a_confirmed_deletion(self, flow):
+        records, writer, clock, original = flow
+        records.advance(original.meeting_id)
+        writer.docs.clear()  # Lost owner access is indistinguishable from deletion.
+        r = records.remove(original.meeting_id, actor="admin")
+        assert r.persistence_status == "removing" and r.google_deleted_at is None
 
     def test_success_survives_new_coordinator_and_replay(self, flow):
         records, writer, clock, original = flow

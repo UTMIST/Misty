@@ -77,6 +77,7 @@ class StorageAdapter(Protocol):
 
         Canonical ID is immutable. Removed records never reopen; stale results
         cannot clear a removal marker. Every mutation increments version.
+        A confirmed google_deleted_at timestamp is also immutable.
         With live_at, also require the same attempt, an unexpired lease and no
         removal marker in the atomic write predicate.
         """

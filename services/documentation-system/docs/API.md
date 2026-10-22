@@ -841,6 +841,10 @@ stored content immediately. Successful indexing clears the flag. A failure keeps
 the saved Doc and retries through `retry-due` after five minutes without another
 Google write; the hourly runner picks up due retries.
 
+`google_deleted_at` is a durable receipt for a confirmed canonical deletion,
+allowing removal to resume after later cleanup fails. An ambiguous 404 never
+sets that receipt.
+
 `last_error` contains a short code. Inspect failed records with
 `GET /meeting-records?persistence_status=failed`. `inaccessible` means an owner
 fetch cannot confirm deletion; retained snapshots/content/chunks and existing

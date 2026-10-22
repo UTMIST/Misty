@@ -321,7 +321,7 @@ class MeetingRecords:
                         and match.document_id != current.google_document_id
                     )
                 ):
-                    self.writer.delete(match.document_id)
+                    self._delete(meeting_id, match.document_id)
         except Exception:
             error = "reconcile_failed"
             logger.warning("meeting.reconcile_failed meeting_id=%s", meeting_id)
@@ -334,6 +334,21 @@ class MeetingRecords:
                     next_reconcile_at=self.now() + timedelta(hours=1),
                     last_error=error or current.last_error,
                 )
+
+    def _delete(self, meeting_id, document_id):
+        current = self.storage.get_meeting(meeting_id)
+        if current.google_document_id == document_id and current.google_deleted_at:
+            return
+        self.writer.delete(document_id)
+        # Only the canonical ID is added back to later cleanup searches. Persist
+        # its successful deletion separately from the final removal transition.
+        # Concurrent delivery/reconciliation updates must not lose this receipt.
+        while True:
+            current = self.storage.get_meeting(meeting_id)
+            if current.google_document_id != document_id or current.google_deleted_at:
+                return
+            if self._change(current, google_deleted_at=self.now()) is not None:
+                return
 
     def remove(self, meeting_id, *, actor):
         r = self.storage.get_meeting(meeting_id)
@@ -380,11 +395,14 @@ class MeetingRecords:
         try:
             matches = self.writer.search(meeting_id)
             ids = {m.document_id for m in matches}
-            if r.google_document_id:
+            if r.google_document_id and not r.google_deleted_at:
                 ids.add(r.google_document_id)
-            for file_id in ids:
-                self.writer.delete(file_id)
+            for file_id in sorted(
+                ids, key=lambda file_id: (file_id != r.google_document_id, file_id)
+            ):
+                self._delete(meeting_id, file_id)
         except Exception:
+            r = self.storage.get_meeting(meeting_id)
             self._change(
                 r,
                 last_error="unexpected_acl_removal_pending"
@@ -415,7 +433,7 @@ class MeetingRecords:
             "last_error": "unexpected_acl" if actor == "security:unexpected_acl" else None,
             "next_reconcile_at": self.now() + timedelta(hours=1),
         }
-        return self._change(r, **empty)
+        return self._change(self.storage.get_meeting(meeting_id), **empty)
 
     def retry_due(self, limit):
         now = self.now()

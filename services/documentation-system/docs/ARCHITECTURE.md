@@ -819,6 +819,10 @@ immediately runs the existing conditional indexer with an injected embedder.
 Failures retry through `retry-due` without rewriting, resharing or refetching the Doc.
 Removal invalidates attempts before erasing content. The canonical Google ID is
 never replaced, and the pending transcript clears only after adoption commits.
+Migration 014 adds the `google_deleted_at` receipt. Successful canonical deletion
+is recorded before later cleanup or the final `removed` transition, so retries
+skip a file already confirmed deleted. An
+unacknowledged Google 404 remains ambiguous; it never creates a deletion receipt.
 
 Meeting content is fetched with the writer OAuth identity in initial ingest,
 refetch and scheduled refresh. An ambiguous owner 404 follows the nondestructive

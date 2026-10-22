@@ -230,6 +230,7 @@ meeting_records = Table(
     Column("version", Integer, nullable=False),
     Column("doc_id", UUID(as_uuid=True), ForeignKey("docs.id"), nullable=True),
     Column("google_document_id", Text, nullable=True, unique=True),
+    Column("google_deleted_at", DateTime(timezone=True), nullable=True),
     Column("index_pending", Boolean, nullable=False, server_default=text("false")),
     Column("doc_url", Text, nullable=True),
     Column("guild_id", Text, nullable=True),

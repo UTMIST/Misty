@@ -80,6 +80,7 @@ class MeetingRecord(StrictModel):
     version: int = 0
     doc_id: UUID | None = None
     google_document_id: str | None = None
+    google_deleted_at: datetime | None = None
     index_pending: bool = False
     doc_url: str | None = None
     guild_id: str | None = None

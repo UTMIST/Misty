@@ -52,6 +52,16 @@ explicitly targets 011 when testing removal of its table. The fake writer suppor
 unique IDs so migration tests coexist with unrelated catalog rows. Agent guidance
 and API/architecture/deployment/design docs describe the schema and retry behavior.
 
+The removal fix adds migration
+[`014_meeting_deletion_receipt.py`](../services/documentation-system/migrations/versions/014_meeting_deletion_receipt.py)
+and its [round-trip test](../services/documentation-system/tests/test_migration_014.py)
+for confirmed canonical-deletion receipts. The schema, model and shared storage
+validation preserve these receipts; the coordinator and parity cases verify
+recovery after partial cleanup or a failed final write. The fake writer rejects
+unconfirmed deletion so retries exercise the production 404 contract. Agent and
+API/architecture/deployment/design docs describe the new schema head and recovery
+limits.
+
 | File | Why it changes |
 |---|---|
 | [Makefile](../Makefile) | Fix shell quoting so the Node version precheck runs instead of passing literal line continuations to JavaScript. |

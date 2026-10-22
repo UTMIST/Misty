@@ -9,6 +9,10 @@ from src.url_norm import normalize_url
 
 
 def changed(record, values, actor):
+    if record.google_deleted_at and (
+        values.get("google_deleted_at", record.google_deleted_at) != record.google_deleted_at
+    ):
+        raise ValueError("confirmed Google deletion is immutable")
     if (
         record.google_document_id
         and values.get("google_document_id", record.google_document_id) != record.google_document_id
