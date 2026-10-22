@@ -252,6 +252,7 @@ class MeetingSession:
         self._deps = deps
         self._on_finalize = on_finalize
         self._started_at = deps["now"]()
+        self._stop_task = None
         self._speakers: dict[str, _SpeakerBuffer] = {}
         # Guards all reads/mutations of self._speakers (dict shape) and of any
         # individual buffer's mutable state (display_name, anchors,
@@ -437,7 +438,15 @@ class MeetingSession:
                 timeout,
             )
 
-    async def stop(self, title: str | None = None) -> StopResponse:
+    async def stop(self, title: str | None = None, record=None) -> StopResponse:
+        if record and record.started_at > self._deps["now"]():
+            raise ValueError("record start time is in the future")
+        self._stop_requested = True
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(self._finalize(title, record))
+        return await asyncio.shield(self._stop_task)
+
+    async def _finalize(self, title, record) -> StopResponse:
         self._stop_requested = True
         # Wait for the tail BEFORE quiescing: the last frames may still be in
         # flight on the WS, and refusing them is exactly how the transcript lost
@@ -492,11 +501,29 @@ class MeetingSession:
             # minutes PDF only. Nothing mixes, persists, or ships audio -- the
             # buffered PCM exists solely as transcription input and dies with
             # the session.
-            return StopResponse(
+            response = StopResponse(
                 transcript=transcript_text,
                 minutes=minutes,
                 pdf_b64=pdf_b64,
             )
+            if record is not None:
+                from src.contracts import RecordResult
+
+                payload = record.model_dump(mode="json") | {
+                    "ended_at": self._deps["now"]().isoformat(),
+                    "title": (title or minutes.title or "Meeting")[:200],
+                    "summary": minutes.summary,
+                    "decisions": minutes.decisions,
+                    "action_items": minutes.action_items,
+                    "transcript": transcript_text,
+                }
+                handoff = self._deps.get("record_handoff")
+                if handoff is not None:
+                    response.record = await handoff.submit(self.session_id, payload)
+                else:
+                    response.record = RecordResult(status="handoff_pending")
+                    _logger.error("meeting.record_handoff_failed meeting_id=%s", self.session_id)
+            return response
         finally:
             self._cleanup()
 

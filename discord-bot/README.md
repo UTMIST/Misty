@@ -642,3 +642,15 @@ Discord role sync, `/unlink`, and any bot-side persistence. (Email verification 
 now implemented — `/link` + `/verify-code` via the verification service.)
 
 Team archive/unarchive, `/team info`, editing role/team-admin on existing memberships, team-admin delegation authority, dynamic role_kinds fetch for slash choices, LLM adapter.
+
+## Durable meeting records
+
+`/record start` saves the finalized transcript and minutes to one Google Doc by
+default, through meeting → documentation-system → connectors. A consent/visibility
+notice is posted before capture. `save:false` keeps the existing PDF-only flow.
+Explicit stop, automatic empty-channel stop and disconnect salvage all send the
+same record context. Failed hand-off still posts the PDF and a delayed-save
+notice; keep that PDF and contact an admin with the meeting ID for recovery.
+Google Docs remain admin-only when complete voice-channel team coverage is
+unavailable. Doc-link delivery is the separate #223 change.
+See [setup and recovery](../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).

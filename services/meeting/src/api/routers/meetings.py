@@ -89,6 +89,7 @@ import json
 import logging
 import re
 import secrets
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from platform_auth import ADMIN_SCOPE, parse_prefix, verify_key
@@ -272,6 +273,17 @@ async def stop_meeting(
     session = registry.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="unknown session")
+    if request and request.record:
+        try:
+            UUID(session_id)
+        except ValueError:
+            raise HTTPException(422, "recording requires a UUID meeting ID") from None
+        if request.record.guild_id != session.guild_id:
+            raise HTTPException(422, "record guild does not match session")
+        try:
+            return await session.stop(request.title, request.record)
+        except ValueError:
+            raise HTTPException(422, "invalid record context") from None
     return await session.stop(request.title if request else None)
 
 
