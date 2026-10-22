@@ -298,6 +298,19 @@ export function createDirectoryClient({ baseUrl, apiKey, fetchImpl = fetch }) {
       throw new DirectoryUnavailable(`directory returned ${resp.status}`);
     },
 
+    async appendChannelTeams(guildId, channelId, teamIds) {
+      const resp = await send(
+        `/channels/${encodeURIComponent(guildId)}/${encodeURIComponent(channelId)}/teams/append`,
+        { method: 'POST', body: JSON.stringify({ team_ids: teamIds }) },
+      );
+      if (resp.status === 200) return parseJson(resp);
+      if (resp.status === 400) {
+        const body = await resp.json().catch(() => ({}));
+        throw new ChannelTeamsInvalid(body.detail ?? 'invalid channel teams');
+      }
+      throw new DirectoryUnavailable(`directory returned ${resp.status}`);
+    },
+
     async clearChannelTeams(guildId, channelId) {
       const resp = await send(
         `/channels/${encodeURIComponent(guildId)}/${encodeURIComponent(channelId)}/teams`,

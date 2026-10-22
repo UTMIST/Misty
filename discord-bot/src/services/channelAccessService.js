@@ -20,16 +20,24 @@ export function createChannelAccessService({ directory } = {}) {
     return { outcome: 'OK', teams };
   }
 
+  async function labelsFor(config) {
+    const teams = [];
+    for (const id of config.team_ids ?? []) {
+      const team = await directory.getTeam(id);
+      if (team) teams.push(team);
+    }
+    return teams;
+  }
+
   async function show({ guildId, channelId }) {
     try {
       const config = await directory.getChannelTeams(guildId, channelId);
       if (!config) return { outcome: 'SHOWN', teams: [], version: null };
-      const teams = [];
-      for (const id of config.team_ids ?? []) {
-        const team = await directory.getTeam(id);
-        if (team) teams.push(team);
-      }
-      return { outcome: 'SHOWN', teams, version: config.version ?? null };
+      return {
+        outcome: 'SHOWN',
+        teams: await labelsFor(config),
+        version: config.version ?? null,
+      };
     } catch (e) {
       if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
       throw e;
@@ -56,6 +64,32 @@ export function createChannelAccessService({ directory } = {}) {
     }
   }
 
+  async function append({ guildId, channelId, slugs }) {
+    try {
+      const resolved = await resolveTeams(slugs);
+      if (resolved.outcome !== 'OK') return resolved;
+      if (resolved.teams.length === 0) return { outcome: 'NO_TEAMS' };
+      // Atomic union in the directory (same write lock as replace/clear). A
+      // bot-side GET-then-PUT would race a concurrent clear and resurrect teams.
+      const config = await directory.appendChannelTeams(
+        guildId,
+        channelId,
+        resolved.teams.map((t) => t.id),
+      );
+      return {
+        outcome: 'APPENDED',
+        teams: await labelsFor(config),
+        version: config.version ?? null,
+      };
+    } catch (e) {
+      if (e instanceof ChannelTeamsInvalid) {
+        return { outcome: 'INVALID_TEAMS', detail: e.detail };
+      }
+      if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
+      throw e;
+    }
+  }
+
   async function clear({ guildId, channelId }) {
     try {
       await directory.clearChannelTeams(guildId, channelId);
@@ -66,5 +100,5 @@ export function createChannelAccessService({ directory } = {}) {
     }
   }
 
-  return { show, set, clear };
+  return { show, set, append, clear };
 }

@@ -151,7 +151,7 @@ team-tracking/
 ├── tests/                  Two-mode test suite (see Testing below)
 │
 ├── docs/
-│   ├── API.md              Consumer-facing endpoint reference (all 32 endpoints)
+│   ├── API.md              Consumer-facing endpoint reference (all 33 endpoints)
 │   ├── ARCHITECTURE.md     Contributor orientation: boundaries, adapters, auth, data model
 │   ├── CONTRIBUTING.md     Task walkthroughs: add an endpoint, adapter method, migration, tests
 │   └── DEPLOYMENT.md       Ops reference: security posture, key management CLI, audit log
@@ -162,7 +162,7 @@ team-tracking/
 ```
 
 **Nine tables:** `people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `providers`, `person_identifiers`, `channel_team_access`, `team_google_groups`.
-**Eight routers, 32 endpoints.** **Ten migrations (001–010);** the latest, 010, persists unconfirmed Google membership writes.
+**Eight routers, 33 endpoints.** **Ten migrations (001–010);** the latest, 010, persists unconfirmed Google membership writes.
 
 **Dependency direction:** `contracts/` imports nothing from `src/`. The API layer imports only from `contracts/` and `src/config`. The storage layer imports `contracts/` for types and defines its own schema. Nothing imports from `src/storage/` except `src/api/deps.py` (the single wiring point). This is the **Protocol boundary** — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -206,6 +206,7 @@ Every endpoint requires an `X-API-Key`. The actor stamped into `created_by`/`upd
 | POST | `/memberships/{id}/end` | `memberships:write` | End a membership (set `ended_at`) |
 | GET | `/channels/{guild_id}/{channel_id}/teams` | `channels:read` | A channel's active teams (empty if unconfigured) |
 | PUT | `/channels/{guild_id}/{channel_id}/teams` | `channels:write` | Replace a channel's teams |
+| POST | `/channels/{guild_id}/{channel_id}/teams/append` | `channels:write` | Atomically union teams onto a channel |
 | DELETE | `/channels/{guild_id}/{channel_id}/teams` | `channels:write` | Clear a channel's teams |
 
 See [docs/API.md](docs/API.md) for full request/response shapes, query parameters, error codes, and curl examples.
@@ -254,7 +255,7 @@ See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for task walkthroughs.
 
 ## Where to find things
 
-- [docs/API.md](docs/API.md) — consumer-facing endpoint reference (all 32 endpoints, scopes, errors, curl)
+- [docs/API.md](docs/API.md) — consumer-facing endpoint reference (all 33 endpoints, scopes, errors, curl)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — contributor orientation: Protocol boundary, adapters, temporal memberships, Level-2 auth, data model
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — task walkthroughs for adding endpoints, adapter methods, migrations
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — ops reference: security posture, key management CLI, audit log
@@ -263,7 +264,7 @@ Machine-readable OpenAPI schema: `GET /openapi.json`. Interactive Swagger UI: `G
 
 ## Status
 
-Nine tables (`people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `providers`, `person_identifiers`, `channel_team_access`, `team_google_groups`), 32 endpoints across 8 routers, two storage adapters, migrations 001–010 (latest: 010, pending Google membership writes). Level-2 auth (DB-issued scoped argon2 keys + attested actor + audit log) is merged, as is the `person_identifiers`/providers identity-mapping feature.
+Nine tables (`people`, `teams`, `role_kinds`, `team_memberships`, `api_keys`, `providers`, `person_identifiers`, `channel_team_access`, `team_google_groups`), 33 endpoints across 8 routers, two storage adapters, migrations 001–010 (latest: 010, pending Google membership writes). Level-2 auth (DB-issued scoped argon2 keys + attested actor + audit log) is merged, as is the `person_identifiers`/providers identity-mapping feature.
 
 **Not implemented (by design):**
 

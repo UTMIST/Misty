@@ -25,6 +25,7 @@ export function issueDevSpoofKey({ teamTrackingDir, databaseUrl, name }) {
       '--scopes',
       'people:read',
       'people:write',
+      'people:elevate',
       'identifiers:read',
       'identifiers:write',
       'teams:read',

@@ -40,8 +40,8 @@ test('buildSnapshotCommands emits the drop, create, and pg_dump-piped-into-psql 
     '-c',
     'CREATE DATABASE team_tracking_playground;',
   ]);
-  // Dump-and-restore pipeline described as a single sh -c line
-  assert.equal(cmds[2][0], 'sh');
+  // Dump-and-restore pipeline described as a single bash -c line
+  assert.equal(cmds[2][0], 'bash');
   assert.equal(cmds[2][1], '-c');
   assert.ok(cmds[2][2].includes('pg_dump'));
   assert.ok(cmds[2][2].includes('team_tracking_playground'));
