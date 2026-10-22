@@ -1,9 +1,88 @@
 import { prepareHelperReply, resolveHelperCaller, WITHHELD_ANSWER } from '../../helperFlow.js';
 import { sendDiscordMessage } from './messages.js';
+import { presentHelperAction } from './helperActions.js';
+import { runRecordAction } from './recording.js';
+import { runQnaAction } from './qna.js';
+import recordCommand from '../../commands/record.js';
+import { ChannelType, PermissionFlagsBits } from 'discord.js';
+
+/** Bind Discord metadata outside model input. Meetings keep the exact source channel. */
+export function createHelperRequest(message, appContext, botId) {
+  const userId = message.author.id;
+  const guildId = message.guild?.id ?? message.guildId ?? null;
+  const sourceChannel = message.channel;
+  const parent = sourceChannel.isThread?.() ? sourceChannel.parentId : null;
+  const recording = guildId ? appContext.meetingSurface?.activeSession?.(guildId) : null;
+  async function sourceAccess() {
+    if (!guildId) return {};
+    const member = await message.guild.members.fetch({ user: userId, force: true });
+    const channel = await message.guild.channels.fetch(sourceChannel.id, { force: true });
+    if (channel?.isThread?.() && channel.parentId) {
+      await message.guild.channels.fetch(channel.parentId, { force: true });
+    }
+    const permissions = channel?.permissionsFor(member);
+    if (!permissions?.has(PermissionFlagsBits.ViewChannel))
+      throw new Error('Channel access changed.');
+    if (
+      channel.type === ChannelType.PrivateThread &&
+      !permissions.has(PermissionFlagsBits.ManageThreads)
+    ) {
+      const membership = await channel.members.fetch({ member: userId, force: true });
+      if (!membership) throw new Error('Thread access changed.');
+    }
+    return { member, channel };
+  }
+  return Object.freeze({
+    discordUserId: userId,
+    discordHandle: message.author.username,
+    discordGuildId: guildId,
+    discordChannelId: parent ?? sourceChannel.id,
+    sourceChannelId: sourceChannel.id,
+    channelUsedParent: Boolean(parent),
+    guildLabel: message.guild?.name,
+    recordingVoiceChannelId: recording?.voiceChannel?.id,
+    checkSurface: sourceAccess,
+    async runMeeting({ commandName, subcommand, options }) {
+      if (!guildId) return { content: 'Use this action in a server channel.' };
+      // Refresh the caller, never use voice state captured during model generation.
+      const { member, channel } = await sourceAccess();
+      if (
+        (commandName === 'qna' || subcommand === 'stop') &&
+        (!recording ||
+          appContext.meetingSurface?.activeSession?.(guildId)?.sessionId !== recording.sessionId)
+      ) {
+        return {
+          content:
+            'The recording ended or changed since your request. Ask again for the current meeting.',
+        };
+      }
+      if (commandName === 'qna') {
+        return runQnaAction(
+          { guildId, channelId: sourceChannel.id, question: options.question },
+          appContext,
+        );
+      }
+      return runRecordAction(
+        {
+          guildId,
+          requesterId: userId,
+          voiceChannel: member.voice?.channel,
+          textChannel: channel,
+          subcommand,
+          name: options.name ?? null,
+        },
+        appContext,
+        recordCommand,
+        botId,
+      );
+    },
+  });
+}
 
 // Recheck immediately before each send, including later parts of a long reply.
 // A check failure is terminal for this reply; no remaining source text is sent.
-export async function sendHelperReply(send, reply) {
+export async function sendHelperReply(send, reply, { message, appContext } = {}) {
+  if (reply.action) return presentHelperAction(message, send, reply.action, appContext);
   let withheld = false;
   await sendDiscordMessage(async (part) => {
     if (withheld) return;
@@ -181,10 +260,12 @@ export async function handleMention(message, { appContext, botId }) {
     if (message.channel.isThread()) {
       target = message.channel;
       const fetched = await target.messages.fetch({ limit: HISTORY_LIMIT });
-      const ordered = [...fetched.values()].sort(
-        (a, b) => (a.createdTimestamp ?? 0) - (b.createdTimestamp ?? 0),
-      );
+      const ordered = [...fetched.values()]
+        .filter((candidate) => messageIsAtOrBefore(candidate, message))
+        .sort((a, b) => (a.createdTimestamp ?? 0) - (b.createdTimestamp ?? 0));
       await prependStarterMessage(target, ordered);
+      if (!ordered.some((candidate) => candidate.id && candidate.id === message.id) && message.id)
+        ordered.push(message);
       turns = threadHistoryToTurns(ordered, botId);
     } else {
       target = await message.startThread({ name: question.slice(0, 100) });
@@ -210,12 +291,18 @@ export async function handleMention(message, { appContext, botId }) {
   // answer is scoped to that channel's configured team union (resolved by the
   // doc service); the asking person's own privileges never widen it.
   const channelId = message.channel.isThread() ? message.channel.parentId : message.channel.id;
-  const reply = await prepareHelperReply(appContext, turns, caller.principal, {
-    kind: 'channel',
-    guildId: message.guild?.id ?? message.guildId ?? null,
-    channelId: channelId ?? null,
-  });
-  await sendHelperReply((part) => target.send(part), reply).catch(() =>
+  const reply = await prepareHelperReply(
+    appContext,
+    turns,
+    caller.principal,
+    {
+      kind: 'channel',
+      guildId: message.guild?.id ?? message.guildId ?? null,
+      channelId: channelId ?? null,
+    },
+    createHelperRequest(message, appContext, botId),
+  );
+  await sendHelperReply((part) => target.send(part), reply, { message, appContext }).catch(() =>
     console.error('Could not deliver helper reply'),
   );
 }
@@ -258,8 +345,14 @@ export async function handleDirectMessage(message, { appContext, botId }) {
   await message.channel.sendTyping().catch(() => {});
   // DM: a tool-enabled answer is scoped to the asking person — their own
   // authorized documents, including anything privately shared with them.
-  const reply = await prepareHelperReply(appContext, turns, caller.principal, { kind: 'person' });
-  await sendHelperReply((part) => message.channel.send(part), reply).catch(() =>
-    console.error('Could not deliver helper DM reply'),
+  const reply = await prepareHelperReply(
+    appContext,
+    turns,
+    caller.principal,
+    { kind: 'person' },
+    createHelperRequest(message, appContext, botId),
+  );
+  await sendHelperReply((part) => message.channel.send(part), reply, { message, appContext }).catch(
+    () => console.error('Could not deliver helper DM reply'),
   );
 }

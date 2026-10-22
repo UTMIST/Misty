@@ -157,18 +157,30 @@ CI runs `node-test` (`npm ci` + `npm test`) plus a Docker build with a boot smok
 
 When `HELPER_TOOLS_ENABLED=true`, a helper answer runs through a client-executed
 tool loop (`src/toolExecutor.js`) instead of a single `/chat` call. The model can
-call document tools (`src/helperTools.js`) to search and read docs before it
-answers. The rules the loop enforces:
+call document tools (`src/helperTools.js`) or prepare a command action
+(`src/commandTools.js`). Command actions end the model turn and deliver the
+existing command's output privately. The rules the loop enforces:
 
 - **Only `llmSafe` tools are reachable.** `src/toolRegistry.js` includes a
   provider's tools only when it exports `llmSafe === true` (a literal `true`, not
-  just truthy). `linkService`/`emailService` can never become model tools.
+  just truthy). Command tools also have an explicit operation allowlist; adding
+  a slash command never exposes it automatically. `linkService`/`emailService`
+  can never become model tools.
+- **Authenticate the requester for every tool.** The production executor checks
+  the Discord author's current active directory identity before each model
+  call, tool call, and publication. Command actions additionally call the shared
+  router's `authorizeCommand` before preparing and executing the action, using
+  the command's existing policy. They require a linked account even for commands
+  whose slash version is public. A relink, deactivation, permission loss, lookup
+  failure, or disabled tool flag fails closed. The model cannot supply an actor.
+  Service HTTP credentials and attested backend audit actors remain unchanged.
 - **Scope comes from the surface, never the model.** `helperFlow.js` derives the
   retrieval context from where the answer is going — a DM scopes to the asking
   person (`X-On-Behalf-Of`), a shared channel scopes to that channel's configured
   teams (`X-Guild-ID` + `X-Channel-ID`, resolved server-side). The executor binds
   that context once and passes it to every tool call; any scope-shaped field the
-  model puts in a tool's `input` is ignored.
+  model puts in a document tool's `input` is ignored. Command tools instead reject
+  unknown arguments, including attempted identity or destination overrides.
   The [channel scope and activation rules](../README.md#channel-scope-and-activation)
   define parent-channel selection, lossless snowflake strings, and rollout ownership.
 - **Fail closed.** `docClient.searchDocs` throws before sending a request if the
@@ -192,7 +204,9 @@ answers. The rules the loop enforces:
   source provenance, including after a restart or disabling the flag. The flow
   removes them on both tool and text-only paths. Follow-ups re-retrieve using the
   previous user questions; an ambiguous reference may need a title or link.
-  No document results or generated answers are cached for model replay.
+  History stops at the triggering message, so a later message cannot replace
+  the authenticated requester's question. No document results or generated
+  answers are cached for model replay.
 - **Bounded retrieval work.** At most four tool calls total across four rounds.
   An oversized batch is rejected before executing any of it, and unknown or
   failed calls still spend capacity. All document reads must pass through the
@@ -212,7 +226,28 @@ answers. The rules the loop enforces:
 - **Only completed answers are published.** `end_turn` is required for final
   text. `max_tokens` exhausts the turn; `incomplete`, `content_filtered`, and
   missing/unknown stop reasons produce no answer. Partial responses are never
-  replayed, retried automatically, or used to execute tool calls.
+  replayed, retried automatically, or used to execute tool calls. A valid
+  `tool_use` response may instead return a terminal `ACTION`: the bot handles
+  it directly without another model call or any later actions in that batch.
+- **Writes require private confirmation.** A prepared command has not executed.
+  The Discord adapter sends the full argument/destination preview before its
+  buttons; failed preview delivery cannot expose a working confirmation UI.
+  Every write requires the same Discord author to confirm. Reads deliver the
+  existing command renderer's output privately. Neither result enters model
+  history. Closed DMs use an ephemeral interaction, never a public result.
+  `src/helperActions.js` holds bounded, expiring actions in memory and consumes
+  them synchronously before awaited execution. Duplicate clicks and failed
+  writes are never retried automatically. Restart invalidates all pending
+  actions; see [user-facing limits](../README.md#commands-through-mentions-and-dms).
+- **Recheck pending actions.** The action retains the original person's ID and
+  trusted Discord context. Fresh directory authorization and Discord member,
+  channel, and private-thread membership checks run before execution and each
+  private message part. Earlier document evidence still passes through the
+  executor's revalidation/deadline gate. A proposal can therefore expire before
+  its two-minute storage TTL. Start recording resolves current voice state at
+  confirmation; stop and Q&A bind the original active session. Meeting Q&A uses
+  the exact recording text channel, while channel settings use a thread's parent.
+  Existing slash-command authentication behavior remains unchanged.
 - **Sources are rendered by the bot.** Available HTTP(S) links are appended and
   deduplicated independently of whether the model includes citations.
 - **Opaque replay within a turn.** Assistant `content_blocks` are replayed
@@ -220,9 +255,10 @@ answers. The rules the loop enforces:
 - **Retrieved content is untrusted.** Snippets and document bodies come back as
   tool results, so an authorized document can carry instructions the model may
   follow (prompt injection). Scope binding contains it: injected text cannot
-  widen the context or reach a document outside it, so the worst case is a
-  steered answer within the asker's own scope, never disclosure of anything they
-  could not already see. There is no content-level sanitization; `get_document`
+  widen the retrieval context or command permissions. It can still steer an
+  answer, trigger an authorized private read, or propose an unwanted write.
+  The requester must review and confirm the concrete write arguments; model
+  text is never itself confirmation. There is no content-level sanitization; `get_document`
   bodies are length-capped (`MAX_DOC_CONTENT_LEN`) only to keep a large doc under
   the service's tool-payload limit, not to neutralize their content.
 
@@ -236,6 +272,34 @@ checks cannot retract a message part that was already delivered.
 This builds on the shared `POST /search` contract (#176) and the member-search
 client shape from #210/#289; channel configuration (#239) and the DM/channel
 integration that flips the flag on (#278) land separately.
+
+### Command-tool implementation audit
+
+All implementation changes stay in the bot zone and reuse existing service
+clients, handlers, and policies. No backend schema, scope, or endpoint changes
+are required. The affected files have these responsibilities:
+
+| Files | Why changed |
+| --- | --- |
+| `src/commandTools.js` | Define the deliberate tool allowlist, validate arguments, bind requester/context, and prepare authorized private actions. |
+| `src/router.js` | Share the existing policy enforcement point between action preparation and ordinary dispatch. |
+| `src/context.js` | Wire command tools, pending actions, and fresh requester authentication into the production executor. |
+| `src/toolExecutor.js`, `src/helperFlow.js` | Carry trusted request metadata, recheck identity, and return terminal actions without replaying command output to the model. |
+| `src/helperActions.js` | Enforce bounded, expiring, requester-bound, single-use pending actions. |
+| `src/adapters/discord/helperActions.js` | Deliver private previews/results, handle confirmation/cancellation, and fail closed on delivery errors. |
+| `src/adapters/discord/index.js`, `src/adapters/discord/interactions.js` | Route action buttons and preserve private visibility and access checks across split replies. |
+| `src/adapters/discord/mentions.js` | Bind real Discord context, recheck source access, bound history at the request, and hand actions to private delivery. |
+| `src/adapters/discord/recording.js`, `src/adapters/discord/qna.js` | Share existing meeting behavior with helper actions while preserving slash behavior. |
+| `test/commandTools.test.js` | Exercise the real registry/router against fake services, including privilege changes and hostile arguments. |
+| `test/helperActions.test.js` | Cover private delivery, confirmation ownership, concurrent clicks, expiry, source access, meeting identity, and mention-to-command integration. |
+| `test/toolExecutor.test.js`, `test/helperFlow.test.js`, `test/helper-retrieval.test.js` | Verify terminal handoff, requester binding/revocation, and existing retrieval under production authentication wiring. |
+| `README.md`, `.env.example`, `src/config.js`, `docs/CONTRIBUTING.md` | Describe the expanded existing flag, user flow, authorization contract, and implementation rationale. |
+
+Offline tests use fake directory, document, model, meeting, and Discord services.
+Staging acceptance must still exercise real mentions/DMs, closed DMs, a member
+denied an admin tool, a revoked pending action, and recording start/stop before
+activation. The flag remains off by default; this code does not alter a deployed
+environment's setting.
 
 ## Checklist before you push
 

@@ -33,6 +33,43 @@ const base = {
   context: { onBehalfOf: 'p' },
 };
 
+test('a command action ends the turn without sending its private result back to the model', async () => {
+  const action = { userId: 'u1', execute: async () => ({ content: 'private email' }) };
+  const llm = scriptedLlm([
+    { stop_reason: 'tool_use', content_blocks: [toolUse('t', 'whoami', {})] },
+  ]);
+  const exec = createToolExecutor({
+    llmClient: llm,
+    registry: registryWith(async () => ({ action }), 'whoami'),
+  });
+  const result = await exec.run(base);
+  assert.equal(result.outcome, 'action');
+  assert.equal(result.action, action);
+  assert.equal(llm.calls.length, 1);
+});
+
+test('fresh caller authorization runs before each tool and prevents execution after revocation', async () => {
+  let allowed = true;
+  let executed = 0;
+  const llm = {
+    async chat() {
+      allowed = false;
+      return { stop_reason: 'tool_use', content_blocks: [toolUse('t', 'whoami', {})] };
+    },
+  };
+  const exec = createToolExecutor({
+    llmClient: llm,
+    authenticate: async (request) => request.discordUserId === 'actual' && allowed,
+    registry: registryWith(async () => {
+      executed++;
+      return {};
+    }, 'whoami'),
+  });
+  const result = await exec.run({ ...base, request: { discordUserId: 'actual' } });
+  assert.equal(result.outcome, OUTCOME.WITHHELD);
+  assert.equal(executed, 0);
+});
+
 test('returns the final answer when the model stops without tools', async () => {
   const llm = scriptedLlm([{ content: 'the answer', stop_reason: 'end_turn' }]);
   const exec = createToolExecutor({ llmClient: llm, registry: registryWith(async () => ({})) });

@@ -30,6 +30,7 @@ export const DEFAULT_MAX_DURATION_MS = 120000;
 
 // Outcomes the caller renders into a surface-appropriate reply.
 export const OUTCOME = {
+  ACTION: 'action', // terminal private result or confirmation, never model replay
   ANSWER: 'answer', // content is the final text; citations may accompany it
   EMPTY: 'empty', // the model produced no usable text
   WITHHELD: 'withheld', // access/evidence could not be revalidated; nothing published
@@ -43,6 +44,7 @@ function toolUseBlocks(blocks) {
 export function createToolExecutor({
   llmClient,
   registry,
+  authenticate,
   maxToolRounds = DEFAULT_MAX_TOOL_ROUNDS,
   maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS,
   perCallMaxTokens = DEFAULT_PER_CALL_MAX_TOKENS,
@@ -77,7 +79,7 @@ export function createToolExecutor({
      * @param scopeCheck  optional async () => boolean; false/throw means access
      *                    narrowed. Document evidence is always checked separately.
      */
-    async run({ messages, system, context, principal, scopeCheck }) {
+    async run({ messages, system, context, principal, scopeCheck, request }) {
       const history = [...messages];
       const citations = [];
       const seen = new Set();
@@ -122,7 +124,9 @@ export function createToolExecutor({
         documentRequests += 1;
         return withDeadline(read);
       };
-      const checks = scopeCheck ? [scopeCheck] : [];
+      const checkCaller = async () =>
+        !authenticate || (await authenticate(request, principal)) === true;
+      const checks = [checkCaller, ...(scopeCheck ? [scopeCheck] : [])];
       let withheld = false;
       const failedCheck = () => ({
         outcome: isExhausted() ? OUTCOME.EXHAUSTED : OUTCOME.WITHHELD,
@@ -228,7 +232,28 @@ export function createToolExecutor({
             continue;
           }
           try {
-            const out = await handler(call.input, { context, principal, readDocument });
+            if (!(await withDeadline(checkCaller))) return { outcome: OUTCOME.WITHHELD };
+            const out = await handler(call.input, {
+              context,
+              principal,
+              readDocument,
+              request,
+              withDeadline,
+            });
+            if (out?.action) {
+              if (!(await canPublish())) return failedCheck();
+              // Stop before another model call or another action. No command
+              // has executed yet. Keep any retrieved evidence authorized while
+              // a user reviews the proposal, too.
+              const check = out.action.check;
+              if (check)
+                out.action.check = async () => {
+                  if (!(await canPublish()))
+                    throw new Error('This request expired or access changed. Ask again.');
+                  return check();
+                };
+              return { outcome: OUTCOME.ACTION, action: out.action, canPublish };
+            }
             if (typeof out?.revalidate === 'function') checks.push(out.revalidate);
             collect(out?.citations);
             results.push({

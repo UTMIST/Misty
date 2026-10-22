@@ -24,14 +24,12 @@ function backendMessage(status) {
 }
 
 /** Dedicated meeting adapter: channel context, no directory/user scoping. */
-export async function handleQnaInteraction(interaction, appContext) {
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  const reply = (content) =>
-    safeReply(interaction, { content, ephemeral: true, allowedMentions: { parse: [] } });
-  if (!interaction.guildId) {
+export async function runQnaAction(request, appContext) {
+  const reply = (content) => ({ content, ephemeral: true, allowedMentions: { parse: [] } });
+  if (!request.guildId) {
     return reply('Use /qna in the server text channel where the meeting’s recording was started.');
   }
-  const question = interaction.options.getString('question');
+  const question = request.question;
   if (typeof question !== 'string' || !question.trim() || [...question].length > 1000) {
     return reply(INVALID_QUESTION);
   }
@@ -40,8 +38,8 @@ export async function handleQnaInteraction(interaction, appContext) {
   }
   try {
     const result = await appContext.meetingSurface.qna({
-      guildId: interaction.guildId,
-      channelId: interaction.channelId,
+      guildId: request.guildId,
+      channelId: request.channelId,
       question: question.trim(),
     });
     if (result.status === 'unconfigured') return reply('Meeting Q&A isn’t configured on this bot.');
@@ -59,9 +57,24 @@ export async function handleQnaInteraction(interaction, appContext) {
     }
     if (result.status !== 'answered') return reply(backendMessage(503));
     const { content, allowedMentions } = renderQnaAnswer(result.response, result.meetingName);
-    return await safeReply(interaction, { content, allowedMentions, ephemeral: true });
+    return { content, allowedMentions, ephemeral: true };
   } catch (error) {
     // Never log provider errors, questions, or generated/document content.
     return reply(backendMessage(error instanceof MeetingQnaError ? error.status : 503));
   }
+}
+
+export async function handleQnaInteraction(interaction, appContext) {
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  return safeReply(
+    interaction,
+    await runQnaAction(
+      {
+        guildId: interaction.guildId,
+        channelId: interaction.channelId,
+        question: interaction.options.getString('question'),
+      },
+      appContext,
+    ),
+  );
 }

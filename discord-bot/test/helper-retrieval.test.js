@@ -262,6 +262,8 @@ test('production context wiring enforces the guard through the HTTP clients', as
     }
     if (url.startsWith('http://directory/teams') || url.startsWith('http://directory/memberships'))
       return Response.json([]);
+    if (url === 'http://directory/people/by-identifier/discord/requester')
+      return Response.json(principal.person);
     assert.fail(`unexpected offline HTTP call: ${url}`);
   });
   const ctx = createAppContext({
@@ -275,7 +277,9 @@ test('production context wiring enforces the guard through the HTTP clients', as
     verificationApiKey: 'test',
     helperToolsEnabled: true,
   });
-  const result = await answerHelperTurns(ctx, [user('Read')], principal, channel);
+  const result = await answerHelperTurns(ctx, [user('Read')], principal, channel, {
+    discordUserId: 'requester',
+  });
   assert.equal(result, WITHHELD_ANSWER);
   assert.equal(calls, 2);
   assert.equal(searches, 3);

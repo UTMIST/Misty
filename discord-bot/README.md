@@ -400,7 +400,7 @@ parallel to team-tracking's scoped-key auth.
 
 | Configuration | Default | Meaning |
 | --- | --- | --- |
-| `HELPER_TOOLS_ENABLED` | `false` | Literal `true` enables authorized document search and DM document reads for Discord helper answers |
+| `HELPER_TOOLS_ENABLED` | `false` | Literal `true` enables authorized document retrieval and command tools for Discord mentions and DMs |
 
 Enable only after retrieval and the destination's channel configuration are
 ready. `DOC_API_KEY` needs `docs:read`, literal `act-as-user` for DMs, and literal
@@ -412,6 +412,50 @@ even after the flag is disabled. The web playground remains text-only.
 
 See the [helper tool contract](docs/CONTRIBUTING.md#the-authorized-helper-tool-loop-71)
 for replay, cost limits, revalidation tradeoffs, and offline coverage.
+
+### Commands through mentions and DMs
+
+With helper tools enabled, ask for one action at a time: `@Misty show my teams`,
+`@Misty show the robotics roster`, or `@Misty start recording`. The same tools
+work in DMs where the underlying command does not need a server or channel.
+
+| Capability | Available actions |
+| --- | --- |
+| Directory and help | List teams, view a roster, my teams, who am I, help, bug-report link |
+| Documents | List, add, remove; search and read use the retrieval rules below |
+| Team administration | Create, rename, add/remove members, seed a person |
+| Google Groups | View sync status, request a sync |
+| Channel access | Show, set, append, clear the current channel's team access |
+| Helper limits | Show or change request limits |
+| Meetings | Recording status, start, stop, and questions about the current recording |
+
+Every tool requires the requesting Discord user's active linked directory
+account. Each command uses its existing permission policy, checked again before
+execution; admin tools still require an admin. User, server, channel, and meeting
+context come from Discord, never from model arguments. Backend calls continue to
+use the bot's scoped service credentials; this does not mint personal API keys.
+Account linking and email verification remain explicit slash-command flows.
+
+Command results go directly to the requester privately and do not enter model
+history. Misty sends a DM, or offers a **View privately** button if DMs are closed.
+Every write, including recording start/stop, first shows its arguments and
+destination in a private preview with **Confirm** and **Cancel**. Only the
+requester can confirm. Pending actions expire within two minutes, are single-use,
+and disappear on restart. There can be at most eight pending actions per user
+and 500 per process. A failed write is never retried automatically; inspect the
+current state before asking again if the result could not be delivered.
+
+Channel-access commands in a thread target its parent. Meeting questions use
+the exact channel or thread where recording was started. Recording starts in
+the requester's voice channel at confirmation time and posts minutes to the
+original request channel. A stop confirmation applies only to the recording
+that was active when requested. Source-channel access is checked again before
+execution and private delivery.
+
+The first prepared command action ends the helper turn; ask separately for
+additional actions. Existing slash commands remain available. Enabling this
+feature uses the same flag and rollout acceptance below; no new environment
+variables, backend endpoints, or slash registrations are required.
 
 ### Channel scope and activation
 
@@ -635,14 +679,18 @@ local `.env`.
 | `src/commands/*.js` | Surface-neutral command handlers + registry. |
 | `src/index.js` | Client setup + interaction routing. |
 | `src/helperFlow.js` | Shared helper-bot authorization and answer handling used by Discord and the web playground. |
+| `src/toolExecutor.js` | Bounded document tool loop, requester revalidation, and terminal command-action handoff. |
+| `src/commandTools.js` | Explicit command-tool allowlist, strict arguments, current-user authorization, and private action previews. |
+| `src/helperActions.js` | Bounded, expiring, single-use actions bound to their requester. |
 | `src/registerCommands.js` | Slash-command registration (global by default; testing-guild only when `beta = true`). Runs as Railway's persistent-environment `preDeployCommand`; ephemeral PR copies use the [preview override](../docs/pr-previews.md#automatic-railway-pr-environments). `npm run register` runs it locally. |
 | `src/defineCommand.js` | Neutral, surface-agnostic command factory. |
 | `src/adapters/discord/index.js` | Discord event wiring; dispatches to the router or dedicated recording handler. |
 | `src/adapters/discord/interactions.js` | Convert interactions to neutral intents and deliver replies. |
 | `src/adapters/discord/messages.js` | Shared Discord text splitting, embed limits, and channel/DM delivery. |
 | `src/adapters/discord/mentions.js` | Mention and reply helper with thread history. |
-| `src/adapters/discord/recording.js` | Dedicated `/record` interaction path and its authorization. |
-| `src/adapters/discord/qna.js` | Private in-progress `/qna` interaction path, with recording-channel context and no directory lookup. |
+| `src/adapters/discord/helperActions.js` | Private command delivery and requester-only confirmation buttons. |
+| `src/adapters/discord/recording.js` | Shared recording runner for slash commands and authenticated helper actions. |
+| `src/adapters/discord/qna.js` | Shared in-progress meeting Q&A runner; the helper adds requester authentication before invoking it. |
 | `src/adapters/discord/voice.js` | Voice occupancy, meeting prompts, and recording auto-stop. |
 | `src/adapters/discord/meetingPosts.js` | Meeting notifications and minutes attachments. |
 | `scripts/dev-web.js` | Orchestrator: ephemeral scratch DB + scratch team-tracking + web server. |

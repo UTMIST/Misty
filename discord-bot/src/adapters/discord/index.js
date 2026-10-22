@@ -16,6 +16,7 @@ import {
 } from './mentions.js';
 import { handleRecordInteraction } from './recording.js';
 import { handleQnaInteraction } from './qna.js';
+import { handleHelperActionInteraction } from './helperActions.js';
 import { createAutoStop, createMeetingPrompt } from './voice.js';
 
 // Discord event wiring. Conversion, mentions, recording, and voice events live
@@ -33,6 +34,14 @@ export function wireDiscordClient(client, { commands, appContext }) {
   }
 
   client.on('interactionCreate', async (interaction) => {
+    if (interaction.isButton?.() && interaction.customId?.startsWith('helper:')) {
+      try {
+        await handleHelperActionInteraction(interaction, appContext);
+      } catch {
+        console.error('Could not deliver private helper action');
+      }
+      return;
+    }
     // Autocomplete interactions are a separate path: they CANNOT be deferred and
     // must respond within 3s. Best-effort — dispatchAutocomplete never throws.
     if (interaction.isAutocomplete()) {
