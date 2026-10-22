@@ -95,35 +95,70 @@ every step and maps 1:1 to:
 Titles and folder names are presentation only. The Doc's real URL goes through
 the normal catalog ingest; the UUID is never presented as a fetchable URL.
 
-**No duplicate Docs: creation is coordinated through the meeting record.**
+**One canonical Doc; late duplicates are reconciled.**
 A Drive search followed by a create is not atomic — two overlapping attempts
 can both find nothing, and a timed-out create can still be in flight when a
-retry searches. So documentation-system serializes creation itself:
+retry searches. A lease coordinates local workers; its expiry does not cancel
+Google's request or prove that it finished. documentation-system owns the
+canonical ID and cleanup of any extra files:
 
 1. **One attempt at a time.** Before calling Google, documentation-system
    claims the record in one conditional update: `persistence_status` moves to
    `creating`, with a fresh `create_attempt_id` and `create_lease_until`
-   (now + `MEETING_DOC_CREATE_LEASE_S`, default 10 min). The update only
-   succeeds if no unexpired lease exists, so a concurrent `PUT`, inline
-   attempt, or `retry-due` run skips the record instead of creating.
+   (now + `MEETING_DOC_CREATE_LEASE_S`, default 10 min). The update
+   succeeds only while the record has no canonical Doc, no removal marker,
+   and no unexpired lease. `failed` records require explicit admin retry;
+   a concurrent `PUT`, inline attempt, or `retry-due` run skips the record.
 2. **Every create is tagged.** The Doc is created with
    `appProperties: {misty_meeting_id, misty_attempt_id}`.
-3. **Known outcome.** On success the Google document ID is stored immediately
-   and the record moves to `doc_created`. A definite failure (Google 4xx)
-   releases the lease for a later retry.
+3. **Accept only a current result.** Success stores the Google document ID and
+   moves to `doc_created` in one conditional update: the attempt ID must still
+   match, the lease must be unexpired, the status must still be `creating` or
+   `create_uncertain`, `google_document_id` must be null, and removal must not
+   have started. Updates reporting a create failure use the same guard, so a
+   late failure cannot undo a newer success. A rejected completion leaves the
+   Doc unshared for reconciliation; that worker must not adopt it,
+   share it, catalog it, or clear the pending payload. A definite failure
+   (Google 4xx) releases the current lease for a later retry.
 4. **Uncertain outcome.** On a timeout, connection reset, or 5xx, the record
    moves to `create_uncertain` and **no new create is allowed** until it is
    reconciled.
-5. **Reconcile before creating again.** Once the lease has expired (so any
-   in-flight request has finished or failed), the next attempt searches the
-   meeting's folder for `misty_meeting_id` using the writer identity. One match
-   → adopt it. Several matches → keep the oldest and permanently delete the
-   others. None → a new create is allowed, under a new lease.
+5. **Reconcile before creating again.** After lease expiry, the next worker
+   claims a new lease and searches with the writer identity for every file
+   tagged `misty_meeting_id`, including trashed files and all result pages.
+   Search by tag across the writer's accessible files, not just the original
+   folder. If no canonical ID exists, adopt the oldest non-trashed match using
+   the guarded update above; trashed-only matches require admin investigation.
+   An empty search permits a new create under the current lease, but does
+   **not** settle the earlier request's outcome.
+6. **Never replace the canonical ID.** Once stored, `google_document_id` is
+   immutable, including when an older or trashed duplicate appears later.
+   Only the stored canonical Doc may be shared or cataloged; re-read the
+   record and check that removal has not started before either operation.
+   Losing workers leave cleanup to reconciliation, which reads the committed
+   canonical ID before permanently deleting every other matching file.
+   Concurrent reconciliation cannot elect a second canonical ID.
 
-Docs are created **unshared** and only shared after their ID is recorded (see
-"Google setup"), so a duplicate that slips through is never visible to anyone
-before reconciliation deletes it. Catalog ingest uses the single adopted
-Google document ID, so the catalog never holds two entries for one meeting.
+**Reconciliation continues after saving.** `retry-due` also scans records with
+a due `next_reconcile_at`, including `saved`, `failed`, `inaccessible`,
+`removing`, and `removed` records. Schedule the first scan when issuing a
+create, and keep rescheduling it hourly after an empty search or successful
+cleanup. A saved record keeps its canonical ID and deletes only duplicates;
+a failed record with no canonical ID deletes late files without adopting
+them. A removal marker requires deleting **all** matching files. Reconciliation
+never creates a Doc or resets a terminal state on its own. A scan claims only
+the attempt ID and lease, preserving the status, canonical ID, and removal
+marker. Process due records oldest-first in bounded batches and persist their
+next scan time so every record gets another turn. Cleanup failures are surfaced
+to admins and retried independently of the creation attempt limit. Retain
+content-free removal tombstones for these scans; neither lease expiry nor an
+empty scan is grounds to stop checking for late files.
+
+Docs are created **unshared**. An uncertain create can leave a temporary extra
+copy visible only to the writer/Drive admins; it is never shared with members
+or cataloged. Reconciliation deletes it once it becomes visible to the writer.
+The guarantee is one stable shared/cataloged Doc and eventual duplicate
+cleanup, not exactly-once Google file creation after an ambiguous response.
 
 **No overwriting human edits.** The Doc is created *with* its content in one
 Drive `files.create` call (HTML upload converted to a Google Doc), so there is
@@ -179,7 +214,10 @@ reconciled as above before anything else happens. After
 `MEETING_RECORD_MAX_ATTEMPTS` (default 8) the record becomes `failed`, which is
 surfaced to admins via the audit log and `GET /meeting-records?status=failed`.
 Every step after `doc_created` is idempotent against the stored document ID,
-so it can be retried after a crash.
+so it can be retried after a crash. Removal sets `removing` and `removed_at`
+before external cleanup, then `removed` once known Google files and catalog
+copies are purged. Neither state permits creation, adoption, sharing, or
+cataloging. Reconciliation of late files continues in either state.
 
 **Remaining crash-loss window (accepted):** a `meeting` process crash during a
 live meeting (existing limitation — sessions are in memory), or between
@@ -197,10 +235,10 @@ content, participant names, or credentials.
 | documentation-system | `GET /meeting-records/{meeting_id}` — status, Doc URL, delivery state (no transcript) | `meetings:read` | bot |
 | documentation-system | `GET /meeting-records?delivery_status=pending&persistence_status=saved` — records whose link still needs posting | `meetings:read` | bot (#223) |
 | documentation-system | `PATCH /meeting-records/{meeting_id}/delivery` — `{status, discord_message_id}` | `meetings:write` | bot (#223) |
-| documentation-system | `POST /meeting-records/retry-due?limit=N` | `meetings:write` | Railway cron |
+| documentation-system | `POST /meeting-records/retry-due?limit=N` — persistence retries, due reconciliation (including terminal records), and expiry | `meetings:write` | Railway cron |
 | documentation-system | `POST /meeting-records/{meeting_id}/remove` — removal cascade (below) | `meetings:admin` | admin / cron expiry |
 | connectors | `POST /google/docs` — `{meeting_id, attempt_id, voice_channel_id, title, html}` → `{document_id, url}`; creates the Doc **unshared** | `meeting-write` | documentation-system |
-| connectors | `POST /google/docs/search` — `{meeting_id}` → every Doc tagged with it (ID, attempt ID, created time) | `meeting-write` | documentation-system |
+| connectors | `POST /google/docs/search` — `{meeting_id}` → every accessible Doc tagged with it, including trashed files and all pages (ID, attempt ID, created time, trashed state) | `meeting-write` | documentation-system |
 | connectors | `PUT /google/docs/{document_id}/sharing` — `{commenters: [group emails]}`; makes the direct shares exactly this set and returns the resulting permissions | `meeting-write` | documentation-system |
 | connectors | `POST /google/docs/{document_id}/fetch` — content **and complete ACL**, read with the writer identity; refuses files without `misty_meeting_id` | `meeting-fetch` | documentation-system |
 | connectors | `GET /google/docs/{document_id}/status` — `exists` / `trashed` / `deleted`, as seen by the owner | `meeting-fetch` | documentation-system |
@@ -235,7 +273,7 @@ stays database-free):
 |---|---|---|
 | `meeting_id` | UUID PK | Bot session UUID |
 | `doc_id` | UUID FK → `docs.id`, null | Set when cataloged |
-| `google_document_id` | text unique, null | |
+| `google_document_id` | text unique, null | Canonical ID; set once by guarded adoption, never replaced by a late result |
 | `doc_url` | text, null | Canonical Doc URL |
 | `guild_id`, `text_channel_id`, `voice_channel_id` | text | Discord snowflakes |
 | `title` | text | Supplied name, else LLM title |
@@ -248,9 +286,10 @@ stays database-free):
 | `decisions` | JSONB `string[]` | Generation-time snapshot, queryable |
 | `action_items` | JSONB `string[]` | Generation-time snapshot, queryable |
 | `generated_at` | timestamptz | Distinguishes snapshot from later Doc edits |
-| `pending_payload` | JSONB, null | Transcript awaiting Doc creation; **cleared as soon as the Doc exists** |
-| `persistence_status` | text | `pending` / `creating` / `create_uncertain` / `doc_created` / `shared` / `saved` / `failed` / `inaccessible` / `removed` |
-| `create_attempt_id`, `create_lease_until` | UUID, timestamptz, null | Creation lease; only the holder may call Google create |
+| `pending_payload` | JSONB, null | Transcript awaiting Doc creation; cleared only after canonical adoption commits |
+| `persistence_status` | text | `pending` / `creating` / `create_uncertain` / `doc_created` / `shared` / `saved` / `failed` / `inaccessible` / `removing` / `removed` |
+| `create_attempt_id`, `create_lease_until` | UUID, timestamptz, null | Serializes creation/reconciliation; stale results cannot change the record |
+| `next_reconcile_at` | timestamptz, null | Set before the first create; remains scheduled after save, failure, and removal |
 | `attempts`, `next_attempt_at`, `last_error` | int, timestamptz, text | `last_error` is a code, never content |
 | `delivery_status` | text | `pending` / `posted` / `failed` (#223) |
 | `discord_message_id` | text, null | Link message, for retry/update and removal |
@@ -357,17 +396,22 @@ recorded and is OK with it. Misty makes that explicit:
 - **Lifetime:** 12 months after `ended_at`
   (`MEETING_RECORD_RETENTION_DAYS=365`). `retry-due` also runs expiry.
 - **Transcript copies held for retries:** `pending_payload` is cleared once the
-  Doc exists; for `failed` records it is cleared after 7 days.
+  canonical Doc ID is committed; for `failed` records it is cleared after 7 days.
 - **Deletion authority:** Misty admins (infra leads). Drive admins can also
   delete in Drive.
 - **Member removal path:** a member DMs or pings a Misty admin with the Doc link
   or meeting ID. The admin calls `POST /meeting-records/{id}/remove`. Removal
-  must leave **no readable copy** in Google or the catalog:
-  1. **Google:** connectors removes every share, then **permanently deletes**
-     the Doc (`DELETE /google/docs/{id}`). Trash is not enough: in My Drive,
-     people who already had access can still open a trashed file until it is
-     permanently deleted. No recoverable Google copy is kept.
-  2. **Catalog:** a new documentation-system purge (`POST /docs/{id}/purge`,
+  blocks new persistence and purges every discovered copy:
+  1. **Stop new work:** atomically set `removing` and `removed_at/by`, invalidate
+     the current attempt, and disable pending link delivery. Retries and late
+     completions cannot clear this marker. Already-issued Google calls can
+     still finish, so removal keeps the reconciliation schedule above.
+  2. **Google:** connectors removes every share, then **permanently deletes**
+     the canonical Doc and every tagged duplicate (`DELETE /google/docs/{id}`).
+     Trash is not enough: in My Drive, people who already had access can still
+     open a trashed file until it is permanently deleted. No recoverable Google
+     copy is kept.
+  3. **Catalog:** a new documentation-system purge (`POST /docs/{id}/purge`,
      privileged `docs:purge` scope, used internally by `/remove`) deletes the
      doc's `content_snapshot`, its `doc_content` row, its `doc_chunks`, and
      **all** its grants, then sets `active=false` and `purged_at`. Today's
@@ -375,11 +419,14 @@ recorded and is OK with it. Misty makes that explicit:
      content, and grants survive it — so it is not used for removal. Only the
      row ID, normalized URL, and Drive file ID remain, and ingest, refetch,
      refresh, and discovery refuse a purged doc.
-  3. **Meeting record:** content columns (summary, decisions, action items,
+  4. **Meeting record:** content columns (summary, decisions, action items,
      participants, payload) are cleared, keeping only a tombstone
-     (`meeting_id`, Google document ID, `removed_at`, `removed_by`) so retries
-     cannot recreate it.
-  4. **Discord:** the bot deletes its link message (`discord_message_id`).
+     (`meeting_id`, canonical Google document ID, `removed_at/by`, and cleanup
+     status/lease/scheduling fields) so retries cannot recreate it. Mark
+     `removed` after known copies are purged; repeated scans still delete
+     late-created files. Keep only identifiers needed to finish any pending
+     catalog or Discord cleanup until those steps succeed.
+  5. **Discord:** the bot deletes its link message (`discord_message_id`).
   The admin deletes the Discord PDF message by hand (the bot does not track
   it today). Copies members already downloaded cannot be recalled; the admin
   tells the requester so. Expiry runs the same cascade.
@@ -412,7 +459,7 @@ recorded and is OK with it. Misty makes that explicit:
 
 | Work | Zone (owner) | Issue |
 |---|---|---|
-| `meeting_records` table + migration, `PUT/GET/PATCH /meeting-records`, creation lease and reconciliation, `retry-due`, `/remove` cascade, identity resolution, Doc HTML rendering, owner-identity fetch for meeting docs in ingest/refetch/refresh | `services/documentation-system` (@angelayzheng) | #222 |
+| `meeting_records` table + migration, `PUT/GET/PATCH /meeting-records`, guarded canonical adoption, recurring reconciliation including terminal records, `retry-due`, `/remove` cascade, identity resolution, Doc HTML rendering, owner-identity fetch for meeting docs in ingest/refetch/refresh | `services/documentation-system` (@angelayzheng) | #222 |
 | Catalog purge (`POST /docs/{id}/purge`, `docs:purge`) and refusing purged docs in ingest/refetch/refresh/discovery | `services/documentation-system` (@angelayzheng) | new follow-up, required before rollout |
 | `POST /google/docs` (unshared create with `appProperties`), `search`, `sharing` with read-back, owner `fetch` (content + full ACL), `status`, permanent `DELETE`, per-voice-channel folders, Workspace OAuth write credentials, `meeting-write`/`meeting-fetch` scopes | `services/connectors` (@michelle-yl) | #222 |
 | `StopRequest.record`, hand-off before discard, hold-and-retry, `StopResponse.record` | `services/meeting` (@andrei-akopian) | #222 |
@@ -421,6 +468,14 @@ recorded and is OK with it. Misty makes that explicit:
 
 The `StopRequest`/`StopResponse` change spans `meeting` and `discord-bot`
 deliberately; ship both halves together and update "The wire contract" below.
+
+**#222 recovery tests use offline fakes.** Delay a create past lease expiry and
+past a replacement reaching `saved`; reject the stale completion and delete its
+Doc on a later scan. Also cover an older duplicate appearing after canonical
+adoption (preserve the canonical Doc and human edits), late creates after
+failure/removal, repeated empty scans before a late file appears, and cleanup
+failure followed by retry. None may reopen a terminal record or share/catalog
+a duplicate.
 
 **Prerequisites:**
 
