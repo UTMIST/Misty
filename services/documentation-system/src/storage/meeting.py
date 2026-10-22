@@ -9,6 +9,10 @@ from src.url_norm import normalize_url
 
 
 def changed(record, values, actor):
+    if not set(record.removed_google_document_ids).issubset(
+        values.get("removed_google_document_ids", record.removed_google_document_ids)
+    ):
+        raise ValueError("removed Google identities cannot be forgotten")
     if record.google_deleted_at and (
         values.get("google_deleted_at", record.google_deleted_at) != record.google_deleted_at
     ):

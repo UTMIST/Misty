@@ -283,6 +283,7 @@ stays database-free):
 | `doc_id` | UUID FK → `docs.id`, null | Set when cataloged |
 | `google_document_id` | text unique, null | Canonical ID; set once by guarded adoption, never replaced by a late result |
 | `google_deleted_at` | timestamptz, null | Confirmed canonical-deletion receipt, preserved across cleanup retries (migration 014) |
+| `removed_google_document_ids` | text[] | Permanent ingestion fences for canonical and discovered duplicate IDs (migration 015) |
 | `index_pending` | boolean | Durable initial-index/retry work; set with catalog acceptance (migration 013) |
 | `doc_url` | text, null | Canonical Doc URL |
 | `guild_id`, `text_channel_id`, `voice_channel_id` | text | Discord snowflakes |

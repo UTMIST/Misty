@@ -539,7 +539,7 @@ Deploy order for the durable Google Doc path:
 1. Configure the connector [Workspace OAuth writer and restricted root](../services/connectors/docs/DEPLOYMENT.md#meeting-writer-setup).
    Use `drive.file`, explicitly grant the root to this OAuth app, and list the
    owning/inherited infra admin principals. Keep the existing read account separate.
-2. Apply documentation-system migrations through **014** and deploy its
+2. Apply documentation-system migrations through **015** and deploy its
    [meeting endpoints](../services/documentation-system/docs/API.md#meeting-records).
    Its connector key needs `meeting-write,meeting-fetch` plus existing scopes.
    Its directory key must read identifiers, channel teams and Google Group state.

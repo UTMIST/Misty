@@ -696,7 +696,7 @@ Production activation requires a separate rollout decision.
 
 ## Meeting record persistence
 
-Apply migrations through **014** (`uv run alembic upgrade head`) before the new API serves
+Apply migrations through **015** (`uv run alembic upgrade head`) before the new API serves
 traffic. Migration 012 adds `meeting_records` and nullable `docs.purged_at`; the prior head
 is 011. Verify upgrade → downgrade -1 → upgrade against a disposable database,
 never against live meeting data. Downgrading 012 drops meeting retry payloads and IDs;
@@ -705,6 +705,10 @@ Migration 013 preserves existing records and marks saved meetings for initial in
 repair. Its downgrade removes only the index retry flag.
 Migration 014 adds confirmed Google-deletion receipts. Its downgrade removes only
 the receipt field; rollback after deletion can require manual investigation.
+Migration 015 adds removed Google identity fences and makes old tombstones due
+for reconciliation. The next meeting retry run purges any surviving catalog
+aliases even if Google deletion already succeeded. Its downgrade forgets those
+additional fences; disable ingestion during rollback until cleanup is verified.
 
 Settings: `MEETING_DOC_CREATE_LEASE_S=600` (minimum 60),
 `MEETING_RECORD_MAX_ATTEMPTS=8`, `MEETING_RECORD_RETENTION_DAYS=365`.

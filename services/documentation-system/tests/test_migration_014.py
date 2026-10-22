@@ -48,8 +48,10 @@ def test_deletion_receipt_round_trip_preserves_tombstone_and_index_state():
             command.upgrade(cfg, "head")
             restored = PostgresStorageAdapter(engine).get_meeting(meeting.meeting_id)
             assert restored.google_deleted_at is None
-            assert restored.model_dump(exclude={"google_deleted_at"}) == removed.model_dump(
-                exclude={"google_deleted_at"}
+            # Migration 015 backfills identity fences and reschedules removal.
+            newer_fields = {"google_deleted_at", "removed_google_document_ids", "next_reconcile_at"}
+            assert restored.model_dump(exclude=newer_fields) == removed.model_dump(
+                exclude=newer_fields
             )
             assert adapter.get_doc(removed.doc_id) == doc
             assert adapter.get_doc(unrelated.id) == unrelated

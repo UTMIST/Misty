@@ -81,6 +81,7 @@ class MeetingRecord(StrictModel):
     doc_id: UUID | None = None
     google_document_id: str | None = None
     google_deleted_at: datetime | None = None
+    removed_google_document_ids: list[str] = []
     index_pending: bool = False
     doc_url: str | None = None
     guild_id: str | None = None

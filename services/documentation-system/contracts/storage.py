@@ -65,7 +65,10 @@ class StorageAdapter(Protocol):
         ...
 
     def get_meeting(self, meeting_id: UUID) -> MeetingRecord | None: ...
-    def get_meeting_by_google_id(self, document_id: str) -> MeetingRecord | None: ...
+    def get_meeting_by_google_id(self, document_id: str) -> MeetingRecord | None:
+        """Match a canonical Google ID or a recorded removed duplicate identity."""
+        ...
+
     def list_meetings(self) -> list[MeetingRecord]:
         """Detached records in created_at/meeting_id order; internal use only."""
         ...
@@ -104,6 +107,18 @@ class StorageAdapter(Protocol):
         """Atomically erase content/snapshot/chunks/grants/tags/ownership/title,
         mark inactive + purged_at. Idempotent, False only for missing docs.
         All future writes except purge must refuse a purged doc.
+        """
+        ...
+
+    def purge_meeting_catalog(
+        self, meeting_id: UUID, google_document_ids: list[str], *, actor: str
+    ) -> MeetingRecord:
+        """For an already marked removal, atomically fence the supplied Google
+        identities plus the canonical ID and purge ALL matching catalog aliases
+        and the linked doc_id. Serialize with ordinary Google insertion so an
+        earlier insert is purged and a later insert refuses the tombstone.
+        Persist the union of identities for future ingestion and late cleanup.
+        Raise ValueError for an unknown or unmarked meeting. Return latest record.
         """
         ...
 

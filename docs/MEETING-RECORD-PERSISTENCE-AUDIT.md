@@ -62,6 +62,19 @@ unconfirmed deletion so retries exercise the production 404 contract. Agent and
 API/architecture/deployment/design docs describe the new schema head and recovery
 limits.
 
+The identity-removal review fix adds
+[`015_meeting_removal_identities.py`](../services/documentation-system/migrations/versions/015_meeting_removal_identities.py)
+and its [round-trip test](../services/documentation-system/tests/test_migration_015.py)
+for permanent fences covering canonical and discovered duplicate Google IDs.
+The meeting model/schema, storage Protocol, shared validation and both adapters
+support atomic identity-based catalog purge under the ingestion locks. The
+coordinator purges ordinary, legacy and late catalog copies. Shared meeting cases
+exercise real ingest, index and removal endpoints against both adapters;
+PostgreSQL adds an actual uncommitted-insert race. The migration 014 test excludes
+the intentional fence backfill/rescheduling from migration 015 when comparing its
+historical round trip. Agent/API/design/architecture/deployment docs describe the
+schema and recovery contract.
+
 | File | Why it changes |
 |---|---|
 | [Makefile](../Makefile) | Fix shell quoting so the Node version precheck runs instead of passing literal line continuations to JavaScript. |

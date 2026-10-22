@@ -305,6 +305,8 @@ class MeetingRecords:
             return
         error = None
         try:
+            if r.removed_at:
+                r = self.storage.purge_meeting_catalog(meeting_id, [], actor="meeting-reconcile")
             matches = self.writer.search(r.meeting_id)
             for match in matches:
                 current = self.storage.get_meeting(meeting_id)
@@ -321,6 +323,10 @@ class MeetingRecords:
                         and match.document_id != current.google_document_id
                     )
                 ):
+                    if current.removed_at:
+                        self.storage.purge_meeting_catalog(
+                            meeting_id, [match.document_id], actor="meeting-reconcile"
+                        )
                     self._delete(meeting_id, match.document_id)
         except Exception:
             error = "reconcile_failed"
@@ -355,7 +361,7 @@ class MeetingRecords:
         if r is None:
             return None
         if r.persistence_status == "removed":
-            return r  # late files remain covered by recurring reconciliation
+            return self.storage.purge_meeting_catalog(meeting_id, [], actor=actor)
         if not r.removed_at:
             r = self.storage.change_meeting(
                 r,
@@ -389,12 +395,13 @@ class MeetingRecords:
             if r is None:
                 return self.storage.get_meeting(meeting_id)
         # Purge catalog even if Google is unavailable: retained text must not
-        # remain readable while external cleanup is being retried.
-        if r.doc_id:
-            self.storage.purge_doc(r.doc_id, actor=actor)
+        # remain readable while external cleanup is being retried. The canonical
+        # URL may have been ingested without ever attaching record.doc_id.
+        r = self.storage.purge_meeting_catalog(meeting_id, [], actor=actor)
         try:
             matches = self.writer.search(meeting_id)
             ids = {m.document_id for m in matches}
+            r = self.storage.purge_meeting_catalog(meeting_id, sorted(ids), actor=actor)
             if r.google_document_id and not r.google_deleted_at:
                 ids.add(r.google_document_id)
             for file_id in sorted(

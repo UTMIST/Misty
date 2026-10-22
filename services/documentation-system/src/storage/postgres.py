@@ -143,7 +143,10 @@ class PostgresStorageAdapter:
             row = (
                 conn.execute(
                     select(meeting_records).where(
-                        meeting_records.c.google_document_id == document_id
+                        or_(
+                            meeting_records.c.google_document_id == document_id,
+                            meeting_records.c.removed_google_document_ids.any(document_id),
+                        )
                     )
                 )
                 .mappings()
@@ -270,33 +273,92 @@ class PostgresStorageAdapter:
             )
             return True
 
+    def purge_meeting_catalog(self, meeting_id, google_document_ids, *, actor):
+        with self._engine.begin() as conn:
+            # The removal marker freezes the canonical ID before these locks.
+            # Use the same identity locks as create_doc so earlier insertions
+            # commit before our lookup and later insertions see the tombstone.
+            current = self.get_meeting(meeting_id)
+            if current is None or not current.removed_at:
+                raise ValueError("meeting removal marker required")
+            identities = set(current.removed_google_document_ids) | set(google_document_ids)
+            if current.google_document_id:
+                identities.add(current.google_document_id)
+            for file_id in sorted(identities):
+                lock_key = int.from_bytes(
+                    sha256(f"google-file:{file_id}".encode()).digest()[:8], signed=True
+                )
+                conn.execute(select(func.pg_advisory_xact_lock(lock_key)))
+            row = (
+                conn.execute(
+                    select(meeting_records)
+                    .where(meeting_records.c.meeting_id == meeting_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .one()
+            )
+            current = MeetingRecord.model_validate(dict(row))
+            identities.update(current.removed_google_document_ids)
+            matches = (
+                conn.execute(
+                    select(docs.c.id)
+                    .where(
+                        or_(
+                            docs.c.id == current.doc_id,
+                            *(
+                                func.substring(docs.c.url_normalized, p).in_(identities)
+                                for p in GOOGLE_ID_PATTERNS
+                            ),
+                        )
+                    )
+                    .order_by(docs.c.id)
+                    .with_for_update()
+                )
+                .scalars()
+                .all()
+            )
+            for doc_id in matches:
+                self._purge_doc(conn, doc_id, actor=actor)
+            if identities != set(current.removed_google_document_ids):
+                current = changed(
+                    current, {"removed_google_document_ids": sorted(identities)}, actor
+                )
+                conn.execute(
+                    update(meeting_records)
+                    .where(meeting_records.c.meeting_id == meeting_id)
+                    .values(**current.model_dump())
+                )
+            return current
+
     def purge_doc(self, doc_id, *, actor):
         with self._engine.begin() as conn:
-            row = conn.execute(
-                select(docs.c.id).where(docs.c.id == doc_id).with_for_update()
-            ).first()
-            if row is None:
-                return False
-            for table in (doc_content, doc_chunks, doc_grants, doc_tags):
-                conn.execute(delete(table).where(table.c.doc_id == doc_id))
-            conn.execute(
-                update(docs)
-                .where(docs.c.id == doc_id)
-                .values(
-                    title=None,
-                    description=None,
-                    content_snapshot=None,
-                    owning_team_id=None,
-                    owning_team_label=None,
-                    owning_person_id=None,
-                    owning_person_label=None,
-                    active=False,
-                    purged_at=func.coalesce(docs.c.purged_at, _now()),
-                    updated_at=_now(),
-                    updated_by=actor,
-                )
+            return self._purge_doc(conn, doc_id, actor=actor)
+
+    def _purge_doc(self, conn, doc_id, *, actor):
+        row = conn.execute(select(docs.c.id).where(docs.c.id == doc_id).with_for_update()).first()
+        if row is None:
+            return False
+        for table in (doc_content, doc_chunks, doc_grants, doc_tags):
+            conn.execute(delete(table).where(table.c.doc_id == doc_id))
+        conn.execute(
+            update(docs)
+            .where(docs.c.id == doc_id)
+            .values(
+                title=None,
+                description=None,
+                content_snapshot=None,
+                owning_team_id=None,
+                owning_team_label=None,
+                owning_person_id=None,
+                owning_person_label=None,
+                active=False,
+                purged_at=func.coalesce(docs.c.purged_at, _now()),
+                updated_at=_now(),
+                updated_by=actor,
             )
-            return True
+        )
+        return True
 
     def acquire_source_refresh_run(self, run_id: UUID, *, actor: str) -> bool:
         with self._engine.begin() as conn:
@@ -584,7 +646,10 @@ class PostgresStorageAdapter:
                     raise PurgedDocument("document was permanently purged")
                 removed = conn.execute(
                     select(meeting_records.c.meeting_id).where(
-                        meeting_records.c.google_document_id == file_id,
+                        or_(
+                            meeting_records.c.google_document_id == file_id,
+                            meeting_records.c.removed_google_document_ids.any(file_id),
+                        ),
                         meeting_records.c.removed_at.is_not(None),
                     )
                 ).first()

@@ -824,6 +824,15 @@ is recorded before later cleanup or the final `removed` transition, so retries
 skip a file already confirmed deleted. An
 unacknowledged Google 404 remains ambiguous; it never creates a deletion receipt.
 
+Migration 015 records every known removed Google identity. `purge_meeting_catalog`
+uses the Google insertion locks to persist those fences and purge all matching
+catalog aliases, including ordinary ingests that never set `record.doc_id`.
+An insert already holding the lock commits before this purge; later inserts see
+the removal fence.
+Reconciliation applies the same purge to late duplicates and old tombstones,
+including when the owner search returns no files. Known identities remain fenced
+even when no catalog row existed at removal time.
+
 Meeting content is fetched with the writer OAuth identity in initial ingest,
 refetch and scheduled refresh. An ambiguous owner 404 follows the nondestructive
 fetch-error path and never extends grant TTLs. `purged_at` prevents subsequent

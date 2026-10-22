@@ -71,6 +71,7 @@ class InMemoryStorageAdapter:
                 r.model_copy(deep=True)
                 for r in self._meetings.values()
                 if r.google_document_id == document_id
+                or document_id in r.removed_google_document_ids
             ),
             None,
         )
@@ -149,6 +150,24 @@ class InMemoryStorageAdapter:
                 actor,
             )
             return True
+
+    def purge_meeting_catalog(self, meeting_id, google_document_ids, *, actor):
+        with self._meeting_lock, self._doc_creation_lock:
+            current = self._meetings.get(meeting_id)
+            if current is None or not current.removed_at:
+                raise ValueError("meeting removal marker required")
+            identities = set(current.removed_google_document_ids) | set(google_document_ids)
+            if current.google_document_id:
+                identities.add(current.google_document_id)
+            for doc in list(self._docs.values()):
+                if doc.id == current.doc_id or google_file_id(doc.url_normalized) in identities:
+                    self.purge_doc(doc.id, actor=actor)
+            if identities != set(current.removed_google_document_ids):
+                current = changed(
+                    current, {"removed_google_document_ids": sorted(identities)}, actor
+                )
+                self._meetings[meeting_id] = current
+            return current.model_copy(deep=True)
 
     def purge_doc(self, doc_id, *, actor):
         doc = self._docs.get(doc_id)

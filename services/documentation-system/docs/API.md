@@ -845,6 +845,12 @@ Google write; the hourly runner picks up due retries.
 allowing removal to resume after later cleanup fails. An ambiguous 404 never
 sets that receipt.
 
+Removal purges the linked catalog row and every alias of the canonical or discovered
+duplicate Google IDs, even when ordinary ingestion left `doc_id=null` on the
+meeting. `removed_google_document_ids` retains these identity fences so concurrent
+or later registration cannot restore them. Reconciliation also purges catalog
+copies of late duplicates and previously removed meetings with empty owner searches.
+
 `last_error` contains a short code. Inspect failed records with
 `GET /meeting-records?persistence_status=failed`. `inaccessible` means an owner
 fetch cannot confirm deletion; retained snapshots/content/chunks and existing
