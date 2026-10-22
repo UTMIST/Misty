@@ -278,6 +278,22 @@ test('revalidation covers kept hits and ignores the dropped tail', async () => {
   assert.equal(await out.revalidate(), true);
 });
 
+test('a pathological doc_id is bounded and does not suppress other hits', async () => {
+  const { search } = tools({
+    async searchDocs() {
+      return [
+        { doc_id: 'z'.repeat(200000), title: 't', url: 'u', text: 'x', chunk: {} },
+        { doc_id: 'd1', title: 't', url: 'u', text: 'x', chunk: {} },
+      ];
+    },
+  });
+  const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
+  // The oversized id is capped, so its hit fits and the good hit below survives.
+  assert.equal(out.content.results.length, 2);
+  assert.ok(out.content.results[0].doc_id.length <= 128);
+  assert.ok(u8(JSON.stringify(out.content)) <= 65536);
+});
+
 test('revalidation fails when a kept hit disappears', async () => {
   let calls = 0;
   const { search } = tools({

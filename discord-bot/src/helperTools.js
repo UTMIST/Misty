@@ -33,6 +33,11 @@ const SNIPPET_LEN = 400; // UTF-16 units; a display snippet, not the real limite
 const MAX_DOC_CONTENT_BYTES = 49152; // 48 KiB
 const MAX_TITLE_LEN = 300; // units; a label, bounded so a fat title can't blow the block
 const MAX_URL_LEN = 2048; // units; real links fit, pathological ones can't bloat a hit
+// Real ids are snowflakes ([0-9]{1,20}); this matches get_document's input cap.
+// Bounding the one remaining service-controlled field keeps a pathological id
+// from bloating a hit past the aggregate budget (which would otherwise drop the
+// whole result set, since packHits stops at the first hit that won't fit).
+const MAX_DOC_ID_LEN = 128;
 // Aggregate byte budget for the whole `{ results: [...] }` block a search
 // returns. Per-field caps bound a single hit, but ten hits (each a fat title +
 // a ~2 KB url + a snippet, all multibyte) still sum past the service's 64 KiB
@@ -89,7 +94,7 @@ function normalizeString(value, max) {
 // raw service internals. `citation` carries the chunk descriptor for access
 // revalidation and source rendering.
 function projectHit(hit) {
-  const docId = hit?.doc_id ?? null;
+  const docId = boundField(hit?.doc_id, MAX_DOC_ID_LEN);
   const text = typeof hit?.text === 'string' ? hit.text : '';
   const title = boundField(hit?.title, MAX_TITLE_LEN);
   const url = boundField(hit?.url, MAX_URL_LEN);
@@ -146,7 +151,7 @@ function projectDoc(doc, docId) {
   const truncated = typeof full === 'string' && utf8Len(full) > MAX_DOC_CONTENT_BYTES;
   return {
     found: true,
-    doc_id: doc.id ?? docId,
+    doc_id: boundField(doc.id ?? docId, MAX_DOC_ID_LEN),
     title: boundField(doc.title, MAX_TITLE_LEN),
     content: truncated ? truncateUtf8(full, MAX_DOC_CONTENT_BYTES) : full,
     // Tell the model the body was cut so it does not treat a partial read as the
