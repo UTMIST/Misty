@@ -80,6 +80,12 @@ removal. The coordinator and shared endpoint regression cover background
 finalization winning the initial version check; API and architecture docs record
 the acknowledgement contract.
 
+The retry-reporting review fix adds outcome counts to the meeting contract,
+coordinator and API. The runner uses them for exit and heartbeat status. Shared
+meeting cases exercise real retry and runner endpoints against both adapters;
+runner tests reject incomplete or inconsistent counts. API, architecture and
+deployment docs describe the response and rollout order.
+
 | File | Why it changes |
 |---|---|
 | [Makefile](../Makefile) | Fix shell quoting so the Node version precheck runs instead of passing literal line continuations to JavaScript. |

@@ -9,7 +9,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from contracts.directory import DirectoryUnavailable
-from contracts.meeting import MeetingRecord, WriterError
+from contracts.meeting import MeetingRecord, MeetingRetryResult, WriterError
 from src.indexing import index_doc
 from src.source_access import resolve_google_permissions, source_grant_expiry
 
@@ -471,20 +471,48 @@ class MeetingRecords:
                 and not (r.create_lease_until and r.create_lease_until > now)
             ):
                 due.append((min(times), r.meeting_id))
+        result = MeetingRetryResult()
         for _, meeting_id in sorted(due)[:limit]:
             r = self.storage.get_meeting(meeting_id)
-            if r.persistence_status == "removing" or (
-                r.ended_at
-                and not r.removed_at
-                and r.ended_at + timedelta(days=self.settings.meeting_record_retention_days) <= now
-            ):
-                self.remove(meeting_id, actor=r.removed_by or "retention")
-            elif (
-                r.persistence_status == "failed"
-                and r.pending_payload
-                and (r.failed_at or r.generated_at) + timedelta(days=7) <= now
-            ):
-                self._change(r, pending_payload=None)
-            self.reconcile(meeting_id)
-            self.advance(meeting_id)
-        return len(due[:limit])
+            phase = "persistence"
+            errors = set()
+            try:
+                if r.persistence_status == "removing" or (
+                    r.ended_at
+                    and not r.removed_at
+                    and r.ended_at + timedelta(days=self.settings.meeting_record_retention_days)
+                    <= now
+                ):
+                    phase = "cleanup"
+                    self.remove(meeting_id, actor=r.removed_by or "retention")
+                elif (
+                    r.persistence_status == "failed"
+                    and r.pending_payload
+                    and (r.failed_at or r.generated_at) + timedelta(days=7) <= now
+                ):
+                    self._change(r, pending_payload=None)
+                phase = "cleanup"
+                self.reconcile(meeting_id)
+                if self.storage.get_meeting(meeting_id).last_error == "reconcile_failed":
+                    errors.add("cleanup")
+                current = self.storage.get_meeting(meeting_id)
+                phase = "index" if current.persistence_status == "saved" else "persistence"
+                self.advance(meeting_id)
+            except Exception:
+                errors.add(phase)
+                logger.warning("meeting.retry_failed meeting_id=%s phase=%s", meeting_id, phase)
+            current = self.storage.get_meeting(meeting_id)
+            if current.persistence_status == "removing":
+                errors.add("cleanup")
+            if not current.removed_at:
+                if current.persistence_status != "saved":
+                    errors.add("persistence")
+                elif current.index_pending:
+                    errors.add("index")
+            result.attempted += 1
+            result.failed += bool(errors)
+            result.succeeded += not errors
+            result.persistence_failed += "persistence" in errors
+            result.index_failed += "index" in errors
+            result.cleanup_failed += "cleanup" in errors
+        return result

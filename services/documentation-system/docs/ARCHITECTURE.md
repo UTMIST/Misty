@@ -835,6 +835,12 @@ even when no catalog row existed at removal time.
 
 The removal marker retries version conflicts before proceeding.
 
+`retry-due` reports attempted/succeeded/failed meetings and separate persistence,
+indexing and cleanup failure counts. Pending or terminal failures and incomplete
+cleanup are not successful recovery. The runner includes these outcomes in its
+exit code, summary and heartbeat; known work failures release the run guard after
+the failure heartbeat, while transport or monitoring uncertainty retains it.
+
 Meeting content is fetched with the writer OAuth identity in initial ingest,
 refetch and scheduled refresh. An ambiguous owner 404 follows the nondestructive
 fetch-error path and never extends grant TTLs. `purged_at` prevents subsequent

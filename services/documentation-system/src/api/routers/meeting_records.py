@@ -7,7 +7,7 @@ from typing import Literal
 
 from contracts.directory import DirectoryClient, DirectoryUnavailable
 from contracts.embedder import Embedder
-from contracts.meeting import MeetingPayload, MeetingWriter, PersistenceStatus
+from contracts.meeting import MeetingPayload, MeetingRetryResult, MeetingWriter, PersistenceStatus
 from contracts.storage import StorageAdapter
 from src.api.auth import get_actor, require_scope
 from src.api.deps import get_directory, get_embedder, get_meeting_writer, get_storage
@@ -36,13 +36,13 @@ def get_records(
     return MeetingRecords(storage, writer, directory, get_settings(), embedder=embedder)
 
 
-@router.post("/retry-due")
+@router.post("/retry-due", response_model=MeetingRetryResult)
 def retry_due(
     limit: int = Query(default=10, ge=1, le=100),
     _key=Depends(require_scope("meetings:write")),
     records=Depends(get_records),
 ):
-    return {"attempted": records.retry_due(limit)}
+    return records.retry_due(limit)
 
 
 @router.get("")

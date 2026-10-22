@@ -812,7 +812,7 @@ models. `meeting_id` is the bot's UUID, independent of the Doc title or URL.
 | `PUT /meeting-records/{meeting_id}` | `meetings:write` | Durable hand-off: 202 on insert; 200 on identical replay; 409 on changed payload |
 | `GET /meeting-records/{meeting_id}` | `meetings:read` | Status, canonical IDs/URL, generation metadata and delivery state; no pending transcript |
 | `GET /meeting-records` | `meetings:read` | Optional `persistence_status` and `delivery_status` filters |
-| `POST /meeting-records/retry-due?limit=10` | `meetings:write` | Bounded oldest-due persistence, reconciliation and expiry; limit 1–100 |
+| `POST /meeting-records/retry-due?limit=10` | `meetings:write` | Bounded oldest-due persistence, reconciliation and expiry with outcome counts; limit 1–100 |
 | `POST /meeting-records/{meeting_id}/retry` | `meetings:admin` | Explicit retry of a failed/inaccessible record; removal remains terminal |
 | `POST /meeting-records/{meeting_id}/remove` | `meetings:admin` | Mark removal before external calls; purge catalog and permanently delete tagged Docs |
 | `PATCH /meeting-records/{meeting_id}/delivery` | `meetings:write` | `{status: posted\|failed, discord_message_id}`; only saved, nonremoved records; posted requires an ID |
@@ -852,6 +852,14 @@ duplicate Google IDs, even when ordinary ingestion left `doc_id=null` on the
 meeting. `removed_google_document_ids` retains these identity fences so concurrent
 or later registration cannot restore them. Reconciliation also purges catalog
 copies of late duplicates and previously removed meetings with empty owner searches.
+
+The retry response contains all of `attempted`, `succeeded`, `failed`,
+`persistence_failed`, `index_failed`, and `cleanup_failed` as nonnegative integers.
+`succeeded + failed = attempted`; `failed` counts meetings once, while the failure
+categories may overlap. A selected meeting with unfinished/failed persistence,
+pending indexing, or failed cleanup counts as failed even though the HTTP request
+completed successfully. An empty queue returns all zeros. The monitored runner
+requires every count and sends a failure heartbeat for any failed meeting work.
 
 `last_error` contains a short code. Inspect failed records with
 `GET /meeting-records?persistence_status=failed`. `inaccessible` means an owner

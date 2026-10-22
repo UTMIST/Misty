@@ -568,15 +568,75 @@ def test_meeting_phase_uses_authenticated_http_and_validates_counts():
         assert request.headers["X-API-Key"] == "offline-key"
         if request.url.path == "/api-keys/self":
             return httpx.Response(200, json={"scopes": ["docs:write", "meetings:write"]})
-        return httpx.Response(200, json={"attempted": 2})
+        return httpx.Response(
+            200,
+            json={
+                "attempted": 2,
+                "succeeded": 1,
+                "failed": 1,
+                "persistence_failed": 1,
+                "index_failed": 0,
+                "cleanup_failed": 0,
+            },
+        )
 
     with httpx.Client(transport=httpx.MockTransport(handle)) as http:
         client = DocsApiClient(
             base_url="http://docs", api_key=SecretStr("offline-key"), client=http
         )
         client.check_scope(timeout=5, meetings=True)
-        assert client.retry_meetings(limit=10, timeout=5) == 2
+        result = client.retry_meetings(limit=10, timeout=5)
+        assert result.attempted == 2 and result.failed == result.persistence_failed == 1
     assert paths == ["/api-keys/self", "/meeting-records/retry-due"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"attempted": 1},
+        {
+            "attempted": True,
+            "succeeded": 1,
+            "failed": 0,
+            "persistence_failed": 0,
+            "index_failed": 0,
+            "cleanup_failed": 0,
+        },
+        {
+            "attempted": 1,
+            "succeeded": 1,
+            "failed": 1,
+            "persistence_failed": 1,
+            "index_failed": 0,
+            "cleanup_failed": 0,
+        },
+        {
+            "attempted": 1,
+            "succeeded": 0,
+            "failed": 1,
+            "persistence_failed": 0,
+            "index_failed": 0,
+            "cleanup_failed": 0,
+        },
+        {
+            "attempted": 11,
+            "succeeded": 11,
+            "failed": 0,
+            "persistence_failed": 0,
+            "index_failed": 0,
+            "cleanup_failed": 0,
+        },
+    ],
+)
+def test_meeting_phase_rejects_missing_or_inconsistent_outcomes(body):
+    with httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body))
+    ) as http:
+        client = DocsApiClient(
+            base_url="http://docs", api_key=SecretStr("offline-key"), client=http
+        )
+        with pytest.raises(RefreshError, match="counts"):
+            client.retry_meetings(limit=10, timeout=5)
 
 
 def test_meeting_phase_requires_its_literal_scope_before_work():

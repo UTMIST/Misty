@@ -15,6 +15,8 @@ from uuid import uuid4
 import httpx
 from pydantic import AnyHttpUrl, BaseModel, Field, SecretStr, TypeAdapter, ValidationError
 
+from contracts.meeting import MeetingRetryResult
+
 DEFAULT_BASE_URL = "http://localhost:8001"
 REFRESH_PATH = "/docs/source-access/refresh-due"
 
@@ -37,6 +39,11 @@ class Report:
     refreshed: int = 0
     failed: int = 0
     index_failed: int = 0
+    meeting_attempted: int = 0
+    meeting_failed: int = 0
+    meeting_persistence_failed: int = 0
+    meeting_index_failed: int = 0
+    meeting_cleanup_failed: int = 0
     drained: bool = False
     error: str = ""
 
@@ -44,13 +51,17 @@ class Report:
     def exit_code(self) -> int:
         if self.error or not self.drained:
             return 2
-        return 1 if self.failed or self.index_failed else 0
+        return 1 if self.failed or self.index_failed or self.meeting_failed else 0
 
     def summary(self) -> str:
         return (
             f"batches={self.batches} attempted={self.attempted} refreshed={self.refreshed} "
             f"failed={self.failed} index_failed={self.index_failed} "
-            f"drained={str(self.drained).lower()}"
+            f"drained={str(self.drained).lower()} "
+            f"meeting_attempted={self.meeting_attempted} meeting_failed={self.meeting_failed} "
+            f"meeting_persistence_failed={self.meeting_persistence_failed} "
+            f"meeting_index_failed={self.meeting_index_failed} "
+            f"meeting_cleanup_failed={self.meeting_cleanup_failed}"
         )
 
 
@@ -112,14 +123,21 @@ class DocsApiClient:
             raise RefreshError("refresh endpoint returned inconsistent counts")
         return batch
 
-    def retry_meetings(self, *, limit: int, timeout: float) -> int:
+    def retry_meetings(self, *, limit: int, timeout: float) -> MeetingRetryResult:
         body = self._request(
             "POST", "/meeting-records/retry-due", params={"limit": limit}, timeout=timeout
         )
-        attempted = body.get("attempted") if isinstance(body, dict) else None
-        if type(attempted) is not int or not 0 <= attempted <= limit:
+        try:
+            result = MeetingRetryResult.model_validate(body)
+            # All fields are mandatory on the wire; an old attempted-only API
+            # must not silently turn missing failure counts into success.
+            if set(result.model_fields_set) != set(MeetingRetryResult.model_fields):
+                raise ValueError("incomplete counts")
+        except ValueError:
             raise RefreshError("meeting retry endpoint returned invalid counts")
-        return attempted
+        if result.attempted > limit:
+            raise RefreshError("meeting retry endpoint returned inconsistent counts")
+        return result
 
     def acquire_run(self, run_id: str) -> None:
         self._run_guard_request("POST", run_id)
@@ -295,10 +313,15 @@ def main(argv: list[str] | None = None) -> int:
                         remaining = args.max_seconds - (time.monotonic() - started)
                         if remaining <= 0:
                             raise RefreshError("meeting retry budget exhausted")
-                        attempted = client.retry_meetings(
+                        meetings = client.retry_meetings(
                             limit=args.batch_size, timeout=min(args.timeout, remaining)
                         )
-                        if attempted < args.batch_size:
+                        report.meeting_attempted += meetings.attempted
+                        report.meeting_failed += meetings.failed
+                        report.meeting_persistence_failed += meetings.persistence_failed
+                        report.meeting_index_failed += meetings.index_failed
+                        report.meeting_cleanup_failed += meetings.cleanup_failed
+                        if meetings.attempted < args.batch_size:
                             break
                     else:
                         raise RefreshError("meeting retry batch limit exhausted")

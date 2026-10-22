@@ -121,6 +121,26 @@ class MeetingRecord(StrictModel):
         return self.model_dump(exclude={"pending_payload", "payload_hash", "audience_group_emails"})
 
 
+class MeetingRetryResult(StrictModel):
+    attempted: int = Field(default=0, strict=True, ge=0)
+    succeeded: int = Field(default=0, strict=True, ge=0)
+    failed: int = Field(default=0, strict=True, ge=0)
+    persistence_failed: int = Field(default=0, strict=True, ge=0)
+    index_failed: int = Field(default=0, strict=True, ge=0)
+    cleanup_failed: int = Field(default=0, strict=True, ge=0)
+
+    @model_validator(mode="after")
+    def consistent_counts(self):
+        categories = (self.persistence_failed, self.index_failed, self.cleanup_failed)
+        if (
+            self.succeeded + self.failed != self.attempted
+            or max(categories) > self.failed
+            or sum(categories) < self.failed
+        ):
+            raise ValueError("inconsistent meeting retry counts")
+        return self
+
+
 class WriterError(Exception):
     def __init__(self, code: str, *, uncertain: bool = False):
         super().__init__(code)

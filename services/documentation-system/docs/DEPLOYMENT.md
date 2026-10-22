@@ -723,6 +723,10 @@ The existing staging Railway cron now runs
 It validates both scopes before work. The meeting phase uses the same time and
 batch budgets and no direct DB or Google credentials. Production scheduling
 remains explicitly disabled in `railway.source-refresh.json` until rollout.
+Deploy the updated API before the runner: the new runner requires full meeting
+outcome counts and rejects an older attempted-only response. Meeting persistence,
+indexing and cleanup failures produce exit 1 and a failure heartbeat, with separate
+`meeting_*_failed` summary counts. API/transport uncertainty still produces exit 2.
 
 Recovery: inspect `GET /meeting-records?persistence_status=failed` or
 `persistence_status=inaccessible`; use privileged

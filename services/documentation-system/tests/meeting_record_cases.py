@@ -353,6 +353,50 @@ class MeetingRecordCases:
         assert not writer.docs
         assert all(doc.purged_at for doc in records.storage.list_docs(active_only=False))
 
+    @pytest.mark.parametrize("failure", ["persistence", "index", "cleanup"])
+    def test_real_retry_api_propagates_meeting_failures_to_runner_and_heartbeat(
+        self, flow, meeting_api, monkeypatch, capsys, failure
+    ):
+        from pydantic import SecretStr
+        from src import source_refresh
+        from src.source_refresh import DocsApiClient, RunMonitor
+
+        records, writer, clock, original = flow
+        client, headers = meeting_api
+        if failure == "persistence":
+            records.settings.meeting_record_max_attempts = 1
+            writer.fail = "share"
+        elif failure == "index":
+            records.embedder.fail_on_call = 1
+        else:
+            records.advance(original.meeting_id)
+            writer.delete_fails = True
+            removing = records.remove(original.meeting_id, actor="admin")
+            records.storage.change_meeting(removing, {"next_reconcile_at": NOW}, actor="test")
+        events = []
+        monkeypatch.setenv("DOCS_API_KEY", headers["X-API-Key"])
+        monkeypatch.setenv("SOURCE_REFRESH_MONITOR_URL", "https://monitor.test/test-run")
+        monkeypatch.setattr(RunMonitor, "ping", lambda self, event: events.append(event) or True)
+        monkeypatch.setattr(
+            source_refresh,
+            "DocsApiClient",
+            lambda **kwargs: DocsApiClient(
+                base_url="http://testserver", api_key=SecretStr(headers["X-API-Key"]), client=client
+            ),
+        )
+        assert source_refresh.main(["--meeting-records"]) == 1
+        assert events == ["start", "fail"]
+        output = capsys.readouterr().out
+        assert "meeting_attempted=1 meeting_failed=1" in output
+        assert f"meeting_{failure}_failed=1" in output
+        current = records.storage.get_meeting(original.meeting_id)
+        if failure == "persistence":
+            assert current.persistence_status == "failed" and current.doc_id is None
+        # Known work failures release the guard after the failure heartbeat.
+        owner = uuid4()
+        assert records.storage.acquire_source_refresh_run(owner, actor="next-run")
+        assert records.storage.release_source_refresh_run(owner)
+
     def test_saved_content_is_immediately_searchable_for_the_source_audience(self, flow):
         records, writer, clock, original = flow
         records.advance(original.meeting_id)
@@ -375,6 +419,27 @@ class MeetingRecordCases:
             k=10,
             min_cosine=0.1,
         )
+
+    def test_retry_outcomes_report_saved_and_empty_queues(self, flow, meeting_api):
+        client, headers = meeting_api
+        response = client.post("/meeting-records/retry-due", headers=headers)
+        assert response.status_code == 200
+        assert response.json() == {
+            "attempted": 1,
+            "succeeded": 1,
+            "failed": 0,
+            "persistence_failed": 0,
+            "index_failed": 0,
+            "cleanup_failed": 0,
+        }
+        assert client.post("/meeting-records/retry-due", headers=headers).json() == {
+            "attempted": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "persistence_failed": 0,
+            "index_failed": 0,
+            "cleanup_failed": 0,
+        }
 
     def test_catalog_purge_requires_marker_and_preserves_identity_fences(self, flow):
         records, writer, clock, original = flow
@@ -405,7 +470,7 @@ class MeetingRecordCases:
             now=lambda: clock[0],
         )
         clock[0] += timedelta(minutes=6)
-        assert restarted.retry_due(10) == 1
+        assert restarted.retry_due(10).attempted == 1
         r = records.storage.get_meeting(r.meeting_id)
         assert not r.index_pending and r.last_error is None
         assert records.storage.list_doc_chunks(r.doc_id)
