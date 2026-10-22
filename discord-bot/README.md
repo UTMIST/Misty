@@ -410,6 +410,13 @@ appends source links, and withholds an answer if those checks fail. Previous use
 questions remain available for follow-ups; earlier bot answers are not replayed,
 even after the flag is disabled. The web playground remains text-only.
 
+Search tools supply the returned source passages, rather than cutting each to a
+400-character preview. Each passage is capped at 48 KiB of UTF-8 text and marked
+when truncated; the complete result block remains bounded at 60 KiB. Channel
+answers can use these authorized passages, while opening a full document by id
+remains available only in DMs. Publication revalidation covers the text supplied
+to the model.
+
 See the [helper tool contract](docs/CONTRIBUTING.md#the-authorized-helper-tool-loop-71)
 for replay, cost limits, revalidation tradeoffs, and offline coverage.
 

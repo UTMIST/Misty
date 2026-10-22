@@ -23,7 +23,6 @@ export const llmSafe = true;
 
 const MAX_QUERY_LEN = 2000; // service caps query at 2000 code points
 const MAX_RESULTS = 10; // service default k
-const SNIPPET_LEN = 400; // UTF-16 units; a display snippet, not the real limiter
 // Byte budget for a fetched document body before it rides back in a tool_result
 // (and into the revalidation fingerprint). The real governing limit is the
 // service's per-block MAX_JSON_BYTES (65_536): a ToolResultBlock whose content
@@ -31,6 +30,9 @@ const SNIPPET_LEN = 400; // UTF-16 units; a display snippet, not the real limite
 // So bound the body in UTF-8 *bytes* (not UTF-16 units), well under 64 KiB, to
 // leave room for the title, keys, and JSON overhead in the same block.
 const MAX_DOC_CONTENT_BYTES = 49152; // 48 KiB
+// Search returns source chunks, not UI previews. Preserve their detail within
+// the same per-text byte cap; packHits still enforces the whole-result budget.
+const MAX_SEARCH_CHUNK_BYTES = MAX_DOC_CONTENT_BYTES;
 const MAX_TITLE_LEN = 300; // units; a label, bounded so a fat title can't blow the block
 const MAX_URL_LEN = 2048; // units; real links fit, pathological ones can't bloat a hit
 // Real ids are snowflakes ([0-9]{1,20}); this matches get_document's input cap.
@@ -102,7 +104,8 @@ function projectHit(hit) {
     doc_id: docId,
     title,
     url,
-    snippet: text ? truncateUnits(text, SNIPPET_LEN) : undefined,
+    snippet: text ? truncateUtf8(text, MAX_SEARCH_CHUNK_BYTES) : undefined,
+    ...(utf8Len(text) > MAX_SEARCH_CHUNK_BYTES ? { truncated: true } : {}),
     citation: {
       doc_id: docId,
       title,
@@ -170,7 +173,7 @@ export function createDocumentTools({ docClient }) {
       definition: {
         name: 'search_documents',
         description:
-          'Search the documents the asker is authorized to see and return ranked matches with their ids and source citations. Use this to find information before answering. Returns an empty list when nothing authorized matches.',
+          'Search the documents the asker is authorized to see and return ranked source passages with their ids and citations. Use these passages to answer; refine the query if the needed detail is absent. A passage is part of a document, not necessarily the whole document. Returns an empty list when nothing authorized matches.',
         input_schema: {
           type: 'object',
           properties: {

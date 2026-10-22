@@ -40,10 +40,10 @@ test('search_documents passes person context to docClient, never scope from inpu
   assert.equal(seen.onBehalfOf, 'person-1');
   assert.equal(seen.guildId, undefined);
   assert.equal(seen.query, 'cpsif');
-  // model-visible content excludes the raw citation object and bounds the snippet
+  // Model-visible content excludes the raw citation object and keeps the passage.
   assert.equal(out.content.results[0].doc_id, 'd1');
   assert.equal(out.content.results[0].citation, undefined);
-  assert.ok(out.content.results[0].snippet.length <= 400);
+  assert.equal(out.content.results[0].snippet, hit.text);
   assert.deepEqual(out.citations[0].chunk, hit.chunk);
 });
 
@@ -59,6 +59,37 @@ test('search_documents forwards channel context (guild + channel) unchanged', as
   assert.equal(seen.guildId, '100');
   assert.equal(seen.channelId, '200');
   assert.equal(seen.onBehalfOf, undefined);
+});
+
+test('channel search preserves answer evidence after the first 400 characters', async () => {
+  const text = 'Background context. '.repeat(80) + 'The restore target is four hours.';
+  const { search } = tools({
+    async searchDocs(args) {
+      assert.equal(args.guildId, '100');
+      assert.equal(args.channelId, '200');
+      return [{ ...hit, text }];
+    },
+  });
+  const out = await search.run(
+    { query: 'What is the restore target?' },
+    { context: { guildId: '100', channelId: '200' } },
+  );
+  assert.equal(out.content.results[0].snippet, text);
+  assert.equal('truncated' in out.content.results[0], false);
+});
+
+test('search revalidation detects changed evidence after the first 400 characters', async () => {
+  let changed = false;
+  const prefix = 'Background context. '.repeat(80);
+  const { search } = tools({
+    async searchDocs() {
+      return [{ ...hit, text: prefix + (changed ? 'eight hours' : 'four hours') }];
+    },
+  });
+  const out = await search.run({ query: 'restore' }, { context: { onBehalfOf: 'p' } });
+  assert.equal(await out.revalidate(), true);
+  changed = true;
+  assert.equal(await out.revalidate(), false);
 });
 
 test('search_documents rejects an empty query without calling the service', async () => {
@@ -188,8 +219,8 @@ test('get_document byte truncation never splits a character', async () => {
   assert.equal(out.content.content.isWellFormed(), true);
 });
 
-test('search snippet truncation never splits a surrogate pair', async () => {
-  const text = 'a'.repeat(399) + '😀'; // cut at SNIPPET_LEN (400) splits the emoji
+test('oversized search passage is byte-capped without splitting a character', async () => {
+  const text = 'a'.repeat(MAX_DOC_CONTENT_BYTES - 1) + '😀';
   const { search } = tools({
     async searchDocs() {
       return [{ doc_id: 'd1', title: 'T', url: 'u', text, chunk: {} }];
@@ -197,8 +228,10 @@ test('search snippet truncation never splits a surrogate pair', async () => {
   });
   const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
   const snippet = out.content.results[0].snippet;
-  assert.ok(snippet.length <= 400);
+  assert.equal(snippet, 'a'.repeat(MAX_DOC_CONTENT_BYTES - 1));
+  assert.ok(u8(snippet) <= MAX_DOC_CONTENT_BYTES);
   assert.equal(snippet.isWellFormed(), true);
+  assert.equal(out.content.results[0].truncated, true);
 });
 
 test('query normalization never splits a surrogate pair at the cap', async () => {
