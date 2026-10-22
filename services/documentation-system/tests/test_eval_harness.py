@@ -1,8 +1,8 @@
-"""Offline tests for the #178 retrieval-quality harness.
+"""Offline tests for the retrieval-quality harness.
 
-Everything here runs on fixtures and the deterministic lexical embedder: #178 requires
-automated tests to avoid paid provider calls, and a score that depended on a network
-round trip would not be reproducible anyway.
+Everything here runs on fixtures and the deterministic lexical embedder: automated tests
+must avoid paid provider calls, and a score that depended on a network round trip would
+not be reproducible anyway.
 """
 
 import json
@@ -274,8 +274,8 @@ def test_retrieval_stays_inside_the_asking_context(tmp_path):
 
 
 def test_two_chunk_sizes_produce_comparable_results(tmp_path):
-    # #178 is explicit that the harness must measure the difference honestly and that
-    # equal scores are a valid outcome. So this asserts both runs are well formed and
+    # The harness must measure the difference honestly, and equal scores are a valid
+    # outcome. So this asserts both runs are well formed and
     # labelled with the configuration that produced them -- never that they differ.
     corpus = load_corpus(write_corpus(tmp_path))
     asked = questions(

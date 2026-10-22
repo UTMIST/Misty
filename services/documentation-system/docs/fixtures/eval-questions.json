@@ -1,7 +1,7 @@
 {
   "version": 1,
   "_comment": [
-    "The #178 answer key. Each entry names a question, the context asking it, and the",
+    "The answer key. Each entry names a question, the context asking it, and the",
     "document that should come back. `rationale` says what the question is for: without",
     "it a later reader cannot tell a boundary probe from a baseline, and the set rots.",
     "",

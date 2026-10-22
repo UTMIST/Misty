@@ -1,7 +1,7 @@
 {
   "version": 1,
   "_comment": [
-    "The #178 retrieval-evaluation corpus: a fixed set of documents whose only job is",
+    "The retrieval-evaluation corpus: a fixed set of documents whose only job is",
     "to be chunked and searched the same way every run. Document text lives in",
     "eval-corpus/, one Markdown file each -- see eval-corpus/README.md for why none of",
     "it is copied from a real document.",

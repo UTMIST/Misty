@@ -1,4 +1,4 @@
-"""Measure retrieval quality against a fixed question set (#178).
+"""Measure retrieval quality against a fixed question set.
 
 Run it:
 
@@ -14,8 +14,8 @@ says nothing about how well real embeddings would do. Its one job is comparison:
 run holds the corpus, the questions, the embedder and the relevance floor fixed, so a
 difference between two runs is attributable to the one setting that changed.
 
-Two runs scoring the same is a result. #178 is explicit that equal scores are a valid
-outcome and not a reason to go looking for a difference.
+Two runs scoring the same is a result: equal scores are a valid outcome, not a reason to
+go looking for a difference.
 
 Every result carries the configuration that produced it -- chunk size, overlap, chunker
 version, token counting, embedder, k and the floor. A score without its configuration
@@ -238,7 +238,7 @@ def format_comparison(runs: list[Run]) -> str:
 def calibrate(corpus: Corpus, questions: tuple[Question, ...], settings: ChunkSettings) -> str:
     """Report how well cosine separates correct documents from incorrect ones.
 
-    docs/DEPLOYMENT.md names #178 as what calibrates `search_min_cosine`. This is the
+    docs/DEPLOYMENT.md points here for calibrating `search_min_cosine`. This is the
     measurement behind that: the best cosine against the expected document, against the
     best wrong document, and what each candidate floor would admit.
     """
@@ -292,7 +292,7 @@ def _settings(value: str) -> ChunkSettings:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m src.eval.harness",
-        description="Measure retrieval quality against the #178 question set.",
+        description="Measure retrieval quality against the fixed question set.",
     )
     parser.add_argument("mode", nargs="?", choices=("run", "calibrate"), default="run")
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)

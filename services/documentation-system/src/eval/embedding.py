@@ -1,7 +1,7 @@
-"""Deterministic offline embeddings for the retrieval-quality harness (#178).
+"""Deterministic offline embeddings for the retrieval-quality harness.
 
-#178 requires measurement to run on fixtures rather than paid provider calls, so the
-harness never reaches the llm service's /embed. It embeds with the stand-in below,
+Measurement runs on fixtures rather than paid provider calls, so the harness never
+reaches the llm service's /embed. It embeds with the stand-in below,
 which satisfies both halves of retrieval: `embed` is the indexing-side `Embedder`
 (contracts/embedder.py) that `src/indexing.py` calls, and `embed_query` is the
 query-side shape `search_chunks` expects (contracts/retrieval.py).

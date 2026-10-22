@@ -65,8 +65,8 @@ def index_doc(
 
     `settings` chooses the splitter's chunk size and overlap. Every caller in the
     service uses the default recorded in docs/ARCHITECTURE.md; it is a parameter so
-    the #178 retrieval harness can re-index a fixed corpus at other sizes and compare
-    the results. Note that the hashes guarding the `unchanged` short circuit cover the
+    the retrieval-quality harness (src/eval/) can re-index a fixed corpus at other sizes
+    and compare the results. Note the hashes guarding the `unchanged` short circuit cover
     content and title, not the settings, so re-indexing the same text at a different
     size needs `force=True`.
     """

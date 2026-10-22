@@ -1,4 +1,4 @@
-"""Load the #178 evaluation corpus and seed it into a storage adapter.
+"""Load the evaluation corpus and seed it into a storage adapter.
 
 Seeding goes through the real indexing path (`src/indexing.py:index_doc`), not a
 private copy of it. That matters more than it looks: `index_doc` prefixes each chunk
