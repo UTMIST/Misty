@@ -833,6 +833,8 @@ Reconciliation applies the same purge to late duplicates and old tombstones,
 including when the owner search returns no files. Known identities remain fenced
 even when no catalog row existed at removal time.
 
+The removal marker retries version conflicts before proceeding.
+
 Meeting content is fetched with the writer OAuth identity in initial ingest,
 refetch and scheduled refresh. An ambiguous owner 404 follows the nondestructive
 fetch-error path and never extends grant TTLs. `purged_at` prevents subsequent

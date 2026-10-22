@@ -362,8 +362,8 @@ class MeetingRecords:
             return None
         if r.persistence_status == "removed":
             return self.storage.purge_meeting_catalog(meeting_id, [], actor=actor)
-        if not r.removed_at:
-            r = self.storage.change_meeting(
+        while not r.removed_at:
+            updated = self.storage.change_meeting(
                 r,
                 {
                     "removed_at": self.now(),
@@ -392,8 +392,9 @@ class MeetingRecords:
                 },
                 actor=actor,
             )
+            r = updated if updated is not None else self.storage.get_meeting(meeting_id)
             if r is None:
-                return self.storage.get_meeting(meeting_id)
+                return None
         # Purge catalog even if Google is unavailable: retained text must not
         # remain readable while external cleanup is being retried. The canonical
         # URL may have been ingested without ever attaching record.doc_id.

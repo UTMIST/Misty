@@ -845,6 +845,8 @@ Google write; the hourly runner picks up due retries.
 allowing removal to resume after later cleanup fails. An ambiguous 404 never
 sets that receipt.
 
+Removal retries the version check before acknowledging its removal marker.
+
 Removal purges the linked catalog row and every alias of the canonical or discovered
 duplicate Google IDs, even when ordinary ingestion left `doc_id=null` on the
 meeting. `removed_google_document_ids` retains these identity fences so concurrent

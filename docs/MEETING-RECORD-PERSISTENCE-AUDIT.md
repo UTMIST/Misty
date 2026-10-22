@@ -75,6 +75,11 @@ the intentional fence backfill/rescheduling from migration 015 when comparing it
 historical round trip. Agent/API/design/architecture/deployment docs describe the
 schema and recovery contract.
 
+The removal-marker review fix retries version conflicts before acknowledging
+removal. The coordinator and shared endpoint regression cover background
+finalization winning the initial version check; API and architecture docs record
+the acknowledgement contract.
+
 | File | Why it changes |
 |---|---|
 | [Makefile](../Makefile) | Fix shell quoting so the Node version precheck runs instead of passing literal line continuations to JavaScript. |

@@ -329,6 +329,30 @@ class MeetingRecordCases:
         assert not records.storage.list_grants(doc_id)
         assert not records.storage.list_doc_chunks(doc_id)
 
+    def test_removal_retries_marker_when_background_finalization_wins_cas(
+        self, flow, meeting_api, monkeypatch
+    ):
+        records, writer, clock, original = flow
+        client, headers = meeting_api
+        change = records.storage.change_meeting
+        raced = []
+
+        def interleaved_change(record, values, **kwargs):
+            if "removed_at" in values and not raced:
+                raced.append(True)
+                records.advance(original.meeting_id)
+                assert (
+                    records.storage.get_meeting(original.meeting_id).persistence_status == "saved"
+                )
+            return change(record, values, **kwargs)
+
+        monkeypatch.setattr(records.storage, "change_meeting", interleaved_change)
+        response = client.post(f"/meeting-records/{original.meeting_id}/remove", headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["persistence_status"] == "removed" and response.json()["removed_at"]
+        assert not writer.docs
+        assert all(doc.purged_at for doc in records.storage.list_docs(active_only=False))
+
     def test_saved_content_is_immediately_searchable_for_the_source_audience(self, flow):
         records, writer, clock, original = flow
         records.advance(original.meeting_id)
