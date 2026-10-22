@@ -9,6 +9,9 @@ from contracts.fetcher import FetchResult, SourcePermission
 from contracts.meeting import MeetingPayload, TaggedDoc, WriterError
 from src.config import Settings
 from src.meeting_records import MeetingRecords
+from tests.fake_embedder import FakeEmbedder, fake_vector
+from contracts.retrieval import QueryEmbedding
+from contracts.visibility import Actor
 
 NOW = datetime(2026, 10, 22, tzinfo=timezone.utc)
 TEAM = uuid4()
@@ -51,7 +54,8 @@ class Directory:
 
 
 class Writer:
-    def __init__(self):
+    def __init__(self, *, prefix=""):
+        self.prefix = prefix
         self.docs = {}
         self.created = []
         self.shares = []
@@ -62,7 +66,7 @@ class Writer:
         self.state = "exists"
 
     def create(self, **kwargs):
-        file_id = f"doc{len(self.created)}"
+        file_id = f"{self.prefix}doc{len(self.created)}"
         self.created.append(kwargs)
         self.docs[file_id] = TaggedDoc(
             document_id=file_id, attempt_id=kwargs["attempt_id"], created_at=NOW, trashed=False
@@ -116,12 +120,65 @@ class MeetingRecordCases:
         clock = [NOW]
         writer = Writer()
         records = MeetingRecords(
-            adapter, writer, Directory(), Settings(_env_file=None), now=lambda: clock[0]
+            adapter,
+            writer,
+            Directory(),
+            Settings(_env_file=None),
+            embedder=FakeEmbedder(),
+            now=lambda: clock[0],
         )
         meeting_id = uuid4()
         r, created = records.accept(meeting_id, payload(), actor="meeting-key")
         assert created
         return records, writer, clock, r
+
+    def test_saved_content_is_immediately_searchable_for_the_source_audience(self, flow):
+        records, writer, clock, original = flow
+        records.advance(original.meeting_id)
+        r = records.storage.get_meeting(original.meeting_id)
+        assert r.persistence_status == "saved" and not r.index_pending
+        assert records.storage.list_doc_chunks(r.doc_id)
+        embedding = QueryEmbedding(model=records.embedder.model, vector=fake_vector("Google body"))
+        hits = records.storage.search_chunks(
+            query="Google body",
+            embedding=embedding,
+            visibility=Actor(PERSON, frozenset(), frozenset({TEAM})),
+            k=10,
+            min_cosine=0.1,
+        )
+        assert {hit.doc_id for hit in hits} == {r.doc_id}
+        assert not records.storage.search_chunks(
+            query="Google body",
+            embedding=embedding,
+            visibility=Actor(uuid4(), frozenset()),
+            k=10,
+            min_cosine=0.1,
+        )
+
+    def test_failed_initial_index_retries_after_restart_without_google_writes(self, flow):
+        records, writer, clock, original = flow
+        records.embedder.fail_on_call = 1
+        records.advance(original.meeting_id)
+        r = records.storage.get_meeting(original.meeting_id)
+        assert r.persistence_status == "saved" and r.index_pending
+        assert r.last_error == "index_pending"
+        assert not records.storage.list_doc_chunks(r.doc_id)
+        restarted = MeetingRecords(
+            records.storage,
+            writer,
+            Directory(),
+            records.settings,
+            embedder=FakeEmbedder(),
+            now=lambda: clock[0],
+        )
+        clock[0] += timedelta(minutes=6)
+        assert restarted.retry_due(10) == 1
+        r = records.storage.get_meeting(r.meeting_id)
+        assert not r.index_pending and r.last_error is None
+        assert records.storage.list_doc_chunks(r.doc_id)
+        assert len(writer.created) == len(writer.shares) == 1
+        restarted.advance(r.meeting_id)
+        assert len(restarted.embedder.calls) == 1
 
     def test_success_survives_new_coordinator_and_replay(self, flow):
         records, writer, clock, original = flow

@@ -255,7 +255,12 @@ class PostgresStorageAdapter:
                 )
             updated = changed(
                 current,
-                {"doc_id": doc_id, "persistence_status": "saved", "last_error": None},
+                {
+                    "doc_id": doc_id,
+                    "persistence_status": "saved",
+                    "index_pending": True,
+                    "last_error": None,
+                },
                 actor,
             )
             conn.execute(

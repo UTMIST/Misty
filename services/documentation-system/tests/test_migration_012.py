@@ -30,7 +30,7 @@ def test_meeting_schema_round_trip_and_restart():
         records = MeetingRecords(adapter, Writer(), Directory(), get_settings())
         r, _ = records.accept(uuid4(), payload(), actor="meeting-key")
         assert PostgresStorageAdapter(engine).get_meeting(r.meeting_id) == r
-        command.downgrade(cfg, "-1")
+        command.downgrade(cfg, "011")
         assert "meeting_records" not in inspect(engine).get_table_names()
         with engine.connect() as conn:
             assert conn.execute(select(docs.c.id).where(docs.c.id == doc.id)).scalar_one() == doc.id

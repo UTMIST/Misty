@@ -696,11 +696,13 @@ Production activation requires a separate rollout decision.
 
 ## Meeting record persistence
 
-Apply migration **012** (`uv run alembic upgrade head`) before the new API serves
-traffic. It adds `meeting_records` and nullable `docs.purged_at`; the prior head
+Apply migrations through **013** (`uv run alembic upgrade head`) before the new API serves
+traffic. Migration 012 adds `meeting_records` and nullable `docs.purged_at`; the prior head
 is 011. Verify upgrade → downgrade -1 → upgrade against a disposable database,
-never against live meeting data. Downgrade drops meeting retry payloads and IDs;
+never against live meeting data. Downgrading 012 drops meeting retry payloads and IDs;
 export them before any operational rollback.
+Migration 013 preserves existing records and marks saved meetings for initial index
+repair. Its downgrade removes only the index retry flag.
 
 Settings: `MEETING_DOC_CREATE_LEASE_S=600` (minimum 60),
 `MEETING_RECORD_MAX_ATTEMPTS=8`, `MEETING_RECORD_RETENTION_DAYS=365`.
@@ -727,6 +729,9 @@ so `delete_unconfirmed` remains pending for admin investigation. After seven
 days in failed state, the pending transcript is cleared; the Discord PDF is the
 fallback if no Google Doc was adopted. Expiry and explicit removal purge the
 catalog even if Google cleanup still needs retries.
+
+Saved records with `index_pending=true` retry indexing on the next due run, with
+a five-minute retry delay, without another Google write.
 
 Removal/unsafe-ACL notices and the existing PDF attachment are the admin's
 responsibility until the link-delivery cleanup in #223 ships. Never log record

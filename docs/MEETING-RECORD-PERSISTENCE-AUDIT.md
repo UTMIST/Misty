@@ -41,6 +41,17 @@ The Discord adapter's move comment now matches that lifecycle behavior.
 Its integration tests cover saved finalization and preserve PDF-only move/auto-stop coverage.
 The bot README and shared recording design describe the audience boundary.
 
+The indexing fix adds migration
+[`013_meeting_recovery.py`](../services/documentation-system/migrations/versions/013_meeting_recovery.py)
+and its [round-trip test](../services/documentation-system/tests/test_migration_013.py)
+for durable initial-index work. The schema, model, storage contract and both
+adapters carry the retry flag; the coordinator and parity cases verify immediate
+authorized retrieval and index recovery after restart. API wiring supplies the
+existing embedder, with route tests using offline fakes. The migration 012 test
+explicitly targets 011 when testing removal of its table. The fake writer supports
+unique IDs so migration tests coexist with unrelated catalog rows. Agent guidance
+and API/architecture/deployment/design docs describe the schema and retry behavior.
+
 | File | Why it changes |
 |---|---|
 | [Makefile](../Makefile) | Fix shell quoting so the Node version precheck runs instead of passing literal line continuations to JavaScript. |

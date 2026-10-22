@@ -91,7 +91,8 @@ class StorageAdapter(Protocol):
         expires_at: datetime,
         actor: str,
     ) -> bool:
-        """Commit Doc, content, source grants, and saved state in one transaction.
+        """Commit Doc, content, source grants, saved state and index_pending=True
+        in one transaction.
 
         Verify record.version, canonical ID and absence of removal under the
         same lock. False on conflict. No network calls inside the transaction.

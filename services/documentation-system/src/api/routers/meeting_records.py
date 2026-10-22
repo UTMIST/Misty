@@ -6,10 +6,11 @@ from pydantic import BaseModel, ConfigDict
 from typing import Literal
 
 from contracts.directory import DirectoryClient, DirectoryUnavailable
+from contracts.embedder import Embedder
 from contracts.meeting import MeetingPayload, MeetingWriter, PersistenceStatus
 from contracts.storage import StorageAdapter
 from src.api.auth import get_actor, require_scope
-from src.api.deps import get_directory, get_meeting_writer, get_storage
+from src.api.deps import get_directory, get_embedder, get_meeting_writer, get_storage
 from src.config import get_settings
 from src.meeting_records import MeetingRecords
 
@@ -30,8 +31,9 @@ def get_records(
     storage: StorageAdapter = Depends(get_storage),
     writer: MeetingWriter = Depends(get_meeting_writer),
     directory: DirectoryClient = Depends(get_directory),
+    embedder: Embedder = Depends(get_embedder),
 ):
-    return MeetingRecords(storage, writer, directory, get_settings())
+    return MeetingRecords(storage, writer, directory, get_settings(), embedder=embedder)
 
 
 @router.post("/retry-due")

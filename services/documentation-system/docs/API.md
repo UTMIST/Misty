@@ -836,6 +836,11 @@ scans continue after save, failure and removal and delete late duplicates withou
 rewriting the canonical Doc. Admin-only status is represented by empty
 `audience_team_ids`; no org grant or public sharing fallback exists.
 
+Catalog acceptance also sets `index_pending=true` atomically, then indexes the
+stored content immediately. Successful indexing clears the flag. A failure keeps
+the saved Doc and retries through `retry-due` after five minutes without another
+Google write; the hourly runner picks up due retries.
+
 `last_error` contains a short code. Inspect failed records with
 `GET /meeting-records?persistence_status=failed`. `inaccessible` means an owner
 fetch cannot confirm deletion; retained snapshots/content/chunks and existing

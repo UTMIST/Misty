@@ -143,6 +143,7 @@ class InMemoryStorageAdapter:
                 {
                     "doc_id": doc_id,
                     "persistence_status": "saved",
+                    "index_pending": True,
                     "last_error": None,
                 },
                 actor,

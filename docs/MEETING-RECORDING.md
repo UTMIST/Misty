@@ -282,6 +282,7 @@ stays database-free):
 | `meeting_id` | UUID PK | Bot session UUID |
 | `doc_id` | UUID FK → `docs.id`, null | Set when cataloged |
 | `google_document_id` | text unique, null | Canonical ID; set once by guarded adoption, never replaced by a late result |
+| `index_pending` | boolean | Durable initial-index/retry work; set with catalog acceptance (migration 013) |
 | `doc_url` | text, null | Canonical Doc URL |
 | `guild_id`, `text_channel_id`, `voice_channel_id` | text | Discord snowflakes |
 | `title` | text | Supplied name, else LLM title |

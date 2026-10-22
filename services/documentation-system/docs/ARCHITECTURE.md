@@ -813,6 +813,10 @@ it never spans network fetching or embedding.
 Migration 012 follows the refresh-runner migration 011. Both storage adapters
 implement atomic replay checks, version-checked transitions and catalog commits;
 `catalog_meeting` commits the Doc, source grants, content and saved state together.
+Migration 013 adds a durable `index_pending` flag.
+Catalog acceptance schedules indexing in the same transaction; the coordinator
+immediately runs the existing conditional indexer with an injected embedder.
+Failures retry through `retry-due` without rewriting, resharing or refetching the Doc.
 Removal invalidates attempts before erasing content. The canonical Google ID is
 never replaced, and the pending transcript clears only after adoption commits.
 

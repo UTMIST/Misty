@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from contracts.directory import DirectoryUnavailable
 from contracts.meeting import MeetingRecord, WriterError
+from src.indexing import index_doc
 from src.source_access import resolve_google_permissions, source_grant_expiry
 
 logger = logging.getLogger("documentation_system.audit")
@@ -58,11 +59,12 @@ def render_html(record):
 
 
 class MeetingRecords:
-    def __init__(self, storage, writer, directory, settings, *, now=None):
+    def __init__(self, storage, writer, directory, settings, *, embedder=None, now=None):
         self.storage = storage
         self.writer = writer
         self.directory = directory
         self.settings = settings
+        self.embedder = embedder
         self.now = now or (lambda: datetime.now(timezone.utc))
 
     def accept(self, meeting_id, payload, *, actor):
@@ -167,9 +169,23 @@ class MeetingRecords:
             exc.code,
         )
 
+    def _index(self, record):
+        if self.embedder is None or not record or record.removed_at or not record.index_pending:
+            return
+        outcome = index_doc(record.doc_id, storage=self.storage, embedder=self.embedder)
+        pending = outcome.status in {"failed", "skipped"}
+        self._change(
+            record,
+            index_pending=pending,
+            last_error="index_pending" if pending else None,
+            next_attempt_at=self.now() + timedelta(minutes=5) if pending else None,
+        )
+        if pending:
+            logger.warning("meeting.index_pending meeting_id=%s", record.meeting_id)
+
     def advance(self, meeting_id, *, explicit=False):
         r = self.storage.get_meeting(meeting_id)
-        if r is None or r.removed_at or r.persistence_status == "saved":
+        if r is None or r.removed_at:
             return
         if r.persistence_status in {"failed", "inaccessible"} and not explicit:
             return
@@ -177,6 +193,9 @@ class MeetingRecords:
         if r.create_lease_until and r.create_lease_until > now:
             return
         if not explicit and r.next_attempt_at and r.next_attempt_at > now:
+            return
+        if r.persistence_status == "saved":
+            self._index(r)
             return
         if r.attempts >= self.settings.meeting_record_max_attempts and not explicit:
             self._change(
@@ -238,7 +257,7 @@ class MeetingRecords:
             resolved = resolve_google_permissions(result.permissions, self.directory)
             # Never mint grants from the requested audience. Only owner-read ACL
             # evidence is allowed; keep the generation-time audience snapshot.
-            self.storage.catalog_meeting(
+            cataloged = self.storage.catalog_meeting(
                 r,
                 result,
                 resolved.grants,
@@ -247,6 +266,8 @@ class MeetingRecords:
                 ),
                 actor="meeting-records",
             )
+            if cataloged:
+                self._index(self.storage.get_meeting(meeting_id))
         except WriterError as exc:
             if exc.code == "unexpected_acl" and r.google_document_id:
                 self.remove(r.meeting_id, actor="security:unexpected_acl")
@@ -330,6 +351,7 @@ class MeetingRecords:
                     "create_attempt_id": uuid4(),
                     "create_lease_until": None,
                     "delivery_status": "disabled",
+                    "index_pending": False,
                     "pending_payload": None,
                     "next_reconcile_at": self.now(),
                     "title": None,
@@ -402,7 +424,10 @@ class MeetingRecords:
             times = [
                 t
                 for t in (
-                    r.next_attempt_at if r.persistence_status not in TERMINAL else None,
+                    r.next_attempt_at
+                    if r.persistence_status not in TERMINAL
+                    or (r.persistence_status == "saved" and r.index_pending)
+                    else None,
                     r.next_reconcile_at,
                     r.ended_at + timedelta(days=self.settings.meeting_record_retention_days)
                     if r.ended_at and not r.removed_at

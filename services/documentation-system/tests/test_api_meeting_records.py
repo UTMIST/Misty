@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.app import create_app
-from src.api.deps import get_directory, get_fetchers, get_storage
+from src.api.deps import get_directory, get_fetchers, get_meeting_writer, get_storage
 from src.api.hashing import generate_key
 from src.api.routers.meeting_records import get_records
 from src.config import Settings
@@ -16,6 +16,7 @@ from src.storage.in_memory import InMemoryStorageAdapter
 from tests.conftest import build_seed_sources
 from tests.meeting_record_cases import Directory, Writer, NOW, payload
 from tests.chunk_storage_cases import make_chunk
+from tests.fake_embedder import FakeEmbedder
 
 AUTH = {"X-API-Key": "dev-api-key-change-me"}
 
@@ -25,7 +26,14 @@ def flow():
     storage = InMemoryStorageAdapter(build_seed_sources())
     writer = Writer()
     directory = Directory()
-    records = MeetingRecords(storage, writer, directory, Settings(_env_file=None), now=lambda: NOW)
+    records = MeetingRecords(
+        storage,
+        writer,
+        directory,
+        Settings(_env_file=None),
+        embedder=FakeEmbedder(),
+        now=lambda: NOW,
+    )
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: storage
     app.dependency_overrides[get_records] = lambda: records
@@ -48,6 +56,20 @@ def test_accept_replay_conflict_status_and_attested_actor(flow):
     changed = payload().model_dump(mode="json") | {"summary": "different"}
     assert client.put(path, headers=AUTH, json=changed).status_code == 409
     assert len(writer.created) == 1
+
+
+def test_default_coordinator_wiring_indexes_after_acceptance(flow):
+    client, records, writer = flow
+    del client.app.dependency_overrides[get_records]
+    client.app.dependency_overrides[get_meeting_writer] = lambda: writer
+    meeting_id = uuid4()
+    response = client.put(
+        f"/meeting-records/{meeting_id}", headers=AUTH, json=payload().model_dump(mode="json")
+    )
+    assert response.status_code == 202
+    saved = records.storage.get_meeting(meeting_id)
+    assert saved.persistence_status == "saved" and not saved.index_pending
+    assert records.storage.list_doc_chunks(saved.doc_id)
 
 
 def test_scope_and_validation_before_external_work(flow):
