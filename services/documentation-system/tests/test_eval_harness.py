@@ -18,6 +18,7 @@ from src.eval import harness
 from src.eval.corpus import doc_id_for, load_corpus, seed
 from src.eval.embedding import DIMENSIONS, MODEL, LexicalEmbedder
 from src.eval.harness import (
+    calibrate,
     Question,
     Run,
     calibration_rows,
@@ -479,3 +480,78 @@ def test_calibration_reports_a_row_per_answerable_question(tmp_path):
     )
     _, rows = calibration_rows(corpus, asked, ChunkSettings())
     assert [name for name, _, _ in rows] == ["answerable"]
+
+
+# --- robustness of the tooling itself ---------------------------------------------
+
+
+def test_a_retired_document_clears_its_chunks_as_the_service_does(tmp_path):
+    # The service re-indexes after retiring, which deletes the chunk set. Leaving them
+    # would inflate the chunk count every result line is compared by.
+    path = write_corpus(
+        tmp_path,
+        documents=[
+            {
+                "key": "gone",
+                "title": "Gone",
+                "url": "https://x.test/gone",
+                "text_file": "cpsif.md",
+                "active": False,
+                "grants": [["team", TEAM, "google_drive"]],
+            }
+        ],
+    )
+    adapter = InMemoryStorageAdapter()
+    seeded = seed(adapter, load_corpus(path), embedder=LexicalEmbedder(), settings=ChunkSettings())
+    assert seeded.chunk_counts["gone"] == 0
+    assert adapter.list_doc_chunks(seeded.docs["gone"].id) == []
+
+
+def test_an_empty_question_set_reports_instead_of_crashing(tmp_path):
+    corpus = load_corpus(write_corpus(tmp_path))
+    result = run(corpus, (), settings=ChunkSettings())
+    assert "no questions to ask" in harness.format_run(result)
+
+
+def test_calibration_says_so_when_no_question_expects_a_document(tmp_path):
+    corpus = load_corpus(write_corpus(tmp_path))
+    asked = questions(question(id="none", expected_doc_keys=()))
+    assert "nothing to calibrate" in calibrate(corpus, asked, ChunkSettings())
+
+
+def test_calibration_does_not_claim_a_k_or_a_floor_it_never_used(tmp_path):
+    # It compares raw cosines and never retrieves, so printing either would attribute
+    # the numbers to settings that had no effect on them.
+    corpus = load_corpus(write_corpus(tmp_path))
+    asked = questions(question(id="q", query="CPSIF", expected_doc_keys=("cpsif",)))
+    header = calibrate(corpus, asked, ChunkSettings()).splitlines()[0]
+    assert "k=" not in header and "min_cosine=" not in header
+
+
+@pytest.mark.parametrize("flag,value", [("--min-cosine", "0"), ("--k", "0"), ("--k", "51")])
+def test_the_cli_bounds_k_and_the_floor_the_way_retrieval_does(flag, value):
+    # Otherwise these surface as a ValueError from inside retrieval, once a run has
+    # already seeded and started.
+    with pytest.raises(SystemExit):
+        harness.build_parser().parse_args([flag, value])
+
+
+def test_a_query_with_no_indexable_terms_is_named_before_measuring(tmp_path):
+    corpus = load_corpus(write_corpus(tmp_path))
+    with pytest.raises(ValueError, match="no indexable terms"):
+        check(corpus, questions(question(id="symbols", query="!!! ???")))
+
+
+def test_terms_that_cancel_raise_the_contract_error_not_a_zero_division(monkeypatch):
+    # Two terms hashing to one bucket with opposite signs sum to zero. Rare in practice;
+    # the point is that it fails as EmbedderRejected, which index_doc handles.
+    class Digest:
+        def __init__(self, sign):
+            self._bytes = bytes([0, 0, 0, 0, sign, 0, 0, 0] * 8)
+
+        def digest(self):
+            return self._bytes
+
+    monkeypatch.setattr("src.eval.embedding.sha256", lambda raw: Digest(1 if raw == b"aa" else 0))
+    with pytest.raises(EmbedderRejected, match="cancel to a zero vector"):
+        LexicalEmbedder().embed_text("aa bb")

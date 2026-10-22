@@ -156,8 +156,8 @@ def seed(adapter, corpus: Corpus, *, embedder, settings: ChunkSettings) -> Seede
             content_hash=content_hash(item.text),
             fetched_at=now,
         )
-        # Retire after indexing, so a retired document exercises the same clearing
-        # path the service uses rather than simply never having been indexed.
+        # Index first, then retire, so a retired document reaches the same state the
+        # service leaves it in rather than simply never having been indexed.
         outcome = index_doc(
             doc.id, storage=adapter, embedder=embedder, force=True, settings=settings
         )
@@ -169,6 +169,17 @@ def seed(adapter, corpus: Corpus, *, embedder, settings: ChunkSettings) -> Seede
         chunk_counts[item.key] = outcome.chunk_count
         if not item.active:
             adapter.update_doc(doc.id, {"active": False}, actor=ACTOR)
+            # The service re-indexes after retiring (src/api/routers/docs.py), which
+            # clears the chunk set. Skipping that would leave chunks the service would
+            # have deleted, inflating the chunk count each result is compared by.
+            cleared = index_doc(
+                doc.id, storage=adapter, embedder=embedder, force=True, settings=settings
+            )
+            if cleared.status != "cleared":
+                raise RuntimeError(
+                    f"{item.key} did not clear on retirement ({cleared.status}: {cleared.detail})"
+                )
+            chunk_counts[item.key] = 0
     return Seeded(docs, chunk_counts, settings)
 
 

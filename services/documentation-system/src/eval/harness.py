@@ -29,6 +29,7 @@ from pathlib import Path
 import sys
 
 from src.chunking import CHUNKER_VERSION, ChunkSettings
+from src.retrieval import terms
 from src.eval.corpus import Corpus, Seeded, load_corpus, seed
 from src.eval.embedding import LexicalEmbedder
 from src.storage.in_memory import InMemoryStorageAdapter
@@ -110,6 +111,11 @@ def check(corpus: Corpus, questions: tuple[Question, ...]) -> None:
     for question in questions:
         if question.context not in corpus.contexts:
             raise ValueError(f"{question.id}: no context named {question.context!r}")
+        # The embedder rejects a query with no indexable term. Catching it here names
+        # the question; letting it through aborts the sweep mid-run saying only that
+        # some text could not be embedded.
+        if not terms(question.query):
+            raise ValueError(f"{question.id}: query has no indexable terms")
         for key in question.expected_doc_keys + question.forbidden_doc_keys:
             if key not in keys:
                 raise ValueError(f"{question.id}: no document keyed {key!r}")
@@ -173,7 +179,8 @@ def run(
     return Run(_config(seeded, embedder, k, min_cosine, len(questions)), tuple(results))
 
 
-def _config(seeded: Seeded, embedder, k: int, min_cosine: float, questions: int) -> dict:
+def _config(seeded: Seeded, embedder, k, min_cosine, questions: int) -> dict:
+    """`k` and `min_cosine` are None for a measurement that does not retrieve."""
     return {
         "target_tokens": seeded.settings.target_tokens,
         "overlap_tokens": seeded.settings.overlap_tokens,
@@ -190,6 +197,8 @@ def _config(seeded: Seeded, embedder, k: int, min_cosine: float, questions: int)
 
 def format_run(result: Run, *, verbose: bool = True) -> str:
     lines = [_config_line(result.config)]
+    if not result.results:
+        return lines[0] + "\n  no questions to ask"
     if verbose:
         width = max(len(r.id) for r in result.results)
         for item in result.results:
@@ -208,10 +217,15 @@ def format_run(result: Run, *, verbose: bool = True) -> str:
 
 
 def _config_line(config: dict) -> str:
+    # Omitted rather than defaulted when a measurement does not use them: printing a k
+    # and a floor that had no effect would attribute the numbers to the wrong settings.
+    retrieval = ""
+    if config["k"] is not None:
+        retrieval = f"k={config['k']} min_cosine={config['min_cosine']} "
     return (
         f"target_tokens={config['target_tokens']} overlap_tokens={config['overlap_tokens']} "
         f"chunker_v{config['chunker_version']} counting={config['counting']} "
-        f"embedder={config['embedder']} k={config['k']} min_cosine={config['min_cosine']} "
+        f"embedder={config['embedder']} {retrieval}"
         f"-> {config['chunks']} chunks over {config['documents']} documents"
     )
 
@@ -282,8 +296,13 @@ def calibrate(corpus: Corpus, questions: tuple[Question, ...], settings: ChunkSe
     """
     seeded, rows = calibration_rows(corpus, questions, settings)
     embedder = LexicalEmbedder()
+    # Calibration compares raw cosines; it never retrieves, so neither k nor the floor
+    # under test applies to it. Both are left off the configuration line for that reason.
+    header = _config_line(_config(seeded, embedder, None, None, len(rows)))
+    if not rows:
+        return f"{header}\n\n  no question expects a document, so there is nothing to calibrate"
     width = max(len(row[0]) for row in rows)
-    lines = [_config_line(_config(seeded, embedder, DEFAULT_K, DEFAULT_MIN_COSINE, len(rows))), ""]
+    lines = [header, ""]
     lines.append(f"  {'question':<{width}} {'correct':>8} {'best wrong':>11}  margin")
     for name, right, wrong in rows:
         lines.append(f"  {name:<{width}} {right:>8.4f} {wrong:>11.4f}  {right - wrong:+.4f}")
@@ -309,6 +328,24 @@ def _settings(value: str) -> ChunkSettings:
     return ChunkSettings(target_tokens=target, overlap_tokens=overlap)
 
 
+def _k(value: str) -> int:
+    # Mirrors SearchRequest's bounds so a bad value is an argparse error rather than a
+    # ValueError raised from inside retrieval once a run is already under way.
+    number = int(value)
+    if not 1 <= number <= 50:
+        raise argparse.ArgumentTypeError(f"k must be between 1 and 50, got {number}")
+    return number
+
+
+def _min_cosine(value: str) -> float:
+    # validate_search requires 0 < min_cosine <= 1. EVALUATION.md tells readers to sweep
+    # the floor, so 0 is a natural thing to type and deserves a real message.
+    number = float(value)
+    if not 0 < number <= 1:
+        raise argparse.ArgumentTypeError(f"min_cosine must be in (0, 1], got {number}")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m src.eval.harness",
@@ -324,8 +361,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TARGET:OVERLAP",
         help="chunk configuration to measure; repeat to compare several (default 500:50)",
     )
-    parser.add_argument("--k", type=int, default=DEFAULT_K)
-    parser.add_argument("--min-cosine", type=float, default=DEFAULT_MIN_COSINE)
+    parser.add_argument("--k", type=_k, default=DEFAULT_K)
+    parser.add_argument("--min-cosine", type=_min_cosine, default=DEFAULT_MIN_COSINE)
     parser.add_argument("--json", action="store_true", help="emit results as JSON")
     parser.add_argument("--quiet", action="store_true", help="scores only, no per-question rows")
     return parser

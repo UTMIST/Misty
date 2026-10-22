@@ -83,4 +83,9 @@ class LexicalEmbedder:
             # but not twenty times more, or boilerplate would dominate the vector.
             vector[bucket] += sign * (1.0 + log(count))
         norm = sqrt(sum(value * value for value in vector))
+        if not norm:
+            # Every term cancelled: a short text whose terms hashed to one bucket with
+            # opposite signs. Rare, but an all-zero vector fails QueryEmbedding anyway,
+            # so raise the error index_doc already knows how to report.
+            raise EmbedderRejected(f"terms cancel to a zero vector in {text[:60]!r}")
         return tuple(value / norm for value in vector)
