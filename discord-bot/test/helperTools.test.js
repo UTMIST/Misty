@@ -111,7 +111,10 @@ test('get_document reports not-found (never forbidden) for a null doc', async ()
   assert.deepEqual(out.content, { found: false });
 });
 
-test('get_document caps an oversized body and flags it truncated', async () => {
+const MAX_DOC_CONTENT_BYTES = 49152; // mirrors helperTools.js
+const u8 = (s) => Buffer.byteLength(s, 'utf8');
+
+test('get_document caps an oversized body by bytes and flags it truncated', async () => {
   const { get } = tools({
     async getDoc(id) {
       return { id, title: 'T', content: 'x'.repeat(50000) };
@@ -119,7 +122,44 @@ test('get_document caps an oversized body and flags it truncated', async () => {
   });
   const out = await get.run({ doc_id: 'big' }, { context: { onBehalfOf: 'person-1' } });
   assert.equal(out.content.truncated, true);
-  assert.equal(out.content.content.length, 20000);
+  assert.ok(u8(out.content.content) <= MAX_DOC_CONTENT_BYTES);
+});
+
+// The real governing limit is the service's 64 KiB per-block cap counted in
+// UTF-8 bytes, so a multibyte body well under 20k characters can still blow it.
+test('get_document bounds a multibyte body by UTF-8 bytes, not units', async () => {
+  // 20k CJK chars = 3 bytes each = 60 KB > 48 KiB budget, but only 20k units.
+  const { get } = tools({
+    async getDoc(id) {
+      return { id, title: 'T', content: '中'.repeat(20000) };
+    },
+  });
+  const out = await get.run({ doc_id: 'cjk' }, { context: { onBehalfOf: 'person-1' } });
+  assert.equal(out.content.truncated, true);
+  assert.ok(u8(out.content.content) <= MAX_DOC_CONTENT_BYTES);
+  assert.equal(out.content.content.isWellFormed(), true);
+});
+
+test('get_document also bounds the content_snapshot fallback path', async () => {
+  const { get } = tools({
+    async getDoc(id) {
+      return { id, title: 'T', content_snapshot: '中'.repeat(20000) };
+    },
+  });
+  const out = await get.run({ doc_id: 'snap' }, { context: { onBehalfOf: 'person-1' } });
+  assert.equal(out.content.truncated, true);
+  assert.ok(u8(out.content.content) <= MAX_DOC_CONTENT_BYTES);
+  assert.equal(out.content.content.isWellFormed(), true);
+});
+
+test('get_document bounds a fat title so it cannot overflow the block', async () => {
+  const { get } = tools({
+    async getDoc(id) {
+      return { id, title: 'T'.repeat(5000), content: 'body' };
+    },
+  });
+  const out = await get.run({ doc_id: 'd1' }, { context: { onBehalfOf: 'person-1' } });
+  assert.ok(out.content.title.length <= 300);
 });
 
 test('get_document leaves a within-limit body whole and unflagged', async () => {
@@ -133,23 +173,19 @@ test('get_document leaves a within-limit body whole and unflagged', async () => 
   assert.equal('truncated' in out.content, false);
 });
 
-// A cap landing mid-emoji must not leave a lone surrogate: that is invalid UTF-8
-// and the /chat service rejects the whole replay (422) before the model runs.
-test('get_document truncation never splits a surrogate pair', async () => {
-  // 19,999 ASCII + one emoji (2 UTF-16 units): the 20,000-unit cut lands between
-  // the surrogate halves.
-  const body = 'a'.repeat(19999) + '😀';
+// A byte cap landing mid-emoji must not leave a lone surrogate: that is invalid
+// UTF-8 and the /chat service rejects the whole replay (422) before the model runs.
+test('get_document byte truncation never splits a character', async () => {
+  // 13,000 emoji = 52,000 bytes (4 each) > 48 KiB; the cut must land on a boundary.
   const { get } = tools({
     async getDoc(id) {
-      return { id, title: 'T', content: body };
+      return { id, title: 'T', content: '😀'.repeat(13000) };
     },
   });
-  const out = await get.run({ doc_id: 'big' }, { context: { onBehalfOf: 'person-1' } });
+  const out = await get.run({ doc_id: 'emoji' }, { context: { onBehalfOf: 'person-1' } });
   assert.equal(out.content.truncated, true);
-  assert.ok(out.content.content.length <= 20000);
+  assert.ok(u8(out.content.content) <= MAX_DOC_CONTENT_BYTES);
   assert.equal(out.content.content.isWellFormed(), true);
-  // The dangling high surrogate is dropped rather than kept half.
-  assert.equal(out.content.content, 'a'.repeat(19999));
 });
 
 test('search snippet truncation never splits a surrogate pair', async () => {
@@ -177,4 +213,18 @@ test('query normalization never splits a surrogate pair at the cap', async () =>
   await search.run({ query: 'a'.repeat(1999) + '😀' }, { context: { onBehalfOf: 'p' } });
   assert.ok(seen.query.length <= 2000);
   assert.equal(seen.query.isWellFormed(), true);
+});
+
+test('search bounds service-controlled title and url in the model content', async () => {
+  const { search } = tools({
+    async searchDocs() {
+      return [
+        { doc_id: 'd1', title: 'T'.repeat(5000), url: 'u'.repeat(5000), text: 'x', chunk: {} },
+      ];
+    },
+  });
+  const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
+  const hit = out.content.results[0];
+  assert.ok(hit.title.length <= 300);
+  assert.ok(hit.url.length <= 2048);
 });

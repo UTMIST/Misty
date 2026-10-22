@@ -23,14 +23,18 @@ export const llmSafe = true;
 
 const MAX_QUERY_LEN = 2000; // service caps query at 2000 code points
 const MAX_RESULTS = 10; // service default k
-const SNIPPET_LEN = 400;
-// Cap a fetched document body before it rides back in a tool_result (and into
-// the revalidation fingerprint). The service rejects any tool payload over 1 MiB
-// (MAX_TOOL_PAYLOAD_BYTES), which would fail the *next* /chat request wholesale,
-// not just the one tool call; bound well under that and flag truncation so the
-// model knows it is not seeing the whole document. Generous vs. SNIPPET_LEN,
-// since get_document exists to read past a snippet.
-const MAX_DOC_CONTENT_LEN = 20000;
+const SNIPPET_LEN = 400; // UTF-16 units; a display snippet, not the real limiter
+// Byte budget for a fetched document body before it rides back in a tool_result
+// (and into the revalidation fingerprint). The real governing limit is the
+// service's per-block MAX_JSON_BYTES (65_536): a ToolResultBlock whose content
+// strings sum past that is rejected, failing the *next* /chat request wholesale.
+// So bound the body in UTF-8 *bytes* (not UTF-16 units), well under 64 KiB, to
+// leave room for the title, keys, and JSON overhead in the same block.
+const MAX_DOC_CONTENT_BYTES = 49152; // 48 KiB
+const MAX_TITLE_LEN = 300; // units; a label, bounded so a fat title can't blow the block
+const MAX_URL_LEN = 2048; // units; real links fit, pathological ones can't bloat a hit
+
+const utf8Len = (value) => Buffer.byteLength(value, 'utf8');
 
 // Truncate to at most `max` UTF-16 code units without splitting a surrogate
 // pair. A naive slice can cut an astral character (e.g. an emoji) in half,
@@ -42,6 +46,29 @@ function truncateUnits(value, max) {
   const last = value.charCodeAt(max - 1);
   const end = last >= 0xd800 && last <= 0xdbff ? max - 1 : max;
   return value.slice(0, end);
+}
+
+// Truncate to at most `maxBytes` of UTF-8 without splitting a character. Iterate
+// by code point (never between surrogate halves) and stop before the budget is
+// exceeded, so the result is always well-formed and within the byte limit.
+function truncateUtf8(value, maxBytes) {
+  if (utf8Len(value) <= maxBytes) return value;
+  let bytes = 0;
+  let end = 0;
+  for (const ch of value) {
+    const next = bytes + utf8Len(ch);
+    if (next > maxBytes) break;
+    bytes = next;
+    end += ch.length; // 1 for BMP, 2 for an astral pair
+  }
+  return value.slice(0, end);
+}
+
+// Bound an optional service-provided string field (title/url) in units, leaving
+// null/absent as-is. These ride in the model-visible content, so a pathological
+// value must not let one hit overflow the block.
+function boundField(value, max) {
+  return typeof value === 'string' ? truncateUnits(value, max) : (value ?? null);
 }
 
 function normalizeString(value, max) {
@@ -56,15 +83,17 @@ function normalizeString(value, max) {
 function projectHit(hit) {
   const docId = hit?.doc_id ?? null;
   const text = typeof hit?.text === 'string' ? hit.text : '';
+  const title = boundField(hit?.title, MAX_TITLE_LEN);
+  const url = boundField(hit?.url, MAX_URL_LEN);
   return {
     doc_id: docId,
-    title: hit?.title ?? null,
-    url: hit?.url ?? null,
+    title,
+    url,
     snippet: text ? truncateUnits(text, SNIPPET_LEN) : undefined,
     citation: {
       doc_id: docId,
-      title: hit?.title ?? null,
-      url: hit?.url ?? null,
+      title,
+      url,
       chunk: hit?.chunk,
     },
   };
@@ -78,13 +107,13 @@ function retrievalArgs(context) {
 }
 
 function projectDoc(doc, docId) {
-  const body = typeof doc.content === 'string' ? doc.content : (doc.content_snapshot ?? null);
-  const truncated = typeof body === 'string' && body.length > MAX_DOC_CONTENT_LEN;
+  const full = typeof doc.content === 'string' ? doc.content : (doc.content_snapshot ?? null);
+  const truncated = typeof full === 'string' && utf8Len(full) > MAX_DOC_CONTENT_BYTES;
   return {
     found: true,
     doc_id: doc.id ?? docId,
-    title: doc.title ?? null,
-    content: truncated ? truncateUnits(body, MAX_DOC_CONTENT_LEN) : body,
+    title: boundField(doc.title, MAX_TITLE_LEN),
+    content: truncated ? truncateUtf8(full, MAX_DOC_CONTENT_BYTES) : full,
     // Tell the model the body was cut so it does not treat a partial read as the
     // whole document. Part of the fingerprint too, so revalidation stays exact.
     ...(truncated ? { truncated: true } : {}),
