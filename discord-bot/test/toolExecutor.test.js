@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createToolExecutor, OUTCOME } from '../src/toolExecutor.js';
 import { buildToolRegistry } from '../src/toolRegistry.js';
+import { createHelperActions } from '../src/helperActions.js';
 
 // A scripted llmClient: each call shifts the next response off `script`.
 function scriptedLlm(script) {
@@ -32,6 +33,51 @@ const base = {
   system: 's',
   context: { onBehalfOf: 'p' },
 };
+
+for (const failure of ['revocation', 'read budget']) {
+  test(`presentation deadline preserves earlier document checks and ${failure}`, async (t) => {
+    const epoch = Date.now();
+    let clock = 0,
+      reads = 0,
+      allowed = true;
+    t.mock.method(Date, 'now', () => epoch + clock);
+    t.mock.method(performance, 'now', () => clock);
+    const action = { userId: 'u', check: async () => {} };
+    const registry = registryWith(async (_input, { readDocument }) => {
+      await readDocument('doc', async () => {
+        reads++;
+      });
+      return {
+        revalidate: async (read) =>
+          read('doc', async () => {
+            reads++;
+            return allowed;
+          }),
+      };
+    });
+    registry.handlers.set('command', async () => ({ action }));
+    const executor = createToolExecutor({
+      registry,
+      maxDocumentRequests: 4,
+      llmClient: scriptedLlm([
+        { stop_reason: 'tool_use', content_blocks: [toolUse('a', 'search_documents', {})] },
+        { stop_reason: 'tool_use', content_blocks: [toolUse('b', 'command', {})] },
+      ]),
+    });
+    const result = await executor.run(base);
+    assert.equal(result.outcome, 'action');
+    assert.equal(reads, 3);
+    const pending = createHelperActions();
+    const token = pending.add(action);
+    clock = 70000;
+    pending.presented(token, 'u');
+    clock = 150000; // past the generation deadline, inside the confirmation window
+    if (failure === 'revocation') allowed = false;
+    else await action.check();
+    await assert.rejects(action.check(), /expired|access/);
+    assert.equal(reads, 4); // no refunded/restarted document request budget
+  });
+}
 
 test('a command action ends the turn without sending its private result back to the model', async () => {
   const action = { userId: 'u1', execute: async () => ({ content: 'private email' }) };

@@ -87,9 +87,10 @@ export function createToolExecutor({
       let toolCalls = 0;
       let documentRequests = 0;
       let exhausted = false;
-      const deadline = performance.now() + maxDurationMs;
+      let deadline = performance.now() + maxDurationMs;
       const isExhausted = () => exhausted || performance.now() >= deadline;
-      // The same deadline survives generation and all Discord send checks.
+      // Text answers keep the generation deadline through delivery. A terminal
+      // command action adopts the pending UI deadline below, keeping read limits.
       // Abort the client request and stop waiting even if a fake/adapter ignores
       // cancellation. An already accepted backend operation may still finish.
       const withDeadline = async (operation) => {
@@ -246,6 +247,13 @@ export function createToolExecutor({
               // has executed yet. Keep any retrieved evidence authorized while
               // a user reviews the proposal, too.
               const check = out.action.check;
+              const setExpiresAt = out.action.setExpiresAt;
+              out.action.setExpiresAt = (expiresAt) => {
+                // A terminal action gets the pending UI's deadline. Generation
+                // is over; retain evidence, spent read capacity and failures.
+                deadline = performance.now() + Math.max(0, expiresAt - Date.now());
+                setExpiresAt?.(expiresAt);
+              };
               if (check)
                 out.action.check = async () => {
                   if (!(await canPublish()))

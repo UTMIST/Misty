@@ -5,6 +5,7 @@ import { wireDiscordClient } from '../src/adapters/discord/index.js';
 import { commands } from '../src/commands/index.js';
 import { sendHelperReply } from '../src/adapters/discord/mentions.js';
 import * as mentions from '../src/adapters/discord/mentions.js';
+import { createTeamService } from '../src/services/teamService.js';
 
 function fixture() {
   const ctx = createAppContext({ helperToolsEnabled: true });
@@ -75,6 +76,275 @@ function button(customId, userId = 'owner') {
       replies.push(p);
     },
   };
+}
+
+function buttonId(messages, label) {
+  return messages
+    .flatMap((p) => p.components ?? [])
+    .flatMap((r) => r.components)
+    .find((b) => b.label === label)?.custom_id;
+}
+
+// Keep the executor, registry, authorization, router and delivery real. Only
+// external model/directory/meeting/Discord boundaries are replaced.
+async function commandAction(f, name, input = {}, generate = () => {}) {
+  const person = { id: 'p1', display_name: 'Alex', active: true, access_level: 'admin' };
+  let calls = 0;
+  f.ctx.directory = {
+    getPersonByDiscordId: async () => person,
+    getTeamBySlug: async () => ({ id: 't1', slug: 'infra' }),
+    updateTeam: async (_id, patch) => {
+      calls++;
+      return { id: 't1', ...patch };
+    },
+  };
+  f.ctx.teamService = createTeamService({ directory: f.ctx.directory });
+  f.ctx.llmClient.chat = async () => {
+    generate();
+    return {
+      stop_reason: 'tool_use',
+      content_blocks: [{ type: 'tool_use', id: 't', name, input }],
+    };
+  };
+  const result = await f.ctx.toolExecutor.run({
+    messages: [{ role: 'user', content: 'Please help' }],
+    principal: { person },
+    context: { onBehalfOf: person.id },
+    request: {
+      discordUserId: 'owner',
+      runMeeting: async ({ commandName, options }) => {
+        assert.equal(commandName, 'qna');
+        assert.deepEqual(options, { question: 'When?' });
+        calls++;
+        return { content: 'Private meeting answer' };
+      },
+    },
+  });
+  assert.equal(result.outcome, 'action');
+  f.action = result.action;
+  return { calls: () => calls, person };
+}
+
+test('closed DM sends defer Q&A until the private button and execute it only once', async () => {
+  const f = fixture();
+  const qna = await commandAction(f, 'qna', { question: 'When?' });
+  f.message.author.createDM = async () => ({
+    send: async () => {
+      throw Object.assign(new Error('Cannot send messages to this user'), { code: 50007 });
+    },
+  });
+  await sendHelperReply(f.send, { action: f.action }, { message: f.message, appContext: f.ctx });
+  const before = qna.calls();
+  const id = buttonId(f.publicMessages, 'View privately');
+  assert.ok(id);
+  const i = button(id);
+  await Promise.all([f.handlers.interactionCreate(i), f.handlers.interactionCreate(button(id))]);
+  assert.deepEqual({ before, after: qna.calls() }, { before: 0, after: 1 });
+  assert.match(JSON.stringify(i.replies), /Private meeting answer/);
+  assert.doesNotMatch(JSON.stringify(f.publicMessages), /Private meeting answer/);
+});
+
+test('a result delivery failure after execution never offers a retry button', async () => {
+  const f = fixture();
+  f.action.confirm = false;
+  f.message.author.createDM = async () => ({
+    send: async (payload) => {
+      if (payload.content === 'Private result') throw new Error('Delivery failed after execution');
+    },
+  });
+  await sendHelperReply(f.send, { action: f.action }, { message: f.message, appContext: f.ctx });
+  assert.equal(f.executed(), 1);
+  assert.equal(buttonId(f.publicMessages, 'View privately'), undefined);
+  assert.match(JSON.stringify(f.publicMessages), /not retried|not run again/i);
+  assert.doesNotMatch(JSON.stringify(f.publicMessages), /Private result/);
+});
+
+test('a partial DM result failure cannot rerun Q&A through fallback', async () => {
+  const f = fixture();
+  const qna = await commandAction(f, 'qna', { question: 'When?' });
+  const execute = f.action.execute;
+  f.action.execute = async () => {
+    await execute();
+    return { content: 'Private meeting answer\n'.repeat(150) };
+  };
+  let resultParts = 0;
+  f.message.author.createDM = async () => ({
+    send: async (p) => {
+      if (p.content.includes('Private meeting answer') && ++resultParts === 2) {
+        throw new Error('Second part failed');
+      }
+      f.privateMessages.push(p);
+    },
+  });
+  await sendHelperReply(f.send, { action: f.action }, { message: f.message, appContext: f.ctx });
+  assert.equal(qna.calls(), 1);
+  assert.equal(resultParts, 2);
+  assert.equal(buttonId(f.publicMessages, 'View privately'), undefined);
+  assert.doesNotMatch(JSON.stringify(f.publicMessages), /Private meeting answer/);
+});
+
+test('a failed execution is consumed and never offered again', async () => {
+  const f = fixture();
+  f.action.confirm = false;
+  let attempts = 0;
+  f.action.execute = async () => {
+    attempts++;
+    throw new Error('Backend failure');
+  };
+  await sendHelperReply(f.send, { action: f.action }, { message: f.message, appContext: f.ctx });
+  assert.equal(attempts, 1);
+  assert.equal(buttonId(f.publicMessages, 'View privately'), undefined);
+  assert.match(JSON.stringify(f.publicMessages), /not retried/i);
+  // The failed action must not occupy a pending slot.
+  for (let i = 0; i < 8; i++) f.ctx.helperActions.add({ ...f.action });
+});
+
+test('concurrent presentations reserve the final pending slot before awaiting delivery', async () => {
+  const f = fixture();
+  f.action.confirm = false;
+  for (let i = 0; i < 7; i++) f.ctx.helperActions.add({ ...f.action });
+  let release;
+  const blocked = new Promise((resolve) => {
+    release = resolve;
+  });
+  f.message.author.createDM = async () => {
+    await blocked;
+    throw new Error('Closed DMs');
+  };
+  const first = sendHelperReply(
+    f.send,
+    { action: { ...f.action } },
+    { message: f.message, appContext: f.ctx },
+  );
+  await sendHelperReply(
+    f.send,
+    { action: { ...f.action } },
+    { message: f.message, appContext: f.ctx },
+  );
+  assert.match(JSON.stringify(f.publicMessages), /too many pending/i);
+  release();
+  await first;
+  assert.equal(f.executed(), 0);
+  assert.ok(buttonId(f.publicMessages, 'View privately'));
+});
+
+test('closed-DM confirmation gets one full window after private review; reviewing again cannot extend it', async (t) => {
+  const f = fixture();
+  const epoch = Date.now();
+  let clock = 0;
+  t.mock.method(Date, 'now', () => epoch + clock);
+  t.mock.method(performance, 'now', () => clock);
+  const write = await commandAction(f, 'team_rename', { slug: 'infra', new_label: 'New label' });
+  f.message.author.createDM = async () => ({
+    send: async () => {
+      throw new Error('Closed DMs');
+    },
+  });
+  await sendHelperReply(f.send, { action: f.action }, { message: f.message, appContext: f.ctx });
+  const reviewId = buttonId(f.publicMessages, 'View privately');
+  clock = 110000;
+  const i = button(reviewId);
+  await f.handlers.interactionCreate(i);
+  const confirmId = buttonId(i.replies, 'Confirm');
+  assert.ok(confirmId);
+  assert.equal(write.calls(), 0);
+  clock = 220000;
+  await f.handlers.interactionCreate(button(reviewId));
+  assert.equal(write.calls(), 0);
+  clock = 230000;
+  const expired = button(confirmId);
+  await f.handlers.interactionCreate(expired);
+  assert.equal(write.calls(), 0);
+  assert.match(JSON.stringify(expired.replies), /expired/);
+});
+
+test('a fresh confirmation window still rejects a revoked directory permission', async (t) => {
+  const f = fixture();
+  let clock = 0;
+  const epoch = Date.now();
+  t.mock.method(Date, 'now', () => epoch + clock);
+  t.mock.method(performance, 'now', () => clock);
+  const write = await commandAction(
+    f,
+    'team_rename',
+    { slug: 'infra', new_label: 'New label' },
+    () => {
+      clock = 70000;
+    },
+  );
+  await sendHelperReply(f.send, { action: f.action }, { message: f.message, appContext: f.ctx });
+  clock = 150000;
+  write.person.access_level = 'member';
+  const i = button(buttonId(f.privateMessages, 'Confirm'));
+  await f.handlers.interactionCreate(i);
+  assert.equal(write.calls(), 0);
+  assert.match(JSON.stringify(i.replies), /permissions/);
+});
+
+for (const limit of ['requester', 'global']) {
+  test(`the ${limit} pending cap rejects before checks, DM delivery or execution with a capacity message`, async () => {
+    const f = fixture();
+    f.action.confirm = false;
+    for (let i = 0; i < (limit === 'requester' ? 8 : 500); i++) {
+      f.ctx.helperActions.add({
+        ...f.action,
+        userId: limit === 'requester' ? 'owner' : `user-${i}`,
+      });
+    }
+    let checks = 0,
+      deliveries = 0;
+    f.action.check = async () => {
+      checks++;
+    };
+    f.message.author.createDM = async () => ({
+      send: async () => {
+        deliveries++;
+        throw new Error('Closed DMs');
+      },
+    });
+    await sendHelperReply(f.send, { action: f.action }, { message: f.message, appContext: f.ctx });
+    assert.deepEqual(
+      { checks, deliveries, executions: f.executed() },
+      { checks: 0, deliveries: 0, executions: 0 },
+    );
+    assert.match(JSON.stringify(f.publicMessages), /too many pending|capacity/i);
+    assert.doesNotMatch(JSON.stringify(f.publicMessages), /permissions|expired/i);
+  });
+}
+
+for (const clickAfter of [119999, 120000]) {
+  test(`confirmation uses the presentation clock after slow generation and preview (click +${clickAfter}ms)`, async (t) => {
+    const f = fixture();
+    const epoch = Date.now();
+    let clock = 0;
+    t.mock.method(Date, 'now', () => epoch + clock);
+    t.mock.method(performance, 'now', () => clock);
+    const write = await commandAction(
+      f,
+      'team_rename',
+      { slug: 'infra', new_label: 'New label' },
+      () => {
+        clock = 70000;
+      },
+    );
+    f.message.author.createDM = async () => ({
+      send: async (p) => {
+        clock += 10000;
+        f.privateMessages.push(p);
+      },
+    });
+    await sendHelperReply(f.send, { action: f.action }, { message: f.message, appContext: f.ctx });
+    assert.equal(write.calls(), 0);
+    const id = buttonId(f.privateMessages, 'Confirm');
+    assert.ok(id);
+    clock += clickAfter;
+    const i = button(id);
+    await f.handlers.interactionCreate(i);
+    assert.equal(write.calls(), clickAfter < 120000 ? 1 : 0);
+    if (clickAfter === 120000) assert.match(JSON.stringify(i.replies), /expired/);
+    await f.handlers.interactionCreate(button(id));
+    assert.equal(write.calls(), clickAfter < 120000 ? 1 : 0);
+  });
 }
 
 test('write proposals send private details and do not execute until the requester confirms once', async () => {

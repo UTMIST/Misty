@@ -111,6 +111,7 @@ export function createCommandTools({ appContext }) {
         if (!request?.discordUserId || !principal?.person?.id) {
           return { is_error: true, content: { error: 'Authenticated requester is required.' } };
         }
+        let expiresAt = Date.now() + 120000;
         const intent = Object.freeze({
           surface: 'discord',
           commandName,
@@ -123,7 +124,9 @@ export function createCommandTools({ appContext }) {
           channelUsedParent: Boolean(request.channelUsedParent),
           requireLinked: true,
           expectedPersonId: principal.person.id,
-          expiresAt: Date.now() + 120000,
+          get expiresAt() {
+            return expiresAt;
+          },
         });
         const check = async () => {
           if (!appContext.helperToolsEnabled) throw new Error('Helper tools are disabled.');
@@ -172,6 +175,9 @@ export function createCommandTools({ appContext }) {
               .join('\n')
               .replaceAll('`', '\\u0060'),
             check,
+            setExpiresAt(value) {
+              expiresAt = value;
+            },
             async execute() {
               await check();
               if (commandName === 'record' || commandName === 'qna') {

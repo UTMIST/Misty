@@ -451,12 +451,19 @@ Account linking and email verification remain explicit slash-command flows.
 
 Command results go directly to the requester privately and do not enter model
 history. Misty sends a DM, or offers a **View privately** button if DMs are closed.
+Reads and meeting Q&A start only after a private DM send succeeds or the requester
+opens that button. A later result-delivery failure never reruns the action.
 Every write, including recording start/stop, first shows its arguments and
 destination in a private preview with **Confirm** and **Cancel**. Only the
-requester can confirm. Pending actions expire within two minutes, are single-use,
-and disappear on restart. There can be at most eight pending actions per user
-and 500 per process. A failed write is never retried automatically; inspect the
-current state before asking again if the result could not be delivered.
+requester can confirm. The confirmation window lasts two minutes from the first
+successful private preview; generation time does not shorten it, and reopening
+the preview does not extend it. Access changes or exhausted evidence checks can
+still block an action. Unopened actions expire after two minutes. Actions are
+single-use and disappear on restart. There can be at most eight pending actions
+per user and 500 per process. Capacity is reserved before delivery or execution;
+a full queue asks you to cancel an action or wait. A failed action is never retried
+automatically; inspect the current state before asking again if its result could
+not be delivered.
 
 Channel-access commands in a thread target its parent. Meeting questions use
 the exact channel or thread where recording was started. Recording starts in
