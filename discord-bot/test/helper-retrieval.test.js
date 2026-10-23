@@ -238,7 +238,7 @@ test('source rendering deduplicates links and rejects unsafe URL schemes', () =>
     { doc_id: 'credentials', title: 'private', url: 'https://user:password@example.test/doc' },
     { doc_id: 'invalid', title: 'invalid', url: 'not a URL' },
   ]);
-  assert.equal(rendered, `Answer\n\nSources:\n• [Test document](${hit.url})`);
+  assert.equal(rendered, `Answer\n\nSources:\n• [Test document](<${hit.url}>)`);
   assert.equal(renderHelperAnswer('Answer', [{ url: 'javascript:alert(1)' }]), 'Answer');
 });
 
@@ -246,14 +246,14 @@ test('source titles cannot escape masked links or trigger mentions', () => {
   const title = '](https://evil.test)\n@everyone \\`*_{}<>#|~';
   const rendered = renderHelperAnswer('Answer', [{ ...hit, title }]);
   const escaped = '\\]\\(https://evil.test\\) @\u200beveryone \\\\\\`\\*\\_\\{\\}\\<\\>\\#\\|\\~';
-  assert.equal(rendered, `Answer\n\nSources:\n• [${escaped}](${hit.url})`);
+  assert.equal(rendered, `Answer\n\nSources:\n• [${escaped}](<${hit.url}>)`);
 });
 
 test('source hrefs encode masked-link delimiters and whitespace', () => {
   const url = 'https://example.test/a(b) c<d>?q=hello world)#fragment)';
   assert.equal(
     renderHelperAnswer('Answer', [{ ...hit, url }]),
-    'Answer\n\nSources:\n• [Test document](https://example.test/a%28b%29%20c%3Cd%3E?q=hello%20world%29#fragment%29)',
+    'Answer\n\nSources:\n• [Test document](<https://example.test/a%28b%29%20c%3Cd%3E?q=hello%20world%29#fragment%29>)',
   );
 });
 
@@ -261,7 +261,7 @@ test('untitled sources still have a clickable label', () => {
   for (const title of [undefined, null, '', ' \n\t ']) {
     assert.equal(
       renderHelperAnswer('Answer', [{ ...hit, title }]),
-      `Answer\n\nSources:\n• [Document](${hit.url})`,
+      `Answer\n\nSources:\n• [Document](<${hit.url}>)`,
     );
   }
 });

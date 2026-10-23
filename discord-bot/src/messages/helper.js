@@ -22,7 +22,8 @@ export function renderHelperAnswer(content, citations = []) {
       .replaceAll('(', '%28')
       .replaceAll(')', '%29')
       .replace(/[<>\s]/gu, encodeURIComponent);
-    sources.push(`• [${title}](${href})`);
+    // Angle brackets suppress previews while retaining the titled link.
+    sources.push(`• [${title}](<${href}>)`);
   }
   return sources.length ? `${content}\n\nSources:\n${sources.join('\n')}` : content;
 }

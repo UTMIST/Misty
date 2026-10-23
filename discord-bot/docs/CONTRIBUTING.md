@@ -215,9 +215,11 @@ answers. The rules the loop enforces:
   replayed, retried automatically, or used to execute tool calls.
 - **Sources are rendered by the bot.** Available HTTP(S) links are appended and
   deduplicated independently of whether the model includes citations. Each source
-  uses a masked link, `• [Title](url)`, with `Document` for an empty title. Keep the
-  title's Markdown/mention escaping, URL delimiter/whitespace encoding, and rejection
-  of credential-bearing or non-HTTP(S) URLs in `messages/helper.js`.
+  uses a masked link, `• [Title](<url>)`, with `Document` for an empty title. Keep the
+  angle brackets to suppress previews and the title's Markdown/mention escaping,
+  URL delimiter/whitespace encoding, and rejection of credential-bearing or non-HTTP(S)
+  URLs in `messages/helper.js`. Discord chunking keeps each source line intact when
+  it fits within the message limit.
 - **Opaque replay within a turn.** Assistant `content_blocks` are replayed
   verbatim only within the current authorized loop, preserving provider state.
 - **Retrieved content is untrusted.** Snippets and document bodies come back as

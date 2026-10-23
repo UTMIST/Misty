@@ -11,6 +11,33 @@ import {
 import { safeReply } from '../src/adapters/discord/interactions.js';
 import { makeChannelNotifier } from '../src/adapters/discord/meetingPosts.js';
 import { handleRecordInteraction } from '../src/adapters/discord/recording.js';
+import { renderHelperAnswer } from '../src/messages/helper.js';
+
+test('long helper answers keep titled source links intact across message boundaries', () => {
+  const citations = Array.from({ length: 30 }, (_, i) => ({
+    doc_id: `doc-${i}`,
+    title: `Section ${i}. A title with spaces and punctuation. ${'Details '.repeat(15)}`,
+    url: `https://docs.google.com/document/d/file-${i}/edit`,
+  }));
+  for (const length of [0, 1700, 1900, 1970, 1990, 2000, 4100]) {
+    const rendered = renderHelperAnswer('x'.repeat(length), citations);
+    const chunks = chunkForDiscord(rendered);
+    assert.ok(chunks.every((part) => part.length <= 2000));
+    for (const line of rendered.split('\n').filter((line) => line.startsWith('• '))) {
+      assert.equal(chunks.filter((part) => part.includes(line)).length, 1);
+    }
+  }
+});
+
+test('a source exactly at the limit stays intact and oversized sources still terminate', () => {
+  const prefix = '• [Title with spaces. More](<https://example.test/';
+  const line = prefix + 'a'.repeat(2000 - prefix.length - 2) + '>)';
+  assert.deepEqual(chunkForDiscord(line + '\nMore text'), [line, '\nMore text']);
+  const oversized = prefix + 'a'.repeat(4000) + '>)';
+  const chunks = chunkForDiscord(oversized);
+  assert.ok(chunks.every((part) => part.length <= 2000));
+  assert.equal(chunks.join(''), oversized);
+});
 
 test('text at the limit stays intact; long lines and emoji split without data loss', () => {
   for (const text of [
