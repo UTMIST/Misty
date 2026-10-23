@@ -2,7 +2,7 @@
 
 Base URL (local): `http://localhost:8002` · Swagger UI: `/docs` · Schema: `/openapi.json`
 
-Three endpoints. Everything except `/health` requires `X-API-Key`.
+`POST /chat` and `POST /embed` require `X-API-Key`. `/health` and the API documentation/schema routes (`/docs`, `/redoc`, `/openapi.json`) are unauthenticated within the service's network exposure.
 
 | Method | Path | Scope | Description |
 |---|---|---|---|
@@ -26,14 +26,6 @@ There is **no `X-Actor` header** and no `dev:spoof` scope. This is a service-to-
 |---|---|
 | Missing or unparseable `X-API-Key` | 401 |
 | Valid key lacking the endpoint's scope (`chat` / `embed`) | 403 — rejected **before** the provider is called, so no tokens are billed |
-
-## Validation errors
-
-Request field and JSON syntax errors return **422** with a `detail` list. Each item
-contains `loc`, `msg`, and `type`; rejected `input` values and error context are omitted.
-Unknown discriminator values are not echoed, and forbidden extra-field locations
-identify the parent object rather than the caller-supplied field name.
-Text sent upstream must be valid UTF-8; invalid text is rejected before a provider call.
 
 ## Validation errors
 

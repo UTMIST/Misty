@@ -2,7 +2,9 @@
 
 Task walkthroughs for working on `discord-bot`. Assumes you've read the [README](../README.md), which covers the architecture, env vars, and the complete cold-start sequence. This doc is the *how do I change it* companion.
 
-The bot is the platform's only consumer-facing surface. It's Node 20+ with `discord.js`, no build step, and no framework beyond that.
+The bot uses Node.js with `discord.js` and no build step. See the
+[runtime prerequisite and current Node 20 mismatch](../README.md#setup) before
+installing dependencies.
 
 ## Conventions you need to know first
 
@@ -89,7 +91,7 @@ Other modes: `npm run dev:web:plain` (web only, no scratch stack), `npm run dev:
 
 2. **Register it** in `src/commands/index.js` — one import, one entry in the `commands` map.
 
-3. **Add subcommands** if the command is a group. `auth` and `ephemeral` inherit from the parent when unset (`sub.auth ?? auth ?? 'linked'`). **`options` does not inherit** — `defineCommand` reads `sub.options` alone, so an omitted subcommand `options` silently becomes `[]` rather than picking up the parent's. Declare options on every subcommand that needs them. `/team` and `/doc` are the models — reads public, writes admin-gated.
+3. **Add subcommands** if the command is a group. `auth` and `ephemeral` inherit from the parent when unset (`sub.auth ?? auth ?? 'linked'`). **`options` does not inherit** — `defineCommand` reads `sub.options` alone, so an omitted subcommand `options` silently becomes `[]` rather than picking up the parent's. Declare options on every subcommand that needs them. `/team` and `/doc` are the models: reads require a linked account, team writes require admin, and `/doc add` requires a linked account while `/doc remove` requires admin. Authorization is separate from public or ephemeral reply visibility.
 
 4. **Write tests** in `test/commands.test.js` (or a new file) using `node --test`. Test the handler directly with a fake context — that's the payoff of surface-neutral commands. Cover the auth policy too: a `linked` command called with no principal must be denied by the router.
 

@@ -110,9 +110,11 @@ Sources with `content_fetch_enabled=false` (`youtube`) can never have content, s
 
 For recurring Google content and access refreshes, run `doc-source-refresh` hourly
 from an external scheduler. It drains the existing refresh endpoint in bounded
-batches, checks `docs:write` before starting, and exits nonzero on document/index
-failures or an incomplete run. It discovers no new documents. See the
-[refresh schedule](docs/DEPLOYMENT.md#source-access-refresh-schedule) for limits,
+batches and checks its key before starting. The checked-in staging command adds
+`--meeting-records` and requires both `docs:write` and `meetings:write`; a manual
+docs-only run omits that flag and needs `docs:write`. It exits nonzero on refresh,
+index, or enabled meeting-phase failures, or an incomplete run. It discovers no new
+documents. See the [refresh schedule](docs/DEPLOYMENT.md#source-access-refresh-schedule) for limits,
 exit codes, and the separate Railway cron config. Migration `011` adds the shared
 runner guard: overlapping runners fail before sending a start heartbeat. A crashed
 or incomplete run requires the documented operator recovery before another run.
@@ -120,7 +122,7 @@ or incomplete run requires the documented operator recovery before another run.
 | CLI environment variable | Default | Purpose |
 |---|---|---|
 | `DOCS_BASE_URL` | `http://localhost:8001` | Target documentation-system API for both HTTP CLIs |
-| `DOCS_API_KEY` | required | Caller credential; refresh needs only `docs:write`, backfill needs the scopes above |
+| `DOCS_API_KEY` | required | Caller credential; staging refresh needs `docs:write meetings:write`, manual docs-only refresh needs `docs:write`, backfill needs the scopes above |
 | `SOURCE_REFRESH_MONITOR_URL` | unset | Secret Healthchecks-compatible HTTPS ping URL for refresh start/success/failure; required by the staging cron |
 
 These CLI variables are read from the process environment; the CLIs do not load `.env`.
@@ -236,7 +238,7 @@ documentation-system/
 The service is built around three swappable Protocols, so no concrete dependency (a specific database, a specific fetch strategy, a specific directory service) leaks into the ingest/API layers:
 
 - **`StorageAdapter`** (`contracts/storage.py`) — persistence for docs, sources, and API keys. Two implementations: `InMemoryStorageAdapter` (tests) and `PostgresStorageAdapter` (production). Swapping to Postgres in Task 15 required zero changes to `src/ingest.py` or the routers.
-- **`Fetcher`** (`contracts/fetcher.py`) — `fetch(url) -> FetchResult`. `FetcherRegistry` maps a `source_id` to a concrete fetcher (`web.py` in-process; `connectors.py` for `github` and the Google sources); unknown or auth-required sources simply skip fetching. The web fetcher applies SSRF egress protection (http/https scheme allowlist, public-address validation that blocks private/reserved/link-local/CGN/metadata IPs, per-hop redirect revalidation, pinned connections) and rejects a blocked or malformed URL as a `BlockedURLError` (a `FetchError` subclass). Fetch failures raise `FetchError`, which `ingest_doc` catches and turns into a warning — a doc is still created with the URL as its title.
+- **`Fetcher`** (`contracts/fetcher.py`) — `fetch(url) -> FetchResult`. `FetcherRegistry` maps a `source_id` to a concrete fetcher (`web.py` in-process; `connectors.py` for `github` and the Google sources). Fetch-disabled sources skip fetching; `requires_auth` alone does not disable it. Enabled sources without a registered fetcher produce a warning. The web fetcher applies SSRF egress protection (http/https scheme allowlist, public-address validation that blocks private/reserved/link-local/CGN/metadata IPs, per-hop redirect revalidation, pinned connections) and rejects a blocked or malformed URL as a `BlockedURLError` (a `FetchError` subclass). Fetch failures raise `FetchError`, which `ingest_doc` catches and turns into a warning — a doc is still created with the URL as its title.
 - **`DirectoryClient`** (`contracts/directory.py`) — resolves owner labels, verified email identities, active memberships, and only membership-synced Google Group mappings. Owner-label outages degrade; an outage during ACL reconciliation aborts the whole reconciliation so a partial result can never revoke or broaden access.
 
 ## Auth model
@@ -246,9 +248,9 @@ grant; see the [visibility policy](docs/API.md#visibility-and-x-on-behalf-of).
 
 Auth is **Level 2** (scoped API keys), matching team-tracking:
 
-- Every request needs `X-API-Key`. Keys are either the shared bootstrap env key (`API_KEY`, scope: `admin`) or a per-consumer key issued via the `doc-keys` CLI, stored as an Argon2 hash with a `docs:{read,write}` or `admin` scope set.
+- Resource endpoints require `X-API-Key`; health, schema and interactive API documentation routes are public. Keys are either the shared bootstrap env key (`API_KEY`, scope: `admin`) or a per-consumer key issued via the `doc-keys` CLI, stored as an Argon2 hash with the consumer's scope set.
 - There is **no `X-Actor` header** — the actor stamped on `created_by`/`updated_by`/audit log entries is always the authenticated key's own name (`AuthedKey.name`). A caller cannot claim to be someone else; this is the "attested actor" model.
-- `require_scope("docs:read")` / `require_scope("docs:write")` gate each route (`POST /docs/index` needs `docs:index`); `admin` is a wildcard scope that satisfies any check.
+- Endpoint scopes distinguish catalog reads/writes, indexing and meeting operations. `admin` satisfies endpoint scope checks but does not replace literal person/channel assertion scopes; see the [scope reference](docs/API.md#scopes).
 - `AuditLogMiddleware` (imported from `platform_auth` directly, wired in `src/api/app.py`) logs every request with the resolved actor.
 - Manage keys with the CLI:
   ```bash
@@ -259,7 +261,7 @@ Auth is **Level 2** (scoped API keys), matching team-tracking:
 
 ## API at a glance
 
-All endpoints require `X-API-Key` with the appropriate scope.
+The resource endpoints below require `X-API-Key` with the appropriate scope.
 
 | Method | Path | Scope | Description |
 |--------|------|-------|-------------|
@@ -331,10 +333,12 @@ loading and clear cached settings before each test. Collection-time application
 imports can still read `.env` before those fixtures run. Exported environment
 variables take precedence in both cases.
 
-Use a disposable database: the adapter suite truncates catalog tables.
-`RUN_PG_TESTS=1` alone skips the destructive migration regressions.
-`RUN_PG_MIGRATION_TESTS=1` additionally opts into downgrades that drop chunk storage
-and creation/removal of a temporary database and role. Enable both flags only
+Use a disposable database: the adapter suite truncates catalog tables, and
+`RUN_PG_TESTS=1` alone enables older destructive migration tests (including
+`test_migration_004.py` and `test_migration_005.py`).
+`RUN_PG_MIGRATION_TESTS=1` additionally enables later suites with downgrades that
+drop chunk storage and creation/removal of a temporary database and role. The
+second flag is not a safety barrier for retained data. Enable both flags only
 against a disposable cluster with superuser credentials, as CI does.
 
 Lint before committing:

@@ -61,13 +61,16 @@ Endpoints live in `src/api/routers/` (`docs.py`, `sources.py`), grouped by resou
 
 ## Add a new Fetcher
 
-Goal: give a source without a fetcher (e.g. YouTube) a real content snapshot.
+Goal: give a source without a fetcher (e.g. YouTube) full text for retrieval and a preview.
 
 1. **Implement the `Fetcher` Protocol** — a class with
    `def fetch(self, url: str) -> FetchResult`. Put it in `src/fetch/<source>.py`. Return a
-   `FetchResult(title=…, content_snapshot=…)`; raise `FetchError` on any retrieval/parse
-   failure (never return a half-broken result). Use a timeout on network calls — see
-   `WebFetcher` for the httpx pattern.
+   `FetchResult(title=title, content=text, content_snapshot=text[:2000])` when text is
+   extracted. `content` is the full extracted text; the snapshot is only a bounded preview
+   and cannot supply searchable content by itself. Return `None` for both content fields
+   when nothing is extracted; follow the [Fetcher contract](../contracts/fetcher.py).
+   Raise `FetchError` on any retrieval/parse failure (never return a half-broken result).
+   Use a timeout on network calls — see `WebFetcher` for the httpx pattern.
 2. **Register it by `source_id`** in `default_registry()` (`src/fetch/registry.py`):
    ```python
    mapping: dict[str, Fetcher] = {
@@ -85,7 +88,8 @@ Goal: give a source without a fetcher (e.g. YouTube) a real content snapshot.
    it in [`DEPLOYMENT.md`](DEPLOYMENT.md)) and thread it through `default_registry()`.
 5. **Test** in `tests/test_fetchers.py`: parse-a-known-page, and the `FetchError` path.
    Fetchers accept an injected httpx client, so tests pass a fake instead of hitting the
-   network.
+   network. Add an ingest test asserting the full extracted text reaches `doc_content`,
+   not just the response snapshot, so retrieval has text to index.
 
 ---
 
@@ -117,9 +121,11 @@ probably introduced a divergence.
 Schema and seed data changes go through Alembic (`migrations/versions/`). Migrations are
 numbered sequentially (`001`, `002`, …) and chained by `down_revision`.
 
-1. Create `migrations/versions/003_<short_name>.py`. Set `revision = "003"` and
-   `down_revision = "002"` (the current head). Copy the header/imports from an existing
-   migration.
+1. Inspect `migrations/versions/` and run `uv run alembic heads` to find the current
+   head. Choose the next unused sequential revision ID, create
+   `migrations/versions/<revision>_<short_name>.py`, and set `revision` to that ID
+   and `down_revision` to the head you inspected. Copy an existing migration's
+   header/imports, replacing its revision, parent, and date.
 2. Write `upgrade()` and a real `downgrade()` following the
    [migration rollback rules and explicit retirement exceptions](../../../AGENTS.md#migrations). Use
    `op.create_table`, `op.add_column`, `op.bulk_insert`, `op.execute(sa.text(...))`, etc.
@@ -142,7 +148,6 @@ Two modes:
 
 ```bash
 uv run pytest --ignore=tests/test_postgres_adapter.py -q
-# 59 passed
 ```
 
 Uses `InMemoryStorageAdapter` injected via `dependency_overrides`, plus fakes for the
@@ -158,8 +163,9 @@ RUN_PG_TESTS=1 RUN_PG_MIGRATION_TESTS=1 uv run pytest -q
 ```
 
 `tests/test_postgres_adapter.py` runs the same behavioral assertions against a live
-database and is gated behind `RUN_PG_TESTS=1`. The destructive migration regressions
-also require `RUN_PG_MIGRATION_TESTS=1`. Run the full suite before any change that
+database and is gated behind `RUN_PG_TESTS=1`. That flag also enables older
+destructive migration tests; additional migration suites require
+`RUN_PG_MIGRATION_TESTS=1` too. Run the full suite before any change that
 touches `postgres.py`, `schema.py`, or a migration, using a disposable cluster as
 described in the [README testing instructions](../README.md#testing).
 

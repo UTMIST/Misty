@@ -25,7 +25,7 @@ Service-specific deploy notes. The full platform runbook is [`docs/RAILWAY-DEPLO
 | Var | Staging / production | Notes |
 |---|---|---|
 | `MEETING_ENV` | `staging` / `production` | Anything but `local` turns on the boot check |
-| `API_KEY` | a real random string | **Required** by the boot check |
+| `API_KEY` | a real random string | Provision a real bootstrap key; the boot check only rejects the built-in dev default (see below) |
 | `CONSUMER_KEYS` | JSON array | Malformed → boot failure |
 | `AWS_REGION` | e.g. `us-east-1` | **Required.** Region for Transcribe streaming. |
 | `LLM_BASE_URL` | `http://${{llm.RAILWAY_PRIVATE_DOMAIN}}:${{llm.PORT}}` | **Required.** Use the `${{service.VAR}}` reference form — a literal `${PORT}` resolves to *meeting's own* port, not llm's, and fails silently until the first `/stop`. See [RAILWAY-DEPLOYMENT.md](../../../docs/RAILWAY-DEPLOYMENT.md). |
@@ -37,11 +37,18 @@ Service-specific deploy notes. The full platform runbook is [`docs/RAILWAY-DEPLO
 
 AWS credentials come from the standard chain (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`).
 
-**The boot check requires all four of `API_KEY`, `AWS_REGION`, `LLM_BASE_URL`, and `LLM_API_KEY`** outside `local`, and the error names every one that's missing. It does not verify that the credentials work or that `llm` is reachable — those surface on a real recording.
+Outside `local`, the boot check rejects the built-in `API_KEY` default and empty
+`AWS_REGION`, `LLM_BASE_URL`, or `LLM_API_KEY`, listing each failing check. An
+absent `API_KEY` falls back to the rejected dev default, but an explicitly empty
+value currently passes and disables bootstrap authentication. This validation
+gap does not bypass authentication: callers still need a valid key. Provision
+real caller credentials and verify access; startup alone does not prove a usable
+bootstrap or consumer key, working AWS credentials, or a reachable `llm`.
+Configuring `DOCS_BASE_URL` also enables the [catalog credential check](#durable-record-hand-off).
 
 ## Deploy order: `llm` first, always
 
-This is a hard dependency, not a soft one. `meeting` **refuses to boot** without `LLM_BASE_URL` and `LLM_API_KEY`, and even with them a recording fails at `/stop` if `llm` isn't reachable.
+Outside `local`, `meeting` **refuses to boot** without `LLM_BASE_URL` and `LLM_API_KEY`. If `llm` is unreachable during a recording, `/stop` still returns the transcript and PDF with placeholder minutes; see [troubleshooting](#troubleshooting).
 
 1. Deploy `llm`.
 2. Mint a `chat`-scoped key named `meeting`:
@@ -77,15 +84,15 @@ Then redeploy. Revoking is the reverse: drop the entry, redeploy.
 
 **Do not run multiple replicas without sticky routing on `session_id`.** A meeting's WebSocket, its `/transcript` polls, and its `/stop` call must all reach the *same* process. Without stickiness, `/transcript` and `/stop` land on a process that never saw the session and return 404 — visible, but broken. One replica is the correct configuration today.
 
-**Every redeploy kills in-flight meetings.** There is no drain, no handoff, no persistence. A restart mid-meeting loses the rolling transcript and the open Transcribe streams; the bot's `/record stop` will then 404. Deploy when no one is recording, and treat "is anyone in a voice channel right now?" as a real pre-deploy check.
+**Every redeploy kills in-flight meetings.** There is no live-session drain or durable session store. A restart mid-meeting loses the rolling transcript and the open Transcribe streams; the bot's `/record stop` will then 404. It also loses completed text still awaiting catalog acceptance. Deploy when no one is recording and pending [record hand-offs](#durable-record-hand-off) have been accepted; retain the Discord PDF when acceptance fails.
 
 Nothing is ever written to disk, so there's no volume to provision and no cleanup to run.
 
 ## Rollback
 
-`git revert` + push. No schema, no migration, no persisted state to reconcile.
+`git revert` + push. No local schema or migration. Completed records already accepted by documentation-system remain catalog-owned; reverting meeting does not undo them.
 
-The same in-flight caveat applies: a rollback is a restart, and a restart drops active meetings.
+The same in-flight caveat applies: a rollback is a restart, and a restart drops active meetings and unaccepted record hand-offs.
 
 ## AWS Transcribe operational notes
 
@@ -99,13 +106,13 @@ The same in-flight caveat applies: a rollback is a restart, and a restart drops 
 Worth stating plainly, because it's a recording service:
 
 - **Audio is never persisted, never mixed, and never returned.** It streams to AWS as transcription input and is dropped.
-- **Nothing is written to disk** — there's a test enforcing it.
-- **The service retains nothing after `/stop` replies.** Transcript, minutes, and PDF are handed to the caller and the session is deregistered. If they matter, the bot must persist them.
-- An abrupt disconnect **holds** the session for `DISCONNECT_GRACE_S` (default 60 s) so `POST /stop` can still produce the minutes and PDF. Only when that window expires with no `/stop` does `discard()` run, and only then are they lost.
+- **No audio or report artifacts are written to disk.** The session filesystem test uses fake collaborators; the real PDF renderer reads bundled fonts and the logo while rendering.
+- **`/stop` deregisters the live session.** Callers must retain the PDF response. With `record` context, finalized text/metadata is handed to documentation-system or held temporarily in memory for retry after the reply; accepted records persist there. See [durable record hand-off](#durable-record-hand-off).
+- An abrupt disconnect **holds** the session for `DISCONNECT_GRACE_S` (default 60 s), allowing prompt `/stop` recovery attempts. Starting stop does not cancel grace teardown: a session still registered at expiry is discarded, which can interrupt an unfinished transcript flush. See the [disconnect contract](API.md#disconnect).
 
 ## Troubleshooting
 
-- **Container dies at boot.** `MEETING_ENV` is non-`local` and one of the four required vars is missing — the error lists them. Or `CONSUMER_KEYS` isn't a JSON **array**.
+- **Container dies at boot.** A non-`local` [configuration check](#variables) failed — the error lists failing variables. Or `CONSUMER_KEYS` isn't a JSON **array**.
 - **`/record stop` returns 404.** The session isn't in the registry. Most likely the service restarted mid-meeting (a deploy), or `/stop` was already called, or requests are being load-balanced across replicas.
 - **`/stop` hangs ~5 seconds then returns a short transcript.** The client never sent `{"end_of_audio": true}`, so the drain barrier timed out. Check the bot's voice surface — a warning is logged on this path.
 - **Minutes come back as `(minutes unavailable: LLM service error)`.** This is the symptom of an `llm` problem — **not** an error status. `LlmUnavailable` is caught in `pipeline/minutes.py` and degrades to placeholder minutes, so `/stop` still returns **200** with a PDF; only the summary/decisions/action-items are empty. Don't go looking for a 502. Check `LLM_BASE_URL` resolves on the private network, that meeting's `LLM_API_KEY` is in llm's `CONSUMER_KEYS` with the `chat` scope, and the `LLM unavailable, returning placeholder minutes` warning in the logs.

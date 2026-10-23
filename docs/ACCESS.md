@@ -115,8 +115,12 @@ offboarding is part of the design rather than an afterthought.
 
 When a contributor steps away, whoever holds admin should:
 
-- **Revoke their directory keys.** `team-tracking-keys revoke` — keys are
-  per-consumer and independently revocable by design.
+- **Revoke every issued service key they held.** Directory, catalog and gateway
+  have independent registries; retiring a directory person or removing account
+  access does not revoke `tt_`, `doc_` or `gw_` credentials. Follow each service’s
+  key-revocation guide: [directory](../services/team-tracking/docs/DEPLOYMENT.md),
+  [catalog](../services/documentation-system/docs/DEPLOYMENT.md), and
+  [gateway](../services/gateway/docs/DEPLOYMENT.md).
 - **Rotate any `CONSUMER_KEYS` entry they held** for `llm`, `meeting`, or
   `connectors`. These have no revoke command: drop the entry from the JSON array
   and redeploy. See [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md).

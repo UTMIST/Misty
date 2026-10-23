@@ -6,7 +6,7 @@ For the consumer-facing endpoint reference, see [API.md](API.md).
 
 ## The big picture
 
-team-tracking is the **source of truth** for UTMIST's directory, and it is **API-only**: nothing runs inside it. Every consumer — the docs catalog, a future Discord bot, dashboards — talks to it over HTTP and treats its internals as a black box. That constraint is what lets the internals stay simple and swappable.
+team-tracking is the **source of truth** for UTMIST's directory. Every consumer — the docs catalog, Discord bot, dashboards — talks to it over HTTP and treats its internals as a black box. Optional [managed Google Groups reconciliation](#managed-google-groups) runs inside the service after directory writes; the consumer boundary still keeps the internals swappable.
 
 Internally the code is three layers with a strict dependency direction:
 
@@ -63,7 +63,7 @@ The Postgres adapter uses **SQLAlchemy Core** — `Table` objects and SQL expres
 - Point-in-time queries work off the main table with no separate audit log: `GET /memberships?...&as_of=2024-12-15` returns rows where `started_at <= as_of AND (ended_at IS NULL OR ended_at > as_of)`.
 - `POST /memberships/{id}/end` exists as a semantic helper over `PATCH` because *closing* a membership is a distinct intent from *editing* one.
 
-There is intentionally **no** unique constraint on `(person_id, team_id)`. Overlapping rows are valid during role transitions — a person can be a member through November and a lead from December, which is two rows with adjacent or overlapping date ranges.
+Multiple rows for `(person_id, team_id)` preserve role transitions, but their half-open ranges `[started_at, ended_at)` must not overlap, regardless of role. Adjacent ranges are allowed: a membership ending on December 1 can be followed by a lead membership starting that day. Both adapters reject overlaps; Postgres enforces this with an exclusion constraint. See the [temporal-integrity notes](../README.md#behavior-notes).
 
 The same "never hard-delete" rule applies to `people` and `teams` (soft-retire with `active = false`) and `api_keys` (revoke sets `revoked_at`). The deliberate exceptions are `person_identifiers` and `channel_team_access`: unlinking an identity or replacing/clearing a channel's teams hard-deletes rows, because both are *current state*, not history.
 
@@ -95,7 +95,7 @@ Each team gets a Google Group so Drive documents and channel access can be grant
 
 **Layering.** `contracts/groups.py` defines the `GroupProvider` Protocol. `src/providers/google_groups.py` implements it with the Cloud Identity Groups and Groups Settings APIs, and `src/google_groups.py` holds the reconciler (`sync_team`), which depends only on the two Protocols. Routers schedule syncs and never call Google. `src/api/deps.py` wires the provider, or `None` when the five `GOOGLE_*` settings are unset; with `None`, every sync trigger is a no-op.
 
-**Who is in a team's group.** Every *active* person whose membership is current today (`started_at <= today < ended_at`), with **all** of their addresses: `primary_email` plus every verified `email` identifier. People sign into Drive with whichever Google account they use, so adding every verified address is what makes a share to the group actually work for them. Parent teams do not inherit their sub-teams' members. A retired team keeps its group (Drive shares to it become harmless), but every member is removed.
+**Who is in a team's group.** Every *active* person whose membership is current today (`started_at <= today < ended_at`), with **all** of their addresses: `primary_email` plus every verified `email` identifier. People sign into Drive with whichever Google account they use, so adding every verified address is what makes a share to the group actually work for them. Parent teams do not inherit their sub-teams' members. A retired team keeps its group and existing Drive shares; reconciliation removes managed MEMBER-only memberships. Owners and managers remain, as described below, so retirement alone is not complete access revocation.
 
 **Reconcile, not replay.** A sync reads the group's current MEMBER-only memberships from Google, computes the desired set from the directory, and adds or removes the difference. Owners and managers are never touched, so the account that created the group, and anyone given Google-side management, stays. Anything else in the group that the directory doesn't list is removed, which is what "membership is the source of truth" means. Because every run converges from current state, a retry is just another run, and a missed event is fixed by the next one.
 
@@ -157,6 +157,7 @@ All tables carry the four audit columns (`created_at`, `updated_at` as `timestam
 | `display_name` | text NOT NULL | Free-form; handles all name conventions |
 | `primary_email` | citext NOT NULL UNIQUE | Case-insensitive; normalized to lowercase on write |
 | `active` | boolean NOT NULL | Default `true`; soft-retirement only |
+| `access_level` | text NOT NULL | `member` (default), `admin`, or `superuser`; [writes require `people:elevate` as documented](API.md#patch-peopleperson_id) |
 
 `citext` (a Postgres extension enabled by migration 001) makes email equality/uniqueness case-insensitive at the DB level; the Pydantic validator also lowercases on write, and the in-memory adapter normalizes manually — belt and suspenders.
 
@@ -264,7 +265,7 @@ UTMIST has titles like "President", "VP Partnerships", "Treasurer". The schema m
 
 ## Migrations layout
 
-Alembic manages the Postgres schema; migrations are written by hand and kept in sync with `schema.py`. Ten exist:
+Alembic manages the Postgres schema; migrations are written by hand and kept in sync with `schema.py`:
 
 - **`001_initial_schema.py`** — enables `citext`; creates `people`, `teams`, `role_kinds`, `team_memberships` and their indexes.
 - **`002_seed_role_kinds.py`** — inserts `executive`, `director`, `lead`, `member`.
@@ -276,6 +277,7 @@ Alembic manages the Postgres schema; migrations are written by hand and kept in 
 - **`008_channel_team_access.py`** — creates `channel_team_access`.
 - **`009_team_google_groups.py`** — creates `team_google_groups`.
 - **`010_pending_group_changes.py`** — persists unconfirmed membership changes. Downgrade refuses to discard pending changes; resolve them first.
+- **`011_remove_retired_provider.py`** — removes the retired provider and its identifiers. Downgrade restores only the provider vocabulary; see the [backup/recovery caveat](DEPLOYMENT.md#registry-cleanup-migration-011).
 
 Apply with `uv run alembic upgrade head`; roll back with `uv run alembic downgrade base`.
 

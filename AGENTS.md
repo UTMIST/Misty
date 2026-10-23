@@ -9,10 +9,10 @@ The UTMIST ops platform: seven Python HTTP services, a Node Discord bot, and one
 ```
 services/team-tracking/         directory (people/teams/roles) — 8000, Postgres 5433
 services/documentation-system/  docs catalog                   — 8001, Postgres 5434
-services/llm/                   Bedrock /chat proxy            — 8002, no DB
+services/llm/                   chat / embedding proxy         — 8002, no DB
 services/verification/          email one-time codes           — 8003, Postgres 5434 ⚠
 services/meeting/               live transcription → minutes   — 8004, no DB, STATEFUL
-services/connectors/            Google doc fetch adapter       — 8005, no DB
+services/connectors/            Google/GitHub fetch, discovery, meeting-Doc writer — 8005, no DB
 services/gateway/               public external API            — 8006, Postgres 5435
 packages/auth/                  platform_auth — shared API-key auth library
 discord-bot/                    Discord frontend + web playground
@@ -87,20 +87,20 @@ Violating any of these is a bug even if tests pass.
 
 ### Run before you push
 
-`make check` from the repo root runs lint, format checks, and the fast suites across all eight Python directories plus the bot. **It is not CI-equivalent** — it skips the Postgres-adapter suites, so after touching storage, an adapter, or a migration use `make test-full` with Postgres up. `make help` lists the rest. It's a wrapper over the commands below — `ci.yml` is still authoritative, and a disagreement between the two means the Makefile is wrong.
+`make check` from the repo root runs lint, format checks, and the fast suites across all eight Python directories plus the bot. **It is not CI-equivalent.** After storage, adapter or migration changes, follow the [database test setup](docs/DEVELOPMENT.md#database-test-setup): `make test-full` collects all suites but does not enable every database suite. Catalog/gateway Postgres tests require `RUN_PG_TESTS=1`; this already enables some destructive catalog migration tests. Additional catalog migration suites require `RUN_PG_MIGRATION_TESTS=1`, and gateway requires `GATEWAY_TEST_DATABASE_URL`. Use the documented disposable databases regardless of the second flag. `make help` lists the rest; `ci.yml` remains authoritative.
 
-For a single DB-backed service (team-tracking, documentation-system, verification):
+For a single DB-backed service (team-tracking, documentation-system, verification, gateway):
 
 ```bash
 cd services/<service>
 uv run pytest --ignore=tests/test_postgres_adapter.py   # fast, in-memory
-uv run pytest                                           # full, needs Postgres up
+uv run pytest                                           # DB suites still need their opt-ins/config
 uv run ruff check . && uv run ruff format --check .
 ```
 
 `llm`, `meeting`, and `connectors` have no Postgres adapter — just `uv run pytest`. The bot: `cd discord-bot && npm test && npm run lint && npm run format:check`. The shared library: `cd packages/auth && uv run pytest`.
 
-Run what CI runs for that service — `.github/workflows/ci.yml` is authoritative, and [`docs/DEPLOYMENT-HISTORY.md`](docs/DEPLOYMENT-HISTORY.md#ci-on-every-pr-to-staging-or-main) lists what each of the ten jobs covers — rather than the generic pair, and don't quote test counts in docs or commit messages — they go stale immediately.
+Run what CI runs for that service — `.github/workflows/ci.yml` is authoritative, and [`docs/DEPLOYMENT-HISTORY.md`](docs/DEPLOYMENT-HISTORY.md#ci-on-every-pr-to-staging-or-main) lists the jobs and their coverage — rather than the generic pair, and don't quote test counts in docs or commit messages — they go stale immediately.
 
 > **Every Python service is gated on both `ruff check` and `ruff format --check`.** There are no deferrals left. (The one job that runs neither is `python-test`, which only runs team-tracking's pytest — team-tracking's linting lives in the separate `python-lint` job.) If a job ever needs an exemption, `ci.yml` carries a comment saying so, and that file is the authority, not this one.
 >

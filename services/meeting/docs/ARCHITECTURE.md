@@ -86,7 +86,7 @@ Two tuning constants govern how words become segments:
 
 The protocol solves it with an explicit signal. After the bot stops recording and has forwarded every captured frame, it sends `{"end_of_audio": true}`. Because the socket delivers **in order**, receiving that frame proves every audio frame before it has already been fed. `stop()` waits for that barrier before finalizing.
 
-The fallback matters as much as the signal: if it never arrives — an older bot, a crash, a dropped socket — `/stop` proceeds anyway after `AUDIO_DRAIN_TIMEOUT_S` (5 s) and logs a warning. A missing signal degrades the transcript tail; it must never hang `/stop`.
+The fallback matters as much as the signal: if neither end-of-audio nor a disconnect has been observed, `/stop` proceeds anyway after `AUDIO_DRAIN_TIMEOUT_S` (5 s) and logs a warning. The transcript tail may be short; a missing signal must never hang `/stop`. An observed disconnect marks audio complete and skips this wait.
 
 ## stop() vs discard()
 
@@ -103,7 +103,7 @@ Two teardown paths, and picking the wrong one is expensive:
 
 `discard()` deliberately skips the finalize pipeline: paying for an LLM call plus a PDF render that nobody will read is pure waste.
 
-**A disconnect no longer routes straight to `discard()`.** It used to, and that was a data-loss bug rather than a saving: the transcript is already assembled in memory when the socket dies, so destroying it immediately meant a client whose connection dropped had nothing left to claim — its follow-up `POST /stop` 404'd. Two fully-transcribed production meetings were lost that way in a single morning. A disconnect now **holds** the session for `DISCONNECT_GRACE_S` (default 60 s) and marks end-of-audio; `discard()` runs only if that window expires unclaimed. The cost saving is preserved — nothing is finalized unless someone actually asks — while a dropped socket becomes recoverable instead of fatal.
+**A disconnect no longer routes straight to `discard()`.** It used to, and that was a data-loss bug rather than a saving: the transcript is already assembled in memory when the socket dies, so destroying it immediately meant a client whose connection dropped had nothing left to claim — its follow-up `POST /stop` 404'd. Two fully-transcribed production meetings were lost that way in a single morning. A disconnect now **holds** the session for `DISCONNECT_GRACE_S` (default 60 s) and marks end-of-audio. At expiry, `discard()` runs if the session is still registered, even if `/stop` has begun. Starting stop does not cancel the timer, so recovery can still lose an unfinished transcription tail; see the [disconnect contract](API.md#disconnect). Nothing is finalized unless a client requests it.
 
 The window is short on purpose. A held session keeps its Transcribe streams parked, so this trades a bounded amount of idle AWS state for the ability to recover a meeting; it is not a general-purpose resume mechanism. Reconnecting to a held session is deliberately *not* supported — a second WS connect for a live `session_id` still closes with 1008.
 
@@ -113,7 +113,7 @@ The window is short on purpose. A held session keeps its Transcribe streams park
 
 **Not horizontally scalable as-is.** A session's WebSocket, its `/transcript` polls, and its `/stop` call must all land on the *same* process. Multiple replicas behind a load balancer without sticky routing on `session_id` will send `/transcript` and `/stop` to a process that never saw that session — which returns a clean 404, so the failure is visible rather than silently wrong, but it's still broken.
 
-**Ephemeral by design.** A restart or crash mid-meeting loses everything in flight: the rolling transcript, the open streams, all of it. There is no database, no durable queue, and **nothing is ever written to disk** (there's a test asserting exactly that: `test_session_lifecycle_never_touches_the_filesystem`). Call `/stop` with record context for a durable hand-off before cleanup. Failed hand-offs retain finalized text temporarily in memory; accepted records live in documentation-system and Google Docs. See [durable finalization](#durable-finalization-hand-off).
+**Ephemeral by design.** A restart or crash mid-meeting loses everything in flight: the rolling transcript, the open streams, all of it. There is no database or durable queue, and **no audio or report artifacts are written to disk**. The session filesystem test uses fake collaborators; the real PDF renderer reads packaged assets during rendering. Call `/stop` with record context for a durable hand-off before cleanup. Failed hand-offs retain finalized text temporarily in memory; accepted records live in documentation-system and Google Docs. See [durable finalization](#durable-finalization-hand-off).
 
 ## Concurrency in the WebSocket handler
 
@@ -123,7 +123,7 @@ Three things in `stream_meeting` exist because of specific failures:
 - **A raising `feed` drops one frame, not the meeting.** The broad `except` around it is deliberate — but it is pointedly *not* `except WebSocketDisconnect`, which must still propagate and break the loop.
 - **A second connect for an active `session_id` closes cleanly** with 1008 rather than crashing the handler post-accept, and leaves the existing session untouched.
 
-Malformed input is uniformly non-fatal — a meeting should survive a buggy client — but note the asymmetry in *observability*: only the binary path counts drops (`empty_ws_frame`, `malformed_ws_frame`, `feed_raised`). Unparseable JSON and text frames matching neither control shape are silently `continue`d with no counter and no log. A client sending malformed control frames looks identical to one sending none, which is worth knowing when a display name never appears.
+Malformed binary framing and feed failures drop the frame; unparseable JSON and text matching neither control shape are silently skipped. Only the binary path counts drops (`empty_ws_frame`, `malformed_ws_frame`, `feed_raised`); ignored text has no counter or log. Control values are not fully validated: an unhashable `speaker_id` raises out of the handler and enters disconnect recovery. Send string speaker/name values and preserve nonfatal handling when extending the protocol; see the [wire-contract limitation](API.md#messages-the-server-accepts).
 
 ## Why Opus decode is per-speaker and in-process
 
@@ -136,7 +136,7 @@ Decode runs in-process via PyAV, which bundles its own ffmpeg libraries. **No `f
 
 ## `llm` as the summarization choke point
 
-`meeting` never calls Bedrock. It POSTs the assembled transcript to the `llm` service's `/chat` and parses the completion into `Minutes`. Swapping models, providers, or prompt wording happens in `llm`'s consumer code path here — but the credential and the model catalog stay in one place.
+`meeting` never calls Bedrock. It POSTs bounded transcript text to the `llm` service's `/chat` and parses the completion into `Minutes`; see the [summarization limits](API.md#post-meetingssession_idstop). Model/provider configuration and provider credentials stay in `llm`. Meeting owns the minutes and Q&A prompt wording in `src/pipeline/`.
 
 This is a genuine hard dependency: `verify_production_secrets()` requires `LLM_BASE_URL` and `LLM_API_KEY` outside `local`, so `meeting` refuses to boot without them. Deploy `llm` first.
 

@@ -11,7 +11,11 @@ It does not answer, and must never learn to answer:
 - *Who* that subject is. `subject` is an opaque string — `discord:12345`, `person:<uuid>`, a pending-signup token. The service never parses it.
 - What to *do* with the proof. Binding a verified email to a directory person is team-tracking's job; the bot orchestrates the two.
 
-That narrowness is the design. The service holds no identity data, so a compromise leaks at most "this email was recently proven for this opaque subject" — not the org's identity graph.
+The service does not own the org's identity graph, but it retains email/subject
+associations from successfully stored requests, including unconfirmed and old
+requests. A database compromise exposes those retained associations and code
+metadata; expiry limits confirmation, not storage lifetime. See
+[data retention](DEPLOYMENT.md#data-retention).
 
 ## Layering
 
@@ -53,7 +57,9 @@ HMAC rather than a plain hash matters here: the search space is only 10⁶, so a
 
 ## Send before persist
 
-`request-code` emails the code **before** writing the row. If delivery fails, the endpoint returns 502 and stores nothing.
+`request-code` emails the code **before** writing the row. If sending raises
+`EmailSendError`, the endpoint returns 502 and stores nothing. Other setup or
+transport exceptions can escape as 500s; see [request-code errors](API.md#errors).
 
 The ordering is deliberate. Persist-then-send would leave two bad states on a mail failure: an unsendable code sitting in the table, and — worse — the user rate-limited out of an immediate retry by a code they never received. Send-first means a failed send is a clean no-op the user can retry at once.
 
@@ -77,10 +83,10 @@ The most security-sensitive code in the platform. Every branch of `confirm_code`
 | Consumed, past TTL | **404** `no_pending_code` |
 | Consumed, within TTL → attempts ≥ max | **429** `too_many_attempts` |
 | Consumed, within TTL → correct code | **200** `{verified, subject, email}` — idempotent replay |
-| Consumed, within TTL → wrong code | **400** `invalid_code`, attempt counted |
+| Consumed, within TTL → wrong code | **400** `invalid_code`, attempt counted; **429** `too_many_attempts` if this increment reaches the cap |
 | Unconsumed → past TTL | **410** `expired` |
 | Unconsumed → attempts ≥ max | **429** `too_many_attempts` |
-| Unconsumed → wrong code | **400** `invalid_code`, attempt counted |
+| Unconsumed → wrong code | **400** `invalid_code`, attempt counted; **429** `too_many_attempts` if this increment reaches the cap |
 | Unconsumed → correct code | **200**, row marked consumed |
 
 The arrows are evaluation order, and it matters: **on both branches the attempt cap is checked before the code is verified.** A locked-out subject returns 429 even for the correct code — idempotent replay does not survive lockout. That's deliberate; the alternative would let an attacker who has exhausted the cap keep testing guesses and learn from a 200.
@@ -112,7 +118,9 @@ The reasoning: there is exactly one consumer (the Discord bot). Issuing per-cons
 
 ## Email backends
 
-Three implementations behind the `EmailSender` Protocol, chosen by `EMAIL_BACKEND` and wired in `deps.py`. Any provider failure normalizes to `EmailSendError` → a clean 502.
+Three implementations behind the `EmailSender` Protocol, chosen by `EMAIL_BACKEND`
+and wired in `deps.py`. `EmailSendError` maps to 502; the
+[API error contract](API.md#errors) records the current normalization gaps.
 
 - **`fake`** (default) — captures in memory. Used by tests and local dev. **Refused outside `local`** by the boot check, because a backend that silently drops mail would 202 every request while delivering nothing.
 - **`resend`** — Resend HTTP API. Plain HTTPS, works on any Railway plan (no SMTP ports needed).
@@ -122,4 +130,7 @@ Three implementations behind the `EmailSender` Protocol, chosen by `EMAIL_BACKEN
 
 `verify_production_secrets()` refuses to start a non-`local` deploy holding any of: the dev `API_KEY`, the dev `CODE_HMAC_SECRET`, a `dev_password@localhost` `DATABASE_URL`, `EMAIL_BACKEND=fake`, or a real backend missing its credentials.
 
-The failure mode this prevents is the nastiest kind: a service that looks perfectly healthy — 202 on every `request-code`, green healthcheck — while no mail is delivered and every confirm 404s. Better to not start.
+The fake backend can pass health checks and return 202 for an accepted request
+while delivering no code to the user. It still stores the row, so confirmation
+follows the normal state machine; the missing delivery prevents normal user
+completion. Refusing to start outside `local` prevents that misleading setup.

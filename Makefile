@@ -85,7 +85,7 @@ test: test-readiness ## Fast suites only — no Docker, external network, or cre
 	@$(MAKE) --no-print-directory check-node
 	@cd $(BOT_DIR) && npm test
 
-test-full: test-readiness ## Every test, including the Postgres adapter suites (needs Docker + migrations)
+test-full: test-readiness ## Collect all suites; DB opt-ins/setup still required (docs/DEVELOPMENT.md)
 	@echo "Requires each DB-backed service's Postgres up and migrated."
 	@echo "See docs/DEVELOPMENT.md — note documentation-system and verification both bind 5434."
 	@set -e; for d in $(PY_DIRS); do \

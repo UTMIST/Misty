@@ -54,8 +54,9 @@ A divergence between the adapters is a bug; the shared seed (`build_seed_sources
 
 ### 2. `Fetcher` — content snapshots
 
-A `Fetcher` returns a `FetchResult` (`title`, `content_snapshot`) or raises `FetchError`,
-which is deliberately non-fatal at ingest: it becomes a warning and never blocks the doc.
+A `Fetcher` returns a `FetchResult` (`title`, full `content`, bounded `content_snapshot`)
+or raises `FetchError`, which is deliberately non-fatal at ingest: it becomes a warning
+and never blocks the doc.
 
 - **`WebFetcher`** (`src/fetch/web.py`) — HTTP fetch (5s timeout, follows redirects), parses
   `<title>`, and keeps up to 2000 chars of stripped text as the snapshot. HTTP errors become
@@ -69,8 +70,10 @@ which is deliberately non-fatal at ingest: it becomes a warning and never blocks
 `FetcherRegistry` (`src/fetch/registry.py`) maps a `source_id` to a `Fetcher`.
 `default_registry()` registers `WebFetcher` for `web` and one `ConnectorsFetcher` each for
 `github`, `gdocs`, `gsheets`, `gslides`, and `gdrive` — exactly the sources with
-`content_fetch_enabled`. Any other source raises `FetchUnsupported` (a
-`FetchError`), which is how auth-gated sources like Google Drive "skip fetching".
+`content_fetch_enabled`. An enabled source without a registered fetcher raises
+`FetchUnsupported` (a `FetchError`). Fetch-disabled sources skip the registry;
+`requires_auth` alone does not disable fetching. Google sources use the authenticated
+connector fetchers above.
 
 ### 3. `DirectoryClient` — ownership validation
 
@@ -101,8 +104,9 @@ unit-testable with fakes. Five steps:
    unknown → `BadReference`). Otherwise the source is derived from the URL
    (`derive_source`).
 3. **Fetch, best-effort.** If the source has `content_fetch_enabled`, try the registry's
-   fetcher; on `FetchError`, append a warning and carry on. If the source `requires_auth`,
-   skip with a warning. If no title survives, fall back to the URL.
+   fetcher; on `FetchError`, append a warning and carry on. If fetching is disabled and
+   the source `requires_auth`, skip with an auth warning. If no title survives, fall
+   back to the URL.
 4. **Resolve ownership.** For each owner id, call the directory. Reachable + valid → label;
    reachable + unknown → `BadReference` (→ 400); unreachable → warning + null label
    (degrade).
@@ -265,8 +269,8 @@ The document FK cascades on hard deletion. Each row stores `chunk_text`, half-op
 Migration `010` adds nullable `source_title_hash`: SHA-256 of the title (None treated
 as empty). It records embedding context separately from the body hash used by citations.
 Existing chunks retain NULL provenance until the normal stale-index pass rebuilds them.
-Migration `018` widens the key to `(doc_id, embedding_model, ordinal)`, so a doc can
-hold one complete set per model while a re-embed runs (see
+[Migration `017`](DEPLOYMENT.md#migrations-alembic) widens the key to
+`(doc_id, embedding_model, ordinal)`, so a doc can hold one complete set per model while a re-embed runs (see
 [Model changes](#model-changes-209)). Its downgrade refuses while any doc still holds
 two models' sets rather than guess which to discard.
 The source hash uses `src/content.py`'s SHA-256 convention; it identifies the text
@@ -357,11 +361,13 @@ this is the file where a divergence becomes a silent data leak.
 |---|---|---|
 | `SEE_ALL` | a `docs:read:all`/`admin` key with no `X-On-Behalf-Of`; or *any* write key with no `X-On-Behalf-Of` | every doc |
 | `DENY` | a plain `docs:read` key with no `X-On-Behalf-Of` | **no docs at all** |
-| `Actor(person_id, team_ids, source_team_ids)` | `X-On-Behalf-Of: <uuid>` present | that person's directory and confirmed Google-group view |
+| `Actor(person_id, team_ids, source_team_ids)` | `X-On-Behalf-Of: <uuid>` present, with literal `act-as-user` in addition to the endpoint's scope | that person's directory and confirmed Google-group view |
 
 `DENY` is deliberate: a bare `docs:read` key carries no identity, so it has no basis for
 seeing anything; consumers must say *who* they act for. Reads on behalf of someone still
 **require** a read scope, so a write-only key can't read through that door.
+The literal `act-as-user` requirement also applies to admins and writes using person
+context; see the [header and scope rules](API.md#visibility-and-x-on-behalf-of).
 
 An `Actor` sees a doc only if a valid grant matches (`org` / their `person` id / one
 of their teams). Ownership remains available for attribution and filtering.

@@ -31,7 +31,10 @@ monitors.
 The existing PR notification webhooks are not reused: readiness alerts are
 operational incidents and should go to a dedicated channel. An unset webhook
 does not leak endpoint details or send a misleading success notification, but
-the workflow log will still show failed checks.
+the current console summary only reports how many services were checked and
+notifications sent. Failed statuses and pending alerts remain in the cached
+checker state; the workflow does not print per-service failure details. Configure
+the dedicated webhook for operational alerts, or explicitly inspect that state.
 
 ## Alert behavior
 

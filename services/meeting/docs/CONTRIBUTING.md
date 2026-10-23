@@ -9,8 +9,8 @@ This is the platform's most unusual service: stateful, WebSocket-driven, and dep
 - **`src/sessions.py` does no I/O and imports no vendor SDK.** Every collaborator that touches the outside world arrives through the injected `deps` dict. Adding an `import boto3` or `import httpx` there breaks the property the whole test suite depends on. If you need a new collaborator, add a `deps` key and wire it in `src/api/wiring.py`. (It does import `assemble_transcript` from `src/pipeline/` directly — pure text assembly, no I/O. That's the allowed shape.)
 - **`wiring.py` is the only place fakes become real.** One module builds the real decoders, the real Transcribe factory, and the real report builder. That's the seam.
 - **Audio is sent once and never retained.** Each decoded chunk goes straight to that speaker's stream and is dropped. Do not add a buffer "just in case" — that's the design that was removed.
-- **Nothing touches the filesystem.** There's a test asserting it (`test_session_lifecycle_never_touches_the_filesystem`). Fonts and the logo are package assets read at import, not runtime writes.
-- **Malformed input is non-fatal.** Truncated frames, bad JSON, unknown text frames — skip and continue; one buggy client frame must never kill a meeting. Binary-path drops are counted via `note_drop`; the text/control path currently counts nothing. If you add a control message, counting its malformed case is a genuine improvement, not a requirement you're violating.
+- **Session orchestration does not touch the filesystem; audio and report artifacts are not written to disk.** `test_session_lifecycle_never_touches_the_filesystem` checks the session with fake collaborators, including a fake report builder. The real PDF renderer reads bundled fonts and the logo during rendering, not at import.
+- **Keep malformed input nonfatal when extending the protocol.** Truncated binary frames, bad JSON, and unknown text shapes are skipped. Existing control values are not fully validated: an unhashable `speaker_id` can end the handler and trigger disconnect recovery. The [wire contract](API.md#messages-the-server-accepts) requires string speaker/name values. Binary-path drops are counted via `note_drop`; ignored text/control frames currently count nothing.
 - **Credentials are `SecretStr`.** Unwrap with `.get_secret_value()` at the boundary — `wiring.py` does this for `LLM_API_KEY` precisely because `LlmClient` puts it straight into a header.
 
 ## Local setup
@@ -31,8 +31,8 @@ To exercise a **real** recording you need AWS Transcribe credentials, a running 
 The wire format is a contract with the Discord bot. Changing it means changing two repos' worth of code in one PR, or shipping it backward-compatibly.
 
 1. **Update the module docstring** in `src/api/routers/meetings.py`. It's the canonical statement of the protocol; [API.md](API.md) mirrors it.
-2. **Handle the new message shape** in the receive loop. Follow the existing pattern: unknown/malformed control frames `continue` rather than raise.
-3. **Stay backward compatible if you can.** `{"end_of_audio": true}` is the model — a client that never sends it still works, degrading to a 5 s timeout with a logged warning. Prefer that shape over a hard requirement.
+2. **Handle the new message shape** in the receive loop. Validate its values and `continue` on malformed input rather than raising; do not copy the existing speaker-control validation gap documented above.
+3. **Stay backward compatible if you can.** `{"end_of_audio": true}` is the model — a client that never sends it still works. If no disconnect has been observed either, `/stop` falls back to a 5 s timeout with a logged warning. Prefer that shape over a hard requirement.
 4. **Update the bot side** in the same PR (`discord-bot/src/`), or the deploy order becomes a coordination problem across two Railway services.
 5. **Update [API.md](API.md)** — the WS route isn't in OpenAPI, so that document *is* the published contract.
 6. **Test it** in `tests/test_meetings_api.py`, which drives the socket with FastAPI's `TestClient`. Cover the happy path, the malformed variant, and the omitted variant.
@@ -97,7 +97,7 @@ uv run pytest -x -q
 
 Tests worth not breaking:
 
-- `test_session_lifecycle_never_touches_the_filesystem` — the no-disk guarantee.
+- `test_session_lifecycle_never_touches_the_filesystem` — session orchestration with fake collaborators performs no filesystem I/O; this does not cover the real PDF asset reads.
 - The segment-ordering cases in `test_sessions.py` — they encode the interjection bug.
 - The WS auth cases — both the query-param and first-frame paths, plus the 1008 rejections.
 
@@ -116,8 +116,8 @@ This service reached staging with **no CI coverage at all** at one point — no 
 
 - [ ] `src/sessions.py` still does no I/O and imports no vendor SDK — new outside-world collaborators go through `deps`.
 - [ ] No new audio buffering; audio is still sent once and dropped.
-- [ ] Nothing writes to disk; the filesystem test still passes.
-- [ ] Malformed client input is skipped, not fatal — it never kills the session.
+- [ ] No audio or report artifacts are written to disk; the session filesystem test still passes with fake collaborators.
+- [ ] New or changed control messages validate their values and skip malformed input without ending the handler; do not extend the existing speaker-control validation gap.
 - [ ] `deps["now"]()` used instead of `datetime.now()`.
 - [ ] WS protocol changes are reflected in the router docstring **and** [API.md](API.md), and the bot side ships in the same PR (or the change is backward compatible).
 - [ ] Tuning-constant changes updated the comment, the tests, and ARCHITECTURE.md.

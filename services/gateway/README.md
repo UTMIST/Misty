@@ -69,7 +69,7 @@ schema is at `http://localhost:8006/openapi.json`.
 |---|---|
 | `DATABASE_URL` | The gateway's **own** Postgres — it holds only `api_keys` (its external key registry), never a copy of team-tracking's data. |
 | `DIRECTORY_BASE_URL` | team-tracking's base URL — where the gateway makes its **outbound** call. |
-| `DIRECTORY_API_KEY` | The gateway's **one internal** team-tracking key, scoped `identifiers:read`. Issued on team-tracking via `team-tracking-keys issue --name gateway --scopes identifiers:read`. |
+| `DIRECTORY_API_KEY` | The gateway's **one internal** team-tracking key, scoped `identifiers:read`. Follow the [directory-pinned provisioning procedure](docs/DEPLOYMENT.md#database-and-internal-access). |
 | `GATEWAY_ENV` | `local` / `staging` / `production`. In non-`local` envs, startup refuses to boot if `DIRECTORY_API_KEY` is blank or still the built-in dev default. |
 | `TRUST_PROXY_HEADERS` | Trust a single valid `X-Real-IP` supplied by an ingress that overwrites that header. **Set this to `true` behind Railway's public edge.** `X-Forwarded-For` is ignored. Missing/invalid/duplicate `X-Real-IP` falls back to the socket peer. Leave `false` for direct/private-network callers. |
 

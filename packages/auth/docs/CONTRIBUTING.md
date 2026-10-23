@@ -2,7 +2,7 @@
 
 Task walkthroughs for working on `platform_auth`. Assumes you've read the [README](../README.md), which documents the full export surface and the credential convention.
 
-> **Read this first: blast radius.** This is a shared leaf that **all six services** import. A change here can break every service at once, and CI is the only thing that will tell you. There is no gradual rollout — the workspace resolves one version of this package for everyone. Treat every change as a platform-wide change.
+> **Read this first: blast radius.** This is a shared leaf that **all Python services** import, including the public gateway. A change here can break every service at once, and CI is the only thing that will tell you. There is no gradual rollout — the workspace resolves one version of this package for everyone. Treat every change as a platform-wide change.
 
 ## Conventions you need to know first
 
@@ -35,7 +35,7 @@ No Docker, no database, no network.
 This is the highest-risk change in the repo. `build_auth` is called by every service's `src/api/auth.py`.
 
 1. **Add parameters, don't reorder or remove them.** Give new parameters defaults that preserve today's behavior, so a service that hasn't been updated keeps working.
-2. **If a behavior change is unavoidable**, update all six service shims in the same PR:
+2. **If a behavior change is unavoidable**, update all service shims in the same PR:
    ```
    services/team-tracking/src/api/auth.py
    services/documentation-system/src/api/auth.py
@@ -43,28 +43,40 @@ This is the highest-risk change in the repo. `build_auth` is called by every ser
    services/llm/src/api/auth.py
    services/meeting/src/api/auth.py
    services/connectors/src/api/auth.py
+   services/gateway/src/api/auth.py
    ```
    Note this makes the PR span every zone — that's the rare case where `pr-zone-check`'s multi-zone warning is expected. Say so in the PR description.
-3. **Check the odd ones out.** Two services deviate and are easy to break:
+3. **Check the distinct auth paths:**
    - **`verification`** uses `NullApiKeyStore` — no per-consumer keys exist, only the bootstrap env key. Any change assuming a real store must tolerate one that always returns `None`.
    - **`meeting`** authenticates its WebSocket in `routers/meetings.py` with `_authenticate_ws`, which **mirrors** `require_api_key`'s logic standalone rather than reusing the `Depends()` chain (a WS handshake can't). A change to the HTTP auth path that isn't mirrored there silently diverges the two.
+   - **`gateway`** disables bootstrap auth with `get_env_key=lambda: None`. Preserve its issued-`gw_`-keys-only boundary; do not introduce an env-key fallback.
 4. **Run every affected service's suite locally**, not just this package's.
 
 ## Walkthrough: change key format or hashing
 
 Key material changes are **not backward compatible** with keys already issued. Before touching `hashing.py`:
 
-1. Work out what happens to existing keys. Keys live in three places: `api_keys` tables (team-tracking, documentation-system), `CONSUMER_KEYS` env vars (llm, meeting, connectors), and a bare env var (verification). All of them would need reissuing.
-2. Preserve `parse_prefix`'s envelope contract. Each service binds its own envelope (`tt_`, `doc_`, `llm_`, `meeting_`, `connectors_`, `vf_` reserved), and the envelope check is what stops a key minted for one service from being accepted by another. That cross-service rejection is a security property, not an inconvenience — the `doc_`-key-into-team-tracking mistake documented in [`docs/DEVELOPMENT.md`](../../../docs/DEVELOPMENT.md#troubleshooting) is it working correctly.
+1. Work out what happens to existing keys. Stored keys live in `api_keys` tables (team-tracking, documentation-system, gateway) or `CONSUMER_KEYS` env vars (llm, meeting, connectors). Internal services also have bootstrap env keys; verification accepts only that path, while gateway disables it. Account for each path when planning reissuance.
+2. Preserve `parse_prefix`'s envelope contract. Each service binds its own envelope (`tt_`, `doc_`, `llm_`, `meeting_`, `connectors_`, `gw_`, `vf_` reserved), and the envelope check is what stops a key minted for one service from being accepted by another. That cross-service rejection is a security property, not an inconvenience — the `doc_`-key-into-team-tracking mistake documented in [`docs/DEVELOPMENT.md`](../../../docs/DEVELOPMENT.md#troubleshooting) is it working correctly.
 3. If you must proceed, write the migration path into [`docs/RAILWAY-DEPLOYMENT.md`](../../../docs/RAILWAY-DEPLOYMENT.md) as part of the same PR.
 
-Realistically: **don't**. Adding a scope, a store implementation, or a dependency is cheap; changing key format is a coordinated re-issue across six services and two environments.
+Realistically: **don't**. Adding a scope, a store implementation, or a dependency is cheap; changing key format requires coordinated reissuance across affected services and environments.
 
 ## Walkthrough: add a scope concept
 
-Scopes are strings; this package only defines the two special ones (`ADMIN_SCOPE`, `DEV_SPOOF_SCOPE`). Ordinary scopes (`people:read`, `chat`, `fetch`) live in the services.
+Scopes are strings. This package exports `ADMIN_SCOPE` and `DEV_SPOOF_SCOPE`;
+`models.py` also defines `ACT_AS_USER_SCOPE` (`act-as-user`), which is not a
+top-level public export. `get_on_behalf_actor` requires literal `act-as-user`
+membership for `X-On-Behalf-Of` even on an admin key, then parses its value as a
+UUID. See the [header contract](../../../services/documentation-system/docs/API.md#visibility-and-x-on-behalf-of).
+Ordinary scopes (`people:read`, `chat`, `fetch`) live in the services.
 
-Add a scope *here* only if it needs special handling — a wildcard, or an environment-gated one like `dev:spoof`, which `_enforce_dev_scope_environment` rejects outside dev/local. Then test both the allowed and the rejected environment.
+Add a scope *here* only if it needs special handling: a wildcard, literal
+assertion permission, or environment guard. The
+[`dev:spoof` production guard](../README.md#development-scope-guard) is opt-in
+and uses the service's `is_prod()` predicate. Test both enabled and disabled
+guard behavior, the relevant environments, and literal-scope checks with an
+admin-only key.
 
 ## Testing
 
@@ -75,11 +87,11 @@ uv run ruff check .
 
 CI runs `auth-lib-test`: `uv sync --extra dev`, `uv run pytest`, `ruff check`, and `ruff format --check`.
 
-**Local green is not enough for this package.** Because six services import it, run their suites too before pushing anything non-trivial:
+**Local green is not enough for this package.** All Python services import it, so run their suites too before pushing anything non-trivial:
 
 ```bash
 # from the REPO ROOT, not packages/auth
-for s in team-tracking documentation-system verification llm meeting connectors; do
+for s in team-tracking documentation-system verification llm meeting connectors gateway; do
   (cd "services/$s" && uv run pytest --ignore=tests/test_postgres_adapter.py -q) || echo "FAILED: $s"
 done
 ```
@@ -91,8 +103,8 @@ The `--ignore` keeps it fast; the DB-free services simply have no such file.
 - [ ] No new dependency beyond fastapi / starlette / argon2 / stdlib.
 - [ ] No import of any service's code.
 - [ ] New exports are in `__all__` **and** the README's export table.
-- [ ] `build_auth` signature changes are additive with behavior-preserving defaults, or all six shims are updated in the same PR.
-- [ ] `verification`'s null store and `meeting`'s standalone WS auth both still work.
+- [ ] `build_auth` signature changes are additive with behavior-preserving defaults, or all service shims are updated in the same PR.
+- [ ] `verification`'s null store, `meeting`'s standalone WS auth, and `gateway`'s no-bootstrap path still work.
 - [ ] New branches fail closed; no `==` on key material.
-- [ ] All six service test suites pass, not just this package's.
+- [ ] All affected service test suites pass, including gateway, not just this package's.
 - [ ] `uv run pytest`, `uv run ruff check .`, and `uv run ruff format --check .` are clean.

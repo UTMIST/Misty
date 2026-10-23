@@ -48,7 +48,8 @@ jobs:
   preview:
     needs: validate
     runs-on: ubuntu-latest
-    # Seven services at 45 minutes each, a 15-minute stop, and setup/API headroom.
+    # Eight targets can need 375 minutes of waits; use the terminal for switches
+    # that may exceed this 360-minute Actions limit. See docs/pr-previews.md.
     timeout-minutes: 360
     # Restrict this GitHub environment to staging and give it a Railway
     # project token scoped only to Railway's dev environment.

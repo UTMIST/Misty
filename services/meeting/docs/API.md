@@ -53,7 +53,7 @@ Close code **1008** is also used for: an invalid `session_id` (before any sessio
 {"speaker_id": "<id>", "display_name": "<name>"}
 ```
 
-Registers or updates the display name for a speaker. Send whenever a speaker's identity becomes known. Until one arrives, the `speaker_id` itself is used as the display name.
+Registers or updates the display name for a speaker. Send string values for both fields whenever a speaker's identity becomes known. Until one arrives, the `speaker_id` itself is used as the display name.
 
 ```json
 {"end_of_audio": true}
@@ -61,9 +61,9 @@ Registers or updates the display name for a speaker. Send whenever a speaker's i
 
 Send **once**, after the recording stops and every captured frame has been forwarded. Because the socket delivers in order, this proves all audio has arrived, and `POST /stop` waits for it before finalizing.
 
-Without it — an older client, a crash, a dropped socket — `/stop` proceeds after a 5 s drain timeout and logs a warning. The transcript tail may then be short, which is exactly the failure this signal prevents. **Send it.**
+If neither this signal nor a disconnect has been observed, `/stop` proceeds after a 5 s drain timeout and logs a warning. The transcript tail may then be short, which is exactly the failure this signal prevents. **Send it.** An observed disconnect marks audio complete and skips the drain wait.
 
-Unknown or malformed text frames are ignored, not fatal.
+Invalid JSON and text matching neither control shape are ignored. **Current limitation:** control values are not fully validated. For example, `{"speaker_id": [], "display_name": "x"}` raises `TypeError`, exits the handler, and enters [disconnect recovery](#disconnect). Clients must not rely on malformed control values being nonfatal.
 
 **2. Audio — WebSocket binary frames**, one raw Opus packet each:
 
@@ -76,11 +76,18 @@ Unknown or malformed text frames are ignored, not fatal.
 
 A length-prefixed speaker id, an 8-byte millisecond timestamp, then the raw Opus payload with no further framing. Truncated or undersized frames are dropped and counted, not fatal.
 
+`ts_ms` is nonnegative elapsed milliseconds since recording start, including
+silence, on one shared monotonic clock for all speakers. Do not send Unix epoch
+milliseconds, a separate clock origin per speaker, or accumulated speaking time;
+the service uses this value directly to anchor speech on the meeting timeline.
+
 ### Disconnect
 
-Disconnecting (or erroring) **without** a preceding `POST /stop` **holds** the session for `DISCONNECT_GRACE_S` (default 60 s) rather than destroying it. The transcript is already assembled server-side, so within that window `POST /stop` still finalizes it into minutes and a PDF exactly as a normal stop would — which is how a client that lost its socket recovers a meeting. The disconnect also marks end-of-audio, since a closed socket can deliver no more frames.
+Disconnecting (or erroring) **without** a preceding `POST /stop` **holds** the session for `DISCONNECT_GRACE_S` (default 60 s). Call `/stop` promptly to attempt recovery into minutes and a PDF. The disconnect also marks end-of-audio, since a closed socket can deliver no more frames.
 
-Only when the grace period expires with no `/stop` is the session torn down via `discard()` — abort each speaker's Transcribe stream, deregister, done. That path deliberately skips the finalize pipeline, so **no minutes and no PDF are produced**: it involves a blocking `llm` call not worth paying for when nobody is waiting for the result. Set `DISCONNECT_GRACE_S=0` to discard immediately instead.
+**Starting `/stop` does not cancel the grace timer.** At expiry, the timer checks only whether the session is still registered. If so, `discard()` aborts each speaker's Transcribe stream and deregisters the session, even when finalization is in progress. An unfinished transcript flush can therefore be interrupted; merely starting stop before expiry does not guarantee complete recovery. If the transcript is already assembled, teardown can still deregister the session while report generation or hand-off continues.
+
+`discard()` itself skips the finalize pipeline and produces no minutes or PDF. Without a `/stop` request, no artifacts are generated. Set `DISCONNECT_GRACE_S=0` to discard immediately instead.
 
 The WebSocket close code is logged on every abrupt disconnect (`session <id>: WS closed without POST /stop (code=…)`).
 
@@ -222,11 +229,20 @@ What it does, in order: wait for the end-of-audio barrier (max 5 s) → close th
 
 `pdf_b64` is the base64-encoded minutes PDF. `minutes.title` may be an empty string, in which case the PDF falls back to a generic title.
 
+**Minutes can be incomplete even on a successful response.** Above 120,000
+transcript characters, only the first and last 60,000 characters are sent for
+summarization, with an omission marker between them. The returned transcript and
+the PDF's transcript section still contain the full assembled text. The parser
+can also salvage truncated model JSON into successful minutes while losing
+content after the truncation point; this logs `salvaged truncated minutes JSON`
+but adds no response warning flag. Review the full transcript when completeness
+matters.
+
 **If `llm` is unreachable, `/stop` still returns 200** — `minutes` comes back as `{"summary": "(minutes unavailable: LLM service error)", "decisions": [], "action_items": []}` with a PDF built around it. There is no error status for a failed summarization; check the `summary` string.
 
 **No meeting audio is returned, ever.** Audio exists only as transcription input — never mixed, never persisted, never written to disk.
 
-**The session is gone after this call.** It is deregistered as part of stopping, so a subsequent `/transcript` or `/stop` returns 404. Persist the response — this service retains nothing.
+**The session is gone after this call.** It is deregistered as part of stopping, so a subsequent `/transcript` or `/stop` returns 404. Retain the PDF response. With `record` context, finalized text/metadata is handed to documentation-system before cleanup or retained temporarily in memory for retry after the reply; see [durable record context](#durable-record-context) for retention and durability limits.
 
 This call is **slow relative to the others**: it blocks on the drain barrier, the Transcribe flush, and an LLM round trip. Budget accordingly; `REQUEST_TIMEOUT_S` (default 60) bounds the `llm` leg.
 

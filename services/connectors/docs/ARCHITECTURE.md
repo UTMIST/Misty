@@ -4,13 +4,13 @@ Why this service is shaped the way it is. For *what it does* and how to run it, 
 
 ## What it is, in one line
 
-An **outbound adapter**: it holds the credential for an external document source, and turns a URL into text and enumerates bounded source metadata pages.
+An **outbound adapter**: it holds source credentials, turns URLs into text, enumerates bounded source metadata pages, and manages meeting Docs through a separate OAuth writer.
 
 ## What it deliberately is not
 
 Two non-goals do more to explain the design than any of the goals:
 
-- **Not a gateway.** It does not front other UTMIST services or route traffic to them. Its only outbound direction is *away* from the platform, to Google.
+- **Not a gateway.** It does not front other UTMIST services or route traffic to them. Its outbound calls go to external sources (Google and GitHub).
 - **Not the final authorization boundary.** It authenticates the *calling service* and never learns the end user. Google fetches return complete source ACL evidence alongside content; documentation-system maps that evidence to its people/teams and applies actor-scoped visibility.
 
 The second point is the one that bites. connectors reads the Drive permission list **before** any export/download and refuses the fetch if that list cannot be read completely, but it cannot decide which UTMIST identity a Google email/group represents. A consumer must reconcile the returned ACL before persisting or disclosing the content. Broad service-account reach alone is never an end-user grant.
@@ -43,14 +43,18 @@ The rules, same as every other service in the platform:
 | `SourceError` subclass | Status | Meaning |
 |---|---|---|
 | `SourceNotConfigured` | 503 | No usable credential for this source |
-| `SourceForbidden` | 403 | Credential valid, file not shared with it |
+| `SourceForbidden` | 403 | Source denied access; Google 403 is normalized without inspecting its reason |
 | `SourceNotFound` | 404 | No such file, or the URL yields no file id |
 | `SourceUnsupported` | 422 | Recognized file with no text form |
 | `SourceUnavailable` | 502 | Upstream 5xx, timeout, transport failure |
 
 This is why a source implementation never imports FastAPI: it raises a domain error, and the router owns the translation. A new source that raises these five errors gets correct HTTP behavior for free.
 
-Google's own `HttpError` statuses are normalized in exactly one place — `execute()` in `google_extractors/base.py`, which every extractor routes its API calls through. One upstream status maps to one `SourceError` at one site.
+Read-source Google `HttpError` statuses are normalized in `execute()` in
+`google_extractors/base.py`, shared by fetch, discovery, and extractors. One
+upstream status maps to one `SourceError` there. Meeting operations expose a
+separate `MeetingWriteError` contract so ambiguous writes remain distinguishable;
+see [meeting writes](#meeting-writes).
 
 ## The extractor strategy
 
@@ -60,7 +64,7 @@ Each Google editor type has a native API that returns far richer structure than 
 GoogleSource.fetch(url)
   → parse_file_id(url)                    regex table, one pattern per URL shape
   → drive.files().get(...)                metadata: name + mimeType + optional size
-  → EXTRACTORS[mime]                      or the text/* Drive-export fallback
+  → EXTRACTORS[mime]                      or the text/* Drive media download fallback
   → media size guard                       PDF/.docx/text/* before byte download
   → extractor.extract(services, file_id, mime)  → ExtractedText(text, warnings)
   → SourceResult(title, content[:max], warnings)
@@ -191,7 +195,11 @@ connectors remains stateless. See [API](API.md#post-discovergoogle) and the
 `contracts/meeting.py` is the injected writer boundary; only
 `src/sources/meeting_google.py` imports Google OAuth/upload clients.
 `src/api/deps.py` wires it separately from read-only source fetching. Each call
-uses a fresh HTTP transport, with retries disabled for creation. Content is an
+uses a fresh HTTP transport. Its `_execute()` calls `request.execute(num_retries=0)`
+and raises `MeetingWriteError` with an `uncertain` flag; shared ACL-read errors are
+also translated to that writer contract. Do not substitute read-source errors:
+the writer router returns content-free `{code, uncertain}` details, and callers
+must preserve ambiguous-create recovery. Content is an
 in-memory HTML upload converted in the same Drive create operation; no empty Doc
 is published and retries never replace a human-edited body. See the
 [durable record design](../../../docs/MEETING-RECORDING.md#durable-records-design-212)
