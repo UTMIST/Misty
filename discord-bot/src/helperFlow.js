@@ -47,7 +47,8 @@ export async function resolveHelperCaller(appContext, discordUserId) {
     throw e;
   }
 
-  if (!authorize('linked', principal).ok) return { ok: false, content: LINK_PROMPT };
+  if (!authorize('linked', principal).ok || principal.person.active === false)
+    return { ok: false, content: LINK_PROMPT };
   return { ok: true, principal };
 }
 
@@ -62,13 +63,13 @@ export async function resolveHelperCaller(appContext, discordUserId) {
  *   {kind:'channel', guildId, channelId} for a shared channel. Omit for the
  *   text-only path (backward compatible).
  */
-export async function answerHelperTurns(appContext, turns, principal, destination) {
-  const reply = await prepareHelperReply(appContext, turns, principal, destination);
+export async function answerHelperTurns(appContext, turns, principal, destination, request) {
+  const reply = await prepareHelperReply(appContext, turns, principal, destination, request);
   return reply.content;
 }
 
 /** Prepare a reply with a final access check for adapters that send it later. */
-export async function prepareHelperReply(appContext, turns, principal, destination) {
+export async function prepareHelperReply(appContext, turns, principal, destination, request) {
   const context = retrievalContext(destination, principal);
   // Discord history has no trusted provenance for old bot text (including
   // pre-rollout replies, restarts, and answers sent before the flag was disabled).
@@ -93,8 +94,16 @@ export async function prepareHelperReply(appContext, turns, principal, destinati
       principal,
     });
     if (!messages.length) return { content: EMPTY_ANSWER };
-    const result = await appContext.toolExecutor.run({ messages, system, context, principal });
+    const result = await appContext.toolExecutor.run({
+      messages,
+      system,
+      context,
+      principal,
+      request,
+    });
     switch (result.outcome) {
+      case OUTCOME.ACTION:
+        return { action: result.action, canPublish: result.canPublish };
       case OUTCOME.ANSWER:
         return {
           content: renderHelperAnswer(result.content, result.citations),

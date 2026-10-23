@@ -62,7 +62,7 @@ export function loadConfig(env = process.env) {
       DEFAULT_HELPER_USER_WINDOW_SECONDS,
       Math.floor(Number.MAX_SAFE_INTEGER / 1000),
     ),
-    // Route helper answers through the authorized document tool loop (#71).
+    // Enable authorized document and command tools for Discord helper requests.
     // Default OFF: stays text-only until retrieval and channel configuration are
     // live in the target environment.
     helperToolsEnabled: booleanFlag(env, 'HELPER_TOOLS_ENABLED'),
