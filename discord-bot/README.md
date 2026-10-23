@@ -410,6 +410,19 @@ appends source links, and withholds an answer if those checks fail. Previous use
 questions remain available for follow-ups; earlier bot answers are not replayed,
 even after the flag is disabled. The web playground remains text-only.
 
+Search tools supply the returned source passages, rather than cutting each to a
+400-character preview. Each passage is capped at 48 KiB of UTF-8 text and marked
+when truncated. JSON escaping and metadata can reduce that text allowance so a
+single hit fits the 60 KiB serialized result budget. Hits are admitted in rank
+order; one that exceeds the remaining budget is skipped, allowing later smaller
+hits to fit. Only retained hits are cited and revalidated. DM document bodies
+use the same raw-text and serialized-result limits.
+
+Channel answers can use these authorized passages, while opening a full document
+by id remains available only in DMs. The channel grant authorizes returned text
+under the [retrieval contract](../services/documentation-system/docs/API.md#authorized-retrieval-post-search),
+not just links. Publication revalidation covers the text supplied to the model.
+
 See the [helper tool contract](docs/CONTRIBUTING.md#the-authorized-helper-tool-loop-71)
 for replay, cost limits, revalidation tradeoffs, and offline coverage.
 
