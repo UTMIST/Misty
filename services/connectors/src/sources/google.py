@@ -281,7 +281,11 @@ class GoogleSource:
             credentials = self._get_credentials()
             services = self._build_services(credentials)
 
-        meta = execute(services["drive"].files().get(fileId=file_id, fields="name,mimeType,size"))
+        meta = execute(
+            services["drive"]
+            .files()
+            .get(fileId=file_id, fields="name,mimeType,size", supportsAllDrives=True)
+        )
         name = (meta or {}).get("name")
         mime = (meta or {}).get("mimeType") or ""
 

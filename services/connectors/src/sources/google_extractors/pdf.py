@@ -10,7 +10,7 @@ import io
 import pypdf
 
 from src.sources.base import SourceUnsupported
-from src.sources.google_extractors.base import ExtractedText, execute
+from src.sources.google_extractors.base import ExtractedText, execute_bytes
 from src.sources.google_extractors.drive_export import DRIVE_READONLY
 
 PDF_MIME = "application/pdf"
@@ -25,7 +25,9 @@ class PdfExtractor:
     services = ("drive",)
 
     def extract(self, services: dict, file_id: str, mime: str) -> ExtractedText:
-        payload = execute(services["drive"].files().get_media(fileId=file_id))
+        payload = execute_bytes(
+            services["drive"].files().get_media(fileId=file_id, supportsAllDrives=True)
+        )
 
         # Parsing failures are properties of the FILE, not of the upstream
         # call, so they map to SourceUnsupported (422) rather than

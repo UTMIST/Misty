@@ -70,10 +70,15 @@ The non-obvious part is that **extractors declare their own requirements**. Each
 
 A consequence worth internalizing: **a new supported file type does not imply a new OAuth scope.** Uploaded PDFs and `.docx` files are downloaded as raw bytes through the Drive media path that `drive.readonly` already covers, then parsed locally with `pypdf` / `python-docx`. Only a genuinely new *Google API* adds a scope.
 
-Uploaded PDF, `.docx`, and text downloads must use the SDK's `files().get_media()`.
+Uploaded PDF, `.docx`, and text downloads must use the SDK's
+`files().get_media(supportsAllDrives=True, ...)`. Metadata reads also set
+`supportsAllDrives=True`, matching the permission reads.
 Calling `files().get(alt="media")` still selects its JSON response model, which
-overwrites `alt` and returns metadata instead of bytes. Offline regression tests
-exercise the real SDK with a fake HTTP transport so this behavior is covered.
+overwrites `alt` and returns metadata instead of bytes. `execute_bytes()` wraps
+`execute()` for media downloads and native Drive exports: a non-bytes response is
+`SourceUnavailable` (502), before any decoding or local parsing. Malformed PDF or
+Word bytes remain `SourceUnsupported` (422). Offline regression tests exercise
+the real SDK with a shared fake HTTP transport, including `files().export()`.
 
 ## Threading: what is memoized and what is not
 
@@ -103,6 +108,14 @@ Two clamps exist, and only one of them is meant to fire:
 - connectors' `MAX_FILE_BYTES` defaults to **25 MiB** and rejects oversized uploaded PDF, `.docx`, `text/*`, and GitHub files before their bytes are downloaded.
 
 The gap is deliberate. The consumer's clamp trips first and reports a truncation warning to whoever ingested the doc; connectors' clamp is a transport backstop that should never be the visible one. If you change either, keep connectors' the larger of the two.
+
+For Drive media this is a metadata precheck, not a hard download-memory bound:
+omitted or stale `size` can bypass it (see the [known limitations](../README.md#known-limitations)).
+A separate bounded-download change must carry the configured limit into the
+download path and cap bytes at the transport boundary. Merely switching to
+`MediaIoBaseDownload` and checking the buffer after each chunk is insufficient
+when a server ignores `Range`: the SDK buffers that response before returning
+the chunk. That follow-up also needs explicit missing-size and file-growth tests.
 
 ## Why no persistence
 

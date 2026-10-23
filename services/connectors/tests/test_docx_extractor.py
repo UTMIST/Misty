@@ -1,29 +1,11 @@
 import io
 
 from docx import Document
+from drive_http import DriveHttp, drive_service
 
 from src.sources.google_extractors.docx import DocxExtractor
 
 DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-
-
-class _FakeFiles:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def get_media(self, *, fileId):
-        return self
-
-    def execute(self):
-        return self._payload
-
-
-class _FakeDrive:
-    def __init__(self, payload):
-        self._files = _FakeFiles(payload)
-
-    def files(self):
-        return self._files
 
 
 def _bytes_of(doc) -> bytes:
@@ -34,7 +16,8 @@ def _bytes_of(doc) -> bytes:
 
 def _extract(doc):
     payload = _bytes_of(doc)
-    return DocxExtractor().extract({"drive": _FakeDrive(payload)}, "file123", DOCX_MIME_TYPE)
+    drive = drive_service(DriveHttp(payload, DOCX_MIME_TYPE))
+    return DocxExtractor().extract({"drive": drive}, "file123", DOCX_MIME_TYPE)
 
 
 def test_heading_styles_become_markdown_levels():

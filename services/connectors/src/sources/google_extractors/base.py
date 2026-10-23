@@ -58,3 +58,13 @@ def execute(request):
         raise SourceUnavailable(f"google api error (status {status})") from e
     except Exception as e:
         raise SourceUnavailable(f"google transport failure: {type(e).__name__}") from e
+
+
+def execute_bytes(request) -> bytes:
+    """Require a download/export response before decoding or parsing a file."""
+    from src.sources.base import SourceUnavailable
+
+    payload = execute(request)
+    if not isinstance(payload, bytes):
+        raise SourceUnavailable("google returned a non-bytes file payload")
+    return payload

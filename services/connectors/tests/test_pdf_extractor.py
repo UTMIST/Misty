@@ -1,6 +1,7 @@
 import io
 
 import pytest
+from drive_http import DriveHttp, drive_service
 from pypdf import PdfWriter
 
 from src.sources.base import SourceUnsupported
@@ -9,27 +10,9 @@ from src.sources.google_extractors.pdf import PdfExtractor
 PDF_MIME_TYPE = "application/pdf"
 
 
-class _FakeFiles:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def get_media(self, *, fileId):
-        return self
-
-    def execute(self):
-        return self._payload
-
-
-class _FakeDrive:
-    def __init__(self, payload):
-        self._files = _FakeFiles(payload)
-
-    def files(self):
-        return self._files
-
-
 def _extract(payload: bytes):
-    return PdfExtractor().extract({"drive": _FakeDrive(payload)}, "file123", PDF_MIME_TYPE)
+    drive = drive_service(DriveHttp(payload, PDF_MIME_TYPE))
+    return PdfExtractor().extract({"drive": drive}, "file123", PDF_MIME_TYPE)
 
 
 def _blank_pdf(pages: int = 1, encrypt: str | None = None) -> bytes:
