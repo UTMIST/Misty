@@ -455,16 +455,19 @@ class InMemoryStorageAdapter:
             sets = self._chunks.get(doc_id, {})
             if self._docs[doc_id].active and content is not None:
                 title_hash = content_hash(self._docs[doc_id].title or "")
-                due = (
-                    not stale_only
-                    or not sets
-                    or any(
-                        model not in sets
-                        or sets[model][0].source_content_hash != content[1]
-                        or sets[model][0].source_title_hash != title_hash
-                        for model in models
+                due = not stale_only or (
+                    (
+                        any(
+                            model not in sets
+                            or sets[model][0].source_content_hash != content[1]
+                            or sets[model][0].source_title_hash != title_hash
+                            for model in models
+                        )
+                        or any(model not in models for model in sets)
                     )
-                    or any(model not in models for model in sets)
+                    # Whitespace-only text has nothing to embed: indexing it
+                    # clears its chunks and records nothing.
+                    and (bool(sets) or bool(content[0].strip()))
                 )
             else:
                 due = bool(sets)

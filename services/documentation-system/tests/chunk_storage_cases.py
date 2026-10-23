@@ -368,6 +368,24 @@ class ChunkStorageCases:
             models=[FAKE_MODEL], stale_only=False
         )
 
+    @pytest.mark.parametrize("blank", [" \n\t ", "　 \x1c\x85"])
+    def test_whitespace_only_docs_are_listed_only_to_clear_chunks(self, adapter, blank):
+        # Every character str.strip() removes, so both adapters agree with
+        # chunk_text, which embeds nothing for this text.
+        doc = self._with_content(adapter, blank)
+        assert doc.id not in adapter.list_docs_for_indexing(models=[FAKE_MODEL])
+        assert doc.id in adapter.list_docs_for_indexing(models=[FAKE_MODEL], stale_only=False)
+        # Chunks left from earlier text are still listed so indexing clears them.
+        adapter.replace_doc_chunks(doc.id, [make_chunk(source_text="older text")])
+        assert doc.id in adapter.list_docs_for_indexing(models=[FAKE_MODEL])
+        # Visible, non-whitespace text next to blanks is indexable.
+        text = blank + "x"
+        adapter.upsert_doc_content(
+            doc.id, content_text=text, content_hash=content_hash(text), fetched_at=None
+        )
+        adapter.replace_doc_chunks(doc.id, [])
+        assert doc.id in adapter.list_docs_for_indexing(models=[FAKE_MODEL])
+
     def test_docs_for_indexing_pages_by_id(self, adapter):
         ids = sorted(self._with_content(adapter).id for _ in range(5))
         assert adapter.list_docs_for_indexing(models=[FAKE_MODEL], limit=2) == ids[:2]

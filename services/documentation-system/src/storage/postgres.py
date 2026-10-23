@@ -1,3 +1,4 @@
+import sys
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from uuid import UUID
@@ -50,6 +51,14 @@ from src.storage.schema import (
     doc_tags,
     docs,
     sources,
+)
+
+
+# Matches text with something to embed. chunk_text embeds nothing when
+# str.strip() empties the text, so the class is exactly the characters it
+# strips; listing literal characters keeps the match independent of locale.
+_HAS_NON_WHITESPACE = (
+    "[^" + "".join(c for c in map(chr, range(sys.maxunicode + 1)) if c.isspace()) + "]"
 )
 
 
@@ -815,9 +824,13 @@ class PostgresStorageAdapter:
                 doc_chunks.c.doc_id == docs.c.id,
                 doc_chunks.c.embedding_model.not_in(list(models)),
             )
+            # Whitespace-only text has nothing to embed: indexing it clears its
+            # chunks and records nothing, so it is listed only while it has some.
+            has_text = doc_content.c.content_text.regexp_match(_HAS_NON_WHITESPACE)
             wanted = and_(
                 wanted,
-                or_(*(~current_set(model) for model in models), other_model, ~has_chunks),
+                or_(*(~current_set(model) for model in models), other_model),
+                or_(has_chunks, has_text),
             )
         orphaned = and_(has_chunks, or_(docs.c.active.is_(False), ~has_content))
         stmt = (

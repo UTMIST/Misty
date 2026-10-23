@@ -476,18 +476,22 @@ one the llm service's `/embed` allows.
 3. **Check readiness.** `GET /docs/index/status` must show `pending_docs: 0` and
    `missing_docs: 0` for the target model. If a doc keeps failing, fix or retire it
    first: switching early would drop it from search.
-4. **Cut over.** Set `SEARCH_EMBED_MODEL` to the new alias, unset `EMBED_MODEL`, and
-   redeploy. Search now reads the new sets.
-5. **Clean up.** Run the step 2 loop once more. It deletes the old model's sets
+4. **Cut over, keeping the old sets.** Swap the two values: set `SEARCH_EMBED_MODEL` to
+   the new alias and `EMBED_MODEL` to the **old** one, and redeploy. Search now reads
+   the new sets, and indexing keeps the old ones current. Do not unset `EMBED_MODEL`
+   here: indexing deletes sets for any model it is not configured with, including on
+   inline ingest or refetch of an unchanged doc, and a request or an overlapping
+   instance still on the old model would then lose docs from its results.
+5. **Wait for old readers to drain.** Once the rollout has finished and no instance or
+   in-flight search is still on the old model, unset `EMBED_MODEL` and redeploy.
+6. **Clean up.** Run the step 2 loop once more. It deletes the old model's sets
    without embedding calls (`unchanged` results); afterwards the status lists only the
-   new model.
+   new model. Inline indexing may already have deleted some.
 
-**Rollback.** Before step 5, setting `SEARCH_EMBED_MODEL` back restores the old sets,
-except for docs re-indexed inline since the cutover: ingest, refetch, scheduled refresh,
-and edits delete a touched doc's old set as they would in step 5. The status then shows
-them as `missing_docs`, and the step 2 loop re-embeds them. To abandon a re-embed before step 4, unset `EMBED_MODEL` and run the loop:
-it deletes the partial target sets. After step 5 the old vectors are gone, and going
-back is another re-embed.
+**Rollback.** Before step 5, swapping the two values back restores search on the old
+sets, which step 4 kept current. To abandon a re-embed before step 4, unset
+`EMBED_MODEL` and run the loop: it deletes the partial target sets. After step 5 the old
+sets start being deleted, and going back is another re-embed.
 
 **Detecting a premature switch.** If `SEARCH_EMBED_MODEL` is switched before step 3
 passes, search logs `N docs are indexed only under other embedding models and are

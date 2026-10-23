@@ -270,7 +270,10 @@ class StorageAdapter(Protocol):
         adds active docs with content that lack a set for one of `models`,
         hold one built from a different body/title hash (or unknown title
         hash), or hold a set for a model outside `models`, so re-running the
-        listing resumes an interrupted re-embed. Without stale_only, adds
+        listing resumes an interrupted re-embed. A doc whose text is
+        whitespace only (empty after str.strip()) is listed only while it has
+        chunks: indexing it clears them and records nothing, so it would
+        otherwise stay pending forever. Without stale_only, adds
         every active doc with content (a forced full pass).
         """
         ...

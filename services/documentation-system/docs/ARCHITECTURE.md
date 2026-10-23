@@ -617,8 +617,9 @@ in all cases.
 `list_docs_for_indexing(models=...)` finds work for the admin route: active docs that lack
 a set for one of `models`, hold one built from older body/title hashes or missing title
 provenance, or hold a set for a model outside `models`, plus docs that still have chunks
-but should not (retired, or no content). It pages by doc id so a doc that keeps failing
-cannot block the rest.
+but should not (retired, or no content). A doc whose text is whitespace only has nothing
+to embed and is listed only while it still has chunks to clear, so it never stays
+pending. It pages by doc id so a doc that keeps failing cannot block the rest.
 
 `HttpEmbedder` (`src/embed/http_client.py`) splits inputs into `/embed` requests of at most
 96 inputs and `EMBED_MAX_REQUEST_CHARS` characters (mirrors of the llm service's limits),
@@ -652,11 +653,12 @@ never removes a doc from search:
   Rerunning the stale-only `POST /docs/index` loop resumes an interrupted re-embed with
   no cursor and no `force`. Each set is written atomically, so an interruption leaves
   whole sets only.
-- **Cutover and cleanup.** After the switch, sets for any model other than the served
-  one and the target are orphans: the same loop deletes them (`delete_doc_chunks_except`)
-  without an embedding call. Inline indexing deletes them too, one touched doc at a
-  time, so switching back after cutover restores search only for docs not re-indexed
-  since.
+- **Cutover and cleanup.** The switch swaps the two settings, so the old model becomes
+  the target and its sets stay complete while old readers drain. Only once `EMBED_MODEL`
+  is unset are sets for any model other than the served one orphans: the same loop
+  deletes them (`delete_doc_chunks_except`) without an embedding call. Any indexing
+  call deletes them too, one touched doc at a time, which is why the runbook keeps the
+  old model configured until nothing reads it.
 - **Surfacing.** `GET /docs/index/status` reports per-model coverage from
   `get_index_coverage`, including `missing_docs`: active docs indexed under some other
   model but not this one. Search checks that count for the served model at most once a

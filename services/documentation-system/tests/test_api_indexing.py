@@ -532,7 +532,16 @@ def test_reembed_builds_target_beside_served_set_then_cuts_over(ctx, monkeypatch
     assert status["pending_docs"] == 0
     assert all(c["missing_docs"] == 0 for c in status["models"])
 
-    # Cut over, then the same loop deletes the old set without embedding.
+    # Cut over keeping the old model configured: inline indexing of an
+    # unchanged doc leaves the old set for readers that have not drained.
+    _configure(monkeypatch, "openai-embed-3-large", "openai-embed-3-small")
+    status = client.get("/docs/index/status", headers=headers).json()
+    assert (status["serving_model"], status["target_model"]) == (LARGE_MODEL, FAKE_MODEL)
+    assert status["pending_docs"] == 0
+    _ingest(client)  # a repeat ingest indexes inline, as a refetch does
+    assert sorted(store.get_doc_index_states(doc_id)) == [LARGE_MODEL, FAKE_MODEL]
+
+    # Once drained, unset it; the same loop deletes the old set without embedding.
     _configure(monkeypatch, "openai-embed-3-large")
     status = client.get("/docs/index/status", headers=headers).json()
     assert (status["serving_model"], status["pending_docs"]) == (LARGE_MODEL, 1)
@@ -579,3 +588,20 @@ def test_search_warns_when_docs_are_indexed_only_under_another_model(
         monkeypatch.setattr(search, "_next_mismatch_check", 0.0)
         search._warn_on_excluded_docs(store, LARGE_MODEL)
         assert "coverage check failed: RuntimeError" in caplog.text
+
+
+def test_whitespace_only_doc_is_not_pending(ctx, fake_embedder):
+    # Nothing to embed, so a cleared doc must not hold back the cutover gate.
+    client, store, fetchers = ctx
+    headers = _key(store, "docs:index")
+    fetchers.result = _result("alice@example.com", content=LONG)
+    doc_id = _ingest(client)["doc"]["id"]
+    fetchers.result = _result("alice@example.com", content=" \n\t ")
+    assert client.post(f"/docs/{doc_id}/refetch", headers=ADMIN).status_code == 200
+    assert store.get_doc_content(UUID(doc_id)) == " \n\t "
+    assert _chunks(store, doc_id) == []
+    calls = len(fake_embedder.calls)
+
+    assert client.get("/docs/index/status", headers=headers).json()["pending_docs"] == 0
+    assert client.post("/docs/index", headers=headers, json={}).json()["attempted"] == 0
+    assert len(fake_embedder.calls) == calls

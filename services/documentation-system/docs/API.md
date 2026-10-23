@@ -632,7 +632,7 @@ Synchronous and bounded.
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
 | `doc_ids` | UUID[] \| null | null | 1–100 docs to index. Every id must exist (else **404** before any work) |
-| `stale_only` | bool | `true` | Listing mode (no `doc_ids`): only docs that lack a set for the served or target model, hold one built from older body/title context or without title provenance, hold a set for any other model, or should not have chunks (retired or no content). `false` lists every doc with content |
+| `stale_only` | bool | `true` | Listing mode (no `doc_ids`): only docs that lack a set for the served or target model, hold one built from older body/title context or without title provenance, hold a set for any other model, or should not have chunks (retired, no content, or whitespace-only text). `false` lists every doc with content |
 | `force` | bool | `false` | Re-embed even when a set's content and title are unchanged. Not needed for a model change: a missing target set is already stale |
 | `after` | UUID \| null | null | Listing-mode cursor: the previous response's `next_after`. Not allowed with `doc_ids` |
 | `limit` | int | 25 | 1–100 docs per call in listing mode |
@@ -694,9 +694,9 @@ any doc has dropped out of search because it is indexed only under another model
 | Field | Meaning |
 |-------|---------|
 | `serving_model` | Resolved id of `SEARCH_EMBED_MODEL`: the only set search reads |
-| `target_model` | Resolved id of `EMBED_MODEL` when it differs (a re-embed is configured), else `null` |
+| `target_model` | Resolved id of `EMBED_MODEL` when it differs (a re-embed, or the old model kept while readers drain after cutover), else `null` |
 | `indexable_docs` | Active docs with stored content |
-| `pending_docs` | Docs a stale-only `POST /docs/index` would list now. A re-embed is ready to cut over at `0` |
+| `pending_docs` | Docs a stale-only `POST /docs/index` would list now. A re-embed is ready to cut over at `0`. Docs whose text is whitespace only have nothing to embed and are not counted |
 | `models[]` | Every stored model plus the served and target ones, by model id |
 | `models[].docs` / `chunks` / `chunk_chars` | Docs with a set for the model, its chunks, and their total text length (input size for a cost estimate) |
 | `models[].missing_docs` | Active docs with content indexed under some other model but not this one. Nonzero for `serving_model` means those docs are excluded from search |
