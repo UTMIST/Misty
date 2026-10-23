@@ -77,6 +77,11 @@ retirement for that purpose.
    outside staging, including PR previews. Staging runs
    `python -m src.discovery --require-monitor` every 15 minutes, one replica, no HTTP healthcheck,
    pre-deploy migration, or automatic failure restart.
+   If Railway rejects the legacy config-file setting, apply these same values to
+   the dedicated service and read them back after deployment. The staging service
+   currently uses explicit settings and an uploaded build, not a GitHub source
+   connection; merging a PR does not update that runner automatically. Verify the
+   deployed revision, command, schedule and retained volume separately.
 4. Attach a persistent volume at `/data`, set
    `DISCOVERY_STATE_PATH=/data/discovery-state.json` and an explicit
    `DISCOVERY_IDENTITY` identifying this environment and connector account. Set both
@@ -166,7 +171,11 @@ hours without a clean completed scan. Repeated continuation, restarts, `--status
 disabled runs and completed traversals with indexing/listing gaps cannot reset it.
 Arm the completion check's initial deadline when provisioning it, before enabling
 the runner; a check left in `new` state does not detect a first scan that never
-finishes. Record this one-time arming separately from actual scan acceptance.
+finishes. Send one setup success with a distinct setup user agent and record its
+timestamp in the check description/release evidence. This only starts the initial
+24-hour deadline; it is not scan acceptance. Do not repeat setup pings to silence
+an overdue check. Healthchecks' resume operation returns a check to `new`, so after
+planned maintenance verify that an actual clean scan has rearmed this deadline.
 
 `--require-monitor` validates both secret HTTPS URLs before catalog/connector work
 and rejects using the same check for both signals. Monitor requests use a separate
@@ -195,7 +204,8 @@ integration. Exercise explicit failure/recovery, start without finish, and an
 actually missed completion heartbeat. Observe each down/up message in Discord,
 then remove the disposable checks. Never stop real discovery for a day to test an
 alert. Separately record a deployed clean scan and its two acknowledged pings.
-For planned maintenance, pause both checks explicitly; resume them with the runner.
+For planned maintenance, pause both checks explicitly; resume them with the runner
+and verify both checks are active rather than left in `new` state.
 
 ## Recovery and lifecycle
 
