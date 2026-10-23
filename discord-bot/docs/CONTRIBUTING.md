@@ -32,7 +32,11 @@ Open `http://127.0.0.1:3001`, paste `100000000000000000` into "Acting as", pick 
 
 > ⚠️ Port **8001** is also `documentation-system`'s API port. Stop the catalog before running `npm run dev:web`.
 
-`/record` has **no playground equivalent** — voice capture needs the real Discord surface (`npm start`).
+Voice capture for `/record` needs the real Discord surface (`npm start`). The
+playground's **Meetings → Preview meeting delivery** runs explicit/automatic stop,
+retry, failure and admin-only scenarios with in-memory collaborators. It does
+not capture audio or call Discord, Google or backend services. See
+[delivery verification](meeting-delivery.md#verification).
 
 For deployed PR recording tests, use the persistent
 [`dev` preview slot](../../docs/pr-previews.md). Its gateway and voice

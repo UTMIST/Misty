@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { meetingFilename } from './meetingFilename.js';
+import { meetingRecordNotice } from '../messages/meeting.js';
 
 // Per-guild live-meeting lifecycle. Pure orchestration: all collaborators
 // (transport client, recorder factory, poster) are injected. No discord.js
@@ -12,6 +13,7 @@ export function createMeetingSurface({
   // it a dropped connection is invisible: the session is gone, /record status
   // says nothing is recording, and nobody knows the meeting was lost.
   notify = async () => {},
+  deliverRecord,
   now = Date.now,
   genId = randomUUID,
 }) {
@@ -299,22 +301,19 @@ export function createMeetingSurface({
         title: name,
         ...(record ? { record } : {}),
       });
-      await poster({ channel: textChannel, report, requesterId, name, startedAt });
-      if (report.record?.status === 'handoff_pending') {
-        await notify({
-          channel: textChannel,
-          content:
-            '⚠️ The Google Doc save is delayed. Misty will retry for up to 30 minutes; keep the PDF and contact a Misty admin with meeting ID ' +
-            sessionId +
-            ' if it remains unavailable.',
-        });
-      } else if (report.record?.admin_only) {
-        await notify({
-          channel: textChannel,
-          content:
-            'The Google Doc record is admin-only because no complete team audience was available.',
-        });
+      if (report.record) {
+        // Independent of the PDF: a failed attachment must not suppress the
+        // durable link, and a failed delivery must not fail finalization.
+        let delivery;
+        try {
+          delivery = await deliverRecord?.(sessionId);
+        } catch {
+          delivery = { status: 'failed' };
+        }
+        const content = meetingRecordNotice(report.record, sessionId, delivery);
+        if (content) await notify({ channel: textChannel, content });
       }
+      await poster({ channel: textChannel, report, requesterId, name, startedAt });
       return { status: 'stopped' };
     } catch (err) {
       console.error(`meetingSurface: error stopping meeting for guild ${guildId}:`, err);

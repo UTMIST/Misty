@@ -181,7 +181,7 @@ Set these per environment (staging vs production) per service.
 | `HELPER_TOOLS_ENABLED` | defaults to `false`; literal `true` enables Discord document tools after retrieval/channel setup; see [helper configuration and access checks](../discord-bot/README.md#helper-document-tools) |
 | `PORT` | Railway-injected port for the Discord readiness listener; defaults to `3002` locally |
 | `DIRECTORY_BASE_URL` / `DIRECTORY_API_KEY` | team-tracking; key set by the provisioning script |
-| `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system; key scopes `docs:read docs:write act-as-user`, plus literal `act-as-channel` for shared-channel helper retrieval (see its [key docs](../services/documentation-system/docs/DEPLOYMENT.md#issuing-api-keys-doc-keys-cli)) |
+| `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system; key scopes `docs:read docs:write act-as-user`, literal `act-as-channel` for shared-channel helper retrieval, and `meetings:read meetings:write` for saved meeting link delivery (see its [key docs](../services/documentation-system/docs/DEPLOYMENT.md#issuing-api-keys-doc-keys-cli)) |
 | `VERIFICATION_BASE_URL` / `VERIFICATION_API_KEY` | verification |
 | `INFRASTRUCTURE_DISCORD_USERNAME` | *optional* — Discord username or ID shown by `/bug` for infrastructure support |
 | `MEETING_BASE_URL` / `MEETING_API_KEY` | meeting; a `meetings`-scoped consumer key |
@@ -553,13 +553,21 @@ Deploy order for the durable Google Doc path:
    persistence/consent before capture; `/record start save:false` opts out.
    Configure voice-channel teams through `/channel-access` and healthy synced
    Google Groups for member access. Missing coverage saves admin-only.
+6. For link delivery, add `meetings:read meetings:write` to the bot's
+   `DOC_API_KEY`. In each originating text channel/thread grant the bot View
+   Channel, Read Message History and Send Messages/Send Messages in Threads.
+   On Discord readiness the bot recovers saved records with pending/failed
+   delivery, then polls every ten minutes. No new cron or Google key is needed.
 
 Rollout checks use a consented staging meeting: explicit and empty-channel stop,
 Doc sections and full transcript, native MIME type and configured destination,
 team commenter access, catalog source grants, repeat stop/persistence, recovery
 from a connector outage, and catalog visibility after a restart. Real Google
-credentials are never used by automated tests. Keep the PDF behavior; #223 will
-post the already-created Doc link and track Discord message cleanup. Follow the
+credentials are never used by automated tests. Keep the PDF behavior; #223 posts
+the already-created Doc link and records its Discord message ID for recovery
+and the existing admin-owned removal workflow. Test delivery failures separately
+from save failures and recover after a bot restart; see the bot's
+[delivery runbook](../discord-bot/docs/meeting-delivery.md). Follow the
 [record removal runbook](../services/documentation-system/docs/DEPLOYMENT.md#meeting-record-persistence)
 for failed, inaccessible or unsafe-ACL records. The generic `docs:purge` endpoint
 remains a rollout follow-up from #212; meeting removal already uses an internal

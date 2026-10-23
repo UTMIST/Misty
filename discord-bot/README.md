@@ -277,7 +277,7 @@ and skips them.
   in threads Misty did not create do not trigger the helper. A typed leading
   `@Misty` remains an independent trigger, including inside a Discord reply.
 
-- `/record start [name:<meeting name>]` (**linked**) — joins your current voice channel and starts
+- `/record start [name:<meeting name>] [save:false]` (**linked**) — joins your current voice channel and starts
   recording the meeting (one recording at a time **per guild** — sessions are
   keyed by `guildId`). `/record status` (**public**) — shows elapsed recording
   time and the voice channel Misty is in; when idle, it explains which voice
@@ -294,9 +294,15 @@ and skips them.
   refused with the active channel and auto-stop guidance — except stopping
   from outside is still allowed once that channel is empty of humans, the
   escape hatch for a runaway recording auto-stop failed to catch. The meeting
-  service persists nothing: it streams audio straight to AWS and never writes
-  audio or transcript to disk. The posted PDF does contain the full
-  transcript, and that lives in Discord like any other attachment.
+  service streams audio straight to AWS and never writes audio to disk.
+  By default, documentation-system also saves a Google Doc containing minutes
+  and the full transcript. Misty posts its link in the exact originating text
+  channel or thread, mentioning the original requester even on automatic stop.
+  You need your own Drive access; posting the link does not change permissions.
+  Missing team/group coverage produces an explicitly admin-only record.
+  `save:false` keeps only the existing PDF attachment. Delayed saves and failed
+  link deliveries are reported separately and recovered automatically. See
+  [delivery and recovery](docs/meeting-delivery.md).
 
   When the first human enters an empty voice channel, the bot @-mentions them
   via direct message and prompts them to run `/record start`.
@@ -338,6 +344,10 @@ The bot itself needs only:
   service with.
 - The `GuildVoiceStates` gateway intent and Connect permission in the voice
   channel (already required to join voice at all).
+- `DOC_API_KEY` also needs `meetings:read` and `meetings:write` for saved-record
+  lookup and delivery receipts. Discord needs View Channel, Read Message History
+  and Send Messages (Send Messages in Threads for a thread) in the original
+  destination. No Google credentials are added to the bot.
 
 The bot does **not** need ffmpeg, AWS credentials, or `MAX_RECORDING_MS` /
 `RECORDING_SILENCE_MS` — those are requirements of the `meeting` service
@@ -715,7 +725,8 @@ Explicit stop, automatic empty-channel stop and disconnect salvage all send the
 same record context. Failed hand-off still posts the PDF and a delayed-save
 notice; keep that PDF and contact an admin with the meeting ID for recovery.
 Google Docs remain admin-only when complete voice-channel team coverage is
-unavailable. Doc-link delivery is the separate #223 change.
+unavailable. Saved Doc links are delivered and recovered independently of the
+PDF; see [link delivery and recovery](docs/meeting-delivery.md).
 Moving the bot to another voice channel ends a saved recording immediately;
 start a new recording there to use its audience. `save:false` recordings continue
 to follow moves.

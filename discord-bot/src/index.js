@@ -4,7 +4,12 @@ import { createAppContext } from './context.js';
 import { commands } from './commands/index.js';
 import { startHealthServer } from './healthServer.js';
 import { wireDiscordClient } from './adapters/discord/index.js';
-import { makeAttachmentPoster, makeChannelNotifier } from './adapters/discord/meetingPosts.js';
+import {
+  makeAttachmentPoster,
+  makeChannelNotifier,
+  makeMeetingLinkPoster,
+} from './adapters/discord/meetingPosts.js';
+import { startMeetingDelivery } from './meeting/meetingDelivery.js';
 import { runtimeMode } from './runtimeMode.js';
 
 async function main() {
@@ -33,9 +38,13 @@ async function main() {
   // Inject the Discord attachment poster here (not inside context.js) so
   // context.js stays surface-agnostic — index.js is one of the few modules
   // allowed to import from adapters/discord/.
+  // The callback closes over the client assigned below, before any recording
+  // or recovery can run. Web-only mode never starts Discord delivery.
+  let client;
   const appContext = createAppContext(config, {
     poster: makeAttachmentPoster(),
     notify: makeChannelNotifier(),
+    postMeetingLink: enableDiscord ? (record) => makeMeetingLinkPoster(client)(record) : undefined,
   });
 
   if (enableDiscord) {
@@ -43,7 +52,7 @@ async function main() {
     // Discord always exposes content for direct mentions, but otherwise sends
     // an empty string unless this privileged intent is enabled both here and in
     // the application's Developer Portal settings.
-    const client = new Client({
+    client = new Client({
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
@@ -55,6 +64,7 @@ async function main() {
     });
     wireDiscordClient(client, { commands, appContext });
     client.once('clientReady', (c) => console.log(`Bot ready as ${c.user.tag}`));
+    client.once('clientReady', () => startMeetingDelivery(appContext.meetingDelivery));
     await startHealthServer(client, process.env.PORT || 3002);
     await client.login(config.discordToken).catch((err) => {
       console.error('Discord login failed:', err.message);

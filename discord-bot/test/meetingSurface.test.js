@@ -574,6 +574,55 @@ test('stop hands off identities and context; save:false keeps PDF only', async (
   }
 });
 
+test('link delivery precedes PDF so attachment failure cannot suppress a saved record', async () => {
+  const fakes = makeFakes({
+    stopImpl: async () => ({ record: { status: 'saved' }, pdf_b64: 'p' }),
+    posterImpl: async () => {
+      throw new Error('PDF failed');
+    },
+  });
+  const delivered = [];
+  const surface = createMeetingSurface({
+    ...fakes,
+    genId: () => 'saved-id',
+    deliverRecord: async (id) => {
+      delivered.push(id);
+      return { status: 'posted' };
+    },
+  });
+  await surface.start({
+    guildId: 'g1',
+    voiceChannel: {},
+    textChannel: { id: '2' },
+    requesterId: '4',
+  });
+  await surface.stop('g1');
+  assert.deepEqual(delivered, ['saved-id']);
+  assert.equal(fakes.stopCalls.length, 1);
+  assert.equal(fakes.notifies.length, 1); // consent only, no false delivery failure
+});
+
+test('failed link delivery reports recovery and still delivers the PDF', async () => {
+  const fakes = makeFakes({
+    stopImpl: async () => ({ record: { status: 'saved' }, pdf_b64: 'p' }),
+  });
+  const surface = createMeetingSurface({
+    ...fakes,
+    deliverRecord: async () => {
+      throw new Error('Discord denied');
+    },
+  });
+  await surface.start({
+    guildId: 'g1',
+    voiceChannel: {},
+    textChannel: { id: '2' },
+    requesterId: '4',
+  });
+  assert.equal((await surface.stop('g1')).status, 'stopped');
+  assert.equal(fakes.posterCalls.length, 1);
+  assert.match(fakes.notifies.at(-1).content, /saved, but its link could not be delivered/);
+});
+
 test('a saved recording stops forwarding immediately on a channel move', async () => {
   const fakes = makeFakes();
   const frames = [];

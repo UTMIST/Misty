@@ -6,7 +6,7 @@ Feature owner: Misty #92. Related: [platform ARCHITECTURE](ARCHITECTURE.md), [`s
 
 ## What it does
 
-A **linked** member (identity resolved via the directory — see "Authorization" below) runs `/record start` in a Discord voice channel, optionally supplying a name up to 100 characters. Before a recording is active, the first human to enter an empty voice channel receives a direct message prompting them to start one. The bot joins, and as people talk it streams their audio to the `meeting` service, which transcribes each speaker live into a rolling transcript. Recording ends on `/record stop` **or automatically when everyone leaves the voice channel** (the bot ends the meeting once no non-bot member remains). On stop the service turns the transcript into minutes (via the `llm` service), renders a PDF, and hands it back; the bot posts the **PDF** to the text channel, @-mentioning whoever started the recording. A supplied name becomes the PDF title and is sanitized into the attachment filename as `<name>_<YYYY-MM-DD_HHMM>.pdf` in America/Toronto; unnamed recordings use `meeting_<YYYY-MM-DD_HHMM>.pdf`, based on the meeting start time. For saved recordings, the finalized transcript and minutes are handed to documentation-system before cleanup, then persisted as one native Google Doc and cataloged. Live sessions and unaccepted hand-offs remain in memory. Posting the existing Doc link is the separate #223 follow-up. Audio is never persisted. See "Durable records" below.
+A **linked** member (identity resolved via the directory — see "Authorization" below) runs `/record start` in a Discord voice channel, optionally supplying a name up to 100 characters. Before a recording is active, the first human to enter an empty voice channel receives a direct message prompting them to start one. The bot joins, and as people talk it streams their audio to the `meeting` service, which transcribes each speaker live into a rolling transcript. Recording ends on `/record stop` **or automatically when everyone leaves the voice channel** (the bot ends the meeting once no non-bot member remains). On stop the service turns the transcript into minutes (via the `llm` service), renders a PDF, and hands it back; the bot posts the **PDF** to the text channel, @-mentioning whoever started the recording. A supplied name becomes the PDF title and is sanitized into the attachment filename as `<name>_<YYYY-MM-DD_HHMM>.pdf` in America/Toronto; unnamed recordings use `meeting_<YYYY-MM-DD_HHMM>.pdf`, based on the meeting start time. For saved recordings, the finalized transcript and minutes are handed to documentation-system before cleanup, then persisted as one native Google Doc and cataloged. Live sessions and unaccepted hand-offs remain in memory. The bot posts the saved Doc link in the originating text channel or thread and recovers delayed deliveries automatically (#223); recipients still need their own Drive access. Audio is never persisted. See "Durable records" below.
 
 ## The boundary, and the one constraint that forces it
 
@@ -51,7 +51,7 @@ Discord voice  ──Opus──▶  bot recorder ──sendFrame──▶  meeti
 
 ## Durable records (design, #212)
 
-**Status: persistence implemented by #222; link delivery remains #223.**
+**Status: persistence implemented by #222; link delivery implemented by #223.**
 Google Docs is the durable destination. See the service
 [API](../services/documentation-system/docs/API.md#meeting-records) and
 [rollout runbook](RAILWAY-DEPLOYMENT.md#meeting-record-persistence).
@@ -262,12 +262,19 @@ as owner, sharing, and permanent deletion).
 Confirm during #222 implementation; fall back to `drive` only if a required
 call is refused.
 
-**Link delivery (#223) survives restarts.** If `/stop` returns
-`record.status = "saved"`, the bot posts the link immediately and PATCHes
-`delivery`. Otherwise the bot polls the pending-delivery query on startup and
-every 10 minutes, posts each link in the record's `text_channel_id`, and
-PATCHes `delivery` with the message ID. Delivery retries edit that message
-rather than posting again.
+**Link delivery (#223) survives restarts.** After `/stop`, the bot re-reads the
+saved reference and posts its link immediately if persistence is `saved`.
+It also polls saved records with `pending` or `failed` delivery on Discord
+startup and every 10 minutes, and PATCHes delivery with the message ID.
+It uses the stored exact `text_channel_id` and `guild_id`, including threads;
+it never falls back to a broader parent channel. The message identifies the
+title/start time, mentions the original requester and states that the Doc has
+minutes and the full transcript. Recipients still need their own Drive access.
+Only a pointer is posted, with link previews suppressed and no document text.
+Retries edit a known message; recent-history recovery and a deterministic nonce
+cover interrupted sends. Delivery failures leave persistence untouched. See
+the bot's [delivery/recovery runbook](../discord-bot/docs/meeting-delivery.md)
+for permissions, duplicate-recovery limits and offline playground scenarios.
 
 ### Metadata schema (documentation-system, migration `012`)
 
@@ -302,7 +309,7 @@ stays database-free):
 | `create_attempt_id`, `create_lease_until` | UUID, timestamptz, null | Serializes creation/reconciliation; stale results cannot change the record |
 | `next_reconcile_at` | timestamptz, null | Set before the first create; remains scheduled after save, failure, and removal |
 | `attempts`, `next_attempt_at`, `last_error` | int, timestamptz, text | `last_error` is a code, never content |
-| `delivery_status` | text | `pending` / `posted` / `failed` (#223) |
+| `delivery_status` | text | `pending` / `posted` / `failed` / `disabled` (#223; removal disables delivery) |
 | `discord_message_id` | text, null | Link message, for retry/update and removal |
 | `removed_at`, `removed_by` | timestamptz, text, null | Tombstone; content columns cleared on removal |
 | `created_at/by`, `updated_at/by` | | Attested actor convention |
@@ -460,9 +467,11 @@ recorded and is OK with it. Misty makes that explicit:
      late-created files. Clear every other field, including `title` and
      `requester_*`; keep only identifiers needed to finish any pending catalog
      or Discord cleanup until those steps succeed.
-  5. **Discord:** the bot deletes its link message (`discord_message_id`).
-  The admin deletes the Discord PDF message by hand (the bot does not track
-  it today). Copies members already downloaded cannot be recalled; the admin
+  5. **Discord:** the design calls for bot deletion of its link message
+  (`discord_message_id`), but automatic Discord cleanup is outside #223.
+  Until that removal follow-up ships, the admin deletes both the link and PDF
+  message by hand, recording their locations before invoking `/remove` (the
+  bot does not track the PDF today). Copies members already downloaded cannot be recalled; the admin
   tells the requester so. Expiry runs the same cascade.
 - **Members who leave** lose access when they leave the managed Google Group;
   their past speech is not removed from records.

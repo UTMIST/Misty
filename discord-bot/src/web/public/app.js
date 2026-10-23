@@ -38,6 +38,15 @@ const dmHelper = {
   category: 'conversation',
   auth: 'linked',
 };
+const meetingDelivery = {
+  key: 'meeting-delivery',
+  title: 'Preview meeting delivery',
+  displayName: 'Meeting delivery preview',
+  description:
+    'Simulate completed recordings and link recovery. No audio, Google or Discord calls.',
+  category: 'meetings',
+  auth: 'public',
+};
 
 async function request(url, options) {
   const response = await fetch(url, options);
@@ -95,7 +104,7 @@ function renderSidebar() {
   commandList.replaceChildren();
   let count = 0;
   for (const category of categories) {
-    const commands = [helper, dmHelper, ...state.commands].filter(
+    const commands = [helper, dmHelper, meetingDelivery, ...state.commands].filter(
       (cmd) => cmd.category === category.id && matchesSearch(cmd, query),
     );
     if (!commands.length) continue;
@@ -212,7 +221,9 @@ function selectCommand(key) {
       ? helper
       : key === dmHelper.key
         ? dmHelper
-        : state.commands.find((cmd) => cmd.key === key);
+        : key === meetingDelivery.key
+          ? meetingDelivery
+          : state.commands.find((cmd) => cmd.key === key);
   if (!command) return;
   state.selectedKey = key;
   state.openCategories.add(command.category);
@@ -224,6 +235,7 @@ function selectCommand(key) {
   renderSidebar();
   if (key === helper.key) renderHelperReplyForm();
   else if (key === dmHelper.key) renderHelperDmForm();
+  else if (key === meetingDelivery.key) renderMeetingDeliveryForm();
   else renderForm(command);
   updateSubmitState();
   setNavigationOpen(false);
@@ -349,6 +361,47 @@ function renderForm(command) {
   form.addEventListener('submit', (event) => {
     event.preventDefault();
     submitForm(command, form);
+  });
+  formStrip.append(form);
+}
+
+function renderMeetingDeliveryForm() {
+  renderCommandHeading(meetingDelivery);
+  const form = document.createElement('form');
+  form.className = 'command-form';
+  const scenario = document.createElement('select');
+  for (const [value, label] of [
+    ['explicit', 'Explicit stop'],
+    ['automatic', 'Automatic stop'],
+    ['retry', 'Failed delivery, then recovery'],
+    ['delivery-failed', 'Discord delivery failure'],
+    ['persistence-pending', 'Save still processing'],
+    ['persistence-failed', 'Save failed'],
+    ['admin-only', 'Admin-only record'],
+  ])
+    scenario.append(new Option(label, value));
+  form.append(createField({ name: 'scenario', label: 'Scenario', required: true }, scenario));
+  form.append(createActions('Run simulation ↗'));
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    setPending(true, 'Simulating meeting delivery…');
+    try {
+      const result = await request('/api/meeting-delivery/preview', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ scenario: scenario.value }),
+      });
+      appendBotMessage({
+        content:
+          `[Simulation: ${result.scenario}]\n` +
+          result.messages.map((message) => message.content).join('\n\n') +
+          `\n\nPersistence: ${result.persistence_status}; delivery: ${result.delivery_status}.`,
+      });
+    } catch (error) {
+      appendErrorMessage(error.message);
+    } finally {
+      setPending(false);
+    }
   });
   formStrip.append(form);
 }
