@@ -8,7 +8,7 @@ A Discord bot opens one WebSocket per meeting and streams each speaker's raw Opu
 
 Two design choices shape everything:
 
-- **Stateful, but ephemeral.** Unlike `llm`, this service *does* hold state — one `MeetingSession` per active meeting, alive only in process memory for the meeting's duration (see the STATEFULNESS note below). There is no database and nothing survives a restart.
+- **Stateful, but ephemeral.** Unlike `llm`, this service *does* hold state — one `MeetingSession` per active meeting, alive only in process memory for the meeting's duration (see the STATEFULNESS note below). Live sessions have no database and do not survive a restart. Completed records accepted by documentation-system do survive; see the [hand-off contract](docs/API.md#durable-record-context).
 - **`llm` as the summarization choke point.** `meeting` never calls Bedrock directly. It POSTs the assembled transcript to the `llm` service's `/chat` endpoint (via `LLM_BASE_URL`/`LLM_API_KEY`) and parses the completion into `Minutes`. Swapping models, providers, or prompts happens in `llm`, not here.
 
 ## Quick start
@@ -54,6 +54,9 @@ All settings load from the environment (`src/config.py`, `.env` in dev):
 | `LLM_BASE_URL` | `""` | Base URL of the `llm` service (e.g. `http://llm.railway.internal:8002` in prod, `http://localhost:8002` in dev). Required outside `local`. |
 | `LLM_API_KEY` | `""` | Consumer key this service presents to `llm`'s `X-API-Key`. |
 | `REQUEST_TIMEOUT_S` | `60` | Per-request timeout when calling `llm` (seconds). |
+| `DOCS_BASE_URL` | `""` | documentation-system URL for durable meeting hand-off. |
+| `DOCS_API_KEY` | `""` | Consumer key with `meetings:write`; required outside local when `DOCS_BASE_URL` is configured. |
+| `RECORD_HANDOFF_HOLD_S` | `1800` | In-memory retry window after a failed catalog hand-off. |
 | `MAX_MEETING_MS` | `14400000` (4h) | Safety backstop: a session stops accepting audio past this. The normal end is `/record stop` or auto-stop-on-empty; this only bounds a forgotten meeting. 4h is also AWS Transcribe's per-stream cap. |
 | `DISCONNECT_GRACE_S` | `60` | How long a session survives an abrupt WebSocket disconnect. The transcript is already assembled server-side, so within this window `POST /stop` still turns a dropped recording into minutes instead of losing it. `0` discards immediately. |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR`. Applied at boot by `configure_logging`. INFO is the default because the volume is a startup note plus per-meeting summaries, not per-request chatter — the alternative is losing them entirely. |
@@ -94,7 +97,7 @@ Every **protected** endpoint (HTTP and WS) requires `X-API-Key` + the `meetings`
 
 **`GET /meetings/{id}/transcript` → `TranscriptView`:** `{"segments": [{"speaker", "start_ms", "text"}, ...]}`. Reads whatever each speaker's live Transcribe stream has finalized so far. Polling is **free** — no AWS call, no audio re-sent — so it can be polled as often as you like. It is a cumulative view, not a diff/append stream.
 
-**`POST /meetings/{id}/stop` → `StopResponse`:** `{"transcript", "minutes": {"title", "summary", "decisions": [...], "action_items": [...]}, "pdf_b64"}`. `pdf_b64` is the base64-encoded minutes PDF. **No meeting audio is returned** — it exists only as transcription input and is never mixed or persisted.
+**`POST /meetings/{id}/stop` → `StopResponse`:** `{"transcript", "minutes": {"title", "summary", "decisions": [...], "action_items": [...]}, "pdf_b64", "record"}`. `record` carries durable-save status when requested (see [the contract](docs/API.md#durable-record-context)). `pdf_b64` is the base64-encoded minutes PDF. **No meeting audio is returned** — it exists only as transcription input and is never mixed or persisted.
 
 ### WebSocket: `WS /meetings/{id}/stream`
 

@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from platform_auth import AuditLogMiddleware
 
 from src.api.routers.meetings import router as meetings_router
-from src.api.wiring import get_qna_runner, shutdown_qna_runner
+from src.api.wiring import get_qna_runner, get_record_handoff, shutdown_qna_runner
 from src.config import get_settings, verify_production_secrets
 from src.logging_setup import configure_logging
 
@@ -30,6 +30,9 @@ async def _lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if get_record_handoff.cache_info().currsize:
+            await get_record_handoff().close()
+        get_record_handoff.cache_clear()
         shutdown_qna_runner()
 
 

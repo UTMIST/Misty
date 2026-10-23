@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # boundary that hands the raw value to GoogleSource) should ever call
     # .get_secret_value() on it.
     google_credentials_json: SecretStr = SecretStr("")
+    google_oauth_client_id: SecretStr = SecretStr("")
+    google_oauth_client_secret: SecretStr = SecretStr("")
+    google_oauth_refresh_token: SecretStr = SecretStr("")
+    google_meeting_root_folder_id: str = ""
+    google_meeting_admin_emails: list[str] = []
     # Optional GitHub token (a fine-grained, read-only PAT). Empty is valid:
     # public repositories are fetched unauthenticated, so this is never part
     # of verify_production_secrets. SecretStr for the same reason as
@@ -64,17 +69,28 @@ def get_settings() -> Settings:
 def verify_production_secrets(settings: Settings | None = None) -> None:
     """Fail fast if a non-local environment still uses the built-in dev secret.
 
-    Google credentials and the GitHub token are deliberately NOT checked here:
+    Read-account credentials and the GitHub token are deliberately NOT checked here:
     a connectors service that cannot reach Drive (or private GitHub repos) is
     degraded, not broken, and must still start and serve /health so it can be
     deployed before those credentials exist.
     """
+    # The optional OAuth writer may be disabled, but an enabled writer must
+    # have complete configuration outside local (checked below).
     settings = settings or get_settings()
     if settings.connectors_env == "local":
         return
     insecure: list[str] = []
     if settings.api_key.get_secret_value() == DEFAULT_DEV_API_KEY:
         insecure.append("API_KEY")
+    writer_fields = {
+        "GOOGLE_OAUTH_CLIENT_ID": settings.google_oauth_client_id.get_secret_value(),
+        "GOOGLE_OAUTH_CLIENT_SECRET": settings.google_oauth_client_secret.get_secret_value(),
+        "GOOGLE_OAUTH_REFRESH_TOKEN": settings.google_oauth_refresh_token.get_secret_value(),
+        "GOOGLE_MEETING_ROOT_FOLDER_ID": settings.google_meeting_root_folder_id,
+        "GOOGLE_MEETING_ADMIN_EMAILS": settings.google_meeting_admin_emails,
+    }
+    if any(writer_fields.values()):
+        insecure.extend(name for name, value in writer_fields.items() if not value)
     if insecure:
         raise RuntimeError(
             f"Refusing to start in connectors_env={settings.connectors_env!r}: "

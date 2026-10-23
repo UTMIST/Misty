@@ -1,4 +1,5 @@
 import pytest
+from pydantic import SecretStr
 
 from src.config import DEFAULT_DEV_API_KEY, Settings, verify_production_secrets
 
@@ -94,3 +95,21 @@ def test_secrets_never_leak_via_string_conversion():
         assert secret not in str(value)
         assert secret not in repr(value)
         assert value.get_secret_value() == secret
+
+
+def test_configured_catalog_requires_a_real_handoff_key():
+    s = Settings(
+        _env_file=None,
+        meeting_env="production",
+        api_key="real-api-key",
+        aws_region="us-east-1",
+        llm_base_url="http://llm",
+        llm_api_key="real-llm-key",
+        docs_base_url="http://catalog",
+    )
+    with pytest.raises(RuntimeError, match="DOCS_API_KEY"):
+        verify_production_secrets(s)
+    secret = "private-catalog-key"
+    s = s.model_copy(update={"docs_api_key": SecretStr(secret)})
+    verify_production_secrets(s)
+    assert secret not in repr(s)

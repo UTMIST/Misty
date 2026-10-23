@@ -693,3 +693,69 @@ This is separate from the existing-document refresh schedule above. Follow the
 [discovery runbook](DISCOVERY.md) for its two scoped keys, persistent checkpoint,
 15-minute schedule, enable/status/disable commands, recovery and staging acceptance.
 Production activation requires a separate rollout decision.
+
+## Meeting record persistence
+
+Apply migrations through **016** (`uv run alembic upgrade head`) before the new API serves
+traffic. Migration 012 adds `meeting_records` and nullable `docs.purged_at`; the prior head
+is 011. Verify upgrade → downgrade -1 → upgrade against a disposable database,
+never against live meeting data. Downgrading 012 drops meeting retry payloads and IDs;
+export them before any operational rollback.
+Migration 013 preserves existing records and marks saved meetings for initial index
+repair. Its downgrade removes only the index retry flag.
+Migration 014 adds confirmed Google-deletion receipts. Its downgrade removes only
+the receipt field; rollback after deletion can require manual investigation.
+Migration 015 adds removed Google identity fences and makes old tombstones due
+for reconciliation. The next meeting retry run purges any surviving catalog
+aliases even if Google deletion already succeeded. Its downgrade forgets those
+additional fences; disable ingestion during rollback until cleanup is verified.
+
+Migration 016 persists per-file deletion intent before contacting Google and
+excludes those identities from adoption. Its downgrade drops this protection;
+stop meeting workers and resolve outstanding Google deletions before rollback.
+No new environment variables are required.
+
+Settings: `MEETING_DOC_CREATE_LEASE_S=600` (minimum 60),
+`MEETING_RECORD_MAX_ATTEMPTS=8`, `MEETING_RECORD_RETENTION_DAYS=365`.
+The existing `CONNECTORS_API_KEY` additionally needs `meeting-write` and
+`meeting-fetch`. The directory key needs the existing identifier, channel-team
+and synced Google Group reads. Issue `meeting` a `meetings:write` key and give
+the bot `meetings:read,meetings:write` for #223.
+
+The existing staging Railway cron now runs
+`python -m src.source_refresh --require-monitor --meeting-records`; add
+`meetings:write` to its existing `docs:write` key **before deploying** the runner.
+It validates both scopes before work. The meeting phase uses the same time and
+batch budgets and no direct DB or Google credentials. Production scheduling
+remains explicitly disabled in `railway.source-refresh.json` until rollout.
+Deploy the updated API before the runner: the new runner requires full meeting
+outcome counts and rejects an older attempted-only response. Meeting persistence,
+indexing and cleanup failures produce exit 1 and a failure heartbeat, with separate
+`meeting_*_failed` summary counts. API/transport uncertainty still produces exit 2.
+
+Recovery: inspect `GET /meeting-records?persistence_status=failed` or
+`persistence_status=inaccessible`; use privileged
+`POST /meeting-records/{id}/retry` after fixing permissions/configuration.
+Do not clear a lease to retry a still-running Google call. Do not replace a
+canonical ID or resubmit changed text under the same UUID. Reconciliation
+continues hourly for terminal records; investigate `reconcile_failed` and
+`removal_pending` by meeting ID. A Google 404 cannot confirm permanent deletion,
+so `delete_unconfirmed` remains pending for admin investigation. Cleanup retries
+pending `google_deletions` IDs even when the owner listing is empty, and the runner
+continues to report cleanup failure until acknowledgement. Historical confirmed
+and pending IDs are also purged from the catalog when removal runs; old tombstones
+are repaired by their recurring reconciliation. After seven days in failed state,
+the pending transcript is cleared; the Discord PDF is the
+fallback if no Google Doc was adopted. Expiry and explicit removal purge the
+catalog even if Google cleanup still needs retries.
+
+Saved records with `index_pending=true` retry indexing on the next due run, with
+a five-minute retry delay, without another Google write.
+
+`google_deleted_at` records a successful canonical deletion and prevents repeated
+deletion during remaining cleanup. If the process or database fails before that receipt commits,
+the existing ambiguous-404 investigation procedure still applies.
+
+Removal/unsafe-ACL notices and the existing PDF attachment are the admin's
+responsibility until the link-delivery cleanup in #223 ships. Never log record
+payloads or credentials. See the [platform rollout](../../../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).

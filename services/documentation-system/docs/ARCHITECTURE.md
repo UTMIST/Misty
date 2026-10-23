@@ -804,3 +804,63 @@ during fetching, including aliases that do not share a normalized URL. Retiremen
 preserves rows, so it cannot invalidate the existence check. Manual re-ingest retains
 its existing semantics. Provider and directory calls finish before this short lock;
 it never spans network fetching or embedding.
+
+## Durable meeting records
+
+`contracts/meeting.py` defines the hand-off, metadata and injected writer.
+`meeting_records.py` orchestrates the leased state machine from the
+[shared design](../../../docs/MEETING-RECORDING.md#durable-records-design-212).
+Migration 012 follows the refresh-runner migration 011. Both storage adapters
+implement atomic replay checks, version-checked transitions and catalog commits;
+`catalog_meeting` commits the Doc, source grants, content and saved state together.
+Migration 013 adds a durable `index_pending` flag.
+Catalog acceptance schedules indexing in the same transaction; the coordinator
+immediately runs the existing conditional indexer with an injected embedder.
+Failures retry through `retry-due` without rewriting, resharing or refetching the Doc.
+Removal invalidates attempts before erasing content. The canonical Google ID is
+never replaced, and the pending transcript clears only after adoption commits.
+Migration 014 adds the `google_deleted_at` receipt. Successful canonical deletion
+is recorded before later cleanup or the final `removed` transition, so retries
+skip a file already confirmed deleted. An
+unacknowledged Google 404 remains ambiguous; it never creates a deletion receipt.
+
+Migration 015 records every known removed Google identity. `purge_meeting_catalog`
+uses the Google insertion locks to persist those fences and purge all matching
+catalog aliases, including ordinary ingests that never set `record.doc_id`.
+An insert already holding the lock commits before this purge; later inserts see
+the removal fence.
+Reconciliation applies the same purge to late duplicates and old tombstones,
+including when the owner search returns no files. Known identities remain fenced
+even when no catalog row existed at removal time.
+
+Migration 016 adds per-file `google_deletions` intent and confirmation state.
+The coordinator commits intent before issuing a Google delete, and never adopts
+an identity carrying that intent, even after a timeout or restart. Explicit
+retry creates a new Doc from the retained payload when only fenced files remain.
+Confirmed deletions are skipped on subsequent cleanup passes, but their identities
+remain in the atomic removal purge and registration fence. Cleanup takes the union
+of current search results, durable pending deletion IDs and removed identities
+whose cleanup was not yet attempted, so losing listing visibility cannot discard
+an unresolved delete. Pending IDs keep retry outcomes in failure, including for
+older tombstones incorrectly marked removed. Successful reconciliation clears its
+own transient error while retaining unrelated errors.
+
+The removal marker retries version conflicts before proceeding.
+
+`retry-due` reports attempted/succeeded/failed meetings and separate persistence,
+indexing and cleanup failure counts. Pending or terminal failures and incomplete
+cleanup are not successful recovery. The runner includes these outcomes in its
+exit code, summary and heartbeat; known work failures release the run guard after
+the failure heartbeat, while transport or monitoring uncertainty retains it.
+
+Meeting content is fetched with the writer OAuth identity in initial ingest,
+refetch and scheduled refresh. An ambiguous owner 404 follows the nondestructive
+fetch-error path and never extends grant TTLs. `purged_at` prevents subsequent
+content, metadata, grants or chunks from restoring removed catalog data. These
+internal purge protections ship with meeting removal; the generic privileged
+catalog purge API remains a follow-up in the design.
+
+Generation-time decisions/action items/participants remain separate fields;
+readable content follows current Google edits. Google creation is a single HTML
+conversion and later retries never write that body. Audio stays entirely outside
+this persistence boundary. No durable PDF copy is retained by the platform.
