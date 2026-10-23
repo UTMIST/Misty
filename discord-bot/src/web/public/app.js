@@ -178,10 +178,11 @@ function updateIdentity() {
 }
 
 function updateSubmitState() {
+  const preview = state.selectedKey === meetingDelivery.key;
   for (const button of formStrip.querySelectorAll('button[type="submit"]')) {
     button.dataset.idleLabel ||= button.textContent;
     button.textContent = state.pending ? 'Working…' : button.dataset.idleLabel;
-    button.disabled = !state.actingAs || state.pending;
+    button.disabled = state.pending || (!preview && !state.actingAs);
   }
   for (const input of formStrip.querySelectorAll('input, select, textarea')) {
     input.disabled = state.pending;
@@ -194,9 +195,11 @@ function updateSubmitState() {
   if (identityNote)
     identityNote.textContent = state.pending
       ? 'A request is in progress…'
-      : !state.actingAs
-        ? 'Choose an identity above to continue.'
-        : 'Runs as your selected identity.';
+      : preview
+        ? 'Simulation only. No identity is required.'
+        : !state.actingAs
+          ? 'Choose an identity above to continue.'
+          : 'Runs as your selected identity.';
 }
 
 function setPending(pending, message = '') {

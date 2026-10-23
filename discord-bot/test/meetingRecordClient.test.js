@@ -60,3 +60,52 @@ test('missing reference is null; network/auth/malformed responses normalize to D
     DocUnavailable,
   );
 });
+
+for (const [operation, request] of [
+  ['get', (client) => client.get('id')],
+  ['list', (client) => client.list('pending')],
+  ['update', (client) => client.update('id', 'posted', '123')],
+]) {
+  test(`${operation} shares one deadline across headers and body, then allows retry`, async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const signals = [];
+    const result = operation === 'list' ? [] : { meeting_id: 'id' };
+    let bodyStarted;
+    const readingBody = new Promise((resolve) => (bodyStarted = resolve));
+    let finishBody;
+    t.after(() => finishBody?.(result));
+    const client = createMeetingRecordClient({
+      baseUrl: 'http://docs',
+      apiKey: 'k',
+      fetchImpl: async (_url, { signal }) => {
+        signals.push(signal);
+        if (signals.length > 1) return { ok: true, status: 200, json: async () => result };
+        // Headers consume part of the request budget before the body stalls.
+        t.mock.timers.tick(6_000);
+        return {
+          ok: true,
+          status: 200,
+          json: () =>
+            new Promise((resolve, reject) => {
+              finishBody = resolve;
+              signal.addEventListener('abort', () => reject(new Error('body aborted')), {
+                once: true,
+              });
+              bodyStarted();
+            }),
+        };
+      },
+    });
+    const pending = request(client);
+    await readingBody;
+    t.mock.timers.tick(3_999);
+    assert.equal(signals[0].aborted, false);
+    t.mock.timers.tick(1);
+    assert.equal(signals[0].aborted, true);
+    await assert.rejects(pending, DocUnavailable);
+
+    assert.deepEqual(await request(client), result);
+    t.mock.timers.tick(10_000);
+    assert.equal(signals[1].aborted, false, 'completed requests release their deadline');
+  });
+}

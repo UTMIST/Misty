@@ -28,6 +28,9 @@ carry identifiers/status only. Restore destination access or catalog key scopes,
 then wait for the next poll or restart the bot to retry immediately. Keep the
 PDF and meeting ID for admin recovery of a persistence failure.
 
+Catalog requests have one ten-second deadline covering response headers and
+the JSON body. A stalled response times out so delivery recovery can continue.
+
 Successful delivery PATCHes `posted` and `discord_message_id`. A retry with a
 receipt edits that message without pinging the requester again. Only a confirmed
 Discord message deletion allows replacing a known receipt. If send succeeded
@@ -50,21 +53,23 @@ or PDF attachments remains the admin-owned workflow in the recording design.
 Run `npm test`, `npm run lint` and `npm run format:check` in `discord-bot`.
 The offline tests cover stop/auto-stop, separate save/delivery failures,
 concurrent retry, acknowledgement failure, restart/history recovery, deleted
-messages, unsafe references, exact thread placement and restricted mentions.
+messages, unsafe references, exact thread placement, restricted mentions and
+stalled catalog response bodies.
 
 In the local playground choose **Meetings → Preview meeting delivery**. Pick
 explicit stop, automatic stop, failed delivery then recovery, Discord failure,
 pending save, failed save or admin-only. Scenarios use the real lifecycle and
 delivery orchestration with in-memory fakes and show persistence and delivery
 state separately. They make no audio, Discord, Google, directory or catalog
-calls and are independent of the acting identity. Voice capture still requires
-the real Discord adapter.
+calls and require no acting identity selection. Ordinary commands still require
+an identity, and the preview cannot be submitted while a request is running.
+Voice capture still requires the real Discord adapter.
 
 ## Changed-file rationale for #223
 
 | File | Why it is needed |
 |---|---|
-| `src/clients/meetingRecordClient.js` | Authenticated, bounded saved-reference reads and delivery receipts. |
+| `src/clients/meetingRecordClient.js` | Authenticated saved-reference reads and delivery receipts, with a deadline through JSON parsing. |
 | `src/meeting/meetingDelivery.js` | Independent delivery retry, concurrency control and startup/poll recovery. |
 | `src/messages/meeting.js` | Shared pointer rendering and accurate persistence/delivery notices. |
 | `src/adapters/discord/meetingPosts.js` | Exact-channel send/edit, safe mentions and duplicate recovery. |
@@ -72,7 +77,7 @@ the real Discord adapter.
 | `src/context.js`, `src/index.js` | Inject and start delivery only on the active Discord surface. |
 | `src/web/meetingDeliveryPreview.js`, `src/web/server.js`, `src/web/public/app.js` | Offline scenario execution, validated endpoint and playground controls. |
 | `test/meetingDelivery.test.js`, `test/meetingLinkPoster.test.js`, `test/meetingRecordClient.test.js` | Verify orchestration, Discord safety/recovery and authenticated transport. |
-| `test/meetingDeliveryPreview.test.js`, `test/meetingSurface.test.js` | Verify playground scenarios and delivery/PDF failure independence. |
+| `test/meetingDeliveryPreview.test.js`, `test/meetingSurface.test.js` | Verify playground scenarios, identity/pending UI gates and delivery/PDF failure independence. |
 | `.env.example`, `README.md`, `docs/CONTRIBUTING.md` | Document required scopes, member behavior and local verification. |
 | `docs/meeting-delivery.md` | Delivery operations, limitations, verification and file rationale. |
 | Root `README.md`, `docs/MEETING-RECORDING.md`, `docs/RAILWAY-DEPLOYMENT.md` | Keep member instructions, design and deployment permissions aligned. |
