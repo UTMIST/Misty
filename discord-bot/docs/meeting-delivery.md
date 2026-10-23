@@ -16,6 +16,11 @@ it never creates a Doc, re-ingests content, or reruns transcription/minutes.
 scopes. Discord requires View Channel, Read Message History and Send Messages
 (Send Messages in Threads in a thread) at the stored destination. A missing
 thread, mismatched guild or denied fetch fails delivery without redirecting it.
+Before reading messages, the bot refreshes its guild membership and checks
+effective View Channel and Read Message History permissions at that destination.
+Missing or unresolved permissions fail delivery even if Discord would return a
+successful empty history list. Restore access before retrying; an empty list
+alone cannot authorize a replacement notification.
 
 On Discord readiness and every ten minutes, the bot polls saved records with
 `delivery_status=pending` or `failed`. It reads each record again before posting
@@ -54,7 +59,9 @@ Run `npm test`, `npm run lint` and `npm run format:check` in `discord-bot`.
 The offline tests cover stop/auto-stop, separate save/delivery failures,
 concurrent retry, acknowledgement failure, restart/history recovery, deleted
 messages, unsafe references, exact thread placement, restricted mentions and
-stalled catalog response bodies.
+stalled catalog response bodies. Lost-receipt/restart coverage also models
+missing history permission returning an empty list after nonce expiry, then
+restored access recovering the original message without another requester ping.
 
 In the local playground choose **Meetings → Preview meeting delivery**. Pick
 explicit stop, automatic stop, failed delivery then recovery, Discord failure,

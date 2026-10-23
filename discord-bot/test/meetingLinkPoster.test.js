@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MessageFlags } from 'discord.js';
+import { MessageFlags, PermissionFlagsBits, PermissionsBitField } from 'discord.js';
 import { makeMeetingLinkPoster } from '../src/adapters/discord/meetingPosts.js';
+import { createMeetingDelivery } from '../src/meeting/meetingDelivery.js';
 
 function setup(overrides = {}) {
   const record = {
@@ -24,9 +25,26 @@ function setup(overrides = {}) {
   const messages = new Map();
   const sends = [];
   const edits = [];
+  const member = { id: 'bot' };
+  const permissions = new PermissionsBitField([
+    PermissionFlagsBits.ViewChannel,
+    PermissionFlagsBits.ReadMessageHistory,
+  ]);
   const channel = {
     id: '2',
     guildId: '1',
+    guild: {
+      members: {
+        fetchMe: async (options) => {
+          assert.deepEqual(options, { force: true });
+          return member;
+        },
+      },
+    },
+    permissionsFor: (resolvedMember) => {
+      assert.equal(resolvedMember, member);
+      return permissions;
+    },
     isTextBased: () => true,
     messages: {
       fetch: async (options) => {
@@ -59,8 +77,76 @@ function setup(overrides = {}) {
       },
     },
   };
-  return { record, client, channel, messages, sends, edits, destinations };
+  return { record, client, channel, messages, sends, edits, destinations, permissions };
 }
+
+test('untrusted empty history cannot authorize a send in a channel or thread', async () => {
+  for (const thread of [false, true]) {
+    for (const missing of [
+      PermissionFlagsBits.ReadMessageHistory,
+      PermissionFlagsBits.ViewChannel,
+      null,
+    ]) {
+      const f = setup();
+      f.channel.isThread = () => thread;
+      if (missing === null) f.channel.permissionsFor = () => null;
+      else f.permissions.remove(missing);
+      // Model Discord's successful [] response rather than a 50013 exception.
+      // This must never be interpreted as proof that no notification exists.
+      let historyReads = 0;
+      f.channel.messages.fetch = async () => {
+        historyReads++;
+        return new Map();
+      };
+      await assert.rejects(() => makeMeetingLinkPoster(f.client)(f.record), /history access/);
+      assert.equal(historyReads, 0);
+      assert.equal(f.sends.length, 0);
+      assert.equal(f.edits.length, 0);
+    }
+  }
+});
+
+test('lost receipt plus restart with denied history fails delivery, then recovers the original message', async () => {
+  const f = setup();
+  let catalogDown = true;
+  const records = {
+    get: async () => ({ ...f.record }),
+    list: async (status) => (f.record.delivery_status === status ? [f.record] : []),
+    update: async (_id, status, messageId) => {
+      if (catalogDown) throw new Error('lost receipt');
+      f.record.delivery_status = status;
+      f.record.discord_message_id = messageId;
+      return { ...f.record };
+    },
+  };
+  await createMeetingDelivery({ records, post: makeMeetingLinkPoster(f.client) }).deliver(
+    f.record.meeting_id,
+  );
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.record.discord_message_id, undefined);
+
+  catalogDown = false;
+  f.permissions.remove(PermissionFlagsBits.ReadMessageHistory);
+  const fetchHistory = f.channel.messages.fetch;
+  f.channel.messages.fetch = async (options) =>
+    f.permissions.has(PermissionFlagsBits.ReadMessageHistory) ? fetchHistory(options) : new Map();
+  // A fresh service has no remembered receipt; the fake sender intentionally
+  // ignores nonce deduplication to model retry after Discord's nonce expires.
+  const restarted = createMeetingDelivery({ records, post: makeMeetingLinkPoster(f.client) });
+  await restarted.poll();
+  assert.equal(f.record.delivery_status, 'failed');
+  assert.equal(f.record.persistence_status, 'saved');
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.edits.length, 0);
+
+  f.permissions.add(PermissionFlagsBits.ReadMessageHistory);
+  await restarted.poll();
+  assert.equal(f.record.delivery_status, 'posted');
+  assert.equal(f.record.discord_message_id, '101');
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.edits.length, 1);
+  assert.deepEqual(f.edits[0].allowedMentions, { parse: [], users: [] });
+});
 
 test('saved link identifies title/time/requester without leaking content or granting access', async () => {
   const f = setup();

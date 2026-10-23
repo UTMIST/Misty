@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { AttachmentBuilder, MessageFlags } from 'discord.js';
+import { AttachmentBuilder, MessageFlags, PermissionFlagsBits } from 'discord.js';
 import { sendDiscordMessage } from './messages.js';
 import { meetingFilename } from '../../meeting/meetingFilename.js';
 import { meetingLinkMessage } from '../../messages/meeting.js';
@@ -32,6 +32,17 @@ export function makeMeetingLinkPoster(client) {
       !client.user?.id
     ) {
       throw new Error('meeting destination unavailable');
+    }
+
+    // Discord can return a successful empty history when Read Message History
+    // is denied. Verify effective channel permissions before interpreting any
+    // fetch (including a missing receipt) as permission to send a replacement.
+    const member = await channel.guild.members.fetchMe({ force: true });
+    const permissions = channel.permissionsFor(member);
+    if (
+      !permissions?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory])
+    ) {
+      throw new Error('meeting history access unavailable');
     }
 
     let message;
