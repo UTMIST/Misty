@@ -8,16 +8,16 @@ Downgrade restores the (doc_id, ordinal) key and refuses while any doc still
 holds more than one model's set: finish or abandon the re-embed first, rather
 than have the migration guess which set to discard.
 
-Revision ID: 011
-Revises: 010
+Revision ID: 017
+Revises: 016
 Create Date: 2026-10-21
 """
 
 from alembic import op
 import sqlalchemy as sa
 
-revision = "011"
-down_revision = "010"
+revision = "017"
+down_revision = "016"
 branch_labels = None
 depends_on = None
 
@@ -41,7 +41,7 @@ def downgrade() -> None:
     if mixed:
         raise RuntimeError(
             f"{mixed} docs hold chunk sets for more than one embedding model; finish the "
-            "re-embed (or remove the unwanted sets) before downgrading below 011"
+            "re-embed (or remove the unwanted sets) before downgrading below 017"
         )
     op.drop_constraint("doc_chunks_pkey", "doc_chunks", type_="primary")
     op.create_primary_key("doc_chunks_pkey", "doc_chunks", ["doc_id", "ordinal"])

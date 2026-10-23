@@ -1,6 +1,6 @@
 """HTTP-backed fetcher for the connectors service.
 
-Implements the same Fetcher protocol as WebFetcher/GithubFetcher, so ingest and
+Implements the same Fetcher protocol as WebFetcher, so ingest and
 refetch need no changes. source_id is bound at construction because
 Fetcher.fetch takes only a url — the registry has already resolved the source.
 """

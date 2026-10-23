@@ -30,6 +30,10 @@ const titles = {
   'record:status': 'Recording status',
   'record:stop': 'Stop a recording',
   seed: 'Add a directory member',
+  'channel-access:show': 'Show channel document teams',
+  'channel-access:set': 'Set channel document teams',
+  'channel-access:append': 'Append channel document teams',
+  'channel-access:clear': 'Clear channel document teams',
   help: 'Command guide',
   bug: 'Report a bug',
 };

@@ -1,6 +1,7 @@
 import sys
 from collections.abc import Sequence
 from datetime import datetime, timezone
+from hashlib import sha256
 from uuid import UUID
 
 from sqlalchemy import (
@@ -26,7 +27,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from contracts.retrieval import ChunkCitation, RetrievalUnavailable, SearchHit
-from contracts.storage import DuplicateActiveUrl
+from contracts.storage import DuplicateActiveUrl, DuplicateDocId, ExistingGoogleDoc, PurgedDocument
 from contracts.types import (
     ApiKey,
     Doc,
@@ -41,6 +42,7 @@ from contracts.types import (
 )
 from contracts.visibility import Actor, ActorContext, Channel, DENY, SEE_ALL
 from src.content import content_hash
+from src.google_identity import GOOGLE_ID_PATTERNS, google_file_id
 from src.retrieval import candidate_limit, fuse, terms, validate_search
 from src.storage.chunks import validate_chunks_for_content, validate_doc_chunks
 from src.storage.schema import (
@@ -50,8 +52,12 @@ from src.storage.schema import (
     doc_grants,
     doc_tags,
     docs,
+    source_refresh_run,
     sources,
+    meeting_records,
 )
+from contracts.meeting import MeetingRecord
+from src.storage.meeting import changed, catalog_values
 
 
 # Matches text with something to embed. chunk_text embeds nothing when
@@ -104,6 +110,295 @@ class PostgresStorageAdapter:
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+
+    def put_meeting(self, record):
+        with self._engine.begin() as conn:
+            created = (
+                conn.execute(
+                    pg_insert(meeting_records)
+                    .values(
+                        **record.model_dump(
+                            mode="python", exclude={"participants", "pending_payload"}
+                        ),
+                        participants=record.participants,
+                        pending_payload=record.pending_payload,
+                    )
+                    .on_conflict_do_nothing(index_elements=[meeting_records.c.meeting_id])
+                    .returning(meeting_records.c.meeting_id)
+                ).scalar_one_or_none()
+                is not None
+            )
+            row = (
+                conn.execute(
+                    select(meeting_records).where(meeting_records.c.meeting_id == record.meeting_id)
+                )
+                .mappings()
+                .one()
+            )
+            current = MeetingRecord.model_validate(dict(row))
+            if current.payload_hash != record.payload_hash:
+                raise ValueError("meeting payload conflict")
+            return current, created
+
+    def get_meeting(self, meeting_id):
+        with self._engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(meeting_records).where(meeting_records.c.meeting_id == meeting_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            return MeetingRecord.model_validate(dict(row)) if row else None
+
+    def get_meeting_by_google_id(self, document_id):
+        with self._engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(meeting_records).where(
+                        or_(
+                            meeting_records.c.google_document_id == document_id,
+                            meeting_records.c.removed_google_document_ids.any(document_id),
+                        )
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            return MeetingRecord.model_validate(dict(row)) if row else None
+
+    def list_meetings(self):
+        with self._engine.connect() as conn:
+            return [
+                MeetingRecord.model_validate(dict(row))
+                for row in conn.execute(
+                    select(meeting_records).order_by(
+                        meeting_records.c.created_at, meeting_records.c.meeting_id
+                    )
+                ).mappings()
+            ]
+
+    def change_meeting(self, record, values, *, actor, live_at=None):
+        updated = changed(record, values, actor)
+        with self._engine.begin() as conn:
+            conditions = (
+                []
+                if live_at is None
+                else [
+                    meeting_records.c.create_lease_until > live_at,
+                    meeting_records.c.create_attempt_id == record.create_attempt_id,
+                    meeting_records.c.removed_at.is_(None),
+                ]
+            )
+            row = (
+                conn.execute(
+                    update(meeting_records)
+                    .where(
+                        meeting_records.c.meeting_id == record.meeting_id,
+                        meeting_records.c.version == record.version,
+                        *conditions,
+                    )
+                    .values(**updated.model_dump())
+                    .returning(meeting_records)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            return MeetingRecord.model_validate(dict(row)) if row else None
+
+    def catalog_meeting(self, record, result, grants, *, expires_at, actor):
+        with self._engine.begin() as conn:
+            row = (
+                conn.execute(
+                    select(meeting_records)
+                    .where(meeting_records.c.meeting_id == record.meeting_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                not row
+                or row["version"] != record.version
+                or row["removed_at"]
+                or not row["google_document_id"]
+            ):
+                return False
+            current = MeetingRecord.model_validate(dict(row))
+            values, body, digest, now = catalog_values(current, result, actor)
+            doc_id = values["id"]
+            lock_key = int.from_bytes(
+                sha256(f"google-file:{current.google_document_id}".encode()).digest()[:8],
+                signed=True,
+            )
+            conn.execute(select(func.pg_advisory_xact_lock(lock_key)))
+            existing = self._get_doc_by_google_file_id(conn, current.google_document_id)
+            if existing:
+                if existing.purged_at or not existing.active:
+                    raise ValueError("meeting catalog identity retired")
+                doc_id = existing.id
+                values.pop("id")
+                values.pop("created_at")
+                values.pop("created_by")
+                conn.execute(update(docs).where(docs.c.id == doc_id).values(**values))
+                for table in (doc_grants, doc_content, doc_tags, doc_chunks):
+                    conn.execute(delete(table).where(table.c.doc_id == doc_id))
+            else:
+                conn.execute(insert(docs).values(**values))
+            conn.execute(insert(doc_tags).values(doc_id=doc_id, tag="meeting"))
+            if body:
+                conn.execute(
+                    insert(doc_content).values(
+                        doc_id=doc_id,
+                        content_text=body,
+                        content_hash=digest,
+                        fetched_at=now,
+                        updated_at=now,
+                    )
+                )
+            for grant in grants:
+                conn.execute(
+                    insert(doc_grants).values(
+                        doc_id=doc_id,
+                        **grant.model_dump(),
+                        origin="google_drive",
+                        created_at=now,
+                        created_by=actor,
+                        expires_at=min(expires_at, grant.source_expires_at)
+                        if grant.source_expires_at
+                        else expires_at,
+                    )
+                )
+            updated = changed(
+                current,
+                {
+                    "doc_id": doc_id,
+                    "persistence_status": "saved",
+                    "index_pending": True,
+                    "last_error": None,
+                },
+                actor,
+            )
+            conn.execute(
+                update(meeting_records)
+                .where(meeting_records.c.meeting_id == current.meeting_id)
+                .values(**updated.model_dump())
+            )
+            return True
+
+    def purge_meeting_catalog(self, meeting_id, google_document_ids, *, actor):
+        with self._engine.begin() as conn:
+            # The removal marker freezes the canonical ID before these locks.
+            # Use the same identity locks as create_doc so earlier insertions
+            # commit before our lookup and later insertions see the tombstone.
+            current = self.get_meeting(meeting_id)
+            if current is None or not current.removed_at:
+                raise ValueError("meeting removal marker required")
+            identities = (
+                set(current.removed_google_document_ids)
+                | set(google_document_ids)
+                | set(current.google_deletions)
+            )
+            if current.google_document_id:
+                identities.add(current.google_document_id)
+            for file_id in sorted(identities):
+                lock_key = int.from_bytes(
+                    sha256(f"google-file:{file_id}".encode()).digest()[:8], signed=True
+                )
+                conn.execute(select(func.pg_advisory_xact_lock(lock_key)))
+            row = (
+                conn.execute(
+                    select(meeting_records)
+                    .where(meeting_records.c.meeting_id == meeting_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .one()
+            )
+            current = MeetingRecord.model_validate(dict(row))
+            identities.update(current.removed_google_document_ids)
+            matches = (
+                conn.execute(
+                    select(docs.c.id)
+                    .where(
+                        or_(
+                            docs.c.id == current.doc_id,
+                            *(
+                                func.substring(docs.c.url_normalized, p).in_(identities)
+                                for p in GOOGLE_ID_PATTERNS
+                            ),
+                        )
+                    )
+                    .order_by(docs.c.id)
+                    .with_for_update()
+                )
+                .scalars()
+                .all()
+            )
+            for doc_id in matches:
+                self._purge_doc(conn, doc_id, actor=actor)
+            if identities != set(current.removed_google_document_ids):
+                current = changed(
+                    current, {"removed_google_document_ids": sorted(identities)}, actor
+                )
+                conn.execute(
+                    update(meeting_records)
+                    .where(meeting_records.c.meeting_id == meeting_id)
+                    .values(**current.model_dump())
+                )
+            return current
+
+    def purge_doc(self, doc_id, *, actor):
+        with self._engine.begin() as conn:
+            return self._purge_doc(conn, doc_id, actor=actor)
+
+    def _purge_doc(self, conn, doc_id, *, actor):
+        row = conn.execute(select(docs.c.id).where(docs.c.id == doc_id).with_for_update()).first()
+        if row is None:
+            return False
+        for table in (doc_content, doc_chunks, doc_grants, doc_tags):
+            conn.execute(delete(table).where(table.c.doc_id == doc_id))
+        conn.execute(
+            update(docs)
+            .where(docs.c.id == doc_id)
+            .values(
+                title=None,
+                description=None,
+                content_snapshot=None,
+                owning_team_id=None,
+                owning_team_label=None,
+                owning_person_id=None,
+                owning_person_label=None,
+                active=False,
+                purged_at=func.coalesce(docs.c.purged_at, _now()),
+                updated_at=_now(),
+                updated_by=actor,
+            )
+        )
+        return True
+
+    def acquire_source_refresh_run(self, run_id: UUID, *, actor: str) -> bool:
+        with self._engine.begin() as conn:
+            return (
+                conn.execute(
+                    pg_insert(source_refresh_run)
+                    .values(singleton=True, run_id=run_id, created_by=actor)
+                    .on_conflict_do_nothing()
+                    .returning(source_refresh_run.c.run_id)
+                ).scalar_one_or_none()
+                is not None
+            )
+
+    def release_source_refresh_run(self, run_id: UUID) -> bool:
+        with self._engine.begin() as conn:
+            return (
+                conn.execute(
+                    delete(source_refresh_run)
+                    .where(source_refresh_run.c.run_id == run_id)
+                    .returning(source_refresh_run.c.run_id)
+                ).scalar_one_or_none()
+                is not None
+            )
 
     def is_ready(self) -> bool:
         try:
@@ -308,6 +603,7 @@ class PostgresStorageAdapter:
         return Doc(
             id=row.id,
             url=row.url,
+            purged_at=row.purged_at,
             url_normalized=row.url_normalized,
             title=row.title,
             source_id=row.source_id,
@@ -346,17 +642,59 @@ class PostgresStorageAdapter:
         fetched_at,
         tags,
         actor,
+        skip_existing_google=False,
+        doc_id=None,
     ) -> Doc:
+        file_id = google_file_id(url_normalized)
+        if skip_existing_google and file_id is None:
+            raise ValueError("Google identity required for discovery insertion")
         with self._engine.begin() as conn:
+            if file_id is not None:
+                # Every Google insert (manual and discovery) takes the same
+                # transaction-scoped lock. A row need not exist yet to lock it.
+                # Retirements preserve rows, so checking both active and retired
+                # identities here cannot miss an operator retirement during fetch.
+                lock_key = int.from_bytes(
+                    sha256(f"google-file:{file_id}".encode()).digest()[:8], signed=True
+                )
+                conn.execute(select(func.pg_advisory_xact_lock(lock_key)))
+                existing = self._get_doc_by_google_file_id(conn, file_id)
+                if existing is not None and existing.purged_at:
+                    raise PurgedDocument("document was permanently purged")
+                removed = conn.execute(
+                    select(meeting_records.c.meeting_id).where(
+                        or_(
+                            meeting_records.c.google_document_id == file_id,
+                            meeting_records.c.removed_google_document_ids.any(file_id),
+                        ),
+                        meeting_records.c.removed_at.is_not(None),
+                    )
+                ).first()
+                if removed:
+                    raise PurgedDocument("meeting was permanently removed")
+                if skip_existing_google:
+                    existing = self._get_doc_by_google_file_id(conn, file_id)
+                    if existing is not None:
+                        raise ExistingGoogleDoc(existing)
+            # Identity first, so a call that collides on both the id and the url fails
+            # the same way here as in the in-memory adapter, which has no url
+            # constraint to reach. The insert below would otherwise report the url
+            # conflict and never surface the one the caller actually controls.
+            if doc_id is not None:
+                taken = conn.execute(select(docs.c.id).where(docs.c.id == doc_id)).one_or_none()
+                if taken is not None:
+                    raise DuplicateDocId(doc_id)
             # New docs are always active, so they fall under the partial unique
             # index on url_normalized WHERE active. A concurrent ingest that
             # already inserted an active row for this URL makes this a no-op:
             # on_conflict_do_nothing suppresses the IntegrityError (which would
             # otherwise poison the transaction) and RETURNING yields no row.
             # Signal that to the caller so ingest can fall back to dedup/merge.
-            row = conn.execute(
+            insert_doc = (
                 pg_insert(docs)
                 .values(
+                    # Omitted when None so the column's gen_random_uuid() default applies.
+                    **({"id": doc_id} if doc_id is not None else {}),
                     url=url,
                     url_normalized=url_normalized,
                     source_id=source_id,
@@ -376,7 +714,18 @@ class PostgresStorageAdapter:
                     index_where=text("active"),
                 )
                 .returning(docs)
-            ).one_or_none()
+            )
+            try:
+                row = conn.execute(insert_doc).one_or_none()
+            except IntegrityError as e:
+                # The check above has already rejected an id this transaction can see,
+                # so reaching here means a concurrent insert took it in between. The
+                # url_normalized conflict is absorbed by on_conflict_do_nothing, leaving
+                # the primary key as the only unique violation; other integrity failures
+                # (a bad source_id FK) must keep their own type.
+                if doc_id is None or getattr(e.orig, "sqlstate", None) != "23505":
+                    raise
+                raise DuplicateDocId(doc_id) from e
             if row is None:
                 raise DuplicateActiveUrl(url_normalized)
             for tag in set(tags):
@@ -413,6 +762,26 @@ class PostgresStorageAdapter:
                 .limit(1)
             ).first()
             return self._row_to_doc(conn, row) if row else None
+
+    def get_doc_by_google_file_id(self, file_id: str) -> Doc | None:
+        with self._engine.connect() as conn:
+            return self._get_doc_by_google_file_id(conn, file_id)
+
+    def _get_doc_by_google_file_id(self, conn, file_id: str) -> Doc | None:
+        row = conn.execute(
+            select(docs)
+            .where(
+                or_(
+                    *(
+                        func.substring(docs.c.url_normalized, p) == file_id
+                        for p in GOOGLE_ID_PATTERNS
+                    )
+                )
+            )
+            .order_by(docs.c.active.desc(), docs.c.created_at, docs.c.id)
+            .limit(1)
+        ).first()
+        return self._row_to_doc(conn, row) if row else None
 
     def list_docs(
         self,
@@ -472,13 +841,20 @@ class PostgresStorageAdapter:
         patch["updated_by"] = actor
         with self._engine.begin() as conn:
             row = conn.execute(
-                update(docs).where(docs.c.id == doc_id).values(**patch).returning(docs)
+                update(docs)
+                .where(docs.c.id == doc_id, docs.c.purged_at.is_(None))
+                .values(**patch)
+                .returning(docs)
             ).one_or_none()
             return self._row_to_doc(conn, row) if row else None
 
     def add_tag(self, doc_id: UUID, tag: str) -> bool:
         with self._engine.begin() as conn:
-            exists = conn.execute(select(docs.c.id).where(docs.c.id == doc_id)).one_or_none()
+            exists = conn.execute(
+                select(docs.c.id)
+                .where(docs.c.id == doc_id, docs.c.purged_at.is_(None))
+                .with_for_update()
+            ).one_or_none()
             if exists is None:
                 return False
             already = conn.execute(
@@ -497,7 +873,11 @@ class PostgresStorageAdapter:
 
     def add_grant(self, doc_id, *, grantee_type, grantee_id, actor) -> bool:
         with self._engine.begin() as conn:
-            exists = conn.execute(select(docs.c.id).where(docs.c.id == doc_id)).one_or_none()
+            exists = conn.execute(
+                select(docs.c.id)
+                .where(docs.c.id == doc_id, docs.c.purged_at.is_(None))
+                .with_for_update()
+            ).one_or_none()
             if exists is None:
                 return False
             already = conn.execute(
@@ -562,7 +942,9 @@ class PostgresStorageAdapter:
         with self._engine.begin() as conn:
             # Serialize complete replacements even when no grant rows exist yet.
             exists = conn.execute(
-                select(docs.c.id).where(docs.c.id == doc_id).with_for_update()
+                select(docs.c.id)
+                .where(docs.c.id == doc_id, docs.c.purged_at.is_(None))
+                .with_for_update()
             ).one_or_none()
             if exists is None:
                 return False
@@ -594,7 +976,7 @@ class PostgresStorageAdapter:
                 )
             conn.execute(
                 update(docs)
-                .where(docs.c.id == doc_id)
+                .where(docs.c.id == doc_id, docs.c.purged_at.is_(None))
                 .values(
                     source_access_synced_at=synced_at,
                     source_access_attempted_at=synced_at,
@@ -609,6 +991,11 @@ class PostgresStorageAdapter:
     ) -> None:
         now = _now()
         with self._engine.begin() as conn:
+            current = conn.execute(
+                select(docs.c.purged_at).where(docs.c.id == doc_id).with_for_update()
+            ).one_or_none()
+            if current is not None and current.purged_at is not None:
+                return
             conn.execute(
                 pg_insert(doc_content)
                 .values(
@@ -669,7 +1056,9 @@ class PostgresStorageAdapter:
             # Lock the parent even when no chunks exist yet. Concurrent writers
             # serialize here before deleting/inserting, so sets cannot mix.
             existing = conn.execute(
-                select(docs.c.id).where(docs.c.id == doc_id).with_for_update()
+                select(docs.c.id)
+                .where(docs.c.id == doc_id, docs.c.purged_at.is_(None))
+                .with_for_update()
             ).scalar_one_or_none()
             if existing is None:
                 return False

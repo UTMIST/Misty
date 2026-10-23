@@ -33,8 +33,9 @@ export function buildSnapshotCommands({ source, target, dbUser }) {
   // pg_dump fails, psql receives an empty stream, exits 0, and the pipe
   // silently succeeds — leaving the scratch DB empty. With pipefail, any
   // failure in the pipeline surfaces as a non-zero exit.
+  // bash, not sh: Ubuntu/Debian /bin/sh is dash, which rejects -o pipefail.
   const pipeCmd = [
-    'sh',
+    'bash',
     '-c',
     'set -e -o pipefail; ' +
       `docker compose exec -T postgres pg_dump -U ${dbUser} ${source} | ` +

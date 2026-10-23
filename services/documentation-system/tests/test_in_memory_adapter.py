@@ -1,3 +1,6 @@
+from tests.reembed_integration_cases import ReembedIntegrationCases
+from tests.doc_identity_cases import DocIdentityCases
+from tests.google_identity_cases import GoogleIdentityCases
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -36,6 +39,12 @@ def _sources():
 @pytest.fixture
 def store():
     return InMemoryStorageAdapter(seed_sources=_sources())
+
+
+def test_source_refresh_guard(store):
+    from tests.source_refresh_guard_cases import assert_refresh_guard
+
+    assert_refresh_guard(store, store)
 
 
 def _mk(store, url="https://x.com", tags=None):
@@ -422,3 +431,27 @@ def test_get_doc_content_meta_scoped_to_requested_doc(store):
     # The actor can see `visible` but NOT `secret`. A cross join would leak
     # `secret`'s content metadata because *some* doc is visible to this actor.
     assert store.get_doc_content_meta(secret.id, visibility=actor) is None
+
+
+class TestGoogleIdentity(GoogleIdentityCases):
+    @pytest.fixture
+    def adapter(self):
+        from tests.conftest import build_seed_sources
+
+        return InMemoryStorageAdapter(seed_sources=build_seed_sources())
+
+
+class TestDocIdentity(DocIdentityCases):
+    @pytest.fixture
+    def adapter(self):
+        from tests.conftest import build_seed_sources
+
+        return InMemoryStorageAdapter(seed_sources=build_seed_sources())
+
+
+class TestReembedIntegration(ReembedIntegrationCases):
+    @pytest.fixture
+    def adapter(self):
+        from tests.conftest import build_seed_sources
+
+        return InMemoryStorageAdapter(build_seed_sources())

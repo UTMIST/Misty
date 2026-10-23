@@ -99,7 +99,7 @@ uv --project services/team-tracking run team-tracking-keys issue \
   --scopes people:read people:write people:elevate \
            identifiers:read identifiers:write \
            teams:read teams:write memberships:read memberships:write \
-           role_kinds:read
+           role_kinds:read channels:read channels:write
 ```
 
 Always pass `--project`, and check the token starts with `tt_` — see the

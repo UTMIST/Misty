@@ -81,7 +81,8 @@ class _FakeDocsService:
     def documents(self):
         return self
 
-    def get(self, *, documentId):
+    def get(self, *, documentId, includeTabsContent=False):
+        assert includeTabsContent is True
         return self
 
     def execute(self):

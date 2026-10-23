@@ -53,8 +53,9 @@ def _ranges_overlap(start1: date, end1: date | None, start2: date, end2: date | 
 class InMemoryStorageAdapter:
     """In-process storage adapter used in tests and for quick prototyping.
 
-    Not thread-safe. Not persistent. Enforces the same semantic invariants as
-    the Postgres adapter (email uniqueness, slug uniqueness, no schema surprises).
+    Not generally thread-safe; channel writes and Google Group claims are
+    serialized. Not persistent. Enforces the same semantic invariants as the
+    Postgres adapter (email uniqueness, slug uniqueness, no schema surprises).
     """
 
     def is_ready(self) -> bool:
@@ -75,6 +76,8 @@ class InMemoryStorageAdapter:
         self._identifiers: dict[UUID, PersonIdentifier] = {}
         # (guild_id, channel_id) -> (team_ids, created_by)
         self._channel_teams: dict[tuple[str, str], tuple[list[UUID], str]] = {}
+        # Append holds this across read/merge/replace; replace re-enters it.
+        self._channel_teams_lock = threading.RLock()
         self._google_groups: dict[UUID, TeamGoogleGroup] = {}
         self._google_group_lock = threading.Lock()
 
@@ -535,18 +538,36 @@ class InMemoryStorageAdapter:
     def replace_channel_teams(
         self, guild_id: str, channel_id: str, team_ids: list[UUID], *, actor: str
     ) -> ChannelTeams:
-        for t in team_ids:
-            team = self._teams.get(t)
-            if team is None or not team.active:
-                raise ValueError("unknown_or_inactive_team")
-        if team_ids:
-            self._channel_teams[(guild_id, channel_id)] = (list(team_ids), actor)
-        else:
-            self._channel_teams.pop((guild_id, channel_id), None)
-        return self.get_channel_teams(guild_id, channel_id)
+        with self._channel_teams_lock:
+            for t in team_ids:
+                team = self._teams.get(t)
+                if team is None or not team.active:
+                    raise ValueError("unknown_or_inactive_team")
+            if team_ids:
+                self._channel_teams[(guild_id, channel_id)] = (list(team_ids), actor)
+            else:
+                self._channel_teams.pop((guild_id, channel_id), None)
+            return self.get_channel_teams(guild_id, channel_id)
+
+    def append_channel_teams(
+        self, guild_id: str, channel_id: str, team_ids: list[UUID], *, actor: str
+    ) -> ChannelTeams:
+        with self._channel_teams_lock:
+            current = self.get_channel_teams(guild_id, channel_id)
+            # Empty input must not rewrite: a replace would stamp updated_by and
+            # drop stored ids for retired teams that still belong to the configuration.
+            if not team_ids:
+                return current
+            for t in team_ids:
+                team = self._teams.get(t)
+                if team is None or not team.active:
+                    raise ValueError("unknown_or_inactive_team")
+            merged = list(dict.fromkeys([*current.team_ids, *team_ids]))
+            return self.replace_channel_teams(guild_id, channel_id, merged, actor=actor)
 
     def clear_channel_teams(self, guild_id: str, channel_id: str) -> None:
-        self._channel_teams.pop((guild_id, channel_id), None)
+        with self._channel_teams_lock:
+            self._channel_teams.pop((guild_id, channel_id), None)
 
     # --- Team Google Groups ---
 

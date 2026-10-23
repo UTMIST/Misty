@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from contracts.types import Source
 from src.url_norm import derive_source, normalize_url
 
@@ -67,3 +69,18 @@ def test_derive_source_path_prefix_respects_segment_boundary():
 
 def test_derive_falls_back_to_web():
     assert derive_source("https://example.org/whatever", SOURCES) == "web"
+
+
+@pytest.mark.parametrize("account", ["", "u/0/", "u/12/"])
+def test_forms_file_identity_uses_google_fallback(account):
+    assert derive_source(f"https://docs.google.com/forms/{account}d/file/edit", SOURCES) == "gdrive"
+    assert (
+        derive_source(f"https://docs.google.com/forms/{account}d/e/published/viewform", SOURCES)
+        == "web"
+    )
+
+
+def test_google_fallback_requires_registered_source_and_preserves_explicit_patterns():
+    url = "https://docs.google.com/forms/d/file/edit"
+    assert derive_source(url, [s for s in SOURCES if s.id != "gdrive"]) == "web"
+    assert derive_source(url, [*SOURCES, _src("custom", ["docs.google.com/forms"])]) == "custom"

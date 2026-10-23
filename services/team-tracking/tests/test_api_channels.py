@@ -68,6 +68,38 @@ def test_replace_overwrites_previous_set(client):
     assert client.get(URL, headers=AUTH).json()["team_ids"] == [b]
 
 
+def test_append_unions_without_dropping_existing(client):
+    a, b = _team(client, "a"), _team(client, "b")
+    client.put(URL, json={"team_ids": [a]}, headers=AUTH)
+    resp = client.post(f"{URL}/append", json={"team_ids": [b]}, headers=AUTH)
+    assert resp.status_code == 200
+    assert sorted(resp.json()["team_ids"]) == sorted([a, b])
+    assert sorted(client.get(URL, headers=AUTH).json()["team_ids"]) == sorted([a, b])
+
+
+def test_append_rejects_inactive_and_keeps_config(client):
+    a, b = _team(client, "a"), _team(client, "b")
+    client.put(URL, json={"team_ids": [a]}, headers=AUTH)
+    client.patch(f"/teams/{b}", json={"active": False}, headers=AUTH)
+    resp = client.post(f"{URL}/append", json={"team_ids": [b]}, headers=AUTH)
+    assert resp.status_code == 400
+    assert client.get(URL, headers=AUTH).json()["team_ids"] == [a]
+
+
+def test_empty_append_is_true_noop(client):
+    a, b = _team(client, "a"), _team(client, "b")
+    before = client.put(URL, json={"team_ids": [a, b]}, headers=AUTH).json()
+    client.patch(f"/teams/{b}", json={"active": False}, headers=AUTH)
+    headers = _key(client, "later-bot", ["channels:read", "channels:write"])
+    resp = client.post(f"{URL}/append", json={"team_ids": []}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["team_ids"] == [a]
+    assert resp.json()["updated_by"] == before["updated_by"]
+    assert resp.json()["updated_by"] != "later-bot"
+    client.patch(f"/teams/{b}", json={"active": True}, headers=AUTH)
+    assert sorted(client.get(URL, headers=AUTH).json()["team_ids"]) == sorted([a, b])
+
+
 def test_replace_with_empty_list_clears(client):
     a = _team(client, "a")
     client.put(URL, json={"team_ids": [a]}, headers=AUTH)
@@ -135,6 +167,7 @@ def test_read_only_key_cannot_write(client):
     headers = _key(client, "reader", ["channels:read"])
     assert client.get(URL, headers=headers).status_code == 200
     assert client.put(URL, json={"team_ids": []}, headers=headers).status_code == 403
+    assert client.post(f"{URL}/append", json={"team_ids": []}, headers=headers).status_code == 403
     assert client.delete(URL, headers=headers).status_code == 403
 
 

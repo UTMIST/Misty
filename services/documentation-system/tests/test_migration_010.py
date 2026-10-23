@@ -27,7 +27,6 @@ def test_migration_010_preserves_chunks_and_marks_unknown_title_stale():
     adapter = PostgresStorageAdapter(engine)
     doc = None
     try:
-        command.downgrade(cfg, "009")
         doc = make_doc(adapter)
         chunk = make_chunk()
         adapter.upsert_doc_content(
@@ -36,6 +35,7 @@ def test_migration_010_preserves_chunks_and_marks_unknown_title_stale():
             content_hash=chunk.source_content_hash,
             fetched_at=None,
         )
+        command.downgrade(cfg, "009")
         old_table = Table("doc_chunks", MetaData(), autoload_with=engine)
         values = chunk.model_dump(exclude={"source_title_hash"})
         with engine.begin() as conn:

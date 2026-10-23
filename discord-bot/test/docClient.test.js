@@ -15,6 +15,100 @@ function jsonResponse(status, body) {
   };
 }
 
+const searchHit = {
+  doc_id: 'd1',
+  title: 'CPSIF',
+  url: 'https://x.test/d1',
+  text: 'CPSIF notes',
+  chunk: { ordinal: 0, start_offset: 0, end_offset: 11, source_content_hash: 'h' },
+  score: 0.5,
+};
+
+test('searchDocs (person) posts to /search with X-On-Behalf-Of and {query,k}', async () => {
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async (url, options) => {
+      assert.equal(url, 'http://doc/search');
+      assert.equal(options.method, 'POST');
+      assert.equal(options.headers['X-On-Behalf-Of'], 'person-1');
+      assert.equal('X-Guild-ID' in options.headers, false);
+      assert.deepEqual(JSON.parse(options.body), { query: 'cpsif', k: 5 });
+      return jsonResponse(200, { results: [searchHit] });
+    }),
+  });
+  const results = await client.searchDocs({ query: 'cpsif', k: 5, onBehalfOf: 'person-1' });
+  assert.deepEqual(results, [searchHit]);
+});
+
+test('searchDocs (channel) sends X-Guild-ID and X-Channel-ID, not an actor', async () => {
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async (url, options) => {
+      assert.equal(options.headers['X-Guild-ID'], '100');
+      assert.equal(options.headers['X-Channel-ID'], '200');
+      assert.equal('X-On-Behalf-Of' in options.headers, false);
+      return jsonResponse(200, { results: [] });
+    }),
+  });
+  const results = await client.searchDocs({ query: 'q', guildId: '100', channelId: '200' });
+  assert.deepEqual(results, []);
+});
+
+test('searchDocs fails closed before any request when context is missing', async () => {
+  let called = false;
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async () => {
+      called = true;
+      return jsonResponse(200, { results: [] });
+    }),
+  });
+  await assert.rejects(() => client.searchDocs({ query: 'q' }), DocUnavailable);
+  assert.equal(called, false);
+});
+
+test('searchDocs fails closed when both person and channel context are given', async () => {
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async () => jsonResponse(200, { results: [] })),
+  });
+  await assert.rejects(
+    () => client.searchDocs({ query: 'q', onBehalfOf: 'p', guildId: '1', channelId: '2' }),
+    DocUnavailable,
+  );
+});
+
+test('searchDocs fails closed on a partial channel context (guild without channel)', async () => {
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async () => jsonResponse(200, { results: [] })),
+  });
+  await assert.rejects(() => client.searchDocs({ query: 'q', guildId: '100' }), DocUnavailable);
+});
+
+test('searchDocs throws DocUnavailable on a non-ok status', async () => {
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async () => jsonResponse(503, { detail: 'scope unavailable' })),
+  });
+  await assert.rejects(() => client.searchDocs({ query: 'q', onBehalfOf: 'p' }), DocUnavailable);
+});
+
+test('searchDocs rejects a body without a results array', async () => {
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'k',
+    fetchImpl: fakeFetch(async () => jsonResponse(200, { oops: true })),
+  });
+  await assert.rejects(() => client.searchDocs({ query: 'q', onBehalfOf: 'p' }), DocUnavailable);
+});
+
 test('ingestDoc posts to /docs and returns IngestResult (created)', async () => {
   const client = createDocClient({
     baseUrl: 'http://doc',
@@ -239,7 +333,13 @@ function replayClient(fixture) {
 
 function argsFor(fixture) {
   const { headers, json } = fixture.request;
-  return { query: json.query, k: json.k, onBehalfOf: headers['X-On-Behalf-Of'] };
+  return {
+    query: json.query,
+    k: json.k,
+    onBehalfOf: headers['X-On-Behalf-Of'],
+    guildId: headers['X-Guild-ID'],
+    channelId: headers['X-Channel-ID'],
+  };
 }
 
 async function withSilencedWarn(fn) {
@@ -254,7 +354,14 @@ async function withSilencedWarn(fn) {
   return warnings;
 }
 
-for (const name of ['alice', 'bob', 'filter-before-rank', 'empty-relevance']) {
+for (const name of [
+  'alice',
+  'bob',
+  'filter-before-rank',
+  'empty-relevance',
+  'channel-union',
+  'unconfigured-channel',
+]) {
   test(`searchDocs replays fixture case ${name} and returns its results`, async () => {
     const fixture = fixtureCase(name);
     const results = await replayClient(fixture).searchDocs(argsFor(fixture));
@@ -271,7 +378,7 @@ test('searchDocs returns different results for people with different access', as
   assert.ok(bob.some((r) => !aliceIds.has(r.doc_id)));
 });
 
-for (const name of ['scope-unavailable', 'embedding-error', 'denied-person', 'missing-context']) {
+for (const name of ['scope-unavailable', 'embedding-error', 'denied-person', 'denied-channel']) {
   test(`searchDocs throws DocUnavailable and warns on fixture case ${name}`, async () => {
     const fixture = fixtureCase(name);
     const warnings = await withSilencedWarn(async () => {
@@ -324,5 +431,18 @@ test('searchDocs throws DocUnavailable when the body has no results array', asyn
   await assert.rejects(
     () => client.searchDocs({ query: 'CPSIF', onBehalfOf: 'person-1' }),
     (e) => e instanceof DocUnavailable,
+  );
+});
+
+// Missing context is now rejected before HTTP, so there is no HTTP status log.
+test('missing-context fixture is denied before contacting the doc service', async () => {
+  const client = createDocClient({
+    baseUrl: 'http://doc',
+    apiKey: 'test',
+    fetchImpl: async () => assert.fail('no network call'),
+  });
+  await assert.rejects(
+    () => client.searchDocs(argsFor(fixtureCase('missing-context'))),
+    DocUnavailable,
   );
 });

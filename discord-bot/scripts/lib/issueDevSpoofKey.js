@@ -25,6 +25,7 @@ export function issueDevSpoofKey({ teamTrackingDir, databaseUrl, name }) {
       '--scopes',
       'people:read',
       'people:write',
+      'people:elevate',
       'identifiers:read',
       'identifiers:write',
       'teams:read',
@@ -32,6 +33,8 @@ export function issueDevSpoofKey({ teamTrackingDir, databaseUrl, name }) {
       'memberships:read',
       'memberships:write',
       'role_kinds:read',
+      'channels:read',
+      'channels:write',
       'dev:spoof',
     ];
     const child = spawn('uv', args, {

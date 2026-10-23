@@ -22,6 +22,39 @@ function oboHeader(onBehalfOf) {
   return onBehalfOf ? { headers: { 'X-On-Behalf-Of': onBehalfOf } } : {};
 }
 
+// Authorized-retrieval scoping for POST /search (shared #176 contract). The
+// service requires EXACTLY one authenticated context and derives the visible
+// team set itself; the caller never passes teams, vectors, or identity in the
+// body:
+//   { onBehalfOf: personId }          -> DM / person: X-On-Behalf-Of, needs the
+//                                        key's act-as-user scope.
+//   { guildId, channelId }            -> shared channel: X-Guild-ID + X-Channel-ID
+//                                        (decimal snowflakes), needs act-as-channel.
+//                                        The service resolves the channel's
+//                                        configured teams; an unconfigured channel
+//                                        returns { results: [] }.
+// The bot decides scope from the answer's destination, never from model
+// arguments. A missing, empty, or ambiguous (both/neither) context is a
+// programming error and fails closed by throwing before any request leaves the
+// bot — there is no unfiltered search to fall back to.
+function searchContextHeaders({ onBehalfOf, guildId, channelId }) {
+  const hasPerson = onBehalfOf != null;
+  const hasChannel = guildId != null || channelId != null;
+  if (hasPerson === hasChannel) {
+    throw new DocUnavailable('retrieval context must be exactly one of person or channel');
+  }
+  if (hasPerson) {
+    if (typeof onBehalfOf !== 'string' || !onBehalfOf) {
+      throw new DocUnavailable('person context requires a non-empty actor id');
+    }
+    return { 'X-On-Behalf-Of': onBehalfOf };
+  }
+  if (!guildId || !channelId) {
+    throw new DocUnavailable('channel context requires both a guild id and a channel id');
+  }
+  return { 'X-Guild-ID': String(guildId), 'X-Channel-ID': String(channelId) };
+}
+
 export function createDocClient({ baseUrl, apiKey, fetchImpl = fetch }) {
   const headers = { 'X-API-Key': apiKey, 'Content-Type': 'application/json' };
   const { send, parseJson } = createHttpClient({
@@ -71,20 +104,34 @@ export function createDocClient({ baseUrl, apiKey, fetchImpl = fetch }) {
       return parseJson(resp);
     },
 
-    async getDoc(id, { onBehalfOf } = {}) {
-      const resp = await send(`/docs/${encodeURIComponent(id)}`, oboHeader(onBehalfOf));
+    async getDoc(id, { onBehalfOf, signal } = {}) {
+      const resp = await send(`/docs/${encodeURIComponent(id)}`, {
+        ...oboHeader(onBehalfOf),
+        ...(signal ? { signal } : {}),
+      });
       if (resp.status === 404) return null;
       if (!resp.ok) throw unavailable(resp.status, 'GET /docs/{id}');
       return parseJson(resp);
     },
 
-    async searchDocs({ query, k, onBehalfOf }) {
+    // Authorized hybrid chunk search (shared #176 contract). Scoped by `context`
+    // (see searchContextHeaders): person for DMs, channel team-union for shared
+    // channels. `k` is forwarded only when given, so the service default (10)
+    // applies otherwise. Returns the ranked `results` array verbatim (one chunk
+    // per hit; a doc may appear more than once); an empty set is a normal answer,
+    // not an error.
+    //
+    // NOTE (#71/#210 coordination): this extends the member-search client shape
+    // from #289 (`searchDocs({ query, k, onBehalfOf })`) with the channel path
+    // (`guildId`/`channelId`). Person-only callers behave exactly as in #289.
+    async searchDocs({ query, k, onBehalfOf, guildId, channelId }, { signal } = {}) {
       const body = { query };
       if (k !== undefined) body.k = k;
       const resp = await send('/search', {
         method: 'POST',
+        headers: searchContextHeaders({ onBehalfOf, guildId, channelId }),
         body: JSON.stringify(body),
-        ...oboHeader(onBehalfOf),
+        ...(signal ? { signal } : {}),
       });
       if (!resp.ok) throw unavailable(resp.status, 'POST /search');
       const parsed = await parseJson(resp);

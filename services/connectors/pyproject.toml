@@ -22,15 +22,15 @@ dependencies = [
     "google-api-python-client>=2.100",
     "google-auth>=2.30",
     "google-auth-httplib2>=0.2",
-    "pypdf>=6.19.0",
+    "pypdf>=6.21.1",
     "python-docx>=1.1",
+    "httpx>=0.27",
     "platform-auth",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
-    "httpx>=0.27",
     "ruff>=0.6",
 ]
 

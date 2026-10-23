@@ -100,7 +100,11 @@ Switching the query model hides incompatible old chunks from both branches
 until reindexing; it never compares them or silently falls back. Change models
 only through the [re-embed runbook](#re-embedding-after-a-model-change-209), which
 builds the new sets before the switch. The absolute
-relevance floor starts at 0.3 and needs #178 calibration before quality claims.
+relevance floor starts at 0.3: against that harness's fixture the
+cosine distributions of correct and incorrect documents overlap across their whole
+range, so no threshold separates them and moving this value trades recall against
+precision. That measurement uses a lexical stand-in embedder, so re-measure against
+real embeddings before changing it. See docs/EVALUATION.md.
 
 No migration or unfiltered-search feature flag is needed. Use the shared
 [contract fixture](API.md#authorized-retrieval-post-search) for consumer mocks;
@@ -168,6 +172,18 @@ Migration history:
   Drain that endpoint once per environment to refresh existing chunks; this spends
   embedding budget. The migration itself makes no provider calls. Downgrading to `009`
   removes only the title fingerprint and preserves vectors, text, and citation offsets.
+- **`011_source_refresh_run`** — adds the singleton refresh-runner guard. Apply before
+  starting the new runner; stop runners before downgrading. See the
+  [refresh recovery procedure](#recovery-credential-rotation-and-disablerollback).
+
+- **`012`–`016`** — meeting records and recovery state; see the
+  [meeting persistence migrations](#meeting-record-persistence).
+- **`017_chunk_sets_per_model`** — widens the chunk key to retain complete sets
+  per model. Apply after `016` and before starting the model-aware application.
+  Existing chunks, catalog data, refresh guards, and meeting recovery state survive.
+  Downgrading to `016` refuses if any document has multiple models: first finish
+  the [model cleanup](#re-embedding-after-a-model-change-209), stop indexing writers,
+  and verify that every doc has at most one model. The downgrade preserves that set.
 
 Downgrading `008` removes the chunk table/index, preserving catalog records and full
 content. The database-level `vector` extension remains installed, even if `008`
@@ -348,7 +364,7 @@ Which sources get fetched is determined by two things that must agree:
 2. A `Fetcher` registered for that `source_id` in `default_registry()`
    (`src/fetch/registry.py`).
 
-`web` and `github` fetch in-process. The four Google sources (`gdrive`, `gdocs`, `gsheets`,
+`web` fetches in-process. `github` and the four Google sources (`gdrive`, `gdocs`, `gsheets`,
 `gslides`) fetch via the [connectors](../../connectors/) service over HTTP
 (`ConnectorsFetcher`, registered in `src/fetch/registry.py`); migration `006` flipped their
 `content_fetch_enabled` to `true` to match. `youtube` remains fetch-disabled:
@@ -358,11 +374,11 @@ the `Fetcher`, register it, and flip `content_fetch_enabled` (see
 [`docs/CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 Fetcher-specific env vars: `CONNECTORS_BASE_URL` / `CONNECTORS_API_KEY` (see above) configure
-the Google sources' fetcher. **Deploy order is recommended, not required:** documentation-system
+the connectors-backed fetchers (`github` and the Google sources). **Deploy order is recommended, not required:** documentation-system
 boots fine with no connectors configuration at all — `verify_production_secrets()` only warns
 on a default `CONNECTORS_API_KEY`, it never blocks startup. Deploying connectors first and
 setting these two vars on documentation-system before deploying it just avoids a window where
-Google-source fetches fail at request time (degraded, not fatal — see the connectors dependency
+GitHub and Google-source fetches fail at request time (degraded, not fatal — see the connectors dependency
 section below) because connectors isn't up yet or isn't yet configured.
 
 ## The team-tracking directory dependency
@@ -385,8 +401,8 @@ steady state.
 
 ## The connectors dependency
 
-The documentation-system fetches content for the Google sources (`gdrive`, `gdocs`,
-`gsheets`, `gslides`) by calling the [connectors](../../connectors/) service over HTTP. It is
+The documentation-system fetches content for `github` and the Google sources (`gdrive`,
+`gdocs`, `gsheets`, `gslides`) by calling the [connectors](../../connectors/) service over HTTP. It is
 a runtime dependency with **two different failure modes** depending on when it's down:
 
 - **At boot, outside `local`:** soft. `verify_production_secrets()` logs a warning, not a
@@ -396,7 +412,7 @@ a runtime dependency with **two different failure modes** depending on when it's
 - **At request time:** soft for ingest, hard for refetch — deliberately different, since
   ingest degrading a whole batch is worse than a single explicit refetch failing loudly.
   On `POST /docs`, if connectors is unreachable or errors, `ConnectorsFetcher` raises
-  `FetchError`, which `ingest_doc` catches the same way it catches a `web`/`github` fetch
+  `FetchError`, which `ingest_doc` catches the same way it catches a `web` fetch
   failure: the doc is still catalogued, just without a content snapshot, and a warning is
   returned — a connectors outage never fails `POST /docs`. On `POST /docs/{id}/refetch`,
   the same `FetchError` is instead surfaced to the caller as an HTTP 502 (see
@@ -525,10 +541,11 @@ authorizing a run, using the served model's row in `GET /docs/index/status`:
 
 ## Source-access refresh schedule
 
-Configure Railway (or the approved external scheduler) to call
-`POST /docs/source-access/refresh-due?limit=10` every hour (`0 * * * *`) with a `docs:write` key.
-Repeat until the response's `attempted` count is below `limit`; the endpoint processes each
-document independently and reports `{attempted, refreshed, failed}`. Only sources with
+Run `doc-source-refresh` hourly (`0 * * * *`) from Railway or the approved external
+scheduler. It calls `POST /docs/source-access/refresh-due?limit=10` with a dedicated
+`docs:write` key, repeating until `attempted < limit`. The endpoint processes each
+document independently and reports `{attempted, refreshed, failed, index_failed}`.
+Only sources with
 `content_fetch_enabled=true` are selected; disabled sources receive no automatic content
 or ACL refresh, so their existing source grants eventually expire.
 
@@ -549,8 +566,292 @@ Domain/link-wide shares, external or unknown users, unmapped groups, and pre-mig
 legacy groups are intentionally ignored. Add legacy group mappings through Team Tracking's
 managed-group migration; never infer access from an ordinary team membership.
 
+Provision a dedicated key using the intended environment's key-management runbook:
+
+```bash
+# Run from this service's directory with that environment's DATABASE_URL.
+uv --project . run python -m src.cli issue --name source-access-refresh-staging --scopes docs:write
+```
+
+Store the issued `doc_` token privately as the runner's `DOCS_API_KEY`. It needs no
+`docs:read:all`, impersonation scope, Google credential, or database connection.
+The runner checks its own scope through `GET /api-keys/self` before any POST.
+Set `DOCS_BASE_URL` to the intended documentation-system API, then run from the
+repository root with those variables in the process environment:
+
+```bash
+uv --directory services/documentation-system --project . run python -m src.source_refresh
+```
+
+The module invocation pins this service's `src` package in the workspace. The
+installed `doc-source-refresh` command is also available inside its isolated image.
+Neither invocation loads `.env`.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--base-url` | `DOCS_BASE_URL` or `http://localhost:8001` | HTTP API target |
+| `--batch-size` | `10` | Documents per request, from 1 through 100 |
+| `--max-batches` | `100` | Stop with an incomplete-run error if no short batch is observed |
+| `--timeout` | `600` | Timeout in seconds for each HTTP network phase |
+| `--max-seconds` | `3000` | Elapsed-time budget for starting requests; each request's timeout is capped by the remaining budget |
+| `--require-monitor` | off locally; on in staging cron | Fail before API calls unless `SOURCE_REFRESH_MONITOR_URL` is configured |
+
+The time budget is not a server cancellation or a hard process deadline. A timed-out
+POST may still finish in the API; the runner never immediately retries it. Failed
+document attempts are recorded by the API and become due again after the configured
+refresh interval. Per-document failures do not stop draining other batches.
+
+Output contains aggregate counts, nonsecret run UUIDs and sanitized errors. Exit `0`
+means a short batch was observed and no refresh/index failures occurred; `1` means
+the queue was drained with failures; `2` means configuration/auth/HTTP/response
+failure, an exhausted budget, or a conflicting runner. An unacknowledged monitor
+ping also exits `2`; `drained` still records whether the API work completed.
+Previously completed batch counts remain in the
+summary after an HTTP failure. `index_failed` requires the normal `POST /docs/index`
+recovery workflow and its separately scoped key; the refresh runner does not re-index
+repeatedly. Alert on either nonzero exit and on no completed run for 24 hours.
+
+### Staging deployment and review gate
+
+Publish and review the implementation in a PR targeting `staging` before deployment
+([#292](https://github.com/UTMIST/Misty/issues/292)). After it merges and the API is
+healthy, create exactly one **dedicated staging service**, `doc-source-refresh`, in
+Misty. Use repository `UTMIST/Misty`, branch `staging`, repository-root build context,
+and config path `/services/documentation-system/railway.source-refresh.json`.
+Record and compare the deployed commit SHA of the API and runner; a matching branch
+name alone is insufficient. Enable wait-for-CI and use the API's watch paths.
+The API must apply migration `011` before starting the new runner; the cron still
+has no database credentials and does not run migrations.
+
+The config reuses the API Dockerfile, clears migrations and HTTP healthchecks,
+sets one replica and restart policy `NEVER`, and runs
+`python -m src.source_refresh --require-monitor`. Only the `staging` override has
+an hourly UTC schedule. The base configuration is disabled; the explicit `pr`
+override also removes the inherited schedule and runs a harmless command so a
+preview cannot issue even one refresh or heartbeat. Exclude the service from
+PR copies as well. Do not attach a volume, public domain, Google credentials,
+`DATABASE_URL`, or the API's bootstrap key. Do not repoint the HTTP service at this
+config. Creating this file does not provision or activate a job.
+
+Set `DOCS_BASE_URL` to the staging API's private domain **and listening port**,
+for example `http://${{documentation-system.RAILWAY_PRIVATE_DOMAIN}}:${{documentation-system.PORT}}`.
+Set the dedicated `DOCS_API_KEY` and the monitoring variable described below.
+Never copy production credentials into this service. In its first deployment,
+observe a manual run and then a real scheduler-triggered run, saving the exit,
+aggregate summary, deployment/run IDs, timestamps and matching revision.
+
+[Railway skips a cron invocation while its previous execution is active](https://docs.railway.com/cron-jobs#service-execution-requirements).
+That does not serialize a second cron service, a manual HTTP caller, or a rollout.
+The runner also acquires a shared database guard through
+`POST /docs/source-access/refresh-runs/{run_id}` before its first heartbeat.
+Only one runner can enter, including across containers or API restarts. A duplicate
+gets `409`, exits `2`, and sends `/fail` without sending `/start` or success.
+Keep one service and one region. Use the CLI for manual execution; a raw HTTP
+batch caller must follow the [same guard protocol](API.md#source-refresh-runner-guard).
+Never launch an older runner that lacks the guard or use a second runner to clear
+a stuck first one. One heartbeat check must correspond to exactly one catalog database.
+
+### Failure and missed-run alerts
+
+Use two independent signals, routed to the same operations destination:
+
+1. In **Misty → Settings → Webhooks**, add the operations Discord/Slack incoming
+   webhook (or an authenticated receiver). Subscribe to `Deployment.failed`,
+   `Deployment.crashed`, and `Deployment.oom_killed`; exclude preview environments.
+   Railway webhooks are project-wide, so direct Discord delivery includes other
+   services/environments. For staging-runner-only alerts, a receiver must filter
+   the staging environment and runner service IDs. Test delivery and prove that
+   exits `1` and `2` generate the expected event during acceptance; a successful
+   deployment is not proof of a successful cron run. See
+   [Railway webhooks](https://docs.railway.com/observability/webhooks).
+2. Create a Healthchecks-compatible check named `Misty staging source refresh`,
+   scheduled `0 * * * *` in UTC with a **55-minute grace period**, and connect its
+   notification integration. Store its base HTTPS ping URL as the secret
+   `SOURCE_REFRESH_MONITOR_URL`. The runner sends empty `POST` pings to `/start`,
+   the base URL for a clean drain, or `/fail` for an incomplete/failed run, with a
+   per-run UUID. UUIDs correlate durations; [Healthchecks only times the most
+   recently started run](https://healthchecks.io/docs/measuring_script_run_time/#alerting-logic-when-using-run-ids),
+   so the database guard supplies overlap protection. It sends no catalog key,
+   counts, document content or source URL to the monitor. The check detects a
+   missing finish, a missed invocation, or a
+   process killed before it can report; its alert fires before 24 hours without
+   a clean completed run. See the [ping API](https://healthchecks.io/docs/http_api/).
+
+A start without completion for 55 minutes is a stuck-run incident. A second runner
+is rejected and reports failure immediately, so it cannot hide that incident with
+a later start or success. The 3000-second budget is not a hard deadline:
+HTTP phase timeouts can extend it. Investigate before stopping a run; terminating
+the client does not cancel the API request. Compare run/deployment history and
+remove duplicate scheduling before resuming. Test missed-run alerts on a disposable
+check using a shorter interval; do not withhold real refreshes for a day to test it.
+
+Monitor requests use a separate HTTP client, a 10-second phase timeout and no
+redirects or retries. A failed start ping does not block refreshing; it prevents a
+success ping and makes the process exit `2`. A failed final ping likewise exits `2`
+without replaying API work. HTTP 200 with `OK (not found)` or a rate-limit message is
+not accepted as delivery. If the monitor itself is unavailable, Railway's failure
+hook is the independent fallback. Configure and test both before release acceptance.
+CLI-only configuration is validated by the runner; it does not load the API's
+`Settings` or `verify_production_secrets()`.
+
+The responsible operator and alert destination must be entered in the acceptance
+record below. Owning a GitHub issue or CODEOWNERS entry is not an on-call assignment.
+No destination is installed by this repository change.
+
+### Recovery, credential rotation and disable/rollback
+
+The guard remains held through the final acknowledged heartbeat. A completed drain
+(including counted document/index failures) releases it; a crash, incomplete drain,
+API error or uncertain heartbeat leaves it held for inspection. It has no automatic
+expiry because a timed-out request can still be doing work in the API. If admission
+or release times out, inspect ownership: the request may have committed.
+
+To recover a stranded guard, stop the old runner and confirm all its API requests
+and monitor deliveries have finished or failed. Find its UUID in `event=acquire`
+or `event=start` logs; if admission was ambiguous, the API database's
+`source_refresh_run` row records the current `run_id`, `started_at` and attested
+`created_by`. Then use an authorized `docs:write` key to call
+`DELETE /docs/source-access/refresh-runs/{run_id}` for that exact owner. Expect
+`200`; a `409` means ownership differs or is already absent, so inspect again.
+Do not delete an arbitrary current owner, expire it based on age, or suppress the
+failure alert. Resume one runner and observe its complete run and recovery signal.
+
+Migration `011` is reversible (`upgrade head` → `downgrade -1` → `upgrade head`),
+but dropping its table removes coordination. Disable and drain every runner before
+an API schema rollback; ordinary cron disablement does not require a DB downgrade.
+
+| Symptom | Operator action |
+|---|---|
+| Admission `409` / overlapping runner | Inspect the existing owner and duplicate schedules. The rejected runner has sent `/fail` without replacing the original heartbeat start. Do not release a live owner; use the recovery procedure above only after quiescence. |
+| `exit_code=2`, API connection/HTTP failure | Restore the API/network/key. Retain confirmed counts. For a timed-out POST, inspect the API's sanitized audit log and wait until the request is known to have finished before starting another run; never immediately replay it. |
+| `drained=true`, `failed>0` | Inspect sanitized API/connector/directory status. Failed documents retain their previous grants until expiry and wait for the next eligibility window; successful/later documents still advance. After restoring the dependency, let the next eligible refresh run or use the documented operator refetch flow. |
+| `index_failed>0` | Restore the llm/index dependency, then use a separate `docs:index` key with `POST /docs/index`, paging `after: next_after` until null. Verify no failed results and a subsequent empty stale-only pass. Refresh alone will not retry a now-fresh document's index. |
+| `drained=false`, budget exhausted | Inspect backlog and durations; reduce batch size or increase bounded limits only with enough margin before the next hour. Do not add replicas or another scheduler. |
+| `monitor_failed=true` | Check the check's URL, existence and integration; inspect Railway run status before retrying anything. A monitoring failure does not undo completed refreshes. |
+| Missing finish/missed-run alert | Inspect active runs and deploy history, duplicate services, schedule/config and private networking. Resolve an outstanding POST before resuming; record how long source grants lacked successful refresh. |
+
+Rotate the catalog key by issuing a new `docs:write` key in staging, storing it
+privately, then updating only the cron's `DOCS_API_KEY` while no run is active.
+Observe the new key's scope check and a complete run before revoking the old key
+by its recorded ID (`python -m src.cli revoke <old-key-id>` from the service directory
+with the staging DB configuration). Verify the old key is rejected; retain only IDs,
+actor names and scopes in the audit. Rotate a monitor URL separately and test its
+check without printing it.
+
+To disable, remove the cron schedule and stop the active deployment after resolving
+any in-flight API call; pause the heartbeat check only as an acknowledged maintenance
+window. Config-as-code overrides dashboard settings on future deployments: remove
+`environments.staging.deploy.cronSchedule` (set it to `null`) and use the disabled
+start command in the reviewed rollback, or disconnect the cron's source until that
+change ships. Revoke its dedicated key if immediate prevention of new work is needed.
+Do not delete catalog data or roll back API migrations. Re-enable only one scheduler,
+restore alerts, and repeat manual/scheduled acceptance with matching API/runner SHAs.
+Production activation requires a separate explicit rollout decision and config change.
+
+### Acceptance record for #292
+
+The implementation is imported from the existing `qiuethan/google-identity-setup`
+workspace, with monitoring, strict index-count validation and staging/preview guards
+added during review. Local fake-provider checks are **not** staging acceptance.
+Record sanitized evidence in the issue or this table before the release go/no-go:
+
+| Evidence | Status / required record |
+|---|---|
+| Review / publication | [PR #294](https://github.com/UTMIST/Misty/pull/294) targets staging; approval and merged staging SHA remain pending. |
+| Staging resource | No cron provisioned during implementation; record service/environment IDs and identical API/runner deployment SHAs. |
+| Alert ownership | Pending named responsible operator and backup. |
+| Alert destination | Existing Discord webhook `9af3f11e-b6b9-4ffa-beb5-29b1ac18791d` verified with `Deployment.failed`, `Deployment.crashed`, and `Deployment.oom_killed`; previews excluded, existing volume/monitor alerts preserved. Healthchecks integration `Misty staging refresh - Discord` is assigned to the refresh check and sends JSON POSTs to the same destination on down/up events, with mentions disabled; the existing email integration is retained. Channel name and delivery tests remain pending; never paste secret URLs. |
+| Heartbeat configuration | On 2026-10-21, configured `Misty staging source refresh` (slug `misty-staging-source-refresh`) in the operations Healthchecks account: `0 * * * *`, UTC, 55-minute grace. Settings and integration assignment verified by read-back. No pings received yet; wiring `SOURCE_REFRESH_MONITOR_URL` into the staging runner remains pending. Treat the ping UUID as a secret too. |
+| Manual + scheduled run | Pending both run IDs, UTC start/finish, exit code and aggregate counts, including `drained`. |
+| Multi-batch + partial failure | Offline runner/API test exercises three documents across batches with one refresh failure and one index failure; record controlled staging evidence separately. |
+| Content/access + recovery | Offline test checks updated content/grants, preservation on transient failure, separate indexing recovery and next-eligible refresh. Staging proof must use approved synthetic documents and access assertions; record outcomes without content/URLs. |
+| API unavailable / ambiguous timeout | Offline transport tests verify exit `2`, preserved progress and no POST retry; record a controlled staging outage/recovery without disrupting shared services. |
+| Overlap / stranded guard | Offline real-API tests prove a second runner cannot send start/success or release the owner; Postgres tests cover concurrent admission through separate connections. Record controlled staging overlap, exit/alert and explicit recovery evidence. |
+| Alert delivery + silence | Pending observed nonzero-exit webhook, stuck/missed-run alert and recovery notification at the chosen destination. |
+| Production | Not authorized by #292. |
+
+For controlled staging fault cases, use an isolated test API/dependency deployment
+or approved synthetic fixtures; never break the shared API, connectors or llm service
+just to trigger an alert. Do not close #292 until manual/scheduled runs and actual
+alert delivery are recorded. Pair this evidence with #291 for the release gate.
+
 ## Registry cleanup (migration `009`)
 
 Reassigns documents from the retired source to `web` before removing its registry row.
 Downgrade restores only the registry entry; it does not undo the data cleanup.
 Use a database backup to recover the previous assignments.
+
+## Automatic discovery schedule
+
+The dedicated, disabled-by-default `doc-discover` runner and
+`railway.discovery.json` provide initial and recurring sharing discovery over HTTP.
+This is separate from the existing-document refresh schedule above. Follow the
+[discovery runbook](DISCOVERY.md) for its two scoped keys, persistent checkpoint,
+15-minute schedule, enable/status/disable commands, recovery and staging acceptance.
+Production activation requires a separate rollout decision.
+
+## Meeting record persistence
+
+Apply migrations through **016** (`uv run alembic upgrade head`) before the new API serves
+traffic. Migration 012 adds `meeting_records` and nullable `docs.purged_at`; the prior head
+is 011. Verify upgrade → downgrade -1 → upgrade against a disposable database,
+never against live meeting data. Downgrading 012 drops meeting retry payloads and IDs;
+export them before any operational rollback.
+Migration 013 preserves existing records and marks saved meetings for initial index
+repair. Its downgrade removes only the index retry flag.
+Migration 014 adds confirmed Google-deletion receipts. Its downgrade removes only
+the receipt field; rollback after deletion can require manual investigation.
+Migration 015 adds removed Google identity fences and makes old tombstones due
+for reconciliation. The next meeting retry run purges any surviving catalog
+aliases even if Google deletion already succeeded. Its downgrade forgets those
+additional fences; disable ingestion during rollback until cleanup is verified.
+
+Migration 016 persists per-file deletion intent before contacting Google and
+excludes those identities from adoption. Its downgrade drops this protection;
+stop meeting workers and resolve outstanding Google deletions before rollback.
+No new environment variables are required.
+
+Settings: `MEETING_DOC_CREATE_LEASE_S=600` (minimum 60),
+`MEETING_RECORD_MAX_ATTEMPTS=8`, `MEETING_RECORD_RETENTION_DAYS=365`.
+The existing `CONNECTORS_API_KEY` additionally needs `meeting-write` and
+`meeting-fetch`. The directory key needs the existing identifier, channel-team
+and synced Google Group reads. Issue `meeting` a `meetings:write` key and give
+the bot `meetings:read,meetings:write` for #223.
+
+The existing staging Railway cron now runs
+`python -m src.source_refresh --require-monitor --meeting-records`; add
+`meetings:write` to its existing `docs:write` key **before deploying** the runner.
+It validates both scopes before work. The meeting phase uses the same time and
+batch budgets and no direct DB or Google credentials. Production scheduling
+remains explicitly disabled in `railway.source-refresh.json` until rollout.
+Deploy the updated API before the runner: the new runner requires full meeting
+outcome counts and rejects an older attempted-only response. Meeting persistence,
+indexing and cleanup failures produce exit 1 and a failure heartbeat, with separate
+`meeting_*_failed` summary counts. API/transport uncertainty still produces exit 2.
+
+Recovery: inspect `GET /meeting-records?persistence_status=failed` or
+`persistence_status=inaccessible`; use privileged
+`POST /meeting-records/{id}/retry` after fixing permissions/configuration.
+Do not clear a lease to retry a still-running Google call. Do not replace a
+canonical ID or resubmit changed text under the same UUID. Reconciliation
+continues hourly for terminal records; investigate `reconcile_failed` and
+`removal_pending` by meeting ID. A Google 404 cannot confirm permanent deletion,
+so `delete_unconfirmed` remains pending for admin investigation. Cleanup retries
+pending `google_deletions` IDs even when the owner listing is empty, and the runner
+continues to report cleanup failure until acknowledgement. Historical confirmed
+and pending IDs are also purged from the catalog when removal runs; old tombstones
+are repaired by their recurring reconciliation. After seven days in failed state,
+the pending transcript is cleared; the Discord PDF is the
+fallback if no Google Doc was adopted. Expiry and explicit removal purge the
+catalog even if Google cleanup still needs retries.
+
+Saved records with `index_pending=true` retry indexing on the next due run, with
+a five-minute retry delay, without another Google write.
+
+`google_deleted_at` records a successful canonical deletion and prevents repeated
+deletion during remaining cleanup. If the process or database fails before that receipt commits,
+the existing ambiguous-404 investigation procedure still applies.
+
+Removal/unsafe-ACL notices and the existing PDF attachment are the admin's
+responsibility until the link-delivery cleanup in #223 ships. Never log record
+payloads or credentials. See the [platform rollout](../../../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).

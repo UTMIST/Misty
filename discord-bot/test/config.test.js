@@ -30,6 +30,27 @@ test('loadConfig throws listing missing vars', () => {
   assert.throws(() => loadConfig({ DISCORD_TOKEN: 't' }), /DIRECTORY_API_KEY/);
 });
 
+test('helperToolsEnabled defaults off and is true only for the literal "true"', () => {
+  assert.equal(loadConfig(FULL).helperToolsEnabled, false);
+  assert.equal(loadConfig({ ...FULL, HELPER_TOOLS_ENABLED: 'true' }).helperToolsEnabled, true);
+  for (const v of ['1', 'yes', 'TRUE', 'false', '']) {
+    assert.equal(
+      loadConfig({ ...FULL, HELPER_TOOLS_ENABLED: v }).helperToolsEnabled,
+      false,
+      `HELPER_TOOLS_ENABLED=${JSON.stringify(v)} must stay off`,
+    );
+  }
+});
+
+test('context exposes the tool registry/executor and the helperToolsEnabled flag', () => {
+  const ctx = createAppContext(loadConfig({ ...FULL, HELPER_TOOLS_ENABLED: 'true' }));
+  assert.equal(ctx.helperToolsEnabled, true);
+  assert.ok(ctx.toolExecutor && typeof ctx.toolExecutor.run === 'function');
+  // the document tools are registered (llmSafe gate lets them through)
+  assert.equal(ctx.toolRegistry.has('search_documents'), true);
+  assert.equal(ctx.toolRegistry.has('get_document'), true);
+});
+
 test('DISCORD_GUILD_ID is optional (global registration) and not reported missing', () => {
   const { DISCORD_GUILD_ID, ...noGuild } = FULL;
   let cfg;

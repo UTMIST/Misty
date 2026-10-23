@@ -21,6 +21,16 @@ from src.pipeline.qna_runner import QnaRunner
 from src.pipeline.transcript import assemble_transcript
 from src.sessions import SessionRegistry
 from src.stt.transcribe import create_transcription_stream
+from src.pipeline.record_handoff import HttpRecordHandoff
+from src.contracts import RecordHandoff
+
+
+@lru_cache(maxsize=1)
+def get_record_handoff() -> RecordHandoff:
+    s = get_settings()
+    return HttpRecordHandoff(
+        s.docs_base_url, s.docs_api_key.get_secret_value(), s.record_handoff_hold_s
+    )
 
 
 class AudioAdapter:
@@ -88,6 +98,7 @@ def get_session_registry() -> SessionRegistry:
         "qna_runner": get_qna_runner().run,
         "now": lambda: datetime.now(timezone.utc),
         "max_meeting_ms": get_settings().max_meeting_ms,
+        "record_handoff": get_record_handoff(),
     }
     return SessionRegistry(deps)
 

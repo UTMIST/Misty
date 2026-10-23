@@ -34,7 +34,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from contracts.embedder import Embedder, EmbedderRejected, EmbedderUnavailable
 from contracts.storage import StorageAdapter
 from contracts.types import DocChunk
-from src.chunking import Chunk, chunk_text
+from src.chunking import Chunk, ChunkSettings, chunk_text
 from src.content import content_hash
 
 logger = logging.getLogger(__name__)
@@ -61,6 +61,7 @@ def index_doc(
     embedder: Embedder,
     target: Embedder | None = None,
     force: bool = False,
+    settings: ChunkSettings = ChunkSettings(),
 ) -> IndexOutcome:
     """Bring one doc's chunk sets in line with its stored content and title.
 
@@ -70,6 +71,9 @@ def index_doc(
     unchanged. Never raises for provider or storage failures; they come back
     as `failed` so callers can report them without losing the catalog write
     that triggered indexing.
+
+    `settings` chooses chunk size and overlap for the offline evaluation harness.
+    Body/title hashes do not include those settings; changing them requires force=True.
     """
     try:
         doc = storage.get_doc(doc_id)
@@ -98,7 +102,7 @@ def index_doc(
 
         indexed_count = None
         if due:
-            chunks = chunk_text(text).chunks
+            chunks = chunk_text(text, settings).chunks
             if not chunks:
                 # Whitespace-only text: nothing to embed in any model. Still
                 # conditional, so a concurrent write of real text is not wiped.

@@ -37,6 +37,21 @@ def replace_channel_teams(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
+@router.post("/{guild_id}/{channel_id}/teams/append", response_model=ChannelTeams)
+def append_channel_teams(
+    payload: ChannelTeamsReplace,
+    guild_id: str = GuildId,
+    channel_id: str = ChannelId,
+    storage: StorageAdapter = Depends(get_storage),
+    actor: str = Depends(get_actor),
+    _: AuthedKey = Depends(require_scope("channels:write")),
+) -> ChannelTeams:
+    try:
+        return storage.append_channel_teams(guild_id, channel_id, payload.team_ids, actor=actor)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
 @router.delete("/{guild_id}/{channel_id}/teams", status_code=status.HTTP_204_NO_CONTENT)
 def clear_channel_teams(
     guild_id: str = GuildId,

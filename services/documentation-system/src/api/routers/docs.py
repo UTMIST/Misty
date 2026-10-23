@@ -32,6 +32,7 @@ from src.fetch.registry import FetcherRegistry
 from src.indexing import IndexStatus, index_doc, index_embedders, index_warning
 from src.ingest import BadReference, ingest_doc
 from src.config import get_settings
+from src.meeting_fetch import fetch_catalog_content
 from src.source_access import (
     GOOGLE_ACCESS_ORIGIN,
     GOOGLE_SOURCE_IDS,
@@ -253,6 +254,29 @@ def list_docs(
     )
 
 
+@router.post("/source-access/refresh-runs/{run_id}")
+def acquire_source_refresh_run(
+    run_id: UUID,
+    storage: StorageAdapter = Depends(get_storage),
+    actor: str = Depends(get_actor),
+    _: AuthedKey = Depends(require_scope("docs:write")),
+) -> dict[str, UUID]:
+    if not storage.acquire_source_refresh_run(run_id, actor=actor):
+        raise HTTPException(status_code=409, detail="source refresh run already active")
+    return {"run_id": run_id}
+
+
+@router.delete("/source-access/refresh-runs/{run_id}")
+def release_source_refresh_run(
+    run_id: UUID,
+    storage: StorageAdapter = Depends(get_storage),
+    _: AuthedKey = Depends(require_scope("docs:write")),
+) -> dict[str, UUID]:
+    if not storage.release_source_refresh_run(run_id):
+        raise HTTPException(status_code=409, detail="source refresh run owner does not match")
+    return {"run_id": run_id}
+
+
 @router.post("/source-access/refresh-due", response_model=SourceAccessRefreshResult)
 def refresh_due_source_access(
     limit: int = Query(default=10, ge=1, le=100),
@@ -463,9 +487,11 @@ def _refetch_doc_source(
     actor: str,
     source_access_max_age_hours: int,
 ) -> Doc:
+    if doc.purged_at:
+        raise FetchError("document was permanently purged")
     expected_content = storage.get_doc_content_meta(doc.id)
     try:
-        result = fetchers.fetch_for(doc.source_id, doc.url)
+        result = fetch_catalog_content(doc.source_id, doc.url, storage=storage, fetchers=fetchers)
     except SourceGone:
         # Remove text and chunks together only if no newer fetch stored text
         # while this request was waiting for the connector.
@@ -517,7 +543,8 @@ def _refetch_doc_source(
         },
         actor=actor,
     )
-    assert updated is not None
+    if updated is None:
+        raise FetchError("document is no longer available for refresh")
     return updated
 
 

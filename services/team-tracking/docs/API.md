@@ -824,7 +824,7 @@ Scopes: `channels:read` for GET, `channels:write` for PUT/DELETE.
 - `version` is a fingerprint of `team_ids` (a truncated SHA-256 of the sorted ids). It changes exactly when the channel's effective access changes, including a retirement, and is not derived from timestamps, so the order concurrent writes commit in cannot hide a change. Use it as a cache key; if it differs from the value you cached, drop what you cached. An unconfigured channel and one configured with no teams share the same version, because both grant nothing.
 - `updated_by` is the key that last configured the channel. `null` when unconfigured.
 
-Concurrent PUTs and DELETEs on the same channel are serialized: the last one to commit wins outright, never a mix of two requests.
+Concurrent PUTs, append POSTs, and DELETEs on the same channel are serialized. Replace and clear: the last one to commit wins outright, never a mix of two requests. Append unions under the same lock, so concurrent appends accumulate and an append cannot resurrect teams a concurrent clear already removed.
 
 ### GET /channels/{guild_id}/{channel_id}/teams
 
@@ -854,6 +854,21 @@ curl -sS -X PUT "http://localhost:8000/channels/111111111111111111/2222222222222
   -H "X-API-Key: dev-api-key-change-me" \
   -H "Content-Type: application/json" \
   -d '{"team_ids": ["660e8400-e29b-41d4-a716-446655440001"]}'
+```
+
+### POST /channels/{guild_id}/{channel_id}/teams/append
+
+Atomically union `team_ids` onto the channel's current active set. Same body shape as PUT. An empty list is a true no-op: it returns the current configuration without rewriting rows (so `updated_by` and mappings for retired teams are unchanged). Holds the same per-channel write lock as PUT/DELETE for the whole read-merge-write.
+
+**Response:** `ChannelTeams`, HTTP 200.
+
+**Errors:** 400 if any id is not an active team; the existing configuration is left unchanged. 422 for duplicate ids, unknown fields, or non-numeric guild/channel ids.
+
+```bash
+curl -sS -X POST "http://localhost:8000/channels/111111111111111111/222222222222222222/teams/append" \
+  -H "X-API-Key: dev-api-key-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"team_ids": ["660e8400-e29b-41d4-a716-446655440002"]}'
 ```
 
 ### DELETE /channels/{guild_id}/{channel_id}/teams

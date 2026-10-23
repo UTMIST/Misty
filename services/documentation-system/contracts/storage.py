@@ -16,6 +16,8 @@ from contracts.types import (
     SourceGrant,
 )
 from contracts.visibility import ActorContext, RetrievalContext, SEE_ALL
+from contracts.meeting import MeetingRecord
+from contracts.fetcher import FetchResult
 
 
 class DuplicateActiveUrl(Exception):
@@ -26,9 +28,125 @@ class DuplicateActiveUrl(Exception):
     such constraint and is single-threaded, so it never raises this."""
 
 
+class DuplicateDocId(Exception):
+    """Raised by create_doc when the supplied doc_id is already catalogued.
+
+    Only reachable when a caller supplies `doc_id`; a generated one cannot collide.
+    Both adapters reject it rather than overwrite, because the alternatives diverge:
+    the in-memory store would replace the existing document while its content, chunks
+    and grants stayed attached to that id, and Postgres would raise a primary-key
+    violation. Retired documents keep their rows, so a retired id is taken too.
+    """
+
+    def __init__(self, doc_id):
+        super().__init__("doc id already catalogued")
+        self.doc_id = doc_id
+
+
+class PurgedDocument(ValueError):
+    """A permanent removal tombstone forbids creating another catalog copy."""
+
+
+class ExistingGoogleDoc(Exception):
+    """Discovery's insert found an existing Google identity, active or retired."""
+
+    def __init__(self, doc: Doc):
+        super().__init__("Google identity already catalogued")
+        self.doc = doc
+
+
 class StorageAdapter(Protocol):
     """Stable contract between the service and persistence. Concrete adapters
     (Postgres, in-memory) implement these with identical semantics."""
+
+    def put_meeting(self, record: MeetingRecord) -> tuple[MeetingRecord, bool]:
+        """Insert atomically; identical payload_hash returns existing + False.
+
+        Different hash raises ValueError. Never modifies an existing payload.
+        """
+        ...
+
+    def get_meeting(self, meeting_id: UUID) -> MeetingRecord | None: ...
+    def get_meeting_by_google_id(self, document_id: str) -> MeetingRecord | None:
+        """Match a canonical Google ID or a recorded removed duplicate identity."""
+        ...
+
+    def list_meetings(self) -> list[MeetingRecord]:
+        """Detached records in created_at/meeting_id order; internal use only."""
+        ...
+
+    def change_meeting(
+        self, record: MeetingRecord, values: dict, *, actor: str, live_at: datetime | None = None
+    ) -> MeetingRecord | None:
+        """Atomic compare-and-swap on version; None on conflict/missing.
+
+        Canonical ID is immutable. Removed records never reopen; stale results
+        cannot clear a removal marker. Every mutation increments version.
+        A confirmed google_deleted_at timestamp is also immutable.
+        Per-file google_deletions intents cannot be forgotten or confirmations
+        reversed. Canonical adoption must reject any deletion-marked identity.
+        With live_at, also require the same attempt, an unexpired lease and no
+        removal marker in the atomic write predicate.
+        """
+        ...
+
+    def catalog_meeting(
+        self,
+        record: MeetingRecord,
+        result: FetchResult,
+        grants: list[SourceGrant],
+        *,
+        expires_at: datetime,
+        actor: str,
+    ) -> bool:
+        """Commit Doc, content, source grants, saved state and index_pending=True
+        in one transaction.
+
+        Verify record.version, canonical ID and absence of removal under the
+        same lock. False on conflict. No network calls inside the transaction.
+        """
+        ...
+
+    def purge_doc(self, doc_id: UUID, *, actor: str) -> bool:
+        """Atomically erase content/snapshot/chunks/grants/tags/ownership/title,
+        mark inactive + purged_at. Idempotent, False only for missing docs.
+        All future writes except purge must refuse a purged doc.
+        """
+        ...
+
+    def purge_meeting_catalog(
+        self, meeting_id: UUID, google_document_ids: list[str], *, actor: str
+    ) -> MeetingRecord:
+        """For an already marked removal, atomically fence the supplied Google
+        identities plus the canonical ID and every google_deletions identity
+        (pending or confirmed), and purge ALL matching catalog aliases and the
+        linked doc_id. Serialize with ordinary Google insertion so an
+        earlier insert is purged and a later insert refuses the tombstone.
+        Persist the union of identities for future ingestion and late cleanup.
+        Raise ValueError for an unknown or unmarked meeting. Return latest record.
+        """
+        ...
+
+    def acquire_source_refresh_run(self, run_id: UUID, *, actor: str) -> bool:
+        """Atomically claim the single runner slot; False if occupied, even by run_id.
+
+        Ownership has no expiry: process death or ambiguous HTTP completion must
+        not admit another runner. Release explicitly after confirming work stopped.
+        """
+        ...
+
+    def release_source_refresh_run(self, run_id: UUID) -> bool:
+        """Release only a matching owner; False leaves the current owner unchanged."""
+        ...
+
+    def get_doc_by_google_file_id(self, file_id: str) -> Doc | None:
+        """Match supported Google URL aliases, including legacy/manual rows.
+
+        Prefer active, then earliest created_at/id. Includes retired rows so
+        discovery can honor operator retirement. No visibility filter: trusted
+        ingest only, like get_doc_by_normalized_url. Never grants access.
+        """
+        ...
 
     def is_ready(self) -> bool:
         """Return whether the backing store can answer a trivial query."""
@@ -72,7 +190,26 @@ class StorageAdapter(Protocol):
         fetched_at,
         tags: list[str],
         actor: str,
-    ) -> Doc: ...
+        skip_existing_google: bool = False,
+        doc_id: UUID | None = None,
+    ) -> Doc:
+        """Insert a doc, coordinating all Google inserts by supported file identity.
+
+        With skip_existing_google=True, atomically check all matching aliases
+        (including retired records) before inserting; raise ExistingGoogleDoc
+        without modifying that record if found. Requires a supported Google URL.
+        The default preserves explicit manual re-ingest after retirement.
+        No provider/network work is performed while coordinating the insertion.
+
+        `doc_id` defaults to a generated UUID. Pass one only where the identity must be
+        reproducible across runs: retrieval breaks ranking ties with the doc id, so a
+        generated id makes the order of equally scored documents vary between runs. The
+        evaluation harness (src/eval/) depends on that order being stable. A supplied id
+        that is already catalogued, active or retired, raises DuplicateDocId; it is
+        never allowed to overwrite the existing document.
+        """
+        ...
+
     def get_doc(self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL) -> Doc | None: ...
     def get_doc_by_normalized_url(self, url_normalized: str) -> Doc | None: ...
     def list_docs(
@@ -95,7 +232,8 @@ class StorageAdapter(Protocol):
 
     def update_doc(self, doc_id: UUID, values: dict, *, actor: str) -> Doc | None:
         """Patch scalar columns (title, description, active, owning_* ids/labels,
-        content_snapshot, fetched_at). `values` holds already-resolved columns.
+        content_snapshot, fetched_at, source_id). `values` holds already-resolved
+        columns; callers validate source_id against the source registry.
         Returns None if no such doc."""
         ...
 

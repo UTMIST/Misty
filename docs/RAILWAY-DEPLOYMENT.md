@@ -157,7 +157,8 @@ Set these per environment (staging vs production) per service.
 | `MAX_MEETING_MS` | — | optional; defaults to the 4h backstop | — |
 | `DISCONNECT_GRACE_S` | — | optional; defaults to 60s. How long a disconnected session is held so `POST /stop` can still finalize it | — |
 | `GOOGLE_CREDENTIALS_JSON` | — | — | base64 Google service-account key; empty is a valid running state (Google fetches 503, rest of the service works) |
-| `MAX_FILE_BYTES` | — | — | optional; defaults to 25 MiB. Pre-download limit for uploaded PDF, `.docx`, and `text/*` files |
+| `GITHUB_TOKEN` | — | — | optional fine-grained read-only PAT; empty fetches public repositories only (private ones 404) |
+| `MAX_FILE_BYTES` | — | — | optional; defaults to 25 MiB. Pre-download limit for uploaded PDF, `.docx`, `text/*`, and GitHub files |
 
 > **Before merging or deploying llm**, configure a real `OPENAI_API_KEY` in the target
 > Railway environment, even for chat-only consumers. The boot check verifies presence,
@@ -177,9 +178,10 @@ Set these per environment (staging vs production) per service.
 | `DISCORD_GUILD_ID` | test guild (staging) / blank (prod) |
 | `ENABLE_DISCORD` / `ENABLE_WEB` | `true` / `false` |
 | `HELPER_USER_MAX_REQUESTS` / `HELPER_USER_WINDOW_SECONDS` | optional helper allowance overrides; see [bot configuration and reset semantics](../discord-bot/README.md#helper-bot-request-limits) |
+| `HELPER_TOOLS_ENABLED` | defaults to `false`; literal `true` enables Discord document tools after retrieval/channel setup; see [helper configuration and access checks](../discord-bot/README.md#helper-document-tools) |
 | `PORT` | Railway-injected port for the Discord readiness listener; defaults to `3002` locally |
 | `DIRECTORY_BASE_URL` / `DIRECTORY_API_KEY` | team-tracking; key set by the provisioning script |
-| `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system; key scopes `docs:read docs:write act-as-user` (see its [key docs](../services/documentation-system/docs/DEPLOYMENT.md#issuing-api-keys-doc-keys-cli)) |
+| `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system; key scopes `docs:read docs:write act-as-user`, plus literal `act-as-channel` for shared-channel helper retrieval (see its [key docs](../services/documentation-system/docs/DEPLOYMENT.md#issuing-api-keys-doc-keys-cli)) |
 | `VERIFICATION_BASE_URL` / `VERIFICATION_API_KEY` | verification |
 | `INFRASTRUCTURE_DISCORD_USERNAME` | *optional* — Discord username or ID shown by `/bug` for infrastructure support |
 | `MEETING_BASE_URL` / `MEETING_API_KEY` | meeting; a `meetings`-scoped consumer key |
@@ -238,22 +240,31 @@ TT_DATABASE_URL="<team-tracking Neon branch DATABASE_URL for this env>" \
 
 This issues scoped `team-tracking-keys` for discord-bot + documentation-system
 and sets each service's `DIRECTORY_API_KEY`. The discord-bot key's scopes
-include `people:elevate` (alongside its `people:*`/`teams:*`/`memberships:*`
-scopes) so its `/seed` can promote people to `admin`/`superuser` — plain
-`people:write` cannot set a non-`member` `access_level`. The
-documentation-system key stays read-only (`people:read teams:read memberships:read
-identifiers:read channels:read`) so it can resolve verified emails, active memberships, channel configuration, and the synced-group
+include `people:elevate` (alongside its `people:*`/`teams:*`/`memberships:*`/
+`channels:read`/`channels:write` scopes) so its `/seed` can promote people to
+`admin`/`superuser` — plain `people:write` cannot set a non-`member`
+`access_level` — and so `/channel-access` can read and replace channel team
+settings. The documentation-system key stays read-only (`people:read teams:read
+memberships:read identifiers:read channels:read`) so it can resolve verified
+emails, active memberships, channel configuration, and the synced-group
 mapping supplied by team-tracking. Re-running issues a fresh key and
 repoints the consumer; the previous key stays active until you revoke it
 manually (`team-tracking-keys revoke <id>`).
 
-Configure a Railway cron/external scheduler to call documentation-system's
-`POST /docs/source-access/refresh-due?limit=10` hourly (`0 * * * *`) with a `docs:write` key, repeating
-until `attempted < limit`. Source-derived grants stop authorizing reads after 48 hours
-without a complete successful refresh. Eligibility still defaults to 24 hours; hourly checks
-avoid skipping a whole day when a document's prior refresh finished after the job started.
-See the service's [refresh schedule](../services/documentation-system/docs/DEPLOYMENT.md#source-access-refresh-schedule)
-for batching and disabled-source behavior.
+The dedicated staging `doc-source-refresh` cron uses
+`/services/documentation-system/railway.source-refresh.json` and the same deployed
+revision as documentation-system. It calls the bounded refresh endpoint hourly with
+its own `docs:write` key, without database or Google credentials. Apply API migration
+`011` first: the runner acquires a persistent guard through HTTP before heartbeats,
+so a duplicate cannot mask a stuck run. Set `DOCS_BASE_URL`,
+`DOCS_API_KEY`, and the secret `SOURCE_REFRESH_MONITOR_URL` on that service only.
+The config disables migrations, HTTP healthchecks, failure restarts, and PR-preview
+schedules; production remains disabled. Review/merge precedes deployment, and manual
+plus scheduled staging evidence precedes release acceptance. See the service's
+[refresh runbook](../services/documentation-system/docs/DEPLOYMENT.md#source-access-refresh-schedule)
+for provisioning, Railway webhook and heartbeat alerts, limits, rotation, recovery,
+and the pending acceptance record. The 24-hour freshness / 48-hour expiry contract
+is unchanged.
 
 > **Gotcha — `src` package collision when minting keys.** Both
 > `services/team-tracking` and `services/documentation-system` declare a top-level
@@ -509,3 +520,47 @@ by an existing admin running `/seed` from Discord.
   don't "normalize" it, and keep `railway.json` and the Dockerfile `CMD` in step
   with each other. Railway reads `railway.json`, so that file is what actually
   governs the deploy.
+
+## Automatic sharing discovery
+
+The optional dedicated `doc-discover` cron service uses
+`services/documentation-system/railway.discovery.json` and the documentation-system
+image. It requires a persistent checkpoint volume, an environment/connector identity
+label, a catalog `docs:write` key and a connectors `discover` key. It has no migrations,
+HTTP healthcheck or automatic failure restart. Keep `DISCOVERY_ENABLED=false` until
+operators configure and approve staging acceptance. Do not enable PR-preview cron
+copies. Follow the [service runbook](../services/documentation-system/docs/DISCOVERY.md)
+for all settings, schedule, monitoring, recovery, member instructions and the separate
+production activation gate. Keep #292's existing-document refresh scheduled as well.
+
+## Meeting record persistence
+
+Deploy order for the durable Google Doc path:
+
+1. Configure the connector [Workspace OAuth writer and restricted root](../services/connectors/docs/DEPLOYMENT.md#meeting-writer-setup).
+   Use `drive.file`, explicitly grant the root to this OAuth app, and list the
+   owning/inherited infra admin principals. Keep the existing read account separate.
+2. Apply documentation-system migrations through **016** and deploy its
+   [meeting endpoints](../services/documentation-system/docs/API.md#meeting-records).
+   Its connector key needs `meeting-write,meeting-fetch` plus existing scopes.
+   Its directory key must read identifiers, channel teams and Google Group state.
+3. Issue a catalog key named for `meeting` with `meetings:write`; configure
+   `DOCS_BASE_URL`, `DOCS_API_KEY`, and optionally `RECORD_HANDOFF_HOLD_S` on meeting.
+4. Add `meetings:write` to the source-refresh cron key before deploying its
+   `--meeting-records` start command. The same monitored hourly staging job now
+   retries, reconciles and expires records. Production scheduling remains gated.
+5. Deploy the bot/meeting stop-context wire change together. The bot announces
+   persistence/consent before capture; `/record start save:false` opts out.
+   Configure voice-channel teams through `/channel-access` and healthy synced
+   Google Groups for member access. Missing coverage saves admin-only.
+
+Rollout checks use a consented staging meeting: explicit and empty-channel stop,
+Doc sections and full transcript, native MIME type and configured destination,
+team commenter access, catalog source grants, repeat stop/persistence, recovery
+from a connector outage, and catalog visibility after a restart. Real Google
+credentials are never used by automated tests. Keep the PDF behavior; #223 will
+post the already-created Doc link and track Discord message cleanup. Follow the
+[record removal runbook](../services/documentation-system/docs/DEPLOYMENT.md#meeting-record-persistence)
+for failed, inaccessible or unsafe-ACL records. The generic `docs:purge` endpoint
+remains a rollout follow-up from #212; meeting removal already uses an internal
+atomic purge with restoration guards.

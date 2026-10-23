@@ -60,14 +60,16 @@ which is deliberately non-fatal at ingest: it becomes a warning and never blocks
 - **`WebFetcher`** (`src/fetch/web.py`) — HTTP fetch (5s timeout, follows redirects), parses
   `<title>`, and keeps up to 2000 chars of stripped text as the snapshot. HTTP errors become
   `FetchError`.
-- **`GithubFetcher`** (`src/fetch/github.py`) — network-free: derives an `owner/repo` title
-  from the URL path, no snapshot. (Raw-content fetch is a later enhancement.)
+- **`ConnectorsFetcher`** (`src/fetch/connectors.py`) — calls the connectors service's
+  `POST /fetch`. Backs `github` (repository README or `/blob/` file, titled `owner/repo`)
+  and the four Google sources; the snapshot is derived from the full content returned.
 
 #### The `FetcherRegistry`
 
 `FetcherRegistry` (`src/fetch/registry.py`) maps a `source_id` to a `Fetcher`.
-`default_registry()` registers `{"web": WebFetcher(), "github": GithubFetcher()}` — exactly
-the sources with `content_fetch_enabled`. Any other source raises `FetchUnsupported` (a
+`default_registry()` registers `WebFetcher` for `web` and one `ConnectorsFetcher` each for
+`github`, `gdocs`, `gsheets`, `gslides`, and `gdrive` — exactly the sources with
+`content_fetch_enabled`. Any other source raises `FetchUnsupported` (a
 `FetchError`), which is how auth-gated sources like Google Drive "skip fetching".
 
 ### 3. `DirectoryClient` — ownership validation
@@ -127,7 +129,8 @@ heals on the next read or update.
   path prefix (`docs.google.com/document`). A pattern matches when the URL host equals or is a
   subdomain of the pattern host **and** the path starts with its prefix. The **longest match
   wins**, so `docs.google.com/spreadsheets/…` resolves to `gsheets`, not `gdocs`/`web`. `web`
-  (empty pattern) is the universal fallback.
+  (empty pattern) is the fallback after recognized Google file identities: Forms
+  edit URLs without a matching pattern use the registered `gdrive` source.
 
 ## Data model
 
@@ -202,6 +205,26 @@ expire after the configured maximum age, so a prolonged refresh outage fails clo
 Manual grants are independent and are never silently created or deleted by source
 reconciliation. Ownership fields are attribution metadata and do not authorize access.
 
+`doc-source-refresh` is an external HTTP client of the bounded refresh endpoint.
+It keeps database/provider credentials in the API, checks its scoped key before
+refreshing, and never replays an ambiguous POST. Separate refresh and index failure
+counts preserve the distinction between source freshness and searchable content.
+Railway failure notifications and independent start/finish heartbeat pings cover
+process failures and missing runs; monitoring failure does not undo or replay API
+work. Deployment, recovery and monitoring setup live in the
+[refresh runbook](DEPLOYMENT.md#source-access-refresh-schedule).
+
+Before its first heartbeat, the runner acquires the database's singleton
+`source_refresh_run` row through authenticated HTTP. The guard covers the whole
+drain and final heartbeat, across containers and API restarts. A conflicting
+runner exits nonzero and sends only `/fail`; it cannot replace the active start
+or send a misleading success. Run IDs alone only correlate Healthchecks durations.
+The guard has no TTL: after a crash or uncertain completion, admitting a new run
+could overlap work still running in the API. An operator must confirm quiescence
+before releasing that exact ID. The bounded refresh endpoint remains independently
+callable; direct API clients must use the same guard protocol for an entire drain.
+Each catalog database must have its own heartbeat check.
+
 Visibility keeps two team sets in the actor context: ordinary active directory memberships
 for manual grants, and separately confirmed synchronized Google memberships for
 source-derived team grants. This prevents a newly added directory member from inheriting a
@@ -236,7 +259,7 @@ The document FK cascades on hard deletion. Each row stores `chunk_text`, half-op
 Migration `010` adds nullable `source_title_hash`: SHA-256 of the title (None treated
 as empty). It records embedding context separately from the body hash used by citations.
 Existing chunks retain NULL provenance until the normal stale-index pass rebuilds them.
-Migration `011` widens the key to `(doc_id, embedding_model, ordinal)`, so a doc can
+Migration `017` widens the key to `(doc_id, embedding_model, ordinal)`, so a doc can
 hold one complete set per model while a re-embed runs (see
 [Model changes](#model-changes-209)). Its downgrade refuses while any doc still holds
 two models' sets rather than guess which to discard.
@@ -436,10 +459,15 @@ index described above.
 
 ### Retrieval constraints and open decisions
 
-- **Relevance floor: absolute cosine, implemented in #176; calibrate on #178.**
+- **Relevance floor: absolute cosine, implemented in #176; measured on #178.**
   `SEARCH_MIN_COSINE` starts at 0.3. Complete keyword matches qualify independently;
-  RRF ranks never determine eligibility. The starting threshold is uncalibrated,
-  and evaluation must measure abstention as well as hit-rate.
+  RRF ranks never determine eligibility. #178's `calibrate` mode measures how well
+  cosine separates correct documents from incorrect ones. Against its fixture the two
+  distributions **overlap across their whole range**, so no floor separates them and
+  moving the threshold trades recall against precision with no sweet spot. That
+  measurement uses a lexical stand-in embedder, so it bounds what the floor can do
+  structurally rather than settling the production value; re-measure against real
+  embeddings before changing `SEARCH_MIN_COSINE`. See [EVALUATION.md](EVALUATION.md).
 - **Visibility follows the explicit person or channel context in #77/#176.** Direct search
   and DMs preserve the person's access. Shared-channel answers use the configured teams'
   Google Group entitlement (#238 maps channels to teams) — never the asker's private grants
@@ -560,12 +588,14 @@ cases (connector shapes, Unicode, repeated text, boundaries) and 200 seeded rand
   and consumer integration (#278) remain release gates. #277's automated lifecycle
   verification and controlled staging gate are tracked in the
   [integration audit](INGESTION-RETRIEVAL-AUDIT.md).
-- **#178 (evaluation):** build the question set and measure hit-rate@k, including
-  exact-name/acronym/date queries, before treating the starting parameters as final.
+- **#178 (evaluation):** built; see "Evaluation (#178)" below and
+  [EVALUATION.md](EVALUATION.md). The question set covers exact-name, acronym and date
+  queries alongside buried and boundary-straddling answers. First finding: at the
+  starting floor the relevance threshold, not the chunk size, dominates the score.
 
 ### Indexing (#175): `src/indexing.py`
 
-`index_doc(doc_id, storage=, embedder=, target=None, force=False)` makes one doc's chunk
+`index_doc(doc_id, storage=, embedder=, target=None, force=False, settings=ChunkSettings())` makes one doc's chunk
 sets match its stored `doc_content` and title: the set for `embedder`'s model (the one
 search serves) and, during a re-embed, the set for `target`'s
 ([Model changes](#model-changes-209)). It is keyed on catalog identity and stored text, never on a URL or a
@@ -670,6 +700,27 @@ Choosing the replacement model and running the paid re-embed are operator decisi
 nothing re-embeds automatically on deploy. The runbook is in
 [DEPLOYMENT.md](DEPLOYMENT.md#re-embedding-after-a-model-change-209).
 
+### Evaluation (#178): `src/eval/`
+
+A local harness that seeds a fixed corpus at a given chunk configuration, asks a fixed
+question set, and reports `hit@k` with the configuration attached. Full usage, fixture
+format and limitations: **[EVALUATION.md](EVALUATION.md)**.
+
+Three decisions worth knowing here:
+
+- **It drives the real `index_doc`,** not a copy of the pipeline, so what it measures
+  includes `embedding_input`'s title and heading context. `index_doc` takes `settings`
+  for exactly this reason; every caller in the service uses the default.
+- **It embeds with a deterministic lexical stand-in** (`src/eval/embedding.py`), since
+  #178 requires automated tests to avoid paid provider calls. Cosine tracks vocabulary
+  overlap, which makes the score respond to chunking and makes it useless as a claim
+  about production retrieval quality.
+- **A leak is scored apart from the hit rate.** Returning a document the asker may not
+  see is an authorization failure, not a ranking one, and a single averaged number
+  would hide it.
+
+Equal scores across configurations are a valid outcome and are reported as measured.
+
 ## Authorized retrieval
 
 `POST /search` uses the [shared API contract and fixture](API.md#authorized-retrieval-post-search).
@@ -757,3 +808,100 @@ The one place concrete adapters meet their Protocols. `get_storage` builds a
 offline fake). Tests override `get_storage`
 (and inject fake fetchers/directory) via `app.dependency_overrides` — which is why these are
 injected functions, not module globals.
+
+## Automatic discovery (#291)
+
+`doc-discover` is an external HTTP runner, checkpointed on its own volume. It calls
+connectors' bounded metadata enumeration and the catalog's `/docs/discovery` import
+endpoint. It never connects to the catalog database or imports another service's
+code. Listing metadata is not ACL evidence: imports reuse `ingest_doc` and `index_doc`,
+so grants still come only from each file's complete, resolved source ACL.
+
+`StorageAdapter.get_doc_by_google_file_id` matches supported URL aliases in both
+adapters, including old manual records and editor `u/<number>/d/` URLs. New normalized
+Google keys collapse to a
+canonical Drive file URL, reusing the active-URL uniqueness constraint for concurrent
+new ingests. Published `/d/e/` editor/Forms links retain their distinct URL keys:
+publication ids are not Drive file identities. No migration or rewriting of existing
+keys/grants is needed. Legacy
+alias lookup currently evaluates URL expressions in Postgres; measure catalog growth
+before introducing an indexed identity column and its duplicate-data migration.
+
+Discovery imports new identities and reports existing content/index gaps. It also
+corrects active legacy Google identities with source `web` to the enabled Google
+source supplied by discovery, retaining their id and manual grants. No content or
+ACL fetch occurs in this correction: #292 continues to own refresh. Records lacking
+an initial Google ACL sync report `registered` even if old web chunks exist. Retired
+records stay retired. Complete or incomplete
+listings never remove records, chunks or grants. The [runbook](DISCOVERY.md) owns the
+checkpoint, scheduling, recovery and topology contract.
+
+All Google inserts take a transaction-scoped Postgres advisory lock derived from the
+file id (a process lock in memory). Discovery's `create_doc(skip_existing_google=True)`
+then checks active and retired aliases in that same transaction before inserting.
+An existing identity raises `ExistingGoogleDoc`; ingest returns it without applying
+the in-flight fetch's content or grants. This closes the registration/retirement race
+during fetching, including aliases that do not share a normalized URL. Retirement
+preserves rows, so it cannot invalidate the existence check. Manual re-ingest retains
+its existing semantics. Provider and directory calls finish before this short lock;
+it never spans network fetching or embedding.
+
+## Durable meeting records
+
+`contracts/meeting.py` defines the hand-off, metadata and injected writer.
+`meeting_records.py` orchestrates the leased state machine from the
+[shared design](../../../docs/MEETING-RECORDING.md#durable-records-design-212).
+Migration 012 follows the refresh-runner migration 011. Both storage adapters
+implement atomic replay checks, version-checked transitions and catalog commits;
+`catalog_meeting` commits the Doc, source grants, content and saved state together.
+Migration 013 adds a durable `index_pending` flag.
+Catalog acceptance schedules indexing in the same transaction; the coordinator
+immediately runs the existing conditional indexer with an injected embedder.
+Failures retry through `retry-due` without rewriting, resharing or refetching the Doc.
+Removal invalidates attempts before erasing content. The canonical Google ID is
+never replaced, and the pending transcript clears only after adoption commits.
+Migration 014 adds the `google_deleted_at` receipt. Successful canonical deletion
+is recorded before later cleanup or the final `removed` transition, so retries
+skip a file already confirmed deleted. An
+unacknowledged Google 404 remains ambiguous; it never creates a deletion receipt.
+
+Migration 015 records every known removed Google identity. `purge_meeting_catalog`
+uses the Google insertion locks to persist those fences and purge all matching
+catalog aliases, including ordinary ingests that never set `record.doc_id`.
+An insert already holding the lock commits before this purge; later inserts see
+the removal fence.
+Reconciliation applies the same purge to late duplicates and old tombstones,
+including when the owner search returns no files. Known identities remain fenced
+even when no catalog row existed at removal time.
+
+Migration 016 adds per-file `google_deletions` intent and confirmation state.
+The coordinator commits intent before issuing a Google delete, and never adopts
+an identity carrying that intent, even after a timeout or restart. Explicit
+retry creates a new Doc from the retained payload when only fenced files remain.
+Confirmed deletions are skipped on subsequent cleanup passes, but their identities
+remain in the atomic removal purge and registration fence. Cleanup takes the union
+of current search results, durable pending deletion IDs and removed identities
+whose cleanup was not yet attempted, so losing listing visibility cannot discard
+an unresolved delete. Pending IDs keep retry outcomes in failure, including for
+older tombstones incorrectly marked removed. Successful reconciliation clears its
+own transient error while retaining unrelated errors.
+
+The removal marker retries version conflicts before proceeding.
+
+`retry-due` reports attempted/succeeded/failed meetings and separate persistence,
+indexing and cleanup failure counts. Pending or terminal failures and incomplete
+cleanup are not successful recovery. The runner includes these outcomes in its
+exit code, summary and heartbeat; known work failures release the run guard after
+the failure heartbeat, while transport or monitoring uncertainty retains it.
+
+Meeting content is fetched with the writer OAuth identity in initial ingest,
+refetch and scheduled refresh. An ambiguous owner 404 follows the nondestructive
+fetch-error path and never extends grant TTLs. `purged_at` prevents subsequent
+content, metadata, grants or chunks from restoring removed catalog data. These
+internal purge protections ship with meeting removal; the generic privileged
+catalog purge API remains a follow-up in the design.
+
+Generation-time decisions/action items/participants remain separate fields;
+readable content follows current Google edits. Google creation is a single HTML
+conversion and later retries never write that body. Audio stays entirely outside
+this persistence boundary. No durable PDF copy is retained by the platform.

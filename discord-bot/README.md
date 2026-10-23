@@ -77,7 +77,8 @@ Also issue an API key for the Discord bot (only if you'll use Discord mode):
 cd services/team-tracking
 uv --project . run team-tracking-keys issue --name discord-bot \
   --scopes people:read people:write people:elevate identifiers:read identifiers:write \
-           teams:read teams:write memberships:read memberships:write role_kinds:read
+           teams:read teams:write memberships:read memberships:write role_kinds:read \
+           channels:read channels:write
 # Copy the tt_... key into discord-bot/.env as DIRECTORY_API_KEY.
 # IMPORTANT: this key must be issued against MAIN (port 8000), not scratch.
 # Verify the token starts with tt_ — a doc_-prefixed key means the shared venv
@@ -123,8 +124,10 @@ npm start                                # or: npm run dev for both surfaces
 
 Before starting Discord mode, enable **Message Content Intent** under Discord
 Developer Portal → your application → **Bot** → **Privileged Gateway Intents**.
-The bot requests this intent so it can include the full recent thread history in
-helper requests, including messages that did not mention Misty.
+The bot requests this intent so it can include recent user questions in helper
+requests, including messages that did not mention Misty. Old bot answers are
+omitted because they have no verifiable source provenance; document follow-ups
+retrieve their evidence again.
 
 Wait for `Logged in as <bot name>` in terminal 2, then use the slash commands
 in whichever Discord server you invited the bot to.
@@ -252,13 +255,23 @@ and skips them.
   - Recovery links appear only for confirmed managed groups with settings/external-member failures, using the stored email/domain. UTMIST's own Google administrator handles authorization or policy recovery. Generic directory outages are not reported as disabled Google integration.
   - Deploy the automatic-settings backend and authorize both OAuth scopes before rolling out these replies. Keep the existing status/retry commands; manual instructions are recovery guidance, not the normal onboarding flow.
 - `/my-teams` (linked) — list your active memberships.
+- `/channel-access show` (admin) — show which teams' documents Misty may use in this
+  channel. In a thread, the setting applies to the parent channel. Drive access stays
+  personal; this only scopes Misty's answers. Backed by team-tracking's
+  `/channels/{guild}/{channel}/teams` API. The playground uses fixed guild/channel
+  snowflakes (`111…` / `222…`) so the command works without Discord.
+- `/channel-access set team:<> [team2:<> … team5:<>]` (admin) — replace the channel's
+  team list (up to five). Team options use slug autocomplete.
+- `/channel-access append team:<> [team2:<> … team5:<>]` (admin) — add teams to the
+  existing list without removing ones already configured (union, then the same PUT).
+- `/channel-access clear` (admin) — clear the channel's team list (no document access).
 - `/doc <add|list|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
 - `/doc search query:<text>` (linked) — search the documents you can access and get the top matches
   as titles and links. Replies are always private, because results include your own Drive shares.
   Needs the bot's doc key to carry the literal `act-as-user` scope (an `admin` key does not imply it).
 
 - `@Misty <question>` (linked) — opens a helper thread and answers using the
-  thread's recent history. In a thread Misty created, replying directly to one of
+  thread's recent user questions. In a thread Misty created, replying directly to one of
   Misty's messages continues the conversation when the reply ping is enabled.
   Ping-off replies, replies to other users, replies in regular channels, and replies
   in threads Misty did not create do not trigger the helper. A typed leading
@@ -359,12 +372,13 @@ parallel to team-tracking's scoped-key auth.
      cd ../services/team-tracking
      uv --project . run team-tracking-keys issue --name discord-bot \
        --scopes people:read people:write people:elevate identifiers:read identifiers:write \
-                teams:read teams:write memberships:read memberships:write role_kinds:read
+                teams:read teams:write memberships:read memberships:write role_kinds:read \
+                channels:read channels:write
      # The token must start with tt_ (a doc_-prefixed key means the shared venv
      # resolved documentation-system's CLI). scripts/provision-directory-key.sh
      # is the source of truth for these scopes — people:elevate is required so
      # /seed can promote people to admin/superuser (without it, /seed to a
-     # privileged level returns 403).
+     # privileged level returns 403). channels:read/write power /channel-access.
      ```
      **Important:** the CLI writes to whichever DB `.env`'s `DATABASE_URL` points
      at, which is your main `team_tracking` DB by default. Do NOT issue this key
@@ -381,6 +395,65 @@ parallel to team-tracking's scoped-key auth.
    propagate); **testing-guild-only** commands go only to that guild. See
    "Registration scope" above.
 5. `npm start` — then invite the bot to any server via its OAuth2 URL.
+
+## Helper document tools
+
+| Configuration | Default | Meaning |
+| --- | --- | --- |
+| `HELPER_TOOLS_ENABLED` | `false` | Literal `true` enables authorized document search and DM document reads for Discord helper answers |
+
+Enable only after retrieval and the destination's channel configuration are
+ready. `DOC_API_KEY` needs `docs:read`, literal `act-as-user` for DMs, and literal
+`act-as-channel` for shared channels. Existing command write scopes still apply.
+The bot checks source access during generation and immediately before sending,
+appends source links, and withholds an answer if those checks fail. Previous user
+questions remain available for follow-ups; earlier bot answers are not replayed,
+even after the flag is disabled. The web playground remains text-only.
+
+Search tools supply the returned source passages, rather than cutting each to a
+400-character preview. Each passage is capped at 48 KiB of UTF-8 text and marked
+when truncated. JSON escaping and metadata can reduce that text allowance so a
+single hit fits the 60 KiB serialized result budget. Hits are admitted in rank
+order; one that exceeds the remaining budget is skipped, allowing later smaller
+hits to fit. Only retained hits are cited and revalidated. DM document bodies
+use the same raw-text and serialized-result limits.
+
+Channel answers can use these authorized passages, while opening a full document
+by id remains available only in DMs. The channel grant authorizes returned text
+under the [retrieval contract](../services/documentation-system/docs/API.md#authorized-retrieval-post-search),
+not just links. Publication revalidation covers the text supplied to the model.
+
+See the [helper tool contract](docs/CONTRIBUTING.md#the-authorized-helper-tool-loop-71)
+for replay, cost limits, revalidation tradeoffs, and offline coverage.
+
+### Channel scope and activation
+
+A helper reply in a thread uses its **parent channel's** configuration. A
+mention in an ordinary channel uses that channel's configuration, including
+when Misty creates a thread for the reply. Configuration commands in
+[#239](https://github.com/UTMIST/Misty/issues/239) must use the same rule; the
+[directory API](../services/team-tracking/docs/API.md#channel-team-access)
+looks up the exact guild/channel pair and does not resolve thread parents.
+Pass Discord snowflakes as their original decimal strings throughout. Do not
+convert them to JavaScript numbers, which can lose precision.
+
+An unconfigured or cleared channel returns an empty search result, without
+embedding the query or searching a wider scope. Missing assertion scopes and
+unavailable channel settings are errors, not empty-channel results; see the
+[retrieval contract](../services/documentation-system/docs/API.md#authorized-retrieval-post-search).
+An empty result gives the model no document evidence and adds no source links.
+
+Activation is coordinated through
+[#278](https://github.com/UTMIST/Misty/issues/278): William leads helper/retrieval
+integration and acceptance; Guneev owns channel configuration and its change
+cases. Keep the flag off until #239 and the real retrieval integration are ready.
+The maintainer with access to the target environment provisions the bot's doc
+key with the scopes above, preserving existing command scopes, and installs it
+as `DOC_API_KEY`; coordinate that operator with the #278 lead. Enable the flag
+in staging for the controlled DM/channel, follow-up, and revocation acceptance.
+Production activation follows recorded acceptance, including the automatic
+sharing flow required by #278. Merging this executor does not flip the flag or
+provision credentials. Disable the flag to stop new tool-enabled answers.
 
 ## Helper-bot request limits
 
@@ -454,15 +527,15 @@ Meetings, Administration, and Help & support. Search matches command names, desc
 and categories. New uncategorized commands remain available under Other commands.
 
 Forms share labeled controls, help text, and Required/Optional indicators.
-Leaving an optional select at **Use default** preserves the command’s server
+Leaving an optional select at **Use default** preserves the command's server
 default; selecting **No** explicitly sends false. Permission badges describe
 the command policy; the server still authorizes every request. Run a command
 to see its reply in **Activity**. Pending requests disable repeat submission.
 
 The layout adapts to narrow screens and supports keyboard navigation. On phones,
 **Commands** opens the category menu; selecting a command closes it.
-**Clear activity** only clears the visible replies; it does not reset Misty’s
-thread context. UTMIST’s existing astronaut logo and cobalt accent are reused
+**Clear activity** only clears the visible replies; it does not reset Misty's
+thread context. UTMIST's existing astronaut logo and cobalt accent are reused
 locally, with no external font, icon, or image requests.
 
 Click **Reset DB** beside the identity picker to re-clone from your main DB
@@ -595,7 +668,7 @@ local `.env`.
 | `scripts/lib/seedDefaultPersonas.js` | Idempotently seeds Dev Superuser/Admin/Member into scratch. |
 | `src/web/server.js` | Fastify web playground (see "Web playground" above). |
 | `src/web/public/catalog.js` | Presentation labels, categories, search, and option serialization; command definitions stay in the registry. |
-| `src/web/public/utmist-logo.png` | Unmodified copy of the meeting service’s UTMIST brand asset, served within the bot image. |
+| `src/web/public/utmist-logo.png` | Unmodified copy of the meeting service's UTMIST brand asset, served within the bot image. |
 | `src/web/public/mentions.js` | Client-side `<@id>` → user pill rendering. |
 | `src/startupGuard.js` | Refuses web-mode boot if the directory key lacks `dev:spoof`. |
 
@@ -632,3 +705,18 @@ Discord role sync, `/unlink`, and any bot-side persistence. (Email verification 
 now implemented — `/link` + `/verify-code` via the verification service.)
 
 Team archive/unarchive, `/team info`, editing role/team-admin on existing memberships, team-admin delegation authority, dynamic role_kinds fetch for slash choices, LLM adapter.
+
+## Durable meeting records
+
+`/record start` saves the finalized transcript and minutes to one Google Doc by
+default, through meeting → documentation-system → connectors. A consent/visibility
+notice is posted before capture. `save:false` keeps the existing PDF-only flow.
+Explicit stop, automatic empty-channel stop and disconnect salvage all send the
+same record context. Failed hand-off still posts the PDF and a delayed-save
+notice; keep that PDF and contact an admin with the meeting ID for recovery.
+Google Docs remain admin-only when complete voice-channel team coverage is
+unavailable. Doc-link delivery is the separate #223 change.
+Moving the bot to another voice channel ends a saved recording immediately;
+start a new recording there to use its audience. `save:false` recordings continue
+to follow moves.
+See [setup and recovery](../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).

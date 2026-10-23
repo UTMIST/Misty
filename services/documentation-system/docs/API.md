@@ -236,6 +236,8 @@ lacking a read scope is `403`. Neither falls through to `SEE_ALL`.
 | `DELETE` | `/docs/{id}/grants` | `docs:write` | Revoke a grant |
 | `POST` | `/docs/{id}/refetch` | `docs:write` | Re-run the content fetch |
 | `POST` | `/docs/source-access/refresh-due` | `docs:write` | Refresh due Google ACLs/content in a bounded batch |
+| `POST` | `/docs/source-access/refresh-runs/{run_id}` | `docs:write` | Acquire the singleton runner guard |
+| `DELETE` | `/docs/source-access/refresh-runs/{run_id}` | `docs:write` | Release only the matching runner guard |
 | `POST` | `/docs/index` | `docs:index` | (Re-)index stored content for retrieval; retry path |
 | `GET` | `/docs/index/status` | `docs:index` | Chunk coverage per embedding model; re-embed progress |
 | `GET` | `/sources` | `docs:read` | List source kinds |
@@ -597,6 +599,27 @@ and its chunks so the doc stops being searchable, unless a newer fetch has store
 meanwhile; the catalog row stays. Any other failure
 (timeouts, 5xx, 403, a different 404) leaves content and chunks untouched.
 
+## Source refresh runner guard
+
+`POST /docs/source-access/refresh-runs/{run_id}` atomically acquires the catalog's
+single runner slot. `run_id` is a fresh UUID chosen by the caller; `created_by`
+comes from the authenticated key. Requires `docs:write` (or `admin`). Returns
+`200 {"run_id": "..."}`; an occupied slot returns `409`, including reuse of its
+current UUID. Invalid UUIDs return `422`. No document or provider work occurs.
+
+`DELETE` on the same path releases only that exact owner, returning the same
+`200` response; a missing or different owner returns `409`. This is also the
+operator recovery operation, so **first confirm the owning process and its API
+requests have stopped**. Releasing a live owner defeats the guard.
+
+Acquire before any start heartbeat or refresh batch, retain through all batches
+and the final heartbeat, and release only after confirmed completion. A rejected
+runner must send failure, never start/success or release another run. The guard
+persists across restarts with no expiry. On ambiguous HTTP/monitor outcomes,
+leave it for [operator recovery](DEPLOYMENT.md#recovery-credential-rotation-and-disablerollback).
+This coordinates participating clients: `refresh-due` itself remains a standalone
+batch endpoint. Manual callers must follow this protocol or use `doc-source-refresh`.
+
 ## `POST /docs/source-access/refresh-due` — scheduled reconciliation
 
 Scope: `docs:write`. Query parameter `limit` defaults to 10 and is constrained to 1–100.
@@ -722,8 +745,8 @@ A **source** describes a kind of URL and how the catalog treats it:
 
 The seven seeded sources: `web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`,
 `youtube`. All but `youtube` have a fetcher and
-`content_fetch_enabled: true` — migration `006` enabled the four Google sources, which
-fetch through the connectors service.
+`content_fetch_enabled: true` — migration `006` enabled the four Google sources. `github`
+and the Google sources fetch through the connectors service.
 
 ## `GET /sources/{id}` — get one source
 
@@ -764,3 +787,130 @@ Errors use FastAPI's standard shape:
 
 Validation errors (422) carry the structured `detail` array FastAPI generates. See
 `/openapi.json` for the exact per-endpoint schemas.
+
+## Discovery import — `POST /docs/discovery`
+
+Requires `docs:write`; actor is the authenticated key name. This literal route is
+registered before `/docs/{doc_id}`. Strict body:
+
+```json
+{"file_id": "example", "source_id": "gdocs"}
+```
+
+File ids contain letters, digits, `_` and `-` (1–200 characters); source is one of
+`gdocs`, `gsheets`, `gslides`, `gdrive`. No URLs, owners, grants or claimed actor are
+accepted. The trusted discovery caller supplies the source from the connector's
+MIME classification. The catalog checks active/fetch-enabled source status before
+fetching, then deduplicates by Drive identity, including legacy/manual URL aliases.
+New records use the normal ingest, complete source-ACL reconciliation and indexer.
+Existing records are inspected without refetching or re-embedding. An active legacy
+Google URL catalogued as `web` is reassigned to the enabled Google source supplied
+by discovery, preserving its id, content, tags and manual grants. The existing source
+refresh job (or explicit refetch) then reconciles its actual Google ACL and content;
+until the first successful ACL sync it is reported as `registered`. Retirement is
+honored, including a manual registration/retirement while discovery is fetching:
+the final storage insert checks identity atomically with other Google inserts and
+returns the existing record without applying discovery's fetched data. Scopes and
+validation precede provider work.
+
+Always returns 200 for a classified outcome:
+
+```json
+{"status": "indexed", "doc_id": "11111111-1111-1111-1111-111111111111", "warnings": 0}
+```
+
+`indexed` means new usable chunks were written; `existing` means a current stored
+index already exists and a Google source has completed its initial ACL sync.
+`registered` means catalogued but missing content or initial Google ACL reconciliation;
+`index_failed` reports failed, missing or stale indexing; `retired` is skipped;
+`disabled` means source fetching is disabled/inactive (no doc id). Warnings are a
+count, with no content/principals/raw upstream details. An empty/whitespace extraction,
+unmapped ACL or fetch failure must not be counted as indexed.
+
+Use the existing refetch/source-refresh and `/docs/index` recovery endpoints; discovery
+only corrects the legacy source classification. See [operations and limits](DISCOVERY.md).
+All new Google URL ingests now use file identity for normalized dedup keys; displayed
+original URLs and existing stored keys are preserved. Editor aliases with an optional
+`u/<number>/` account selector share the same identity. Forms edit URLs without an
+explicit source use `gdrive` when no more-specific source pattern matches and that
+source is registered. Published `/d/e/` URLs are
+excluded from Drive identity extraction and keep distinct URL keys. Preexisting
+duplicate records are not merged. The active earliest record wins identity lookup.
+
+## Meeting records
+
+These service-to-service endpoints use attested key actors and strict input
+models. `meeting_id` is the bot's UUID, independent of the Doc title or URL.
+
+| Method/path | Scope | Behavior |
+|---|---|---|
+| `PUT /meeting-records/{meeting_id}` | `meetings:write` | Durable hand-off: 202 on insert; 200 on identical replay; 409 on changed payload |
+| `GET /meeting-records/{meeting_id}` | `meetings:read` | Status, canonical IDs/URL, generation metadata and delivery state; no pending transcript |
+| `GET /meeting-records` | `meetings:read` | Optional `persistence_status` and `delivery_status` filters |
+| `POST /meeting-records/retry-due?limit=10` | `meetings:write` | Bounded oldest-due persistence, reconciliation and expiry with outcome counts; limit 1–100 |
+| `POST /meeting-records/{meeting_id}/retry` | `meetings:admin` | Explicit retry of a failed/inaccessible record; removal remains terminal |
+| `POST /meeting-records/{meeting_id}/remove` | `meetings:admin` | Mark removal before external calls; purge catalog and permanently delete tagged Docs |
+| `PATCH /meeting-records/{meeting_id}/delivery` | `meetings:write` | `{status: posted\|failed, discord_message_id}`; only saved, nonremoved records; posted requires an ID |
+
+The PUT body contains `guild_id`, `text_channel_id`, `voice_channel_id`,
+`requester_discord_id`, timezone-aware `started_at` and `ended_at`, `title`,
+`participants: [{discord_id, display_name}]`, `summary`, `decisions: string[]`,
+`action_items: string[]`, and the full assembled `transcript`. Decisions and
+action items stay discrete JSON fields. Unknown fields, duplicate participants,
+invalid timestamps/IDs, NUL/invalid UTF-8, and oversized content fail with 422.
+Escaped text is capped at 3,500,000 characters to fit the writer transport.
+The directory resolves participant IDs and the complete voice-channel team
+Google Groups; incomplete group coverage results in an admin-only record.
+A directory outage returns 503 so `meeting` holds and retries the hand-off.
+
+Acceptance commits before Google work starts. A background attempt runs once;
+remaining work belongs to the existing hourly runner. State, leases and the
+immutable canonical ID live in Postgres; repeated acceptance never creates
+another row. A timed-out create keeps its lease until reconciliation. Recurring
+scans continue after save, failure and removal and delete late duplicates without
+rewriting the canonical Doc. Admin-only status is represented by empty
+`audience_team_ids`; no org grant or public sharing fallback exists.
+
+Catalog acceptance also sets `index_pending=true` atomically, then indexes the
+stored content immediately. Successful indexing clears the flag. A failure keeps
+the saved Doc and retries through `retry-due` after five minutes without another
+Google write; the hourly runner picks up due retries.
+
+`google_deleted_at` is a durable receipt for a confirmed canonical deletion,
+allowing removal to resume after later cleanup fails. An ambiguous 404 never
+sets that receipt. `google_deletions` maps each cleanup identity to `pending`
+(before the external delete) or `confirmed` (after acknowledgement). Both states
+permanently exclude that identity from canonical adoption; explicit retry can
+create a fresh Doc from the retained payload. Successful reconciliation clears
+`reconcile_failed`, so recovered scans stop reporting cleanup failures.
+
+Removal retries the version check before acknowledging its removal marker.
+
+Removal purges the linked catalog row and every alias of the canonical or discovered
+duplicate Google IDs, even when ordinary ingestion left `doc_id=null` on the
+meeting. `removed_google_document_ids` retains these identity fences so concurrent
+or later registration cannot restore them. Reconciliation also purges catalog
+copies of late duplicates and previously removed meetings with empty owner searches.
+This purge includes every `google_deletions` identity, including confirmed duplicates
+that disappeared from Google search before removal. Pending deletions are retried by
+ID in both removal and reconciliation even when search no longer lists the file.
+Cleanup remains incomplete, with a failed retry result, until deletion is acknowledged;
+an empty listing or ambiguous 404 does not confirm deletion. Older tombstones with
+pending deletions follow the same recovery path.
+
+The retry response contains all of `attempted`, `succeeded`, `failed`,
+`persistence_failed`, `index_failed`, and `cleanup_failed` as nonnegative integers.
+`succeeded + failed = attempted`; `failed` counts meetings once, while the failure
+categories may overlap. A selected meeting with unfinished/failed persistence,
+pending indexing, or failed cleanup counts as failed even though the HTTP request
+completed successfully. An empty queue returns all zeros. The monitored runner
+requires every count and sends a failure heartbeat for any failed meeting work.
+
+`last_error` contains a short code. Inspect failed records with
+`GET /meeting-records?persistence_status=failed`. `inaccessible` means an owner
+fetch cannot confirm deletion; retained snapshots/content/chunks and existing
+grant expiry remain intact. Only independently confirmed trash/deletion or an
+explicit removal triggers purge. A security removal records
+`removed_by=security:unexpected_acl`; admins notify the requester and retain the
+Discord PDF unless its removal is separately requested. The bot's link delivery
+and Discord cleanup are implemented separately in #223.

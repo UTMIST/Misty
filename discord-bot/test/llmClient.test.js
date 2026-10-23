@@ -25,6 +25,30 @@ function fakeFetch(responses) {
 const BASE = 'http://llm';
 const KEY = 'botkey';
 
+test('chat omits tools for the text-only path (empty or absent)', async () => {
+  const fetchImpl = fakeFetch([{ status: 200, body: { content: 'x' } }]);
+  const client = createLlmClient({ baseUrl: BASE, apiKey: KEY, fetchImpl });
+  await client.chat({ messages: [{ role: 'user', content: 'hi' }], tools: [] });
+  const body = JSON.parse(fetchImpl.calls[0].opts.body);
+  assert.equal('tools' in body, false);
+});
+
+test('chat forwards a non-empty tools list and returns stop_reason + content_blocks', async () => {
+  const blocks = [{ type: 'tool_use', id: 't1', name: 'search_documents', input: { query: 'q' } }];
+  const fetchImpl = fakeFetch([
+    { status: 200, body: { content: '', stop_reason: 'tool_use', content_blocks: blocks } },
+  ]);
+  const client = createLlmClient({ baseUrl: BASE, apiKey: KEY, fetchImpl });
+  const res = await client.chat({
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [{ name: 'search_documents', input_schema: {} }],
+  });
+  const body = JSON.parse(fetchImpl.calls[0].opts.body);
+  assert.equal(body.tools.length, 1);
+  assert.equal(res.stop_reason, 'tool_use');
+  assert.deepEqual(res.content_blocks, blocks);
+});
+
 test('chat POSTs /chat with key header and maps a 200 response', async () => {
   const fetchImpl = fakeFetch([
     {
@@ -48,6 +72,8 @@ test('chat POSTs /chat with key header and maps a 200 response', async () => {
     content: 'hi there',
     model: 'claude-sonnet-4-6',
     usage: { input_tokens: 5, output_tokens: 2 },
+    stop_reason: 'end_turn',
+    content_blocks: undefined,
   });
   const call = fetchImpl.calls[0];
   assert.match(call.url, /\/chat$/);
@@ -108,4 +134,53 @@ test('chat aborts and throws LlmUnavailable when the request stalls past timeout
     () => client.chat({ messages: [{ role: 'user', content: 'q' }] }),
     LlmUnavailable,
   );
+});
+
+for (const phase of ['headers', 'body']) {
+  test(`chat propagates the caller deadline while waiting for response ${phase}`, async () => {
+    const controller = new AbortController();
+    let fetchSignal;
+    const client = createLlmClient({
+      baseUrl: BASE,
+      apiKey: KEY,
+      fetchImpl: async (_url, { signal }) => {
+        fetchSignal = signal;
+        const waitForAbort = () =>
+          new Promise((_, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+            controller.abort();
+          });
+        return phase === 'headers' ? waitForAbort() : { ok: true, json: waitForAbort };
+      },
+    });
+    await assert.rejects(
+      client.chat({ messages: [{ role: 'user', content: 'Read' }], signal: controller.signal }),
+      LlmUnavailable,
+    );
+    assert.equal(fetchSignal.aborted, true);
+  });
+}
+
+test('the client timeout remains active through response body reading', async () => {
+  let fetchSignal;
+  const client = createLlmClient({
+    baseUrl: BASE,
+    apiKey: KEY,
+    timeoutMs: 10,
+    fetchImpl: async (_url, { signal }) => {
+      fetchSignal = signal;
+      return {
+        ok: true,
+        json: () =>
+          new Promise((_, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          }),
+      };
+    },
+  });
+  await assert.rejects(
+    client.chat({ messages: [{ role: 'user', content: 'Read' }] }),
+    LlmUnavailable,
+  );
+  assert.equal(fetchSignal.aborted, true);
 });

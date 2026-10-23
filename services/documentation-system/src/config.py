@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     # a failed/stopped scheduler eventually fails closed.
     source_access_refresh_after_hours: int = Field(default=24, gt=0)
     source_access_max_age_hours: int = Field(default=48, gt=0)
+    meeting_doc_create_lease_s: int = Field(default=600, ge=60)
+    meeting_record_max_attempts: int = Field(default=8, ge=1)
+    meeting_record_retention_days: int = Field(default=365, ge=1)
 
     @model_validator(mode="after")
     def _validate_source_access_windows(self) -> "Settings":
@@ -86,11 +89,11 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
     and must block startup.
 
     `connectors_api_key` is different in kind, not just degree: connectors is
-    a soft dependency. It only backs the four Google-backed sources (`gdocs`,
-    `gsheets`, `gslides`, `gdrive`) — `web` and `github` fetch in-process and
-    never touch it — and `ingest_doc` is designed to turn a connectors
+    a soft dependency. It only backs `github` and the four Google-backed
+    sources (`gdocs`, `gsheets`, `gslides`, `gdrive`) — `web` fetches
+    in-process and never touches it — and `ingest_doc` is designed to turn a connectors
     `FetchError` into a per-doc warning while still cataloguing the doc (see
-    src/ingest.py). Losing connectors means "no Google content," not "broken
+    src/ingest.py). Losing connectors means "no GitHub or Google content," not "broken
     catalog," so a default `connectors_api_key` gets a startup warning
     instead of a boot refusal (see below). This mirrors connectors' own
     `verify_production_secrets` (services/connectors/src/config.py), which
