@@ -188,7 +188,7 @@ Docker is needed by the four DB-backed services **and by the bot's playground**.
 - **Node 22.12+** — required by the locked `@discordjs/voice` dependency.
   The bot package declaration, Dockerfile and CI still select/allow Node 20;
   this is an unresolved runtime/dependency mismatch, not a compatibility guarantee.
-  See the [bot prerequisites](../discord-bot/README.md#prerequisites).
+  See the [bot prerequisites](../discord-bot/README.md#setup).
   Check with `node --version`. The bot reads its `.env` via Node's built-in `--env-file`, so no `dotenv` package needed.
 
 Sanity check: `git --version`, `docker --version`, `uv --version`, `node --version`
