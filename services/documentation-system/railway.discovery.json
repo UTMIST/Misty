@@ -2,9 +2,25 @@
   "$schema": "https://railway.com/railway.schema.json",
   "build": { "builder": "DOCKERFILE", "dockerfilePath": "services/documentation-system/Dockerfile" },
   "deploy": {
-    "startCommand": "python -m src.discovery",
-    "cronSchedule": "*/15 * * * *",
+    "startCommand": "python -c \"print('Discovery disabled outside staging')\"",
+    "cronSchedule": null,
+    "preDeployCommand": null,
+    "healthcheckPath": null,
     "restartPolicyType": "NEVER",
     "numReplicas": 1
+  },
+  "environments": {
+    "staging": {
+      "deploy": {
+        "startCommand": "python -m src.discovery --require-monitor",
+        "cronSchedule": "*/15 * * * *"
+      }
+    },
+    "pr": {
+      "deploy": {
+        "startCommand": "python -c \"print('Discovery disabled in PR previews')\"",
+        "cronSchedule": null
+      }
+    }
   }
 }

@@ -6,7 +6,7 @@ Atomic replacement plus an OS lock make interruption/replay safe on a volume.
 
 import argparse
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -15,7 +15,7 @@ from pathlib import Path
 import sys
 import time
 from typing import Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     discovery_max_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
     discovery_timeout_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
     discovery_excluded_ids: set[str] = Field(default_factory=set)
+    discovery_monitor_url: SecretStr = SecretStr("")
+    discovery_completion_monitor_url: SecretStr = SecretStr("")
 
 
 class WireModel(BaseModel):
@@ -142,6 +144,42 @@ def _url(value: str) -> str:
     ):
         raise DiscoveryError("service URLs require HTTP(S), no credentials, query or fragment")
     return str(url).rstrip("/")
+
+
+class DiscoveryMonitor:
+    """Independent Healthchecks pings; no source data or API credentials."""
+
+    def __init__(self, url: SecretStr, *, client: httpx.Client, run_id: str):
+        try:
+            parsed = httpx.URL(url.get_secret_value())
+        except (httpx.InvalidURL, ValueError):
+            raise DiscoveryError("discovery monitors require HTTPS ping URLs") from None
+        if (
+            parsed.scheme != "https"
+            or not parsed.host
+            or parsed.userinfo
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise DiscoveryError(
+                "discovery monitors require HTTPS without credentials, query or fragment"
+            )
+        self.url = SecretStr(str(parsed).rstrip("/"))
+        self.client = client
+        self.run_id = run_id
+
+    def ping(self, event: str) -> bool:
+        suffix = {"start": "/start", "success": "", "fail": "/fail"}[event]
+        try:
+            response = self.client.post(
+                self.url.get_secret_value() + suffix,
+                params={"rid": self.run_id},
+                timeout=10,
+                follow_redirects=False,
+            )
+            return response.status_code == 200 and response.text.strip() == "OK"
+        except httpx.HTTPError:
+            return False
 
 
 class DiscoveryClient:
@@ -388,26 +426,74 @@ def run_discovery(client, settings: Settings, state: State, save) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--status", action="store_true", help="print sanitized checkpoint counts")
+    parser.add_argument("--require-monitor", action="store_true", help="require both monitor URLs")
     args = parser.parse_args(argv)
-    try:
-        settings = Settings()
-        if not settings.discovery_enabled and not args.status:
-            print("discovery disabled")
-            return 0
-        with checkpoint(settings) as (state, save):
-            if args.status:
-                print(json.dumps({"enabled": settings.discovery_enabled, **state.summary()}))
+    run_id = str(uuid4())
+    started = time.monotonic()
+    state = monitor = completion_monitor = None
+    code = 2
+    monitor_failed = False
+    # Keep the checkpoint lock through the final pings. A rejected overlapping
+    # runner may report failure but must never replace the owner's start time.
+    with ExitStack() as stack:
+        try:
+            settings = Settings()
+            if not settings.discovery_enabled and not args.status:
+                print("discovery disabled")
                 return 0
-            with httpx.Client() as http:
-                code = run_discovery(DiscoveryClient(settings, http), settings, state, save)
-            print(json.dumps({"exit_code": code, **state.summary()}))
-            return code
-    except (ValidationError, SettingsError, OSError):
-        print("invalid discovery configuration or checkpoint storage", file=sys.stderr)
-        return 2
-    except DiscoveryError as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
+            if args.status:
+                with checkpoint(settings) as (state, _):
+                    print(json.dumps({"enabled": settings.discovery_enabled, **state.summary()}))
+                return 0
+            monitor_http = stack.enter_context(httpx.Client())
+            if settings.discovery_monitor_url.get_secret_value():
+                monitor = DiscoveryMonitor(
+                    settings.discovery_monitor_url, client=monitor_http, run_id=run_id
+                )
+            if settings.discovery_completion_monitor_url.get_secret_value():
+                completion_monitor = DiscoveryMonitor(
+                    settings.discovery_completion_monitor_url, client=monitor_http, run_id=run_id
+                )
+            if args.require_monitor and (monitor is None or completion_monitor is None):
+                raise DiscoveryError(
+                    "DISCOVERY_MONITOR_URL and DISCOVERY_COMPLETION_MONITOR_URL are required"
+                )
+            if monitor and completion_monitor and monitor.url == completion_monitor.url:
+                raise DiscoveryError("discovery monitors must use separate checks")
+            state, save = stack.enter_context(checkpoint(settings))
+            http = stack.enter_context(httpx.Client())
+            client = DiscoveryClient(settings, http)
+            print(json.dumps({"event": "start", "run_id": run_id}), flush=True)
+            if monitor:
+                monitor_failed = not monitor.ping("start")
+            code = run_discovery(client, settings, state, save)
+        except (ValidationError, SettingsError, OSError):
+            print("invalid discovery configuration or checkpoint storage", file=sys.stderr)
+        except DiscoveryError as exc:
+            print(str(exc), file=sys.stderr)
+        # Partial scans and errors must never reset the full-scan deadline.
+        # Only a newly completed clean traversal (exit 0) sends this success.
+        if completion_monitor and code == 0:
+            monitor_failed = not completion_monitor.ping("success") or monitor_failed
+        if monitor:
+            event = "success" if code == 0 and not monitor_failed else "fail"
+            monitor_failed = not monitor.ping(event) or monitor_failed
+        if monitor_failed:
+            code = 2
+        print(
+            json.dumps(
+                {
+                    "event": "finish",
+                    "run_id": run_id,
+                    "exit_code": code,
+                    "monitor_failed": monitor_failed,
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                    **(state.summary() if state else {}),
+                }
+            ),
+            flush=True,
+        )
+    return code
 
 
 if __name__ == "__main__":

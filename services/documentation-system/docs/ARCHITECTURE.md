@@ -823,6 +823,12 @@ endpoint. It never connects to the catalog database or imports another service's
 code. Listing metadata is not ACL evidence: imports reuse `ingest_doc` and `index_doc`,
 so grants still come only from each file's complete, resolved source ACL.
 
+Discovery has separate invocation and clean-completion heartbeat checks. Only a
+newly completed clean scan resets the completion deadline; bounded continuation
+cannot keep a stalled corpus apparently healthy. The local checkpoint lock spans
+the final pings, and monitoring failures never replay import work. Timing,
+ownership and recovery live in the [monitoring runbook](DISCOVERY.md#failure-stuck-run-and-completion-alerts).
+
 `StorageAdapter.get_doc_by_google_file_id` matches supported URL aliases in both
 adapters, including old manual records and editor `u/<number>/d/` URLs. New normalized
 Google keys collapse to a

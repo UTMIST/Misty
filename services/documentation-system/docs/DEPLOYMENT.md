@@ -793,6 +793,9 @@ Use a database backup to recover the previous assignments.
 
 The dedicated, disabled-by-default `doc-discover` runner and
 `railway.discovery.json` provide initial and recurring sharing discovery over HTTP.
+Staging uses `python -m src.discovery --require-monitor`; provision the secret
+`DISCOVERY_MONITOR_URL` and separate `DISCOVERY_COMPLETION_MONITOR_URL` first.
+Outside staging, including PR previews, the config does not schedule discovery.
 This is separate from the existing-document refresh schedule above. Follow the
 [discovery runbook](DISCOVERY.md) for its two scoped keys, persistent checkpoint,
 15-minute schedule, enable/status/disable commands, recovery and staging acceptance.

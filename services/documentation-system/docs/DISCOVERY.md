@@ -73,15 +73,23 @@ retirement for that purpose.
    no Google OAuth scope beyond the connector's existing read-only scopes.
 3. Create exactly one dedicated staging cron service using
    `services/documentation-system/railway.discovery.json`, repository-root build
-   context and the same revision as the APIs. Disable PR-preview schedules. It runs
-   `python -m src.discovery` every 15 minutes, one replica, no HTTP healthcheck,
+   context and the same revision as the APIs. The configuration disables schedules
+   outside staging, including PR previews. Staging runs
+   `python -m src.discovery --require-monitor` every 15 minutes, one replica, no HTTP healthcheck,
    pre-deploy migration, or automatic failure restart.
+   If Railway rejects the legacy config-file setting, apply these same values to
+   the dedicated service and read them back after deployment. The staging service
+   currently uses explicit settings and an uploaded build, not a GitHub source
+   connection; merging a PR does not update that runner automatically. Verify the
+   deployed revision, command, schedule and retained volume separately.
 4. Attach a persistent volume at `/data`, set
    `DISCOVERY_STATE_PATH=/data/discovery-state.json` and an explicit
    `DISCOVERY_IDENTITY` identifying this environment and connector account. Set both
    service base URLs and the two dedicated API keys on **the runner**. Do not copy
    API service database or Google variables. See the [configuration table](../README.md#automatic-sharing-discovery).
-5. Set `DISCOVERY_ENABLED=true` and trigger the initial run. Subsequent invocations
+5. Provision both [discovery monitors](#failure-stuck-run-and-completion-alerts),
+   set their secret URLs on the runner, then set `DISCOVERY_ENABLED=true` and
+   trigger the initial run. Subsequent invocations
    resume unfinished scans or start another full scan. No folder ids are configured.
 6. Inspect sanitized run summaries and `python -m src.discovery --status` with the
    same volume and settings when no run holds the lock. Status shows enabled state,
@@ -143,11 +151,62 @@ failures. A full scan's last counts remain available while another scan runs. Un
 warnings are counted, not printed. Do not log upstream bodies, source URLs, content,
 checkpoint payloads, or API keys.
 
-Before enabling staging, assign an operator and alert destination. Alert on exits
-1/2, repeated continuation without a completed scan, overlap, stuck runs, and no
-completed scan for 24 hours. Tune limits/cadence from measured workload and alert
-on loss of progress, not merely the existence of a checkpoint. No alert integration
-is provisioned by this code change.
+### Failure, stuck-run and completion alerts
+
+Provision two independent Healthchecks-compatible checks, separate from source
+refresh. Both send down/up notifications to `#misty-staging-dev-alerts` with a
+discovery-specific label and mentions disabled. Primary owner: **Ethan Qiu**.
+Backup: **unassigned**, explicitly accepted by the operator on 2026-10-23; do not
+infer an on-call backup from CODEOWNERS or issue assignments.
+
+| Check | Timing | Runner setting | Signal |
+|---|---|---|---|
+| `Misty staging discovery runs` | Cron `*/15 * * * *`, UTC; 30-minute grace | `DISCOVERY_MONITOR_URL` | `/start` after acquiring the checkpoint lock; success only on exit 0, otherwise `/fail` |
+| `Misty staging discovery completion` | Simple period 23 hours; grace 1 hour | `DISCOVERY_COMPLETION_MONITOR_URL` | Success only after a newly completed clean scan has been checkpointed; no start/failure pings |
+
+The first check reports exits 1/2, overlaps, missed invocations and runs stuck for
+30 minutes after start. The grace leaves room for the 900-second work budget and
+an already accepted request's phase timeouts. The second check alerts after 24
+hours without a clean completed scan. Repeated continuation, restarts, `--status`,
+disabled runs and completed traversals with indexing/listing gaps cannot reset it.
+Arm the completion check's initial deadline when provisioning it, before enabling
+the runner; a check left in `new` state does not detect a first scan that never
+finishes. Send one setup success with a distinct setup user agent and record its
+timestamp in the check description/release evidence. This only starts the initial
+24-hour deadline; it is not scan acceptance. Do not repeat setup pings to silence
+an overdue check. Healthchecks' resume operation returns a check to `new`, so after
+planned maintenance verify that an actual clean scan has rearmed this deadline.
+
+`--require-monitor` validates both secret HTTPS URLs before catalog/connector work
+and rejects using the same check for both signals. Monitor requests use a separate
+HTTP client, empty POST bodies, a per-invocation UUID, 10-second phase timeouts,
+and no redirects or retries. HTTP 200 must contain exactly `OK` after trimming;
+unknown/rate-limited responses are failures. See the [ping API](https://healthchecks.io/docs/http_api/).
+A failed start ping does not prevent discovery work or the completion ping, but
+the run check then receives failure.
+Any monitor-delivery failure exits 2 without replaying imports. Final pings happen
+while the checkpoint lock remains held; an overlapping invocation sends failure
+without sending start or completion, so it cannot hide the active run.
+
+Keep the project's Railway failure webhook as an independent fallback for
+`Deployment.failed`, `Deployment.crashed` and `Deployment.oom_killed`, with previews
+excluded. It covers a process unable to report to Healthchecks. The project-wide
+webhook also includes other services; it does not replace discovery's two checks.
+
+For an alert, inspect sanitized start/finish summaries and checkpoint status before
+changing limits or restarting. A nonzero result can mean expected bounded
+continuation, a content/index gap, denied listing, dependency failure, overlap or
+monitor failure. Preserve the checkpoint and identify the cause. Tune limits from
+observed progress; never acknowledge a completed scan by manually pinging success.
+Coordinate recovery of ambiguous API work using the lifecycle guidance below.
+
+To verify delivery, use disposable checks with short periods and the discovery
+integration. Exercise explicit failure/recovery, start without finish, and an
+actually missed completion heartbeat. Observe each down/up message in Discord,
+then remove the disposable checks. Never stop real discovery for a day to test an
+alert. Separately record a deployed clean scan and its two acknowledged pings.
+For planned maintenance, pause both checks explicitly; resume them with the runner
+and verify both checks are active rather than left in `new` state.
 
 ## Recovery and lifecycle
 
