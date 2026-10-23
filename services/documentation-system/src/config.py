@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     # a failed/stopped scheduler eventually fails closed.
     source_access_refresh_after_hours: int = Field(default=24, gt=0)
     source_access_max_age_hours: int = Field(default=48, gt=0)
+    meeting_doc_create_lease_s: int = Field(default=600, ge=60)
+    meeting_record_max_attempts: int = Field(default=8, ge=1)
+    meeting_record_retention_days: int = Field(default=365, ge=1)
 
     @model_validator(mode="after")
     def _validate_source_access_windows(self) -> "Settings":

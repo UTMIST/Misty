@@ -405,3 +405,18 @@ the API's production boot check does not read these runner-only settings.
 
 See the [operator runbook](docs/DISCOVERY.md) for scheduling, bounds, recovery,
 limitations and the staging acceptance gate. Production activation is separate.
+
+## Meeting record configuration
+
+Completed meetings are accepted durably at `PUT /meeting-records/{meeting_id}`.
+The catalog owns Google persistence, structured generation metadata and retry
+state; see the [API contract](docs/API.md#meeting-records).
+
+| Var | Default | Purpose |
+|---|---|---|
+| `MEETING_DOC_CREATE_LEASE_S` | `600` | Creation/reconciliation lease, minimum 60 seconds |
+| `MEETING_RECORD_MAX_ATTEMPTS` | `8` | Automatic persistence attempts before explicit admin recovery |
+| `MEETING_RECORD_RETENTION_DAYS` | `365` | Lifetime before Google/catalog removal |
+
+The existing connector key additionally needs `meeting-write,meeting-fetch`.
+See [deployment and recovery](docs/DEPLOYMENT.md#meeting-record-persistence).

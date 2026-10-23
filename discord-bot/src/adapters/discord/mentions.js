@@ -70,6 +70,7 @@ export function createHelperRequest(message, appContext, botId) {
           textChannel: channel,
           subcommand,
           name: options.name ?? null,
+          save: options.save ?? true,
         },
         appContext,
         recordCommand,

@@ -6,7 +6,7 @@ Feature owner: Misty #92. Related: [platform ARCHITECTURE](ARCHITECTURE.md), [`s
 
 ## What it does
 
-A **linked** member (identity resolved via the directory — see "Authorization" below) runs `/record start` in a Discord voice channel, optionally supplying a name up to 100 characters. Before a recording is active, the first human to enter an empty voice channel receives a direct message prompting them to start one. The bot joins, and as people talk it streams their audio to the `meeting` service, which transcribes each speaker live into a rolling transcript. Recording ends on `/record stop` **or automatically when everyone leaves the voice channel** (the bot ends the meeting once no non-bot member remains). On stop the service turns the transcript into minutes (via the `llm` service), renders a PDF, and hands it back; the bot posts the **PDF** to the text channel, @-mentioning whoever started the recording. A supplied name becomes the PDF title and is sanitized into the attachment filename as `<name>_<YYYY-MM-DD_HHMM>.pdf` in America/Toronto; unnamed recordings use `meeting_<YYYY-MM-DD_HHMM>.pdf`, based on the meeting start time. Nothing is persisted — the transcript lives in memory for the meeting and is discarded after the report is returned. *Planned (#222/#223):* save the full transcript and generated minutes in one Google Doc, catalog its URL, and post the Doc link to the originating channel. Audio is never persisted. See "Durable records" below.
+A **linked** member (identity resolved via the directory — see "Authorization" below) runs `/record start` in a Discord voice channel, optionally supplying a name up to 100 characters. Before a recording is active, the first human to enter an empty voice channel receives a direct message prompting them to start one. The bot joins, and as people talk it streams their audio to the `meeting` service, which transcribes each speaker live into a rolling transcript. Recording ends on `/record stop` **or automatically when everyone leaves the voice channel** (the bot ends the meeting once no non-bot member remains). On stop the service turns the transcript into minutes (via the `llm` service), renders a PDF, and hands it back; the bot posts the **PDF** to the text channel, @-mentioning whoever started the recording. A supplied name becomes the PDF title and is sanitized into the attachment filename as `<name>_<YYYY-MM-DD_HHMM>.pdf` in America/Toronto; unnamed recordings use `meeting_<YYYY-MM-DD_HHMM>.pdf`, based on the meeting start time. For saved recordings, the finalized transcript and minutes are handed to documentation-system before cleanup, then persisted as one native Google Doc and cataloged. Live sessions and unaccepted hand-offs remain in memory. Posting the existing Doc link is the separate #223 follow-up. Audio is never persisted. See "Durable records" below.
 
 ## The boundary, and the one constraint that forces it
 
@@ -28,7 +28,7 @@ The bot deliberately carries **no processing dependencies** (no `@aws-sdk`, no `
 
 Every other backend service (`team-tracking`, `documentation-system`, `llm`, `verification`) is a stateless source-of-truth: a request goes in, a response comes out, nothing is held between calls. `meeting` is the deliberate exception. **Live transcription requires *something* to hold the rolling transcript across the life of a meeting**, and the bot is the wrong place (we're keeping it lean and processing-free). So the service keeps an **in-memory registry of active meeting sessions**, each holding one live Transcribe stream per speaker plus the growing rolling transcript those streams produce (see "Live" below). This is a considered trade, not an accident — it's the price of "ask Misty during the meeting" being possible at all. The audio itself is *not* held: each chunk goes straight to AWS and is dropped.
 
-State is still **ephemeral**: a session exists only while its meeting is live, and `POST /stop` (or an abrupt WebSocket disconnect) tears it down and closes its Transcribe streams. Nothing is written to disk, and nothing reaches a database or object store.
+Live state is **ephemeral**: sessions and audio streams stay in memory. At stop, the optional record context enables a durable text-only hand-off to documentation-system before session cleanup. The meeting service never writes to disk. Abrupt disconnect recovery retains its existing grace period.
 
 ## Data flow
 
@@ -45,15 +45,18 @@ Discord voice  ──Opus──▶  bot recorder ──sendFrame──▶  meeti
 
 **Live:** the bot's recorder taps each speaker's raw Opus packets and forwards them (untouched, no decode) over one WebSocket. The service decodes/resamples each speaker's audio and pushes it into that speaker's **persistent AWS Transcribe stream**, held open for the whole meeting. Audio is sent once and never replayed, so `GET /transcript` is a free read of what has finalized so far — it makes no AWS call and costs nothing to poll. `GET /meetings/{id}/transcript` exposes the transcript at any time — the same finalized-speech source used by the live `/qna` command.
 
-**Stop:** `POST /meetings/{id}/stop` closes each speaker's Transcribe stream (concurrently, so latency is one flush and not N), assembles the transcript, calls the `llm` service for minutes, renders the PDF, returns it base64-encoded, and discards the session.
+**Stop:** `POST /meetings/{id}/stop` closes each speaker's Transcribe stream (concurrently, so latency is one flush and not N), assembles the transcript, calls the `llm` service for minutes, renders the PDF, hands off the optional durable record, returns the PDF base64-encoded, and discards the session.
 
 **Timeline correctness:** each forwarded frame carries `ts_ms` = milliseconds since the meeting started. AWS Transcribe reports word times relative to *each speaker's own* stream, and a speaker's stream carries only the frames they actually spoke — silence is never sent. So the service records an **anchor** whenever a frame arrives later than the audio already streamed accounts for, and maps word times through the nearest preceding anchor. Anchoring on the first `ts_ms` alone is not enough: it fixes only the speaker's first word, leaving cross-speaker order wrong past the opening minute and collapsing each speaker into one segment (the gap rule never sees a gap). `ts_ms` must always be sent and honored.
 
 ## Durable records (design, #212)
 
-**Status: design for review, not built.** Google Docs is the agreed destination.
-#222 creates and catalogs the record; #223 delivers its existing link. Until
-those ship, the current behavior above still applies. Decisions marked
+**Status: persistence implemented by #222; link delivery remains #223.**
+Google Docs is the durable destination. See the service
+[API](../services/documentation-system/docs/API.md#meeting-records) and
+[rollout runbook](RAILWAY-DEPLOYMENT.md#meeting-record-persistence).
+The generic privileged catalog purge API remains a required rollout follow-up;
+meeting removal already uses an internal atomic purge with restoration guards. Decisions marked
 *proposed* are policy defaults for reviewers to confirm before rollout; they do
 not block #222/#223 implementation, which reads them from configuration.
 
@@ -167,9 +170,8 @@ never write its body again.
 
 ### Hand-off and retry (closes the `/stop` gap)
 
-Today `/stop` discards the session as soon as it returns, so the transcript
-exists only in the bot's memory afterwards. The fix is to make the transcript
-durable **inside `/stop`, before the session is discarded**:
+The transcript becomes durable **inside `/stop`, before the session is
+discarded**, when record context is supplied:
 
 ```text
 bot ──POST /meetings/{id}/stop {title, record context}──▶ meeting
@@ -200,8 +202,8 @@ documentation-system ── create Doc ──▶ connectors ──▶ Google Dri
    with backoff. The bot posts the PDF as today and says the Google Doc save is
    delayed. If the hold expires, `meeting` logs `meeting.record_handoff_failed`
    (IDs only) and the PDF in Discord is the surviving copy — never silent.
-4. **documentation-system owns everything after acceptance.** It immediately
-   tries the Google + catalog steps once (bounded time). Whatever is left is
+4. **documentation-system owns everything after acceptance.** A background
+   attempt immediately tries the Google + catalog steps once (bounded time). Whatever is left is
    finished by `POST /meeting-records/retry-due`, called by the same hourly
    Railway cron that already drives `POST /docs/source-access/refresh-due`. No
    new queue or scheduler.
@@ -267,7 +269,9 @@ every 10 minutes, posts each link in the record's `text_channel_id`, and
 PATCHes `delivery` with the message ID. Delivery retries edit that message
 rather than posting again.
 
-### Metadata schema (documentation-system, migration `011`)
+### Metadata schema (documentation-system, migration `012`)
+
+Migration 011 was used by the hourly refresh-runner guard before this implementation.
 
 New table `meeting_records`, both storage adapters, owned by
 documentation-system (it already owns the catalog and has Postgres; `meeting`
@@ -278,6 +282,9 @@ stays database-free):
 | `meeting_id` | UUID PK | Bot session UUID |
 | `doc_id` | UUID FK → `docs.id`, null | Set when cataloged |
 | `google_document_id` | text unique, null | Canonical ID; set once by guarded adoption, never replaced by a late result |
+| `google_deleted_at` | timestamptz, null | Confirmed canonical-deletion receipt, preserved across cleanup retries (migration 014) |
+| `removed_google_document_ids` | text[] | Permanent ingestion fences for canonical and discovered duplicate IDs (migration 015) |
+| `index_pending` | boolean | Durable initial-index/retry work; set with catalog acceptance (migration 013) |
 | `doc_url` | text, null | Canonical Doc URL |
 | `guild_id`, `text_channel_id`, `voice_channel_id` | text | Discord snowflakes |
 | `title` | text | Supplied name, else LLM title |
@@ -411,6 +418,10 @@ recorded and is OK with it. Misty makes that explicit:
   <teams | admins only>, plus a reminder that everyone present should consent; ask a Misty admin to remove a record.
 - `/record start` gains `save:false` to skip the Google Doc for that meeting
   (PDF only, as today). Any participant may ask the requester to stop.
+- Moving the bot ends a saved recording. Audio forwarding stops synchronously
+  before receive-stream draining, so destination-channel speech cannot enter the
+  original audience's record. Start a new recording for the destination audience.
+  PDF-only (`save:false`) recordings continue to follow moves.
 - Posting a link in Discord never grants Drive access (#223).
 
 ### Retention and removal *(proposed)*
@@ -476,7 +487,9 @@ recorded and is OK with it. Misty makes that explicit:
   and refresh; it must not reach `delete_doc_content`. Destructive cleanup runs
   only after connectors'
   `GET /google/docs/{id}/status` — asked as the owning writer identity —
-  confirms the Doc is `deleted` or `trashed`. Then documentation-system runs
+  confirms the Doc is `deleted` or `trashed`. The current Google adapter can
+  positively identify `trashed`; a 404 stays `inaccessible` because it cannot
+  independently prove permanent deletion. Then documentation-system runs
   the same cascade as `/remove` (permanently deleting a trashed Doc). If the
   writer identity itself has lost access, nothing is deleted and admins
   investigate.
@@ -537,7 +550,7 @@ The bot's `meetingClient.encodeFrame` and the service's `_parse_frame` are inver
 - **Binary audio frame:** `[2-byte big-endian speaker_id length][speaker_id UTF-8][8-byte big-endian ts_ms][raw Opus payload]`
 - **Control frame (text/JSON):** `{"speaker_id": "...", "display_name": "..."}` — registers the display name shown for a speaker.
 - **Auth:** the `platform_auth` consumer key — on the WS as the first text frame `{"key": "…"}` (or a `?key=` query param; both server-supported), and on `GET /transcript` / `POST /stop` as the `X-API-Key` header. The `meetings` scope is required.
-- **`POST /stop` request:** optional `{ "title": "..." }` body, limited to 100 characters. A supplied title wins over the LLM-generated title. **Response:** `{ transcript, minutes, pdf_b64 }` (PDF base64-encoded). The bot posts it @-mentioning whoever ran `/record start` — including on the auto-stop path, where there is no interaction to read the requester off.
+- **`POST /stop` request:** optional `title` (up to 100 characters) and `record` context; see the [durable stop contract](../services/meeting/docs/API.md#durable-record-context). A supplied title wins over the LLM-generated title. **Response:** `{ transcript, minutes, pdf_b64, record }` (PDF base64-encoded). The bot posts it @-mentioning whoever ran `/record start` — including on the auto-stop path, where there is no interaction to read the requester off.
 
 ## The "separate surface" in the bot
 

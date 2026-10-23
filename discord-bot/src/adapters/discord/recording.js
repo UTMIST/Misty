@@ -118,6 +118,7 @@ export async function handleRecordInteraction(interaction, appContext, recordCom
       textChannel: interaction.channel,
       subcommand: interaction.options.getSubcommand(false),
       name: interaction.options.getString?.('name') ?? null,
+      save: interaction.options.getBoolean?.('save') ?? true,
     },
     appContext,
     recordCommand,
@@ -196,6 +197,7 @@ export async function runRecordAction(request, appContext, recordCommand, botId)
         // started the recording, even when auto-stop ends it.
         requesterId: request.requesterId,
         name: request.name ?? null,
+        save: request.save ?? true,
       });
     } catch (e) {
       console.error('meetingSurface.start failed:', e.message);

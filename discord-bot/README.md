@@ -468,7 +468,9 @@ not be delivered.
 Channel-access commands in a thread target its parent. Meeting questions use
 the exact channel or thread where recording was started. Recording starts in
 the requester's voice channel at confirmation time and posts minutes to the
-original request channel. A stop confirmation applies only to the recording
+original request channel. Its preview states whether the transcript and minutes
+will be saved as a Google Doc (default yes, matching `/record start`; ask for
+`save=false` to opt out). A stop confirmation applies only to the recording
 that was active when requested. Source-channel access is checked again before
 execution and private delivery.
 
@@ -760,3 +762,18 @@ Discord role sync, `/unlink`, and any bot-side persistence. (Email verification 
 now implemented — `/link` + `/verify-code` via the verification service.)
 
 Team archive/unarchive, `/team info`, editing role/team-admin on existing memberships, team-admin delegation authority, dynamic role_kinds fetch for slash choices, LLM adapter.
+
+## Durable meeting records
+
+`/record start` saves the finalized transcript and minutes to one Google Doc by
+default, through meeting → documentation-system → connectors. A consent/visibility
+notice is posted before capture. `save:false` keeps the existing PDF-only flow.
+Explicit stop, automatic empty-channel stop and disconnect salvage all send the
+same record context. Failed hand-off still posts the PDF and a delayed-save
+notice; keep that PDF and contact an admin with the meeting ID for recovery.
+Google Docs remain admin-only when complete voice-channel team coverage is
+unavailable. Doc-link delivery is the separate #223 change.
+Moving the bot to another voice channel ends a saved recording immediately;
+start a new recording there to use its audience. `save:false` recordings continue
+to follow moves.
+See [setup and recovery](../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).

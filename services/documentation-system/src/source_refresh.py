@@ -15,6 +15,8 @@ from uuid import uuid4
 import httpx
 from pydantic import AnyHttpUrl, BaseModel, Field, SecretStr, TypeAdapter, ValidationError
 
+from contracts.meeting import MeetingRetryResult
+
 DEFAULT_BASE_URL = "http://localhost:8001"
 REFRESH_PATH = "/docs/source-access/refresh-due"
 
@@ -37,6 +39,11 @@ class Report:
     refreshed: int = 0
     failed: int = 0
     index_failed: int = 0
+    meeting_attempted: int = 0
+    meeting_failed: int = 0
+    meeting_persistence_failed: int = 0
+    meeting_index_failed: int = 0
+    meeting_cleanup_failed: int = 0
     drained: bool = False
     error: str = ""
 
@@ -44,13 +51,17 @@ class Report:
     def exit_code(self) -> int:
         if self.error or not self.drained:
             return 2
-        return 1 if self.failed or self.index_failed else 0
+        return 1 if self.failed or self.index_failed or self.meeting_failed else 0
 
     def summary(self) -> str:
         return (
             f"batches={self.batches} attempted={self.attempted} refreshed={self.refreshed} "
             f"failed={self.failed} index_failed={self.index_failed} "
-            f"drained={str(self.drained).lower()}"
+            f"drained={str(self.drained).lower()} "
+            f"meeting_attempted={self.meeting_attempted} meeting_failed={self.meeting_failed} "
+            f"meeting_persistence_failed={self.meeting_persistence_failed} "
+            f"meeting_index_failed={self.meeting_index_failed} "
+            f"meeting_cleanup_failed={self.meeting_cleanup_failed}"
         )
 
 
@@ -88,13 +99,15 @@ class DocsApiClient:
         except ValueError:
             raise RefreshError(f"{method} {path} returned invalid JSON") from None
 
-    def check_scope(self, *, timeout: float) -> None:
+    def check_scope(self, *, timeout: float, meetings: bool = False) -> None:
         body = self._request("GET", "/api-keys/self", timeout=timeout)
         scopes = body.get("scopes") if isinstance(body, dict) else None
         if not isinstance(scopes, list) or any(not isinstance(s, str) for s in scopes):
             raise RefreshError("GET /api-keys/self returned an invalid scope list")
         if "docs:write" not in scopes and "admin" not in scopes:
             raise RefreshError("DOCS_API_KEY requires docs:write")
+        if meetings and "meetings:write" not in scopes and "admin" not in scopes:
+            raise RefreshError("DOCS_API_KEY requires meetings:write for --meeting-records")
 
     def refresh_batch(self, *, limit: int, timeout: float) -> Batch:
         body = self._request("POST", REFRESH_PATH, params={"limit": limit}, timeout=timeout)
@@ -109,6 +122,22 @@ class DocsApiClient:
         ):
             raise RefreshError("refresh endpoint returned inconsistent counts")
         return batch
+
+    def retry_meetings(self, *, limit: int, timeout: float) -> MeetingRetryResult:
+        body = self._request(
+            "POST", "/meeting-records/retry-due", params={"limit": limit}, timeout=timeout
+        )
+        try:
+            result = MeetingRetryResult.model_validate(body)
+            # All fields are mandatory on the wire; an old attempted-only API
+            # must not silently turn missing failure counts into success.
+            if set(result.model_fields_set) != set(MeetingRetryResult.model_fields):
+                raise ValueError("incomplete counts")
+        except ValueError:
+            raise RefreshError("meeting retry endpoint returned invalid counts")
+        if result.attempted > limit:
+            raise RefreshError("meeting retry endpoint returned inconsistent counts")
+        return result
 
     def acquire_run(self, run_id: str) -> None:
         self._run_guard_request("POST", run_id)
@@ -225,6 +254,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--require-monitor", action="store_true", help="require SOURCE_REFRESH_MONITOR_URL"
     )
+    parser.add_argument(
+        "--meeting-records", action="store_true", help="also retry/reconcile/expire meeting records"
+    )
     return parser
 
 
@@ -258,7 +290,9 @@ def main(argv: list[str] | None = None) -> int:
                 if args.require_monitor and monitor is None:
                     raise RefreshError("SOURCE_REFRESH_MONITOR_URL is required for scheduled runs")
                 client = DocsApiClient(base_url=args.base_url, api_key=api_key, client=http)
-                client.check_scope(timeout=min(args.timeout, args.max_seconds))
+                client.check_scope(
+                    timeout=min(args.timeout, args.max_seconds), meetings=args.meeting_records
+                )
                 # Log the ID before admission: even a lost acquire response can
                 # leave an owner that an operator must identify for recovery.
                 print(f"source_refresh event=acquire run_id={run_id}", flush=True)
@@ -274,6 +308,23 @@ def main(argv: list[str] | None = None) -> int:
                     timeout=args.timeout,
                     max_seconds=args.max_seconds,
                 )
+                if args.meeting_records and report.drained:
+                    for _ in range(args.max_batches):
+                        remaining = args.max_seconds - (time.monotonic() - started)
+                        if remaining <= 0:
+                            raise RefreshError("meeting retry budget exhausted")
+                        meetings = client.retry_meetings(
+                            limit=args.batch_size, timeout=min(args.timeout, remaining)
+                        )
+                        report.meeting_attempted += meetings.attempted
+                        report.meeting_failed += meetings.failed
+                        report.meeting_persistence_failed += meetings.persistence_failed
+                        report.meeting_index_failed += meetings.index_failed
+                        report.meeting_cleanup_failed += meetings.cleanup_failed
+                        if meetings.attempted < args.batch_size:
+                            break
+                    else:
+                        raise RefreshError("meeting retry batch limit exhausted")
             except RefreshError as exc:
                 report.error = str(exc)
             if monitor:

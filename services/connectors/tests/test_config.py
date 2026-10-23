@@ -99,3 +99,26 @@ def test_consumer_keys_never_leaks_via_string_conversion():
     assert secret not in str(s)
     assert secret not in str(s.consumer_keys)
     assert s.consumer_keys.get_secret_value() == secret
+
+
+def test_partial_writer_config_fails_at_boot_but_disabled_writer_is_supported():
+    import pytest
+    from src.config import verify_production_secrets
+
+    verify_production_secrets(Settings(connectors_env="production", api_key="real-key"))
+    with pytest.raises(RuntimeError, match="GOOGLE_OAUTH_CLIENT_SECRET"):
+        verify_production_secrets(
+            Settings(
+                connectors_env="production",
+                api_key="real-key",
+                google_oauth_client_id="fake-client",
+            )
+        )
+    settings = Settings(
+        google_oauth_client_id="private-client",
+        google_oauth_client_secret="private-secret",
+        google_oauth_refresh_token="private-refresh",
+    )
+    assert "private-client" not in repr(settings)
+    assert "private-secret" not in repr(settings)
+    assert "private-refresh" not in repr(settings)

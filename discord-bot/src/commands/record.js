@@ -27,6 +27,12 @@ export default defineCommand({
       description: 'Start recording the voice channel you are in',
       options: [
         {
+          name: 'save',
+          type: 'boolean',
+          required: false,
+          description: 'Save the transcript and minutes to Google Docs (default: true)',
+        },
+        {
           name: 'name',
           type: 'string',
           required: false,

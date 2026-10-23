@@ -85,6 +85,47 @@ function buttonId(messages, label) {
     .find((b) => b.label === label)?.custom_id;
 }
 
+for (const save of [undefined, false, true]) {
+  test(`record helper preview and confirmation preserve the save option (${save})`, async () => {
+    const f = fixture();
+    const person = { id: 'p1', active: true, access_level: 'member' };
+    const voiceChannel = { id: 'voice' };
+    const starts = [];
+    f.ctx.directory.getPersonByDiscordId = async () => person;
+    f.ctx.meetingSurface = {
+      activeSession: () => null,
+      start: async (args) => {
+        starts.push(args);
+        return { status: 'recording' };
+      },
+    };
+    f.message.channel = { id: 'text', permissionsFor: () => ({ has: () => true }) };
+    f.message.guild = {
+      id: 'guild',
+      members: { fetch: async () => ({ voice: { channel: voiceChannel } }) },
+      channels: { fetch: async () => f.message.channel },
+    };
+    const request = mentions.createHelperRequest(f.message, f.ctx, 'bot');
+    const { action } = await f.ctx.toolRegistry.handlers.get('record_start')(
+      { name: 'Review', ...(save !== undefined && { save }) },
+      { request, principal: { person } },
+    );
+    await sendHelperReply(f.send, { action }, { message: f.message, appContext: f.ctx });
+    assert.equal(starts.length, 0);
+    const confirmation = button(buttonId(f.privateMessages, 'Confirm'));
+    await f.handlers.interactionCreate(confirmation);
+    assert.equal(starts.length, 1);
+    assert.equal(starts[0].save, save ?? true);
+    assert.equal(starts[0].requesterId, 'owner');
+    assert.equal(starts[0].name, 'Review');
+    assert.equal(starts[0].textChannel.id, 'text');
+    assert.match(
+      JSON.stringify(f.privateMessages),
+      save === false ? /Google Doc: no/ : /Google Doc: yes/,
+    );
+  });
+}
+
 // Keep the executor, registry, authorization, router and delivery real. Only
 // external model/directory/meeting/Discord boundaries are replaced.
 async function commandAction(f, name, input = {}, generate = () => {}) {

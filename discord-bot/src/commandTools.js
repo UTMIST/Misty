@@ -164,6 +164,9 @@ export function createCommandTools({ appContext }) {
               commandName === 'record' && subcommand === 'start'
                 ? `Recording location: your voice channel at confirmation. Minutes channel: ${request.sourceChannelId}`
                 : null,
+              commandName === 'record' && subcommand === 'start'
+                ? `Save transcript and minutes as a Google Doc: ${(options.save ?? true) ? 'yes' : 'no'}`
+                : null,
               commandName === 'record' && subcommand === 'stop'
                 ? `Recording voice channel: ${request.recordingVoiceChannelId ?? 'no active recording'}. Applies only to the recording active when you asked.`
                 : null,
