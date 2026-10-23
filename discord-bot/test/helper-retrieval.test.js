@@ -209,6 +209,61 @@ test('authorized citations survive the real Discord mention and DM delivery path
   }
 });
 
+test('oversized citations preserve complete links through channel and DM delivery', async () => {
+  const urls = [1850, 1970, 1971, 1972, 1978, 1980].map((size) => {
+    const url = 'https://example.test/' + 'a'.repeat(size);
+    return [url, url];
+  });
+  urls.push(
+    ['https://example.test/' + ')'.repeat(640), 'https://example.test/' + '%29'.repeat(640)],
+    ['https://example.test/' + ')'.repeat(700), 'https://example.test/' + '%29'.repeat(700)],
+  );
+  for (const [url, href] of urls) {
+    const longHit = {
+      ...hit,
+      title: '[WIP] @everyone '.repeat(10),
+      url,
+    };
+    for (const kind of ['channel', 'person']) {
+      let calls = 0;
+      const sent = [];
+      const ctx = app(
+        { chat: async () => (calls++ === 0 ? use() : answer('Here is the answer.')) },
+        { searchDocs: async () => [longHit] },
+      );
+      const target = {
+        id: '200',
+        isThread: () => false,
+        sendTyping: async () => {},
+        send: async (part) => sent.push(part),
+        messages: { fetch: async () => new Map() },
+      };
+      const message = {
+        id: '300',
+        author: { id: 'member-1' },
+        content: 'Read the document',
+        channel: target,
+        guildId: '100',
+        startThread: async () => target,
+      };
+      await (kind === 'channel' ? handleMention : handleDirectMessage)(message, {
+        appContext: ctx,
+        botId: 'bot-1',
+      });
+      assert.match(sent.join('\n'), /Here is the answer/);
+      assert.ok(sent.every((part) => part.length <= 2000));
+      if (href.length + 2 <= 2000) {
+        assert.equal(sent.filter((part) => part.includes(`<${href}>`)).length, 1);
+        const source = renderHelperAnswer('', [longHit]).split('\n').at(-1);
+        assert.ok(sent.some((part) => part.includes(source)));
+      } else {
+        assert.ok(sent.some((part) => part.includes('Source link is too long to display.')));
+        assert.equal(sent.join('\n').includes('https://example.test/'), false);
+      }
+    }
+  }
+});
+
 test('a generated reply is checked again at the send boundary and between parts', async () => {
   let allowed = true,
     calls = 0;

@@ -234,7 +234,10 @@ answers. The rules the loop enforces:
   angle brackets to suppress previews and the title's Markdown/mention escaping,
   URL delimiter/whitespace encoding, and rejection of credential-bearing or non-HTTP(S)
   URLs in `messages/helper.js`. Discord chunking keeps each source line intact when
-  it fits within the message limit.
+  it fits within the message limit. The renderer budgets the fully encoded URL and
+  escaped title together, shortening the title without cutting escape sequences.
+  If only the URL fits, it uses a preview-suppressed `<url>` fallback; if even that
+  cannot fit, it emits an explicit notice rather than a partial link.
 - **Opaque replay within a turn.** Assistant `content_blocks` are replayed
   verbatim only within the current authorized loop, preserving provider state.
 - **Retrieved content is untrusted.** Passages and document bodies come back as

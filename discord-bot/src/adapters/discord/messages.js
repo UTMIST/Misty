@@ -2,7 +2,9 @@ const MESSAGE_LIMIT = 2000;
 export const DELIVERY_ERROR = 'I couldn’t send the full reply. Please try again shortly.';
 
 function preferredBoundary(text, limit, markers, fence) {
-  const sources = [...text.matchAll(/^• \[[^\r\n]*\]\(<https?:\/\/[^\r\n]*>\)$/gm)];
+  const sources = [
+    ...text.matchAll(/^(?:• \[[^\r\n]*\]\(<https?:\/\/[^\r\n]*>\)|<https?:\/\/[^\r\n]*>)$/gm),
+  ];
   function keepSourceWhole(boundary) {
     const source = sources.find(
       (line) => line.index < boundary && boundary < line.index + line[0].length,

@@ -9,7 +9,10 @@ from alembic.config import Config
 from sqlalchemy import create_engine, delete, insert, inspect, select, update
 
 from src.config import get_settings
-from src.storage.schema import doc_source_url_backfill, doc_tags, docs
+from src.storage.schema import doc_source_url_backfill, doc_tags, docs, meeting_records
+from src.storage.postgres import PostgresStorageAdapter
+from src.meeting_records import MeetingRecords
+from tests.meeting_record_cases import Directory, Writer, payload
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_PG_TESTS") != "1" or os.environ.get("RUN_PG_MIGRATION_TESTS") != "1",
@@ -22,6 +25,8 @@ def test_migration_017_round_trip_preserves_identity_and_unrelated_data():
     cfg = Config("alembic.ini")
     cfg.set_main_option("script_location", "migrations")
     rows, expected = [], {}
+    adapter = PostgresStorageAdapter(engine)
+    meeting_id = uuid4()
 
     def add(source, url, normalized, replacement=None, active=True):
         doc_id = uuid4()
@@ -42,6 +47,9 @@ def test_migration_017_round_trip_preserves_identity_and_unrelated_data():
 
     try:
         command.downgrade(cfg, "016")
+        pending, _ = MeetingRecords(adapter, Writer(), Directory(), get_settings()).accept(
+            meeting_id, payload(), actor="meeting-key"
+        )
         for source, path in (
             ("gdocs", "document"),
             ("gsheets", "spreadsheets"),
@@ -93,6 +101,7 @@ def test_migration_017_round_trip_preserves_identity_and_unrelated_data():
 
         for _ in range(2):
             command.upgrade(cfg, "head")
+            assert adapter.get_meeting(meeting_id) == pending
             with engine.connect() as conn:
                 upgraded = {r.id: dict(r._mapping) for r in conn.execute(select(docs))}
                 assert upgraded == {
@@ -101,6 +110,7 @@ def test_migration_017_round_trip_preserves_identity_and_unrelated_data():
                 }
                 assert conn.execute(select(doc_tags)).all() == tags
             command.downgrade(cfg, "016")
+            assert adapter.get_meeting(meeting_id) == pending
             assert "doc_source_url_backfill" not in inspect(engine).get_table_names()
             with engine.connect() as conn:
                 assert {r.id: dict(r._mapping) for r in conn.execute(select(docs))} == original
@@ -140,5 +150,6 @@ def test_migration_017_round_trip_preserves_identity_and_unrelated_data():
     finally:
         command.upgrade(cfg, "head")
         with engine.begin() as conn:
+            conn.execute(delete(meeting_records).where(meeting_records.c.meeting_id == meeting_id))
             conn.execute(delete(docs).where(docs.c.id.in_([row["id"] for row in rows])))
         engine.dispose()
