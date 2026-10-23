@@ -13,13 +13,16 @@ export function renderHelperAnswer(content, citations = []) {
     const key = citation.doc_id ?? url.href;
     if (seen.has(key)) continue;
     seen.add(key);
-    const title = String(citation.title || 'Document')
+    const title = (String(citation.title ?? '').trim() || 'Document')
       .replace(/[\r\n]/g, ' ')
       .slice(0, 160)
       .replace(/([\\`*_{}[\]()<>#|~])/g, '\\$1')
       .replaceAll('@', '@\u200b');
-    const href = url.href.replaceAll('<', '%3C').replaceAll('>', '%3E');
-    sources.push(`• ${title} — <${href}>`);
+    const href = url.href
+      .replaceAll('(', '%28')
+      .replaceAll(')', '%29')
+      .replace(/[<>\s]/gu, encodeURIComponent);
+    sources.push(`• [${title}](${href})`);
   }
   return sources.length ? `${content}\n\nSources:\n${sources.join('\n')}` : content;
 }
