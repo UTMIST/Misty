@@ -93,6 +93,13 @@ cases cover ordinary ingestion, authenticated search, prior reconciliation and
 removal against both adapters. API, architecture and deployment docs explain the
 expanded identity set and recovery contract. No schema change is needed.
 
+The unlisted-deletion recovery fix updates the coordinator to retry known
+unresolved identities independently of listing visibility and keep cleanup
+incomplete until acknowledgement, repairing older tombstones too. Shared meeting
+cases exercise pending and not-yet-attempted duplicate deletions through the real
+retry API and monitored runner against both adapters. API, architecture and
+deployment docs describe the failure reporting and recovery behavior.
+
 | File | Why it changes |
 |---|---|
 | [Makefile](../Makefile) | Fix shell quoting so the Node version precheck runs instead of passing literal line continuations to JavaScript. |

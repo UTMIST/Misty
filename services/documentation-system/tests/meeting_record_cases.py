@@ -395,6 +395,116 @@ class MeetingRecordCases:
         alias = "https://docs.google.com/document/u/0/d/duplicate/edit"
         assert client.post("/docs", headers=headers, json={"url": alias}).status_code == 400
 
+    @pytest.mark.parametrize("previously_removed", [False, True])
+    @pytest.mark.parametrize("delete_error", ["google_transport", "delete_unconfirmed"])
+    def test_unlisted_pending_duplicate_keeps_removal_and_monitoring_incomplete(
+        self, flow, meeting_api, monkeypatch, capsys, delete_error, previously_removed
+    ):
+        from pydantic import SecretStr
+        from src import source_refresh
+        from src.source_refresh import DocsApiClient, RunMonitor
+
+        records, writer, clock, original = flow
+        client, headers = meeting_api
+        records.advance(original.meeting_id)
+        writer.docs["duplicate"] = TaggedDoc(
+            document_id="duplicate", attempt_id=uuid4(), created_at=NOW, trashed=False
+        )
+        writer.docs["unattempted"] = TaggedDoc(
+            document_id="unattempted", attempt_id=uuid4(), created_at=NOW, trashed=False
+        )
+        delete = writer.delete
+        blocked = [True]
+        attempts = []
+
+        def delayed_delete(document_id):
+            attempts.append(document_id)
+            if document_id == "duplicate" and blocked[0]:
+                raise WriterError(delete_error, uncertain=True)
+            return delete(document_id)
+
+        monkeypatch.setattr(writer, "delete", delayed_delete)
+        response = client.post(f"/meeting-records/{original.meeting_id}/remove", headers=headers)
+        assert response.status_code == 200
+        assert response.json()["persistence_status"] == "removing"
+        assert response.json()["google_deletions"]["duplicate"] == "pending"
+        assert "unattempted" in response.json()["removed_google_document_ids"]
+        assert "unattempted" not in response.json()["google_deletions"]
+        # The provider still holds the file, but listing loses visibility.
+        monkeypatch.setattr(writer, "search", lambda meeting_id: [])
+        if previously_removed:
+            # Repair tombstones marked complete by the previous implementation.
+            records.storage.change_meeting(
+                records.storage.get_meeting(original.meeting_id),
+                {"persistence_status": "removed"},
+                actor="old-removal",
+            )
+        clock[0] += timedelta(hours=1)
+        response = client.post("/meeting-records/retry-due", headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json() == {
+            "attempted": 1,
+            "succeeded": 0,
+            "failed": 1,
+            "persistence_failed": 0,
+            "index_failed": 0,
+            "cleanup_failed": 1,
+        }
+        assert attempts.count("duplicate") == 2 and "duplicate" in writer.docs
+        events = []
+        monkeypatch.setenv("DOCS_API_KEY", headers["X-API-Key"])
+        monkeypatch.setenv("SOURCE_REFRESH_MONITOR_URL", "https://monitor.test/test-run")
+        monkeypatch.setattr(RunMonitor, "ping", lambda self, event: events.append(event) or True)
+        monkeypatch.setattr(
+            source_refresh,
+            "DocsApiClient",
+            lambda **kwargs: DocsApiClient(
+                base_url="http://testserver", api_key=SecretStr(headers["X-API-Key"]), client=client
+            ),
+        )
+        clock[0] += timedelta(hours=1)
+        assert source_refresh.main(["--meeting-records"]) == 1
+        assert events == ["start", "fail"]
+        assert "meeting_cleanup_failed=1" in capsys.readouterr().out
+        current = records.storage.get_meeting(original.meeting_id)
+        assert current.persistence_status == "removing"
+        assert current.google_deletions["duplicate"] == "pending"
+        # A real acknowledgement, independent of listing, permits completion.
+        blocked[0] = False
+        events.clear()
+        clock[0] += timedelta(hours=1)
+        assert source_refresh.main(["--meeting-records"]) == 0
+        assert events == ["start", "success"]
+        current = records.storage.get_meeting(original.meeting_id)
+        assert current.persistence_status == "removed"
+        assert current.google_deletions["duplicate"] == "confirmed"
+        assert attempts.count("doc0") == 1 and not writer.docs
+
+    def test_reconciliation_retries_unlisted_pending_duplicate(self, flow, monkeypatch):
+        records, writer, clock, original = flow
+        records.advance(original.meeting_id)
+        writer.docs["duplicate"] = TaggedDoc(
+            document_id="duplicate", attempt_id=uuid4(), created_at=NOW, trashed=False
+        )
+        writer.delete_fails = True
+        clock[0] += timedelta(hours=1)
+        records.reconcile(original.meeting_id)
+        assert records.storage.get_meeting(original.meeting_id).google_deletions == {
+            "duplicate": "pending"
+        }
+        monkeypatch.setattr(writer, "search", lambda meeting_id: [])
+        clock[0] += timedelta(hours=1)
+        result = records.retry_due(10)
+        assert result.failed == result.cleanup_failed == 1
+        writer.delete_fails = False
+        clock[0] += timedelta(hours=1)
+        result = records.retry_due(10)
+        assert result.succeeded == 1 and not result.failed
+        current = records.storage.get_meeting(original.meeting_id)
+        assert current.persistence_status == "saved" and not current.last_error
+        assert current.google_deletions["duplicate"] == "confirmed"
+        assert set(writer.docs) == {current.google_document_id}
+
     def test_removal_retries_marker_when_background_finalization_wins_cas(
         self, flow, meeting_api, monkeypatch
     ):

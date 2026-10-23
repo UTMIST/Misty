@@ -857,7 +857,11 @@ meeting. `removed_google_document_ids` retains these identity fences so concurre
 or later registration cannot restore them. Reconciliation also purges catalog
 copies of late duplicates and previously removed meetings with empty owner searches.
 This purge includes every `google_deletions` identity, including confirmed duplicates
-that disappeared from Google search before removal.
+that disappeared from Google search before removal. Pending deletions are retried by
+ID in both removal and reconciliation even when search no longer lists the file.
+Cleanup remains incomplete, with a failed retry result, until deletion is acknowledged;
+an empty listing or ambiguous 404 does not confirm deletion. Older tombstones with
+pending deletions follow the same recovery path.
 
 The retry response contains all of `attempted`, `succeeded`, `failed`,
 `persistence_failed`, `index_failed`, and `cleanup_failed` as nonnegative integers.

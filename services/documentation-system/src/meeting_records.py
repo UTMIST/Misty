@@ -313,7 +313,15 @@ class MeetingRecords:
             if r.removed_at:
                 r = self.storage.purge_meeting_catalog(meeting_id, [], actor="meeting-reconcile")
             matches = self.writer.search(r.meeting_id)
-            for match in matches:
+            ids = {match.document_id for match in matches}
+            ids.update(
+                document_id
+                for document_id, state in r.google_deletions.items()
+                if state == "pending"
+            )
+            if r.removed_at:
+                ids.update(r.removed_google_document_ids)
+            for document_id in sorted(ids):
                 current = self.storage.get_meeting(meeting_id)
                 if (
                     current.create_attempt_id != r.create_attempt_id
@@ -322,17 +330,15 @@ class MeetingRecords:
                     return
                 if (
                     current.removed_at
+                    or current.google_deletions.get(document_id) == "pending"
                     or (current.persistence_status == "failed" and not current.google_document_id)
-                    or (
-                        current.google_document_id
-                        and match.document_id != current.google_document_id
-                    )
+                    or (current.google_document_id and document_id != current.google_document_id)
                 ):
                     if current.removed_at:
                         self.storage.purge_meeting_catalog(
-                            meeting_id, [match.document_id], actor="meeting-reconcile"
+                            meeting_id, [document_id], actor="meeting-reconcile"
                         )
-                    self._delete(meeting_id, match.document_id, cleanup_attempt=r.create_attempt_id)
+                    self._delete(meeting_id, document_id, cleanup_attempt=r.create_attempt_id)
         except Exception:
             error = "reconcile_failed"
             logger.warning("meeting.reconcile_failed meeting_id=%s", meeting_id)
@@ -384,7 +390,7 @@ class MeetingRecords:
         r = self.storage.get_meeting(meeting_id)
         if r is None:
             return None
-        if r.persistence_status == "removed":
+        if r.persistence_status == "removed" and "pending" not in r.google_deletions.values():
             return self.storage.purge_meeting_catalog(meeting_id, [], actor=actor)
         while not r.removed_at:
             updated = self.storage.change_meeting(
@@ -427,6 +433,7 @@ class MeetingRecords:
             matches = self.writer.search(meeting_id)
             ids = {m.document_id for m in matches}
             r = self.storage.purge_meeting_catalog(meeting_id, sorted(ids), actor=actor)
+            ids.update(r.removed_google_document_ids)
             if r.google_document_id and not r.google_deleted_at:
                 ids.add(r.google_document_id)
             for file_id in sorted(
@@ -437,6 +444,7 @@ class MeetingRecords:
             r = self.storage.get_meeting(meeting_id)
             self._change(
                 r,
+                persistence_status="removing",
                 last_error="unexpected_acl_removal_pending"
                 if r.removed_by == "security:unexpected_acl"
                 else "removal_pending",
@@ -501,7 +509,10 @@ class MeetingRecords:
             phase = "persistence"
             errors = set()
             try:
-                if r.persistence_status == "removing" or (
+                if (
+                    r.persistence_status == "removing"
+                    or (r.removed_at and "pending" in r.google_deletions.values())
+                ) or (
                     r.ended_at
                     and not r.removed_at
                     and r.ended_at + timedelta(days=self.settings.meeting_record_retention_days)
@@ -526,7 +537,10 @@ class MeetingRecords:
                 errors.add(phase)
                 logger.warning("meeting.retry_failed meeting_id=%s phase=%s", meeting_id, phase)
             current = self.storage.get_meeting(meeting_id)
-            if current.persistence_status == "removing":
+            if (
+                current.persistence_status == "removing"
+                or "pending" in current.google_deletions.values()
+            ):
                 errors.add("cleanup")
             if not current.removed_at:
                 if current.persistence_status != "saved":

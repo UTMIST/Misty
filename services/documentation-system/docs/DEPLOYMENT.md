@@ -740,13 +740,14 @@ Do not clear a lease to retry a still-running Google call. Do not replace a
 canonical ID or resubmit changed text under the same UUID. Reconciliation
 continues hourly for terminal records; investigate `reconcile_failed` and
 `removal_pending` by meeting ID. A Google 404 cannot confirm permanent deletion,
-so `delete_unconfirmed` remains pending for admin investigation. After seven
-days in failed state, the pending transcript is cleared; the Discord PDF is the
+so `delete_unconfirmed` remains pending for admin investigation. Cleanup retries
+pending `google_deletions` IDs even when the owner listing is empty, and the runner
+continues to report cleanup failure until acknowledgement. Historical confirmed
+and pending IDs are also purged from the catalog when removal runs; old tombstones
+are repaired by their recurring reconciliation. After seven days in failed state,
+the pending transcript is cleared; the Discord PDF is the
 fallback if no Google Doc was adopted. Expiry and explicit removal purge the
 catalog even if Google cleanup still needs retries.
-
-Historical confirmed and pending `google_deletions` IDs are also purged from the
-catalog when removal runs; old tombstones are repaired by recurring reconciliation.
 
 Saved records with `index_pending=true` retry indexing on the next due run, with
 a five-minute retry delay, without another Google write.
