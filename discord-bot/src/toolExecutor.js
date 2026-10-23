@@ -24,6 +24,9 @@
 import { combineHelperActions } from './helperActions.js';
 import { checkOnce } from './helperChecks.js';
 
+const PREPARATION_CLARIFICATION =
+  "All command preparations failed. Nothing was changed. Explain the tool errors or ask for the missing details; for an invalid user ID ask for an explicit member mention, and for an unavailable action suggest checking command access with /help privately. Do not infer the requester's role or disclose account details. Do not call any tools or retry a subset of the request. The user must clarify or submit a new request before any action can be prepared.";
+
 export const DEFAULT_MAX_TOOL_ROUNDS = 4;
 export const DEFAULT_MAX_OUTPUT_TOKENS = 8000;
 export const DEFAULT_PER_CALL_MAX_TOKENS = 1024;
@@ -91,6 +94,7 @@ export function createToolExecutor({
       let toolCalls = 0;
       let documentRequests = 0;
       let exhausted = false;
+      let clarifyPreparation = false;
       let deadline = performance.now() + maxDurationMs;
       const isExhausted = () => exhausted || performance.now() >= deadline;
       // Text answers keep the generation deadline through delivery. A terminal
@@ -179,7 +183,11 @@ export function createToolExecutor({
           res = await withDeadline((signal) =>
             llmClient.chat({
               messages: history,
-              system,
+              system: clarifyPreparation
+                ? [system, PREPARATION_CLARIFICATION].filter(Boolean).join('\n\n')
+                : system,
+              // Replay requires the original definitions even during a final
+              // clarification. The execution gate below rejects further calls.
               tools: registry.definitions,
               maxTokens,
               signal,
@@ -206,6 +214,7 @@ export function createToolExecutor({
           return { outcome: OUTCOME.ANSWER, content, citations, canPublish };
         }
         if (res.stop_reason !== 'tool_use') return { outcome: OUTCOME.EMPTY };
+        if (clarifyPreparation) return { outcome: OUTCOME.INCOMPLETE_ACTION };
         const calls = toolUseBlocks(res.content_blocks);
         if (!calls.length) return { outcome: OUTCOME.EMPTY };
 
@@ -276,6 +285,17 @@ export function createToolExecutor({
         }
         if (actions.length || calls.some((call) => registry.terminalTools?.has(call.name))) {
           // Never silently omit a failed proposal or replay private command data.
+          if (
+            !actions.length &&
+            results.every((result) => result.is_error) &&
+            calls.every((call) => registry.terminalTools?.has(call.name))
+          ) {
+            // Only sanitized preparation errors exist: no private previews or
+            // command output. Allow one explanation, never an executable retry.
+            history.push({ role: 'user', content: results });
+            clarifyPreparation = true;
+            continue;
+          }
           if (!(await canPublish())) return failedCheck();
           if (!actions.length || results.some((result) => result.is_error))
             return { outcome: OUTCOME.INCOMPLETE_ACTION };

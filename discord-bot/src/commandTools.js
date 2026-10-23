@@ -104,7 +104,7 @@ export function createCommandTools({ appContext }) {
       terminal: true,
       definition: {
         name,
-        description: `${operation.description}. Authenticates the requesting user. ${delivery}${confirm ? ' after private user confirmation' : ''}. Include all requested actions in the same tool-call response (one call per member for team changes, at most four calls total including lookups). Finish any document searches or reads in earlier tool rounds; never mix them with command calls in the same response. The whole batch ends the assistant turn; results are not returned to the model.`,
+        description: `${operation.description}. Authenticates the requesting user. ${delivery}${confirm ? ' after private user confirmation' : ''}. Include all requested actions in the same tool-call response (one call per member for team changes, at most four calls total including lookups). Finish any document searches or reads in earlier tool rounds; never mix them with command calls in the same response. Prepared batches end the assistant turn; command results are not returned to the model. If every preparation fails, explain the errors or ask for missing details without further tool calls.`,
         input_schema: {
           type: 'object',
           additionalProperties: false,

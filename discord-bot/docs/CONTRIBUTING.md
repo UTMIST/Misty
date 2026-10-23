@@ -257,10 +257,17 @@ visibility. The rules the loop enforces:
   `tool_use` response may instead return a terminal `ACTION`: the bot handles
   it directly without another model call. Every action in the batch is prepared
   before handoff, within the existing tool-call budget. Any failed call withholds
-  the entire proposal. `INCOMPLETE_ACTION` explains that preparation failed and
-  nothing changed; `WITHHELD` remains reserved for failed access/evidence checks.
-  Command tools carry registry-only `terminal` metadata so even an entirely
-  failed proposal ends the turn without a model retry that could drop actions.
+  the entire proposal. A partially prepared batch returns `INCOMPLETE_ACTION`
+  without replaying private previews. When every command fails preparation,
+  only sanitized tool errors return for one final explanation or clarification.
+  The executor rejects further tool calls in that turn, preventing an automatic
+  retry with a subset. The fallback mentions command access and required arguments
+  without blaming member details. `WITHHELD` remains reserved for failed
+  access/evidence checks. Registry-only `terminal` metadata identifies command
+  proposals independently of successful preparation. Replayed tool calls retain
+  their definitions as required by the LLM contract; the execution gate, not
+  merely the clarification prompt, prohibits new calls. The final response keeps
+  the same output budget, deadline and evidence/publication checks.
   Document tools retain their normal result/replay loop. A response mixing
   document tools and terminal commands is rejected before any tool executes;
   document results must be consumed in earlier rounds. No command executes
@@ -415,8 +422,8 @@ The follow-up review fixes stay in the bot zone:
 | Files | Why changed |
 | --- | --- |
 | `src/router.js` | Propagate helper authorization and unexpected handler failures without exposing account/backend details; share principal resolution within a validation step. |
-| `src/commandTools.js`, `src/toolRegistry.js` | Mark terminal proposals independently of successful preparation, tolerate optional label failures, and specify document-round ordering. |
-| `src/toolExecutor.js`, `src/helperFlow.js` | Reject incomplete or incompatible mixed proposals before execution, explain that nothing changed, and bind evidence checks to each result. |
+| `src/commandTools.js`, `src/toolRegistry.js` | Mark terminal proposals independently of successful preparation, tolerate optional label failures, and specify document-round ordering and clarification behavior. |
+| `src/toolExecutor.js`, `src/helperFlow.js` | Reject partial or incompatible proposals, allow one clarification for sanitized all-failed preparations without executable retries, and bind evidence checks to each result. |
 | `src/helperActions.js`, `src/adapters/discord/helperActions.js` | Stop on later authorization failures while preserving earlier authorized results and private recording feedback. |
 | `src/helperChecks.js` | Share duplicate validation work only within a step; keep fresh checks before every effect and send. |
 | `src/commands/help.js`, `src/messages/help.js` | Keep public help independent of requester privileges and preserve private personalized help. |
@@ -425,7 +432,7 @@ The follow-up review fixes stay in the bot zone:
 | `test/helperActions.test.js` | Reproduce removal, meeting and permission failures through confirmation; bound repeated lookups and cover private feedback, no retries and session changes. |
 | `test/commandTools.test.js`, `test/router.test.js` | Cover label fallbacks without bypassing deadlines, shared public help, and sanitized helper authorization errors. |
 | `test/adapters-discord.test.js` | Preserve private slash recording error replies when the meeting adapter throws. |
-| `test/helperFlow.test.js`, `test/toolExecutor.test.js` | Verify invalid, unavailable and failed tool preparation rejects the entire proposal without writes or model replay. |
+| `test/helperFlow.test.js`, `test/toolExecutor.test.js` | Verify partial proposals never replay, all-failed proposals explain missing mentions/access without executable retries, and clarification preserves output budgets and evidence checks. |
 | `README.md`, `docs/CONTRIBUTING.md` | Keep the user-facing failure behavior, developer contract and file rationale accurate. |
 
 The public tool-result policy changes only the bot zone:

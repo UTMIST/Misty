@@ -491,9 +491,11 @@ pass. A result whose access or expiry check fails is withheld even if its action
 completed. Inspect the current state before asking again.
 A mixed public/private batch uses the private interaction, then
 delivers each result with its own visibility. An unexpected execution error stops
-the remaining actions without retrying earlier ones. If any tool call cannot be
-prepared, the entire proposal is withheld and Misty explains that nothing was
-changed. Only the requester can confirm. The confirmation window lasts two
+the remaining actions without retrying earlier ones. If some command calls prepare
+and others fail, the entire proposal is withheld and Misty explains that nothing
+was changed. If every command fails preparation, Misty can explain the sanitized
+errors or ask for missing details. No further tools run until the user submits a
+new request. Only the requester can confirm. The confirmation window lasts two
 minutes from the first successful private preview; generation time does not
 shorten it, and reopening
 the preview does not extend it. Access changes or exhausted evidence checks can

@@ -11,8 +11,9 @@
 //   - `run(input, ctx)` executes the call. `ctx` carries the trusted, bound
 //     retrieval context and collaborators; `input` is the model's arguments and
 //     is never trusted to carry scope.
-//   - `terminal: true` marks command proposals that end the helper turn even
-//     when preparation fails. This metadata never enters model definitions.
+//   - `terminal: true` marks command proposals that end tool execution. Failed
+//     preparation may allow a final explanation, but never another tool call.
+//     This metadata never enters model definitions.
 export function buildToolRegistry(providers) {
   const definitions = [];
   const handlers = new Map();

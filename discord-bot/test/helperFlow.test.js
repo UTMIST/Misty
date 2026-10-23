@@ -101,7 +101,7 @@ test('incomplete command proposals explain that nothing changed without leaking 
 });
 
 for (const failure of ['invalid arguments', 'authorization failure']) {
-  test(`an entirely failed command proposal is terminal (${failure})`, async (t) => {
+  test(`an entirely failed command proposal cannot retry a subset (${failure})`, async (t) => {
     t.mock.method(globalThis, 'fetch', async () => assert.fail('Unexpected network request'));
     const ctx = createAppContext({ helperToolsEnabled: true });
     const admin = {
@@ -148,10 +148,70 @@ for (const failure of ['invalid arguments', 'authorization failure']) {
       { kind: 'person' },
       { discordUserId: 'owner' },
     );
-    assert.equal(modelCalls, 1, 'failed proposals must not be replayed or replaced with a subset');
+    assert.equal(modelCalls, 2, 'only one clarification response is allowed');
     assert.match(result.content, /couldn't prepare the full request.*nothing was changed/);
     assert.equal(result.action, undefined);
   });
+}
+
+for (const failure of ['invalid member', 'authorization failure']) {
+  for (const count of [1, 2]) {
+    test(`all-failed ${count}-command proposal explains ${failure} without executing`, async (t) => {
+      t.mock.method(globalThis, 'fetch', async () => assert.fail('Unexpected network request'));
+      const ctx = createAppContext({ helperToolsEnabled: true });
+      const caller = { person: { id: 'caller', active: true, access_level: 'member' } };
+      ctx.directory = {
+        getPersonByDiscordId: async () => caller.person,
+        getTeamBySlug: async () => assert.fail('Failed preparation looked up a private label'),
+      };
+      ctx.teamService.addMember = async () => assert.fail('Failed preparation executed');
+      ctx.helperService.prepare = async () => ({
+        messages: [{ role: 'user', content: 'Add members' }],
+      });
+      const clarification =
+        failure === 'invalid member'
+          ? 'Please mention each person to add and include the team. Nothing was changed.'
+          : 'Use /help privately to check command access or ask an admin. Nothing was changed.';
+      let modelCalls = 0;
+      ctx.llmClient.chat = async (args) => {
+        if (++modelCalls === 1)
+          return {
+            stop_reason: 'tool_use',
+            content_blocks: ['101', '202'].slice(0, count).map((user) => ({
+              type: 'tool_use',
+              id: user,
+              name: 'team_add',
+              input: { user: failure === 'invalid member' ? 'Alex' : user, team: 'infra' },
+            })),
+          };
+        assert.equal(modelCalls, 2);
+        assert.ok(
+          args.tools.some((tool) => tool.name === 'team_add'),
+          'replayed calls retain their required definitions',
+        );
+        const errors = args.messages.at(-1).content;
+        assert.equal(errors.length, count);
+        assert.ok(errors.every((result) => result.is_error));
+        assert.match(
+          JSON.stringify(errors),
+          failure === 'invalid member' ? /Invalid user/ : /not available/,
+        );
+        assert.match(args.system, /Nothing was changed/);
+        return { stop_reason: 'end_turn', content: clarification };
+      };
+      const result = await prepareHelperReply(
+        ctx,
+        turns,
+        caller,
+        { kind: 'person' },
+        { discordUserId: 'owner' },
+      );
+      assert.equal(modelCalls, 2);
+      assert.equal(result.content, clarification);
+      assert.equal(result.action, undefined);
+      assert.equal(await result.canPublish(), true);
+    });
+  }
 }
 
 test('the flow passes trusted request metadata and preserves a terminal action for private delivery', async () => {

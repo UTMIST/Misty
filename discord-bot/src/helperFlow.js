@@ -16,7 +16,7 @@ export const COULDNT_COMPLETE =
 export const WITHHELD_ANSWER =
   "I couldn't confirm continued access to the sources for that answer. Please try again.";
 export const INCOMPLETE_ACTION =
-  "I couldn't prepare the full request, so nothing was changed. Please check the people and other details, then ask again.";
+  "I couldn't prepare the full request, so nothing was changed. Check command access with `/help` privately and include the required arguments, then ask again.";
 export const MIXED_ACTION_REQUEST =
   'Please ask for document research and commands separately. Nothing was changed.';
 

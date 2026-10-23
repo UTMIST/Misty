@@ -120,6 +120,71 @@ test('document tools and terminal commands in one response fail before any tool 
   }
 });
 
+test('preparation clarification uses the remaining output budget and stops after one response', async () => {
+  const registry = registryWith(
+    async () => ({ is_error: true, content: { error: 'Invalid user.' } }),
+    'command',
+  );
+  registry.terminalTools.add('command');
+  const llm = scriptedLlm([
+    {
+      stop_reason: 'tool_use',
+      usage: { output_tokens: 2 },
+      content_blocks: [toolUse('a', 'command', {})],
+    },
+    { stop_reason: 'end_turn', usage: { output_tokens: 1 }, content: 'Please mention the member.' },
+  ]);
+  const result = await createToolExecutor({
+    registry,
+    llmClient: llm,
+    maxOutputTokens: 3,
+    perCallMaxTokens: 2,
+  }).run(base);
+  assert.equal(result.outcome, OUTCOME.ANSWER);
+  assert.deepEqual(
+    llm.calls.map((call) => call.maxTokens),
+    [2, 1],
+  );
+});
+
+for (const revokeAt of ['generation', 'delivery']) {
+  test(`preparation clarification still checks earlier document evidence at ${revokeAt}`, async () => {
+    let allowed = true;
+    const registry = registryWith(async () => ({ revalidate: async () => allowed }));
+    registry.handlers.set('command', async () => ({
+      is_error: true,
+      content: { error: 'Invalid user.' },
+    }));
+    registry.terminalTools.add('command');
+    let modelCalls = 0;
+    const executor = createToolExecutor({
+      registry,
+      llmClient: {
+        chat: async () => {
+          modelCalls++;
+          if (modelCalls < 3)
+            return {
+              stop_reason: 'tool_use',
+              content_blocks: [
+                toolUse(String(modelCalls), modelCalls === 1 ? 'search_documents' : 'command', {}),
+              ],
+            };
+          if (revokeAt === 'generation') allowed = false;
+          return { stop_reason: 'end_turn', content: 'Please mention the member.' };
+        },
+      },
+    });
+    const result = await executor.run(base);
+    assert.equal(modelCalls, 3);
+    if (revokeAt === 'generation') assert.equal(result.outcome, OUTCOME.WITHHELD);
+    else {
+      assert.equal(result.outcome, OUTCOME.ANSWER);
+      allowed = false;
+      assert.equal(await result.canPublish(), false);
+    }
+  });
+}
+
 test('all actions in one model response are prepared and confirmed together', async () => {
   const executed = [];
   const llm = scriptedLlm([
