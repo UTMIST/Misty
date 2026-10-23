@@ -127,7 +127,12 @@ The `/forms/d/e/<id>/viewform` published link carries a *published id*, not a Dr
 
 Every tab of a spreadsheet is read — there is no first-tab-only limitation. Docs and Slides have no size cap.
 
-The `MAX_FILE_BYTES` guard applies before download to uploaded PDFs, `.docx` files, `text/*` files, and GitHub files (the size GitHub reports on a `HEAD` of the raw file; a file whose size is not reported is rejected too, and the download is additionally capped at the limit). Native Google editor types use their APIs and are not rejected when Drive metadata omits `size`.
+The `MAX_FILE_BYTES` guard checks metadata before downloading uploaded PDFs,
+`.docx` files, `text/*` files, and GitHub files, then caps the streamed body before
+parsing. Missing or stale Drive `size` metadata cannot bypass that cap. GitHub
+requires a size from its raw-file `HEAD` request. Native Google editor API
+responses and exports are exempt. Partial or unexpectedly encoded Drive media
+responses fail as upstream errors rather than returning incomplete text.
 
 ### Errors
 
@@ -137,7 +142,7 @@ The `MAX_FILE_BYTES` guard applies before download to uploaded PDFs, `.docx` fil
 | File's MIME type has no text form | 422 | `no text form for mime type: <mime>` |
 | PDF is encrypted | 422 | `pdf is encrypted and cannot be read` |
 | PDF could not be parsed | 422 | `pdf could not be parsed: <ExceptionType>` |
-| Uploaded PDF, `.docx`, `text/*`, or GitHub file exceeds `MAX_FILE_BYTES` | 422 | File-size limit detail; bytes are not downloaded |
+| Uploaded PDF, `.docx`, `text/*`, or GitHub file exceeds `MAX_FILE_BYTES` | 422 | File-size limit detail; rejected before download when known, otherwise during streaming before parsing |
 | Malformed request body | 422 | Pydantic validation error |
 | Source not configured (`GOOGLE_CREDENTIALS_JSON` empty or malformed) | 503 | `source not configured` |
 | Service account denied access to the file | 403 | `source denied access to this file` |

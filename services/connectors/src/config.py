@@ -53,10 +53,9 @@ class Settings(BaseSettings):
     # catalog's clamp must remain the authoritative one, or its "content
     # truncated" warning can never fire.
     max_content_chars: int = Field(default=1_200_000, gt=0)
-    # Pre-download guard for uploaded files whose bytes are fetched through
-    # Drive media, and for GitHub files (a HEAD request's size metadata, with a
-    # byte cap on the streamed body as backstop). Native Google editor types use their APIs and do not need a
-    # Drive byte-size check. A missing Drive size is treated as unknown.
+    # Metadata precheck plus a streamed byte cap for uploaded Drive media and
+    # GitHub files. Missing/stale Drive size cannot bypass the stream cap.
+    # Native Google editor API responses/exports are exempt.
     max_file_bytes: int = Field(default=25 * 1024 * 1024, gt=0)
     request_timeout_s: float = Field(default=30.0, gt=0)
 

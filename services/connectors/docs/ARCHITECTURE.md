@@ -104,6 +104,23 @@ The non-obvious part is that **extractors declare their own requirements**. Each
 
 A consequence worth internalizing: **a new supported file type does not imply a new OAuth scope.** Uploaded PDFs and `.docx` files are downloaded as raw bytes through the Drive media path that `drive.readonly` already covers, then parsed locally with `pypdf` / `python-docx`. Only a genuinely new *Google API* adds a scope.
 
+Uploaded PDF, `.docx`, and text downloads must use the SDK's
+`files().get_media(supportsAllDrives=True, ...)`. Metadata reads also set
+`supportsAllDrives=True`, matching the permission reads.
+Calling `files().get(alt="media")` still selects its JSON response model, which
+overwrites `alt` and returns metadata instead of bytes. `execute_bytes()` wraps
+`execute()` for media downloads and native Drive exports: a non-bytes response is
+`SourceUnavailable` (502), before any decoding or local parsing. Malformed PDF or
+Word bytes remain `SourceUnsupported` (422). Offline regression tests exercise
+the real SDK with a shared fake HTTP transport, including `files().export()`.
+
+pypdf diagnostics can contain document text from malformed input. The PDF
+extractor installs a `NullHandler` on the `pypdf` package logger and disables
+propagation to application handlers once at import. This covers child warnings
+and errors without changing logging during concurrent extractions. Do not attach
+output handlers directly to pypdf loggers. Safe `SourceUnsupported` messages and
+the response's no-text-layer warning still describe extraction failures/loss.
+
 ## Threading: what is memoized and what is not
 
 This is the subtlest thing in the service, and the comments in `google.py` exist because getting it wrong is silent corruption rather than a crash.
@@ -129,9 +146,30 @@ Two clamps exist, and only one of them is meant to fire:
 
 - connectors' `MAX_CONTENT_CHARS` defaults to **1,200,000**.
 - documentation-system's own `MAX_CONTENT_CHARS` is **1,000,000**.
-- connectors' `MAX_FILE_BYTES` defaults to **25 MiB** and rejects oversized uploaded PDF, `.docx`, `text/*`, and GitHub files before their bytes are downloaded.
+- connectors' `MAX_FILE_BYTES` defaults to **25 MiB** and checks uploaded PDF, `.docx`, `text/*`, and GitHub file metadata before download, then caps the streamed body before parsing.
 
 The gap is deliberate. The consumer's clamp trips first and reports a truncation warning to whoever ingested the doc; connectors' clamp is a transport backstop that should never be the visible one. If you change either, keep connectors' the larger of the two.
+
+`_build_services` places `BoundedDriveHttp` beneath Drive's `AuthorizedHttp`.
+Metadata, native exports and credential refresh use the existing SDK transport;
+uploaded-file media uses HTTPX streaming with the configured timeout and byte
+limit. Missing/stale metadata and ignored `Range` headers cannot bypass this
+cap. Each raw network chunk is checked before appending to the download buffer;
+an oversized body is closed and rejected as `SourceUnsupported` (422).
+
+The transport requests identity encoding and rejects unexpected encodings before
+decompression, as well as partial responses (502). Redirect bodies are closed
+unread; redirect targets retain the cap, have a fixed hop limit, and must use
+HTTPS. HTTPX removes authorization on cross-origin redirects. HTTP error bodies
+are also closed unread; the status still reaches the SDK's error mapping and
+401 credential refresh.
+
+The retained download buffer is capped at `MAX_FILE_BYTES`, with bounded extra
+space for one network chunk and the final bytes copy. This is not a cap on PDF
+or Word parser allocations or decompressed document structures. Native Google
+editor API responses/exports remain exempt. `MediaIoBaseDownload` alone would
+not provide this protection: an ignored Range request can make it buffer the
+whole response before returning a chunk.
 
 ## Why no persistence
 

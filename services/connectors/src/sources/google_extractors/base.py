@@ -45,10 +45,14 @@ def execute(request):
     """
     from googleapiclient.errors import HttpError
 
-    from src.sources.base import SourceForbidden, SourceNotFound, SourceUnavailable
+    from src.sources.base import SourceError, SourceForbidden, SourceNotFound, SourceUnavailable
 
     try:
         return request.execute()
+    except SourceError:
+        # The bounded media transport already classified this failure (e.g.
+        # a file exceeding MAX_FILE_BYTES is unsupported, not an upstream 502).
+        raise
     except HttpError as e:
         status = getattr(getattr(e, "resp", None), "status", None)
         if status == 403:
@@ -58,3 +62,13 @@ def execute(request):
         raise SourceUnavailable(f"google api error (status {status})") from e
     except Exception as e:
         raise SourceUnavailable(f"google transport failure: {type(e).__name__}") from e
+
+
+def execute_bytes(request) -> bytes:
+    """Require a download/export response before decoding or parsing a file."""
+    from src.sources.base import SourceUnavailable
+
+    payload = execute(request)
+    if not isinstance(payload, bytes):
+        raise SourceUnavailable("google returned a non-bytes file payload")
+    return payload

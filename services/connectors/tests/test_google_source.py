@@ -35,12 +35,15 @@ class _FakeFiles:
         self.metadata_fields = None
         self.media_calls = 0
 
-    def get(self, *, fileId, fields=None, alt=None):
-        if alt == "media":
-            self.media_calls += 1
-            return _FakeRequest(result=self._payload, error=self._export_error)
+    def get(self, *, fileId, fields=None, supportsAllDrives=False):
+        assert supportsAllDrives is True
         self.metadata_fields = fields
         return _FakeRequest(result=self._meta, error=self._get_error)
+
+    def get_media(self, *, fileId, supportsAllDrives=False):
+        assert supportsAllDrives is True
+        self.media_calls += 1
+        return _FakeRequest(result=self._payload, error=self._export_error)
 
     def export(self, *, fileId, mimeType):
         self.export_mime = mimeType
