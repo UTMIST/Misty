@@ -1,5 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadConfig, runChecks, shouldPoll } from './readiness-checker.js';
 
 const config = {
@@ -203,10 +210,104 @@ test('discards a pending recovery when the latest probe is down', async () => {
     sendNotification: async (content) => notifications.push(content),
   });
   assert.equal(notifications.filter((message) => message.includes('recovered')).length, 0);
-  assert.equal(notifications.filter((message) => message.includes('outage')).length, 2);
+  assert.equal(notifications.filter((message) => message.includes('outage')).length, 1);
   assert.equal(downAgain.state.services.bot.pendingNotification, undefined);
   assert.equal(downAgain.state.services.bot.alertedDown, true);
 });
+
+test('recovers after a failed recovery delivery and a single failing probe', async () => {
+  const notifications = [];
+  let recoveryAttempts = 0;
+  let state = { services: {} };
+  for (const status of [503, 503, 200, 503, 200, 200]) {
+    const result = await runChecks(config, {
+      state,
+      fetchImpl: fetchSequence([{ ok: status === 200, status }]),
+      sendNotification: async (content) => {
+        if (content.includes('recovered') && ++recoveryAttempts === 1) {
+          throw new Error('webhook unavailable');
+        }
+        notifications.push(content);
+      },
+    });
+    // Scheduled runs reload JSON rather than sharing objects in memory.
+    state = JSON.parse(JSON.stringify(result.state));
+  }
+  assert.equal(notifications.filter((message) => message.includes('outage')).length, 1);
+  assert.equal(notifications.filter((message) => message.includes('recovered')).length, 1);
+  assert.equal(state.services.bot.alertedDown, false);
+  assert.equal(state.services.bot.pendingNotification, undefined);
+});
+
+for (const webhookStatus of [undefined, 503, 200]) {
+  test(`CLI releases stalled HTTP requests (${webhookStatus ?? 'no webhook headers'}), saves state and exits`, { timeout: 10_000 }, async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), 'misty-readiness-'));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    let requests = 0;
+    const server = createServer((request, response) => {
+      request.resume();
+      if (request.url === '/webhook') {
+        requests += 1;
+        if (webhookStatus === undefined) return;
+        response.writeHead(webhookStatus);
+      } else {
+        response.writeHead(503);
+      }
+      // Send headers but leave the body open until the client cancels it.
+      response.flushHeaders();
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    t.after(() => {
+      server.closeAllConnections();
+      server.close();
+    });
+
+    const stateFile = join(directory, 'state.json');
+    const probeFixture = `
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (url, options) => {
+        if (String(url).startsWith('https://readiness.example.test/')) {
+          return realFetch('http://127.0.0.1:${server.address().port}/probe', options);
+        }
+        return realFetch(url, options);
+      };
+    `;
+    const child = spawn(process.execPath, [
+      '--import', `data:text/javascript,${encodeURIComponent(probeFixture)}`,
+      fileURLToPath(new URL('./readiness-checker.js', import.meta.url)),
+    ], {
+      cwd: directory,
+      env: {
+        READINESS_ENDPOINTS: JSON.stringify({
+          first: 'https://readiness.example.test/first',
+          second: 'https://readiness.example.test/second',
+        }),
+        READINESS_FAILURE_THRESHOLD: '1',
+        READINESS_NOTIFICATION_TIMEOUT_MS: '100',
+        READINESS_STATE_FILE: stateFile,
+        DISCORD_READINESS_WEBHOOK: `http://127.0.0.1:${server.address().port}/webhook`,
+      },
+    });
+    t.after(() => child.kill('SIGKILL'));
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.stdout.resume();
+    const deadline = setTimeout(() => child.kill('SIGKILL'), 3000);
+    t.after(() => clearTimeout(deadline));
+    const [code, signal] = await once(child, 'close');
+    clearTimeout(deadline);
+    assert.equal(signal, null, `CLI kept stalled requests alive: ${stderr}`);
+    assert.equal(code, 0, stderr);
+    assert.equal(requests, 2);
+    const state = JSON.parse(await readFile(stateFile, 'utf8'));
+    for (const service of ['first', 'second']) {
+      assert.equal(state.services[service].lastStatus, 503);
+      assert.equal(state.services[service].alertedDown, webhookStatus === 200);
+      assert.equal(state.services[service].pendingNotification?.type, webhookStatus === 200 ? undefined : 'down');
+    }
+  });
+}
 
 test('times out a stalled notification and continues polling later services', async () => {
   const checked = [];

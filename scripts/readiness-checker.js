@@ -89,6 +89,8 @@ async function checkEndpoint(url, timeoutMs, fetchImpl = fetch) {
   } catch {
     return { ok: false, status: 'offline' };
   } finally {
+    // Only the status is needed; release any unfinished response body.
+    controller.abort();
     clearTimeout(timeout);
   }
 }
@@ -107,16 +109,22 @@ function notification(service, state, result, timestamp) {
 }
 
 async function deliverNotification(sendNotification, alert, timeoutMs) {
+  const controller = new AbortController();
   let timeout;
   try {
-    const delivery = sendNotification(alert.content);
+    const delivery = sendNotification(alert.content, { signal: controller.signal });
     const timedOut = new Promise((resolve) => {
-      timeout = setTimeout(() => resolve(false), timeoutMs);
+      timeout = setTimeout(() => {
+        controller.abort();
+        resolve(false);
+      }, timeoutMs);
     });
     return (await Promise.race([delivery, timedOut])) !== false;
   } catch {
     return false;
   } finally {
+    // Header-only responses can still leave a socket receiving an unused body.
+    controller.abort();
     clearTimeout(timeout);
   }
 }
@@ -126,12 +134,13 @@ export async function runChecks(
   {
     state = { services: {} },
     fetchImpl = fetch,
-    sendNotification = async (content) => {
+    sendNotification = async (content, { signal }) => {
       if (!config.webhook) return false;
       const response = await fetchImpl(config.webhook, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content }),
+        signal,
       });
       if (!response.ok) throw new Error(`Discord webhook returned HTTP ${response.status}`);
       return true;
@@ -179,7 +188,8 @@ export async function runChecks(
       current.consecutiveFailures = previous.consecutiveFailures + 1;
       if (previous.pendingNotification?.type === 'recovery') {
         delete current.pendingNotification;
-        current.alertedDown = false;
+        // The delivered outage remains open until a recovery is delivered.
+        // Discard only the stale message, not the receipt of the down alert.
       } else if (previous.pendingNotification) {
         if (await deliverNotification(sendNotification, previous.pendingNotification, notificationTimeoutMs)) {
           notifications.push(previous.pendingNotification);

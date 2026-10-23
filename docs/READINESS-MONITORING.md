@@ -18,7 +18,7 @@ Actions**:
 | `READINESS_ENDPOINTS` | variable | `{}` | JSON object such as `{"team-tracking":"https://.../health/ready","documentation-system":"https://.../health/ready","discord-bot":"https://.../health/ready"}` |
 | `READINESS_POLL_INTERVAL_SECONDS` | variable | `300` | Expected check cadence; the workflow schedule is five minutes and should be changed with this value if a different cadence is needed. |
 | `READINESS_FAILURE_THRESHOLD` | variable | `2` | Consecutive failed checks before the down alert (ten minutes with defaults). |
-| `READINESS_NOTIFICATION_TIMEOUT_MS` | variable | `10000` | Maximum time to wait for one Discord webhook delivery before retaining it for retry. |
+| `READINESS_NOTIFICATION_TIMEOUT_MS` | variable | `10000` | Maximum time for one Discord webhook delivery; expiry aborts the request and retains the notification for retry. |
 | `DISCORD_READINESS_WEBHOOK` | secret | unset | Dedicated Discord operations/outages channel webhook. |
 
 The services are private on Railway by default. The selected readiness
@@ -42,6 +42,21 @@ suppressed until a successful readiness check sends exactly one recovery
 notification. A successful check resets the failure counter when no outage was
 alerted.
 
+A failed recovery delivery leaves the delivered outage open. If readiness fails
+again before recovery can be delivered, the stale recovery message is discarded;
+the next healthy probe still sends recovery, without another down alert. Failed,
+skipped and timed-out webhook deliveries remain pending while later services
+continue to be checked. The timeout cancels the webhook request so an open socket
+cannot keep the checker alive after its state has been saved.
+
+[GitHub's schedule runs only from the repository's default branch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+This repository currently defaults to `staging`, so merging this workflow there
+enables its scheduled runs. Configure reachable endpoints and the dedicated
+webhook, then record the controlled outage/recovery acceptance below; without
+endpoints the checker only saves empty state. GitHub Actions cache is best-effort
+storage: a missing/evicted cache resets the debounce history and can result in
+another outage alert.
+
 ## Testing an outage
 
 1. Temporarily point one entry in `READINESS_ENDPOINTS` at an approved test
@@ -58,12 +73,13 @@ alerted.
    services.
 
 The offline test suite exercises threshold timing, transient-failure
-suppression, duplicate-alert suppression, recovery, configuration defaults, and
-HTTP failures without making network calls:
+suppression, duplicate-alert suppression, recovery retries, configuration
+defaults, and HTTP failures. CLI regressions use a loopback HTTP server with
+stalled headers and response bodies; no external provider is contacted. CI's
+`node-test` job and `make check` run these tests:
 
 ```bash
-cd scripts
-node --test readiness-checker.test.js
+make test-readiness
 ```
 
 ## Planned maintenance
