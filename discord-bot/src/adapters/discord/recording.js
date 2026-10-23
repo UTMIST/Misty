@@ -166,6 +166,7 @@ export async function runRecordAction(request, appContext, recordCommand, botId)
         await reply(authMessages.unavailable().content);
         return payload;
       }
+      if (request.propagateErrors) throw new Error('Recording authentication failed');
       console.error('record auth lookup failed:', e.message);
       await reply(authMessages.internalError().content);
       return payload;
@@ -205,6 +206,7 @@ export async function runRecordAction(request, appContext, recordCommand, botId)
         save: request.save ?? true,
       });
     } catch (e) {
+      if (request.propagateErrors) throw new Error('Recording start failed');
       console.error('meetingSurface.start failed:', e.message);
       await reply("Couldn't start recording — the meeting service may be unavailable.");
       return payload;
@@ -235,7 +237,8 @@ export async function runRecordAction(request, appContext, recordCommand, botId)
 
   if (subcommand === 'status') {
     const result = appContext.meetingSurface.status(request.guildId);
-    if (result.status === 'not-recording') await reply(noRecordingMessage(request));
+    if (result.status === 'not-recording')
+      await reply(noRecordingMessage(request), 'No recording is currently in progress.');
     else {
       const active = activeRecording(appContext.meetingSurface, request.guildId);
       if (active)
@@ -274,6 +277,7 @@ export async function runRecordAction(request, appContext, recordCommand, botId)
     try {
       result = await appContext.meetingSurface.stop(request.guildId);
     } catch (e) {
+      if (request.propagateErrors) throw new Error('Recording stop failed');
       console.error('meetingSurface.stop failed:', e.message);
       await reply("Couldn't stop recording — please try again.");
       return payload;

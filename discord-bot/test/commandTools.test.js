@@ -223,6 +223,68 @@ test('member previews escape labels while keeping the exact member, team and thr
   assert.doesNotMatch(JSON.stringify(result.content), /Sam|Infrastructure/);
 });
 
+test('optional preview labels fall back to the member mention and team slug on lookup failure', async () => {
+  const f = fixture('admin');
+  const identify = f.ctx.directory.getPersonByDiscordId;
+  f.ctx.directory.getPersonByDiscordId = async (id) => {
+    if (id === '123') throw new Error('Sensitive person detail');
+    return identify(id);
+  };
+  f.ctx.directory.getTeamBySlug = async () => {
+    throw new Error('Sensitive team detail');
+  };
+  const result = await tool(f, 'team_remove', { user: '123', team: 'infra' });
+  assert.ok(result.action);
+  assert.match(result.action.summary, /<@123>/);
+  assert.match(result.action.summary, /infra/);
+  assert.doesNotMatch(result.action.summary, /Sensitive/);
+  assert.equal(
+    f.calls.some((call) => call[0] === 'update'),
+    false,
+  );
+});
+
+test('the turn deadline still rejects a preview whose optional label lookup stalls', async () => {
+  const f = fixture('admin');
+  let labels = 0;
+  f.ctx.directory.getTeamBySlug = async () => {
+    labels++;
+    return new Promise(() => {});
+  };
+  await assert.rejects(
+    f.ctx.toolRegistry.handlers.get('team_rename')(
+      { slug: 'infra', new_label: 'New' },
+      {
+        request: f.request,
+        principal: f.principal,
+        withDeadline: async (read) => {
+          const pending = read();
+          if (labels) throw new Error('Turn deadline');
+          return pending;
+        },
+      },
+    ),
+    /Turn deadline/,
+  );
+  assert.equal(labels, 1);
+});
+
+test('guild helper help is a shared guide while DM help remains personalized', async () => {
+  for (const input of [{}, { command: 'team' }, { command: 'seed' }]) {
+    const member = fixture();
+    const admin = fixture('admin');
+    const memberReply = await (await tool(member, 'help', input)).action.execute();
+    const adminReply = await (await tool(admin, 'help', input)).action.execute();
+    assert.deepEqual(adminReply.publicReply, memberReply.publicReply);
+    assert.doesNotMatch(JSON.stringify(adminReply), /\/seed|\/team create/);
+  }
+  const admin = fixture('admin');
+  delete admin.request.discordGuildId;
+  const reply = await (await tool(admin, 'help', { command: 'team' })).action.execute();
+  assert.equal(reply.publicReply, undefined);
+  assert.match(JSON.stringify(reply), /create/);
+});
+
 test('a delayed authentication cannot execute an expired action', async (t) => {
   const f = fixture('admin');
   const result = await tool(f, 'team_rename', { slug: 'infra', new_label: 'Changed' });

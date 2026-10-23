@@ -1,7 +1,9 @@
 /** Reply payloads for help-command errors. */
 export const helpMessages = {
-  unknownCommand: (name) => ({
-    content: `I couldn't find a command named \`/${name}\` that you can use. Run \`/help\` to see available commands.`,
+  unknownCommand: (name, { shared = false } = {}) => ({
+    content: shared
+      ? 'That command is not in the shared guide. Use `/help` privately for commands available to your account.'
+      : `I couldn't find a command named \`/${name}\` that you can use. Run \`/help\` to see available commands.`,
     ephemeral: true,
   }),
 };
@@ -23,17 +25,21 @@ function formatOption(option) {
  * @param {Iterable<object>} commands Visible command definitions.
  * @returns {object} Surface-neutral reply payload.
  */
-export function buildHelpEmbed(commands) {
+export function buildHelpEmbed(commands, { shared = false } = {}) {
   const sorted = [...commands].sort((a, b) => a.name.localeCompare(b.name));
   return {
     embeds: [
       {
-        title: 'Available commands',
+        title: shared ? 'Shared command guide' : 'Available commands',
         description:
           sorted.length === 0
             ? 'No commands are available.'
             : sorted.map((command) => `**/${command.name}** — ${command.description}`).join('\n'),
-        footer: { text: 'Use /help command:<name> for details.' },
+        footer: {
+          text: shared
+            ? 'Use /help privately for commands available to your account.'
+            : 'Use /help command:<name> for details.',
+        },
       },
     ],
     ephemeral: true,
@@ -46,7 +52,7 @@ export function buildHelpEmbed(commands) {
  * @param {object} command Visible command metadata and subcommands.
  * @returns {object} Surface-neutral reply payload.
  */
-export function buildCommandDetailEmbed(command) {
+export function buildCommandDetailEmbed(command, { shared = false } = {}) {
   const fields = [];
   if (command.options.length > 0) {
     fields.push({ name: 'Options', value: command.options.map(formatOption).join('\n') });
@@ -64,6 +70,9 @@ export function buildCommandDetailEmbed(command) {
       {
         title: `/${command.name}`,
         description: command.description,
+        ...(shared && {
+          footer: { text: 'Use /help privately for commands available to your account.' },
+        }),
         ...(fields.length > 0 ? { fields } : {}),
       },
     ],

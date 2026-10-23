@@ -45,12 +45,24 @@ async function preview(action, token, send) {
   });
 }
 
-async function deliverResult(payload, sendPrivate, sendPublic) {
+async function deliverResult(payload, sendPrivate, sendPublic, defaultCheck) {
+  let privateDelivered = false;
   for (const reply of payload?.replies ?? [payload]) {
-    const { publicReply, ...privateReply } = reply;
-    if (publicReply && sendPublic) await sendPublic(publicReply);
-    else await sendPrivate(privateReply);
+    const { publicReply, keepPrivate, check = defaultCheck, safeFailure, ...privateReply } = reply;
+    if (safeFailure) {
+      // Only the batch's generic failure receipt may bypass a failed permission
+      // check, just like ACTION_FAILED; it contains no command data or labels.
+      await sendPrivate(privateReply, async () => {});
+      privateDelivered = true;
+    } else {
+      if (!publicReply || !sendPublic || keepPrivate) {
+        await sendPrivate(privateReply, check);
+        privateDelivered = true;
+      }
+      if (publicReply && sendPublic) await sendPublic(publicReply, check);
+    }
   }
+  return privateDelivered;
 }
 
 /** Deliver command output directly; private data never goes through the model. */
@@ -65,11 +77,12 @@ export async function presentHelperAction(message, send, action, appContext) {
     // Retain the trusted destination for later button clicks and mixed batches.
     // Only an explicit public projection may leave the private result path.
     if (message.guild || message.guildId) {
-      action.sendPublic = ({ payload, send: destinationSend = send }) =>
+      action.sendPublic = ({ payload, send: destinationSend = send }, check = action.check) =>
         sendDiscordMessage(async (part) => {
-          await action.check();
+          const validation = new Map();
+          await check(validation);
           const { ephemeral: _ephemeral, ...body } = part;
-          return destinationSend({ ...body, allowedMentions: { parse: [] } });
+          return destinationSend({ ...body, allowedMentions: { parse: [] } }, validation);
         }, payload);
       if (action.publicRead && !action.confirm) {
         if (!appContext.helperActions.take(token, action.userId)) throw new Error('Expired');
@@ -80,6 +93,7 @@ export async function presentHelperAction(message, send, action, appContext) {
             throw new Error('Public result is no longer available');
           },
           action.sendPublic,
+          action.check,
         );
         return;
       }
@@ -93,9 +107,9 @@ export async function presentHelperAction(message, send, action, appContext) {
       }
     }
     if (dm) {
-      const sendPrivate = (payload) =>
+      const sendPrivate = (payload, check = action.check) =>
         sendDiscordMessage(async (part) => {
-          await action.check();
+          await check();
           const { ephemeral: _ephemeral, ...body } = privatePayload(part);
           return dm.send(body);
         }, payload);
@@ -109,7 +123,7 @@ export async function presentHelperAction(message, send, action, appContext) {
           await sendPrivate({ content: 'Preparing your private result…' });
           if (!appContext.helperActions.take(token, action.userId)) throw new Error('Expired');
           executionStarted = true;
-          await deliverResult(await action.execute(), sendPrivate);
+          await deliverResult(await action.execute(), sendPrivate, null, action.check);
         }
         // A failed source-channel acknowledgement must not invalidate buttons
         // already delivered privately, or cause a successful read to run again.
@@ -159,9 +173,9 @@ export async function handleHelperActionInteraction(interaction, appContext) {
   const action = appContext.helperActions?.get(token, userId);
   if (!action)
     return reply({ content: 'This request is expired, already used, or belongs to another user.' });
-  const sendPrivate = async (payload) => {
+  const sendPrivate = async (payload, check = action.check) => {
     const delivered = await safeReply(interaction, privatePayload(payload), {
-      beforeSend: action.check,
+      beforeSend: check,
     });
     if (!delivered) throw new Error('Private delivery failed');
   };
@@ -178,8 +192,9 @@ export async function handleHelperActionInteraction(interaction, appContext) {
     }
     return;
   }
+  const validation = new Map();
   try {
-    await action.check();
+    await action.check(validation);
   } catch {
     appContext.helperActions.take(token, userId);
     return reply({ content: 'This request expired or your permissions changed. Ask again.' });
@@ -188,12 +203,16 @@ export async function handleHelperActionInteraction(interaction, appContext) {
   if (!appContext.helperActions.take(token, userId))
     return reply({ content: 'This request is expired or already used.' });
   try {
-    const payload = await action.execute();
-    await action.check();
-    await deliverResult(payload, sendPrivate, action.sendPublic);
+    const payload = await action.execute(validation);
+    const privateDelivered = await deliverResult(
+      payload,
+      sendPrivate,
+      action.sendPublic,
+      action.check,
+    );
     // Discord deferred an ephemeral reply even when every result was public.
-    if ((payload?.replies ?? [payload]).every((result) => result.publicReply) && action.sendPublic)
-      await sendPrivate({ content: 'Posted the result in the channel.' });
+    if (!privateDelivered && action.sendPublic)
+      await reply({ content: 'Posted the result in the channel.' });
   } catch {
     await reply({
       content: ACTION_FAILED,

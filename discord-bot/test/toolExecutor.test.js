@@ -94,6 +94,32 @@ test('a command action ends the turn without sending its private result back to 
   assert.equal(llm.calls.length, 1);
 });
 
+test('document tools and terminal commands in one response fail before any tool work', async () => {
+  for (const commandFirst of [true, false]) {
+    const calls = [toolUse('read', 'search_documents', {}), toolUse('write', 'team_rename', {})];
+    const registry = buildToolRegistry([
+      {
+        name: 'mixed',
+        llmSafe: true,
+        tools: ['search_documents', 'team_rename'].map((name) => ({
+          terminal: name === 'team_rename',
+          definition: { name, input_schema: {} },
+          run: async () => assert.fail('Mixed batch performed provider work'),
+        })),
+      },
+    ]);
+    const llm = scriptedLlm([
+      {
+        stop_reason: 'tool_use',
+        content_blocks: commandFirst ? calls.reverse() : calls,
+      },
+    ]);
+    const result = await createToolExecutor({ registry, llmClient: llm }).run(base);
+    assert.deepEqual(result, { outcome: OUTCOME.INCOMPLETE_ACTION, reason: 'mixed_tools' });
+    assert.equal(llm.calls.length, 1);
+  }
+});
+
 test('all actions in one model response are prepared and confirmed together', async () => {
   const executed = [];
   const llm = scriptedLlm([
@@ -132,7 +158,7 @@ test('all actions in one model response are prepared and confirmed together', as
   assert.equal(llm.calls.length, 1);
 });
 
-test('a failed call in an action batch withholds the whole proposal', async () => {
+test('a failed call in an action batch rejects the whole incomplete proposal', async () => {
   for (const invalidFirst of [true, false]) {
     const calls = [toolUse('a', 'command', {}), toolUse('b', 'missing', {})];
     const executor = createToolExecutor({
@@ -145,7 +171,7 @@ test('a failed call in an action batch withholds the whole proposal', async () =
       ),
     });
     const result = await executor.run(base);
-    assert.equal(result.outcome, OUTCOME.WITHHELD);
+    assert.equal(result.outcome, 'incomplete_action');
     assert.equal(result.action, undefined);
   }
 });
@@ -213,7 +239,9 @@ test('a batch reports a completed action and stops after an uncertain execution 
   const { action } = await executor.run(base);
   const result = await action.execute();
   assert.deepEqual(executed, [1, 2]);
-  assert.deepEqual(result.replies[0], {
+  const { check, ...receipt } = result.replies[0];
+  assert.equal(typeof check, 'function');
+  assert.deepEqual(receipt, {
     content: 'First completed',
     embeds: [{ title: 'Result' }],
   });

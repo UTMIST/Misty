@@ -463,7 +463,9 @@ Account linking and email verification remain explicit slash-command flows.
 
 Command results are rendered directly and do not enter model history. In server
 conversations, team lists, team rosters, help and bug-report links reply publicly
-without a button. Other command results stay private by default, including
+without a button. Public help is a shared guide that does not reveal the
+requester's access level; use `/help` privately for personalized command help.
+Other command results stay private by default, including
 personal lookups, document lists, meeting Q&A and administrative operations.
 Document search retains the channel-authorized retrieval rules above; full
 document reads remain DM-only.
@@ -478,13 +480,20 @@ private response (or a private acknowledgement is delivered for a DM request). A
 result-delivery failure never reruns the action.
 Every write, including recording start/stop, first shows its arguments and
 destination in a private preview with **Confirm** and **Cancel**. Member changes
-show the directory names, Discord mentions and team label/slug. A multi-action
+show the directory names, Discord mentions and team label/slug. If an optional
+name lookup fails, the preview still identifies the member by mention and the
+team by slug. A multi-action
 request lists every proposed action; one confirmation approves the whole list.
-Commands run sequentially and report each result; they are not an atomic
-transaction. A mixed public/private batch uses the private interaction, then
+Commands run sequentially and report each result while access and expiry checks
+still permit delivery; they are not an atomic transaction. If a later action
+loses permission, earlier results are still delivered when their own checks
+pass. A result whose access or expiry check fails is withheld even if its action
+completed. Inspect the current state before asking again.
+A mixed public/private batch uses the private interaction, then
 delivers each result with its own visibility. An unexpected execution error stops
-the remaining actions without retrying earlier ones. If any tool call cannot be prepared, the entire proposal
-is withheld. Only the requester can confirm. The confirmation window lasts two
+the remaining actions without retrying earlier ones. If any tool call cannot be
+prepared, the entire proposal is withheld and Misty explains that nothing was
+changed. Only the requester can confirm. The confirmation window lasts two
 minutes from the first successful private preview; generation time does not
 shorten it, and reopening
 the preview does not extend it. Access changes or exhausted evidence checks can
@@ -503,15 +512,22 @@ original request channel. Its preview states whether the transcript and minutes
 will be saved as a Google Doc (default yes, matching `/record start`; ask for
 `save=false` to opt out). A stop confirmation applies only to the recording
 that was active when requested. Recording status replies publicly only when
-requested in that meeting's exact origin text channel or thread. Successful
-start/stop actions also announce there after private confirmation. These public
-messages omit voice-channel locations and requester-specific details. Requests
+requested in that meeting's exact origin text channel or thread. If that recording
+ends and no new recording has started before the status runs, Misty reports that
+no recording is in progress; it rechecks the session before posting. A replacement
+recording in another channel cannot publish its status here. Successful
+start/stop actions also announce there after private confirmation, while keeping
+the full result in the requester's ephemeral response. These public messages
+omit voice-channel locations and requester-specific details. Requests
 elsewhere and unsuccessful recording actions keep their results private. An
 auto-created helper thread is not substituted for the meeting's origin, and a
 thread never publishes into its parent. Source-channel access is checked again
 before execution and every public or private message part.
 
-The prepared command batch ends the helper turn. Existing slash commands retain
+The prepared command batch ends the helper turn. Document research must finish
+in earlier tool rounds; a model response mixing document tools and commands is
+rejected before either runs, with a request to ask separately.
+Existing slash commands retain
 their current reply visibility. Enabling this feature uses the same flag and
 rollout acceptance below; no new environment
 variables, backend endpoints, or slash registrations are required.
@@ -741,6 +757,7 @@ local `.env`.
 | `src/toolExecutor.js` | Bounded document tool loop, requester revalidation, and terminal command-action handoff. |
 | `src/commandTools.js` | Explicit command-tool allowlist, strict arguments, current-user authorization, and private action previews. |
 | `src/helperActions.js` | Bounded, expiring, single-use actions bound to their requester. |
+| `src/helperChecks.js` | Share duplicate authorization work within one validation step; never cache across operations or messages. |
 | `src/registerCommands.js` | Slash-command registration (global by default; testing-guild only when `beta = true`). Runs as Railway's persistent-environment `preDeployCommand`; ephemeral PR copies use the [preview override](../docs/pr-previews.md#automatic-railway-pr-environments). `npm run register` runs it locally. |
 | `src/defineCommand.js` | Neutral, surface-agnostic command factory. |
 | `src/adapters/discord/index.js` | Discord event wiring; dispatches to the router or dedicated recording handler. |

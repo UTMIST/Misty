@@ -22,6 +22,7 @@
 // Callback errors fail closed. These callbacks are never sent to the model.
 
 import { combineHelperActions } from './helperActions.js';
+import { checkOnce } from './helperChecks.js';
 
 export const DEFAULT_MAX_TOOL_ROUNDS = 4;
 export const DEFAULT_MAX_OUTPUT_TOKENS = 8000;
@@ -33,6 +34,7 @@ export const DEFAULT_MAX_DURATION_MS = 120000;
 // Outcomes the caller renders into a surface-appropriate reply.
 export const OUTCOME = {
   ACTION: 'action', // terminal private result or confirmation, never model replay
+  INCOMPLETE_ACTION: 'incomplete_action', // a command proposal failed; nothing executed
   ANSWER: 'answer', // content is the final text; citations may accompany it
   EMPTY: 'empty', // the model produced no usable text
   WITHHELD: 'withheld', // access/evidence could not be revalidated; nothing published
@@ -219,6 +221,17 @@ export function createToolExecutor({
         // Reject oversized batches before executing any of their calls.
         toolCalls += calls.length;
 
+        // A terminal command cannot consume document results from this same
+        // response. Reject the incompatible batch before any provider work;
+        // do not silently drop either requested operation.
+        if (
+          calls.some((call) => registry.terminalTools?.has(call.name)) &&
+          calls.some(
+            (call) => registry.handlers.has(call.name) && !registry.terminalTools?.has(call.name),
+          )
+        )
+          return { outcome: OUTCOME.INCOMPLETE_ACTION, reason: 'mixed_tools' };
+
         // Replay the assistant turn verbatim (opaque continuation blocks and all)
         // so the signed/encrypted reasoning transcript stays intact.
         history.push({ role: 'assistant', content: res.content_blocks });
@@ -261,23 +274,25 @@ export function createToolExecutor({
             results.push(errorResult(call.id, 'tool failed'));
           }
         }
-        if (actions.length) {
+        if (actions.length || calls.some((call) => registry.terminalTools?.has(call.name))) {
           // Never silently omit a failed proposal or replay private command data.
-          if (results.some((result) => result.is_error)) return { outcome: OUTCOME.WITHHELD };
           if (!(await canPublish())) return failedCheck();
+          if (!actions.length || results.some((result) => result.is_error))
+            return { outcome: OUTCOME.INCOMPLETE_ACTION };
+          for (const item of actions) {
+            const check = item.check;
+            item.check = async (validation = new Map()) => {
+              if (!(await checkOnce(validation, canPublish, canPublish)))
+                throw new Error('This request expired or access changed. Ask again.');
+              return check?.(validation);
+            };
+          }
           const action = combineHelperActions(actions);
-          const check = action.check;
           const setExpiresAt = action.setExpiresAt;
           action.setExpiresAt = (expiresAt) => {
             deadline = performance.now() + Math.max(0, expiresAt - Date.now());
             setExpiresAt?.(expiresAt);
           };
-          if (check)
-            action.check = async () => {
-              if (!(await canPublish()))
-                throw new Error('This request expired or access changed. Ask again.');
-              return check();
-            };
           return { outcome: OUTCOME.ACTION, action, canPublish };
         }
         history.push({ role: 'user', content: results });

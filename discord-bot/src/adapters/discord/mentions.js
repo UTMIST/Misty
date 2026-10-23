@@ -4,6 +4,7 @@ import { presentHelperAction } from './helperActions.js';
 import { runRecordAction } from './recording.js';
 import { runQnaAction } from './qna.js';
 import recordCommand from '../../commands/record.js';
+import { checkOnce } from '../../helperChecks.js';
 import { ChannelType, PermissionFlagsBits } from 'discord.js';
 
 /** Bind Discord metadata outside model input. Meetings keep the exact source channel. */
@@ -43,10 +44,10 @@ export function createHelperRequest(message, appContext, botId) {
     recordingVoiceChannelId: recording?.voiceChannel?.id,
     recordingTextChannelId: recording?.textChannelId,
     checkSurface: sourceAccess,
-    async runMeeting({ commandName, subcommand, options }) {
+    async runMeeting({ commandName, subcommand, options }, checks = new Map()) {
       if (!guildId) return { content: 'Use this action in a server channel.' };
       // Refresh the caller, never use voice state captured during model generation.
-      const { member, channel } = await sourceAccess();
+      const { member, channel } = await checkOnce(checks, sourceAccess, sourceAccess);
       if (
         (commandName === 'qna' || subcommand === 'stop') &&
         (!recording ||
@@ -59,7 +60,12 @@ export function createHelperRequest(message, appContext, botId) {
       }
       if (commandName === 'qna') {
         return runQnaAction(
-          { guildId, channelId: sourceChannel.id, question: options.question },
+          {
+            guildId,
+            channelId: sourceChannel.id,
+            question: options.question,
+            propagateErrors: true,
+          },
           appContext,
         );
       }
@@ -74,23 +80,38 @@ export function createHelperRequest(message, appContext, botId) {
           name: options.name ?? null,
           save: options.save ?? true,
           allowPublicReply: true,
+          propagateErrors: true,
         },
         appContext,
         recordCommand,
         botId,
       );
+      // commandTools.publicRead selects the initial UI from the captured origin;
+      // execution and publication must still match the current session here.
       const announced =
-        subcommand === 'start' ? appContext.meetingSurface?.activeSession?.(guildId) : before;
+        subcommand === 'start'
+          ? appContext.meetingSurface?.activeSession?.(guildId)
+          : (before ?? (subcommand === 'status' ? recording : null));
       if (!publicContent || announced?.textChannelId !== sourceChannel.id) return payload;
+      // A status requested in the origin may execute after that meeting ends.
+      // Publish only the safe no-recording projection, while that absence holds.
+      const expectedSessionId =
+        subcommand === 'status' ? (before?.sessionId ?? null) : announced.sessionId;
       return {
         ...payload,
+        keepPrivate: subcommand === 'start' || subcommand === 'stop',
         publicReply: {
           payload: { content: publicContent },
-          async send(part) {
-            const { channel: destination } = await sourceAccess();
+          async send(part, validation = new Map()) {
+            const { channel: destination } = await checkOnce(
+              validation,
+              sourceAccess,
+              sourceAccess,
+            );
             if (
               subcommand !== 'stop' &&
-              appContext.meetingSurface?.activeSession?.(guildId)?.sessionId !== announced.sessionId
+              (appContext.meetingSurface?.activeSession?.(guildId)?.sessionId ?? null) !==
+                expectedSessionId
             ) {
               throw new Error('Recording changed before publication.');
             }

@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { checkOnce } from './helperChecks.js';
 
 const ACTION_TTL_MS = 120000;
 export class PendingActionsFull extends Error {}
@@ -9,27 +10,31 @@ export function combineHelperActions(actions) {
   if (actions.some((action) => action.userId !== actions[0].userId)) {
     throw new Error('Actions must belong to the same requester.');
   }
-  return {
+  const batch = {
     userId: actions[0].userId,
     confirm: actions.some((action) => action.confirm),
     publicRead: actions.every((action) => action.publicRead && !action.confirm),
     summary: actions.map((action, i) => `${i + 1}. ${action.summary}`).join('\n\n'),
-    async check() {
-      for (const action of actions) await action.check();
+    async check(checks = new Map()) {
+      for (const action of actions) await checkOnce(checks, action, () => action.check(checks));
     },
     setExpiresAt(expiresAt) {
       for (const action of actions) action.setExpiresAt?.(expiresAt);
     },
-    async execute() {
+    async execute(checks = new Map()) {
       // Preflight the entire proposal before any command can change state.
-      await this.check();
+      await batch.check(checks);
       const replies = [];
       for (const [index, action] of actions.entries()) {
-        await action.check();
         try {
-          replies.push(await action.execute());
+          const beforeEffect = new Map();
+          await action.check(beforeEffect);
+          replies.push({ ...(await action.execute(beforeEffect)), check: action.check });
         } catch {
           replies.push({
+            // This content-free failure receipt is safe even when authorization
+            // was lost. Successful payloads keep their own delivery checks.
+            safeFailure: true,
             content: `Action ${index + 1} could not be completed. Earlier actions may have completed; remaining actions were not run. Check the current state before asking again.`,
           });
           break;
@@ -38,6 +43,7 @@ export function combineHelperActions(actions) {
       return { replies };
     },
   };
+  return batch;
 }
 
 /** Short-lived, user-bound actions. Claim synchronously before any awaited work. */

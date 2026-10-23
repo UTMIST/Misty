@@ -232,11 +232,10 @@ export function createMeetingSurface({
   // A snapshot of the guild's active recording, or null: its `sessionId`,
   // opaque `voiceChannel`, and origin `textChannelId`. The Discord adapter uses
   // these to auto-stop and bind public status to the meeting's audience.
-  // All fields come from the single session
-  // source of truth so they can't drift; the channel is treated opaquely so this
-  // module stays free of any discord.js dependency. The `sessionId` lets the
-  // adapter bind a scheduled auto-stop to a SPECIFIC recording, so a timer from
-  // an already-ended session can never terminate a later one in the same guild.
+  // All fields come from the single session source of truth so they can't drift;
+  // treating the channel opaquely keeps this module free of discord.js.
+  // The `sessionId` binds a scheduled auto-stop to a SPECIFIC recording, so a
+  // timer from an already-ended session cannot stop a later one in the same guild.
   function activeSession(guildId) {
     const session = sessions.get(guildId);
     if (!session) return null;

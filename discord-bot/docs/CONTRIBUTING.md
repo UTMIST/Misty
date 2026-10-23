@@ -257,17 +257,37 @@ visibility. The rules the loop enforces:
   `tool_use` response may instead return a terminal `ACTION`: the bot handles
   it directly without another model call. Every action in the batch is prepared
   before handoff, within the existing tool-call budget. Any failed call withholds
-  the entire proposal. No command executes during preparation.
+  the entire proposal. `INCOMPLETE_ACTION` explains that preparation failed and
+  nothing changed; `WITHHELD` remains reserved for failed access/evidence checks.
+  Command tools carry registry-only `terminal` metadata so even an entirely
+  failed proposal ends the turn without a model retry that could drop actions.
+  Document tools retain their normal result/replay loop. A response mixing
+  document tools and terminal commands is rejected before any tool executes;
+  document results must be consumed in earlier rounds. No command executes
+  during preparation. Optional preview name lookups fall back to mentions and
+  slugs on provider errors; they still respect the overall turn deadline.
 - **Writes require private confirmation.** A prepared command has not executed.
   The Discord adapter sends the full argument/destination preview before its
   buttons; failed preview delivery cannot expose a working confirmation UI.
   Every write requires the same Discord author to confirm the complete list.
   The batch rechecks every action before the first execution, then each command
   checks its authorization again. Commands execute sequentially with separate
-  results, not transactionally; an unexpected execution exception stops later
-  commands without retrying earlier ones. No command result enters model history.
+  results, not transactionally; an authorization or execution exception stops later
+  commands without retrying earlier ones. The router propagates a sanitized
+  exception for helper dispatch so the batch can stop; ordinary slash commands
+  retain their generic error reply. Helper meeting requests likewise propagate
+  unexpected adapter failures through their trusted `propagateErrors` flag.
+  Expected business rejections remain ordinary results. No command result
+  enters model history. Each completed result keeps its own delivery check:
+  losing permission for a later command does not suppress earlier results that
+  are still authorized. A static partial-failure receipt contains no command
+  arguments or protected data and can be delivered even after permission loss.
+  Access or expiry failures still withhold the affected result.
   `team_list`, `team_roster`, `help` and `bug` explicitly project public replies;
-  all other ordinary commands remain private, regardless of a renderer's
+  public help lists common commands independently of the requester's privileges,
+  while slash/DM help remains personalized. Helper dispatch authorization errors
+  throw instead of becoming public account-specific reply payloads.
+  All other ordinary commands remain private, regardless of a renderer's
   `ephemeral` flag. A batch of public reads executes immediately. Mixed batches
   wait for the private interaction and keep each result's own visibility.
   Private server results use a requester-only button followed by ephemeral
@@ -287,7 +307,10 @@ visibility. The rules the loop enforces:
   trusted Discord context. Fresh directory authorization and Discord member,
   channel, and private-thread membership checks run before execution and each
   public or private message part. Earlier document evidence still passes through
-  the executor's revalidation/deadline gate. Admission gives delivery two minutes;
+  the executor's revalidation/deadline gate. `helperChecks.js` shares duplicate
+  identity, evidence and source lookups only within one validation step. Every
+  operation and every message part starts a fresh step; permission decisions
+  are never cached across them. Admission gives delivery two minutes;
   the first successful private confirmation starts a fresh two-minute window
   shared by storage, command authorization and executor checks. A non-confirm
   fallback starts its window when its button is delivered. Reopening a preview
@@ -298,7 +321,8 @@ visibility. The rules the loop enforces:
   the exact recording text channel, while channel settings use a thread's parent.
   Recording status and successful start/stop results have a separate public
   projection without voice-channel or requester details, restricted to requests
-  in the exact meeting origin. Writes still require private confirmation; errors
+  in the exact meeting origin. Writes still require private confirmation and
+  retain their complete private result alongside the public announcement; errors
   and results requested elsewhere stay private. The adapter retains the origin
   destination through confirmation and rechecks access before publication; an
   auto-created helper thread or parent channel never replaces it. Status/start
@@ -359,12 +383,15 @@ are required. The affected files have these responsibilities:
 | `src/context.js` | Wire command tools, pending actions, and fresh requester authentication into the production executor. |
 | `src/toolExecutor.js`, `src/helperFlow.js` | Carry trusted request metadata, recheck identity, and return terminal actions without model replay; adopt the pending deadline while retaining evidence and read budgets. |
 | `src/helperActions.js` | Reserve bounded capacity before delivery/work and manage one presentation window for requester-bound, single-use actions. |
+| `src/helperChecks.js` | Coalesce duplicate validation lookups without reusing checks across effects or sends. |
+| `src/commands/help.js`, `src/messages/help.js` | Render a requester-independent public help guide while retaining personalized private help. |
 | `src/adapters/discord/helperActions.js` | Route explicit public projections, verify private delivery before private reads/Q&A, prohibit retries after execution, and handle confirmation/cancellation and admission failures. |
 | `src/adapters/discord/index.js`, `src/adapters/discord/interactions.js` | Route action buttons and preserve private visibility and access checks across split replies. |
 | `src/adapters/discord/mentions.js` | Bind real Discord context, recheck source access, bound history at the request, and hand actions to private delivery. |
 | `src/adapters/discord/recording.js`, `src/adapters/discord/qna.js` | Share existing meeting behavior with helper actions while preserving slash behavior, including the meeting-persistence `save` option from #306. |
 | `test/adapters-discord.test.js` | Preserve slash recording defaults and explicit save opt-out through the shared recording runner. |
 | `test/commandTools.test.js` | Exercise the real registry/router against fake services, including privilege changes and hostile arguments. |
+| `test/router.test.js` | Verify helper authorization errors cannot become public command results. |
 | `test/helperActions.test.js` | Cover failed DM sends, partial results, both capacity limits, concurrent admission/clicks, presentation clocks, source access, meeting identity, and mention integration. |
 | `test/toolExecutor.test.js`, `test/helperFlow.test.js`, `test/helper-retrieval.test.js` | Verify terminal handoff, retained evidence/read limits, destination-only rejection, requester revocation, and retrieval under production authentication wiring. |
 | `README.md`, `.env.example`, `src/config.js`, `docs/CONTRIBUTING.md` | Describe the expanded existing flag, user flow, authorization contract, and implementation rationale. |
@@ -382,6 +409,24 @@ The multi-action/private-thread fix changes only the bot zone:
 | `test/commandTools.test.js` | Verify readable, escaped previews without putting private labels in model results. |
 | `test/helperActions.test.js` | Exercise two removals through the real executor/router/service/confirmation path, duplicate clicks, requester privacy and server delivery. |
 | `README.md`, `docs/CONTRIBUTING.md` | Document the changed batch, preview and thread-delivery contracts. |
+
+The follow-up review fixes stay in the bot zone:
+
+| Files | Why changed |
+| --- | --- |
+| `src/router.js` | Propagate helper authorization and unexpected handler failures without exposing account/backend details; share principal resolution within a validation step. |
+| `src/commandTools.js`, `src/toolRegistry.js` | Mark terminal proposals independently of successful preparation, tolerate optional label failures, and specify document-round ordering. |
+| `src/toolExecutor.js`, `src/helperFlow.js` | Reject incomplete or incompatible mixed proposals before execution, explain that nothing changed, and bind evidence checks to each result. |
+| `src/helperActions.js`, `src/adapters/discord/helperActions.js` | Stop on later authorization failures while preserving earlier authorized results and private recording feedback. |
+| `src/helperChecks.js` | Share duplicate validation work only within a step; keep fresh checks before every effect and send. |
+| `src/commands/help.js`, `src/messages/help.js` | Keep public help independent of requester privileges and preserve private personalized help. |
+| `src/adapters/discord/mentions.js`, `src/adapters/discord/recording.js`, `src/adapters/discord/qna.js` | Propagate unexpected helper meeting failures, retain private start/stop details, and safely report ended recordings with a fresh session check. |
+| `src/meeting/meetingSurface.js` | Clarify the origin/session snapshot comment. |
+| `test/helperActions.test.js` | Reproduce removal, meeting and permission failures through confirmation; bound repeated lookups and cover private feedback, no retries and session changes. |
+| `test/commandTools.test.js`, `test/router.test.js` | Cover label fallbacks without bypassing deadlines, shared public help, and sanitized helper authorization errors. |
+| `test/adapters-discord.test.js` | Preserve private slash recording error replies when the meeting adapter throws. |
+| `test/helperFlow.test.js`, `test/toolExecutor.test.js` | Verify invalid, unavailable and failed tool preparation rejects the entire proposal without writes or model replay. |
+| `README.md`, `docs/CONTRIBUTING.md` | Keep the user-facing failure behavior, developer contract and file rationale accurate. |
 
 The public tool-result policy changes only the bot zone:
 

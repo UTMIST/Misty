@@ -36,21 +36,28 @@ export default defineCommand({
    * @returns {Promise<object>} Ephemeral reply payload.
    */
   async handler({ options, principal, ctx }) {
+    // Public helper replies are a shared guide, independent of who asked.
+    // Slash/DM help continues to show the caller's own permissions privately.
+    const canShow = (command) =>
+      ctx.sharedHelp
+        ? ['public', 'linked'].includes(visiblePolicy(command))
+        : authorize(visiblePolicy(command), principal).ok;
     const visible = [...ctx.commands.values()]
       .filter((command) => command.name !== 'help')
-      .filter((command) => authorize(visiblePolicy(command), principal).ok);
+      .filter(canShow);
 
-    if (!options.command) return buildHelpEmbed(visible);
+    if (!options.command) return buildHelpEmbed(visible, { shared: ctx.sharedHelp });
 
     const requested = options.command.trim().replace(/^\//, '').toLowerCase();
     const command = visible.find((candidate) => candidate.name === requested);
-    if (!command) return helpMessages.unknownCommand(requested);
+    if (!command) return helpMessages.unknownCommand(requested, { shared: ctx.sharedHelp });
 
-    return buildCommandDetailEmbed({
-      ...command,
-      subcommands: command.subcommands.filter(
-        (subcommand) => authorize(visiblePolicy(subcommand), principal).ok,
-      ),
-    });
+    return buildCommandDetailEmbed(
+      {
+        ...command,
+        subcommands: command.subcommands.filter(canShow),
+      },
+      { shared: ctx.sharedHelp },
+    );
   },
 });

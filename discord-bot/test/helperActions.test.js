@@ -160,6 +160,60 @@ test('two removals share a descriptive private thread confirmation and execute o
   assert.equal(confirmed.replies[1].flags, 64, 'later results stay ephemeral');
 });
 
+test('an unexpected removal failure stops later writes and reports partial results privately without retry', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => assert.fail('Unexpected network request'));
+  const errors = [];
+  t.mock.method(console, 'error', (...args) => errors.push(args));
+  const f = fixture();
+  f.message.guildId = 'guild';
+  f.message.author.createDM = async () => assert.fail('Thread actions must not open a DM');
+  const admin = { id: 'admin', active: true, access_level: 'admin' };
+  const ended = [];
+  f.ctx.directory = {
+    getPersonByDiscordId: async (id) =>
+      id === 'owner' ? admin : { id, display_name: `Member ${id}` },
+    getTeamBySlug: async () => ({ id: 'team', slug: 'infra', label: 'Infrastructure' }),
+    listMemberships: async ({ personId }) => [{ id: personId }],
+    endMembership: async (id) => {
+      ended.push(id);
+      if (id === '202') throw new Error('Sensitive backend detail');
+    },
+  };
+  f.ctx.teamService = createTeamService({ directory: f.ctx.directory });
+  let modelCalls = 0;
+  f.ctx.llmClient.chat = async () => {
+    assert.equal(++modelCalls, 1, 'private action results must not be replayed');
+    return {
+      stop_reason: 'tool_use',
+      content_blocks: ['101', '202', '303'].map((user) => ({
+        type: 'tool_use',
+        id: user,
+        name: 'team_remove',
+        input: { user, team: 'infra' },
+      })),
+    };
+  };
+  const result = await f.ctx.toolExecutor.run({
+    messages: [{ role: 'user', content: 'Remove all three members from infra' }],
+    principal: { person: admin },
+    request: { discordUserId: 'owner', discordGuildId: 'guild', sourceChannelId: 'thread' },
+  });
+  await sendHelperReply(f.send, result, { message: f.message, appContext: f.ctx });
+  const review = button(buttonId(f.publicMessages, 'Review privately'));
+  await f.handlers.interactionCreate(review);
+  assert.deepEqual(ended, [], 'no writes before confirmation');
+  const confirmId = buttonId(review.replies, 'Confirm');
+  const confirmed = button(confirmId);
+  await f.handlers.interactionCreate(confirmed);
+  await f.handlers.interactionCreate(button(confirmId));
+  assert.deepEqual(ended, ['101', '202']);
+  assert.match(JSON.stringify(confirmed.replies), /Removed.*Member 101/);
+  assert.match(JSON.stringify(confirmed.replies), /Action 2.*remaining actions were not run/);
+  assert.equal(confirmed.replies[1].flags, 64);
+  assert.doesNotMatch(JSON.stringify(f.publicMessages), /Member|Infrastructure/);
+  assert.doesNotMatch(JSON.stringify([confirmed.replies, errors]), /Sensitive backend detail/);
+});
+
 test('cancelling a private batch consumes every proposed action without executing any', async () => {
   const f = fixture();
   f.message.guildId = 'guild';
@@ -828,7 +882,8 @@ function recordingFixture(subcommand, { origin = 'source-thread', outcome } = {}
   f.ctx.directory.getPersonByDiscordId = async () => person;
   f.ctx.meetingSurface = {
     activeSession: () => session,
-    status: () => ({ status: 'recording', elapsedMs: 15000 }),
+    status: () =>
+      session ? { status: 'recording', elapsedMs: 15000 } : { status: 'not-recording' },
     start: async ({ textChannel }) => {
       executions++;
       if (outcome) return { status: outcome };
@@ -861,11 +916,110 @@ function recordingFixture(subcommand, { origin = 'source-thread', outcome } = {}
     person,
     request,
     executions: () => executions,
+    endSession: () => {
+      session = null;
+    },
     replaceSession: () => {
       session = { ...session, sessionId: 'replacement' };
     },
   };
 }
+
+test('later permission loss stops the batch and preserves an earlier authorized result', async () => {
+  const f = recordingFixture('status');
+  f.person.access_level = 'admin';
+  f.ctx.directory.listTeams = async () => {
+    f.person.access_level = 'member';
+    return [{ id: 'team', slug: 'infra', label: 'Infrastructure' }];
+  };
+  f.ctx.directory.getTeamBySlug = async () => ({ id: 'team', slug: 'infra' });
+  f.ctx.teamService = createTeamService({ directory: f.ctx.directory });
+  f.ctx.teamService.renameTeam = async () => assert.fail('Revoked write executed');
+  f.ctx.llmClient.chat = async () => ({
+    stop_reason: 'tool_use',
+    content_blocks: [
+      { type: 'tool_use', id: 'list', name: 'team_list', input: {} },
+      {
+        type: 'tool_use',
+        id: 'write',
+        name: 'team_rename',
+        input: { slug: 'infra', new_label: 'New' },
+      },
+      {
+        type: 'tool_use',
+        id: 'later',
+        name: 'team_rename',
+        input: { slug: 'infra', new_label: 'Later' },
+      },
+    ],
+  });
+  const result = await f.ctx.toolExecutor.run({
+    messages: [{ role: 'user', content: 'List and rename teams' }],
+    principal: { person: f.person },
+    request: f.request,
+  });
+  await sendHelperReply(f.send, result, { message: f.message, appContext: f.ctx });
+  const review = button(buttonId(f.publicMessages, 'Review privately'));
+  await f.handlers.interactionCreate(review);
+  const confirmed = button(buttonId(review.replies, 'Confirm'));
+  await f.handlers.interactionCreate(confirmed);
+  assert.match(JSON.stringify(f.publicMessages), /Infrastructure/);
+  assert.match(JSON.stringify(confirmed.replies), /Action 2.*remaining actions were not run/);
+  assert.doesNotMatch(JSON.stringify(confirmed.replies), /may already have run/);
+  assert.equal(f.privateMessages.length, 0);
+});
+
+test('four confirmed commands bound directory and Discord lookups without sharing checks across effects', async () => {
+  const f = recordingFixture('status');
+  f.person.access_level = 'admin';
+  let discordReads = 0,
+    identityReads = 0,
+    writes = 0;
+  for (const manager of [f.message.guild.members, f.message.guild.channels]) {
+    const fetch = manager.fetch;
+    manager.fetch = async (...args) => {
+      discordReads++;
+      return fetch(...args);
+    };
+  }
+  f.ctx.directory.getPersonByDiscordId = async () => {
+    identityReads++;
+    return f.person;
+  };
+  f.ctx.directory.getTeamBySlug = async () => ({ id: 'team', slug: 'infra' });
+  const identitiesAtWrite = [];
+  f.ctx.teamService.renameTeam = async () => {
+    identitiesAtWrite.push(identityReads);
+    writes++;
+    return { outcome: 'RENAMED', team: { label: 'New' } };
+  };
+  f.ctx.llmClient.chat = async () => ({
+    stop_reason: 'tool_use',
+    content_blocks: [1, 2, 3, 4].map((id) => ({
+      type: 'tool_use',
+      id: String(id),
+      name: 'team_rename',
+      input: { slug: 'infra', new_label: 'New' },
+    })),
+  });
+  const result = await f.ctx.toolExecutor.run({
+    messages: [{ role: 'user', content: 'Rename four teams' }],
+    principal: { person: f.person },
+    request: f.request,
+  });
+  await sendHelperReply(f.send, result, { message: f.message, appContext: f.ctx });
+  const review = button(buttonId(f.publicMessages, 'Review privately'));
+  await f.handlers.interactionCreate(review);
+  identityReads = 0;
+  discordReads = 0;
+  const confirmed = button(buttonId(review.replies, 'Confirm'));
+  await f.handlers.interactionCreate(confirmed);
+  assert.equal(writes, 4);
+  assert.equal(confirmed.replies.length, 4);
+  assert.ok(discordReads <= 30, `${discordReads} Discord fetches exceed the confirmation budget`);
+  assert.ok(identityReads <= 20, `${identityReads} identity reads exceed the confirmation budget`);
+  assert.ok(identitiesAtWrite.every((count, index) => count > (identitiesAtWrite[index - 1] ?? 0)));
+});
 
 for (const subcommand of ['status', 'start', 'stop']) {
   test(`record ${subcommand} posts a safe result only in the exact meeting channel`, async () => {
@@ -886,7 +1040,7 @@ for (const subcommand of ['status', 'start', 'stop']) {
       await f.handlers.interactionCreate(confirm);
       await f.handlers.interactionCreate(button(id));
       assert.equal(f.executions(), 1);
-      assert.match(JSON.stringify(confirm.replies), /Posted the result/);
+      assert.match(JSON.stringify(confirm.replies), /private-voice/);
     }
     assert.equal(f.originMessages.length, 1);
     assert.match(f.originMessages[0].content, /this meeting/);
@@ -922,6 +1076,59 @@ for (const subcommand of ['status', 'stop']) {
   });
 }
 
+for (const operation of ['start', 'stop', 'qna']) {
+  test(`unexpected meeting ${operation} errors stop later batch writes`, async (t) => {
+    t.mock.method(globalThis, 'fetch', async () => assert.fail('Unexpected network request'));
+    const errors = [];
+    t.mock.method(console, 'error', (...args) => errors.push(args));
+    const f = recordingFixture(operation === 'qna' ? 'status' : operation);
+    f.person.access_level = 'admin';
+    const executions = [];
+    f.ctx.meetingSurface[operation] = async () => {
+      executions.push(operation);
+      throw new Error('Sensitive backend detail');
+    };
+    f.ctx.directory.getTeamBySlug = async () => ({ id: 'team', slug: 'infra' });
+    f.ctx.directory.listMemberships = async () => [{ id: 'membership' }];
+    f.ctx.directory.endMembership = async () => executions.push('remove');
+    f.ctx.teamService = createTeamService({ directory: f.ctx.directory });
+    f.ctx.llmClient.chat = async () => ({
+      stop_reason: 'tool_use',
+      content_blocks: [
+        {
+          type: 'tool_use',
+          id: 'meeting',
+          name: operation === 'qna' ? 'qna' : `record_${operation}`,
+          input: operation === 'qna' ? { question: 'When?' } : {},
+        },
+        {
+          type: 'tool_use',
+          id: 'remove',
+          name: 'team_remove',
+          input: { user: '101', team: 'infra' },
+        },
+      ],
+    });
+    const result = await f.ctx.toolExecutor.run({
+      messages: [{ role: 'user', content: 'Meeting action then remove 101' }],
+      principal: { person: f.person },
+      request: f.request,
+    });
+    await sendHelperReply(f.send, result, { message: f.message, appContext: f.ctx });
+    const review = button(buttonId(f.publicMessages, 'Review privately'));
+    await f.handlers.interactionCreate(review);
+    assert.deepEqual(executions, []);
+    const confirmId = buttonId(review.replies, 'Confirm');
+    const confirm = button(confirmId);
+    await f.handlers.interactionCreate(confirm);
+    await f.handlers.interactionCreate(button(confirmId));
+    assert.deepEqual(executions, [operation]);
+    assert.match(JSON.stringify(confirm.replies), /Action 1.*remaining actions were not run/);
+    assert.equal(f.originMessages.length, 0);
+    assert.doesNotMatch(JSON.stringify([confirm.replies, errors]), /Sensitive backend detail/);
+  });
+}
+
 test('failed recording starts stay private and do not announce success', async () => {
   const f = recordingFixture('start', { outcome: 'error' });
   const { action } = await f.ctx.toolRegistry.handlers.get('record_start')(
@@ -934,6 +1141,39 @@ test('failed recording starts stay private and do not announce success', async (
   const confirm = button(buttonId(review.replies, 'Confirm'));
   await f.handlers.interactionCreate(confirm);
   assert.match(JSON.stringify(confirm.replies), /couldn't join/);
+  assert.equal(f.originMessages.length, 0);
+});
+
+test('public recording status reports an ended meeting without exposing private voice details', async () => {
+  const f = recordingFixture('status');
+  const { action } = await f.ctx.toolRegistry.handlers.get('record_status')(
+    {},
+    { request: f.request, principal: { person: f.person } },
+  );
+  assert.equal(action.publicRead, true);
+  f.endSession();
+  await sendHelperReply(f.send, { action }, { message: f.message, appContext: f.ctx });
+  assert.equal(f.originMessages.length, 1);
+  assert.match(f.originMessages[0].content, /No recording.*in progress/);
+  assert.doesNotMatch(JSON.stringify(f.originMessages), /private-voice|You are/);
+  assert.doesNotMatch(JSON.stringify(f.publicMessages), /could not complete/);
+  assert.equal(f.privateMessages.length, 0);
+});
+
+test('an ended recording status is withheld if a new session starts before publication', async () => {
+  const f = recordingFixture('status');
+  f.endSession();
+  const payload = await f.request.runMeeting({
+    commandName: 'record',
+    subcommand: 'status',
+    options: {},
+  });
+  assert.ok(payload.publicReply);
+  f.replaceSession();
+  await assert.rejects(
+    payload.publicReply.send(payload.publicReply.payload),
+    /changed before publication/,
+  );
   assert.equal(f.originMessages.length, 0);
 });
 
