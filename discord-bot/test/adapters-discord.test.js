@@ -397,6 +397,29 @@ for (const save of [null, false, true]) {
   });
 }
 
+for (const subcommand of ['start', 'stop']) {
+  test(`/record ${subcommand} retains its private error reply when the meeting adapter throws`, async (t) => {
+    t.mock.method(console, 'error', () => {});
+    const calls = [];
+    const client = fakeClient();
+    wireDiscordClient(client, {
+      commands: recordCommands,
+      appContext: {
+        directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) },
+        meetingSurface: {
+          [subcommand]: async () => {
+            throw new Error('Sensitive backend detail');
+          },
+        },
+      },
+    });
+    await client.emit(fakeRecordInteraction({ subcommand, voiceChannel: { id: 'voice' }, calls }));
+    const reply = calls.find((c) => c.method === 'editReply').payload;
+    assert.match(reply.content, new RegExp(`Couldn't ${subcommand} recording`));
+    assert.doesNotMatch(reply.content, /Sensitive backend detail/);
+  });
+}
+
 test('/record start is denied for an UNLINKED caller and never starts recording', async () => {
   const calls = [];
   let startCalled = false;

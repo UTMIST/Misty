@@ -94,6 +94,225 @@ test('a command action ends the turn without sending its private result back to 
   assert.equal(llm.calls.length, 1);
 });
 
+test('document tools and terminal commands in one response fail before any tool work', async () => {
+  for (const commandFirst of [true, false]) {
+    const calls = [toolUse('read', 'search_documents', {}), toolUse('write', 'team_rename', {})];
+    const registry = buildToolRegistry([
+      {
+        name: 'mixed',
+        llmSafe: true,
+        tools: ['search_documents', 'team_rename'].map((name) => ({
+          terminal: name === 'team_rename',
+          definition: { name, input_schema: {} },
+          run: async () => assert.fail('Mixed batch performed provider work'),
+        })),
+      },
+    ]);
+    const llm = scriptedLlm([
+      {
+        stop_reason: 'tool_use',
+        content_blocks: commandFirst ? calls.reverse() : calls,
+      },
+    ]);
+    const result = await createToolExecutor({ registry, llmClient: llm }).run(base);
+    assert.deepEqual(result, { outcome: OUTCOME.INCOMPLETE_ACTION, reason: 'mixed_tools' });
+    assert.equal(llm.calls.length, 1);
+  }
+});
+
+test('preparation clarification uses the remaining output budget and stops after one response', async () => {
+  const registry = registryWith(
+    async () => ({ is_error: true, content: { error: 'Invalid user.' } }),
+    'command',
+  );
+  registry.terminalTools.add('command');
+  const llm = scriptedLlm([
+    {
+      stop_reason: 'tool_use',
+      usage: { output_tokens: 2 },
+      content_blocks: [toolUse('a', 'command', {})],
+    },
+    { stop_reason: 'end_turn', usage: { output_tokens: 1 }, content: 'Please mention the member.' },
+  ]);
+  const result = await createToolExecutor({
+    registry,
+    llmClient: llm,
+    maxOutputTokens: 3,
+    perCallMaxTokens: 2,
+  }).run(base);
+  assert.equal(result.outcome, OUTCOME.ANSWER);
+  assert.deepEqual(
+    llm.calls.map((call) => call.maxTokens),
+    [2, 1],
+  );
+});
+
+for (const revokeAt of ['generation', 'delivery']) {
+  test(`preparation clarification still checks earlier document evidence at ${revokeAt}`, async () => {
+    let allowed = true;
+    const registry = registryWith(async () => ({ revalidate: async () => allowed }));
+    registry.handlers.set('command', async () => ({
+      is_error: true,
+      content: { error: 'Invalid user.' },
+    }));
+    registry.terminalTools.add('command');
+    let modelCalls = 0;
+    const executor = createToolExecutor({
+      registry,
+      llmClient: {
+        chat: async () => {
+          modelCalls++;
+          if (modelCalls < 3)
+            return {
+              stop_reason: 'tool_use',
+              content_blocks: [
+                toolUse(String(modelCalls), modelCalls === 1 ? 'search_documents' : 'command', {}),
+              ],
+            };
+          if (revokeAt === 'generation') allowed = false;
+          return { stop_reason: 'end_turn', content: 'Please mention the member.' };
+        },
+      },
+    });
+    const result = await executor.run(base);
+    assert.equal(modelCalls, 3);
+    if (revokeAt === 'generation') assert.equal(result.outcome, OUTCOME.WITHHELD);
+    else {
+      assert.equal(result.outcome, OUTCOME.ANSWER);
+      allowed = false;
+      assert.equal(await result.canPublish(), false);
+    }
+  });
+}
+
+test('all actions in one model response are prepared and confirmed together', async () => {
+  const executed = [];
+  const llm = scriptedLlm([
+    {
+      stop_reason: 'tool_use',
+      content_blocks: [
+        toolUse('a', 'team_remove', { user: 'Alex' }),
+        toolUse('b', 'team_remove', { user: 'Sam' }),
+      ],
+    },
+  ]);
+  const executor = createToolExecutor({
+    llmClient: llm,
+    registry: registryWith(
+      async ({ user }) => ({
+        action: {
+          userId: 'requester',
+          confirm: true,
+          summary: `Remove ${user}`,
+          check: async () => {},
+          execute: async () => {
+            executed.push(user);
+            return { content: `Removed ${user}` };
+          },
+        },
+      }),
+      'team_remove',
+    ),
+  });
+  const result = await executor.run(base);
+  assert.match(result.action.summary, /Alex/);
+  assert.match(result.action.summary, /Sam/);
+  assert.deepEqual(executed, []);
+  await result.action.execute();
+  assert.deepEqual(executed, ['Alex', 'Sam']);
+  assert.equal(llm.calls.length, 1);
+});
+
+test('a failed call in an action batch rejects the whole incomplete proposal', async () => {
+  for (const invalidFirst of [true, false]) {
+    const calls = [toolUse('a', 'command', {}), toolUse('b', 'missing', {})];
+    const executor = createToolExecutor({
+      llmClient: scriptedLlm([
+        { stop_reason: 'tool_use', content_blocks: invalidFirst ? calls.reverse() : calls },
+      ]),
+      registry: registryWith(
+        async () => ({ action: { userId: 'u', check: async () => {} } }),
+        'command',
+      ),
+    });
+    const result = await executor.run(base);
+    assert.equal(result.outcome, 'incomplete_action');
+    assert.equal(result.action, undefined);
+  }
+});
+
+test('a batched confirmation rechecks every action before the first write', async () => {
+  let allowed = true;
+  const executed = [];
+  const executor = createToolExecutor({
+    llmClient: scriptedLlm([
+      {
+        stop_reason: 'tool_use',
+        content_blocks: [toolUse('a', 'command', { id: 1 }), toolUse('b', 'command', { id: 2 })],
+      },
+    ]),
+    registry: registryWith(
+      async ({ id }) => ({
+        action: {
+          userId: 'u',
+          confirm: true,
+          summary: `Action ${id}`,
+          check: async () => {
+            if (id === 2 && !allowed) throw new Error('Permission revoked');
+          },
+          execute: async () => {
+            executed.push(id);
+            return { content: 'Done' };
+          },
+        },
+      }),
+      'command',
+    ),
+  });
+  const { action } = await executor.run(base);
+  allowed = false;
+  await assert.rejects(action.execute(), /Permission revoked/);
+  assert.deepEqual(executed, []);
+});
+
+test('a batch reports a completed action and stops after an uncertain execution failure', async () => {
+  const executed = [];
+  const executor = createToolExecutor({
+    llmClient: scriptedLlm([
+      {
+        stop_reason: 'tool_use',
+        content_blocks: [1, 2, 3].map((id) => toolUse(String(id), 'command', { id })),
+      },
+    ]),
+    registry: registryWith(
+      async ({ id }) => ({
+        action: {
+          userId: 'u',
+          confirm: true,
+          summary: `Action ${id}`,
+          check: async () => {},
+          execute: async () => {
+            executed.push(id);
+            if (id === 2) throw new Error('Ambiguous backend failure');
+            return { content: 'First completed', embeds: [{ title: 'Result' }] };
+          },
+        },
+      }),
+      'command',
+    ),
+  });
+  const { action } = await executor.run(base);
+  const result = await action.execute();
+  assert.deepEqual(executed, [1, 2]);
+  const { check, ...receipt } = result.replies[0];
+  assert.equal(typeof check, 'function');
+  assert.deepEqual(receipt, {
+    content: 'First completed',
+    embeds: [{ title: 'Result' }],
+  });
+  assert.match(result.replies[1].content, /Action 2.*remaining actions were not run/);
+});
+
 test('fresh caller authorization runs before each tool and prevents execution after revocation', async () => {
   let allowed = true;
   let executed = 0;

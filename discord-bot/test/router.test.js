@@ -40,6 +40,17 @@ test('dispatch: public command runs without a principal', async () => {
   assert.equal(out.content, 'pong');
 });
 
+test('dispatch: helper authorization failure cannot become a public command result', async () => {
+  const dependencies = {
+    commands: new Map([['ping', publicCmd]]),
+    appContext: { directory: { getPersonByDiscordId: async () => null } },
+  };
+  await assert.rejects(
+    dispatch({ commandName: 'ping', discordUserId: '1', requireLinked: true }, dependencies),
+    /Helper command is no longer authorized/,
+  );
+});
+
 test('dispatch: public command can identify its caller and receives the registry in ctx', async () => {
   const cmd = defineCommand({
     name: 'help',

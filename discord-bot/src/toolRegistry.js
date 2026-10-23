@@ -6,14 +6,18 @@
 // even if they declare `tools`. Anything other than a literal `true` is unsafe.
 //
 // Each provider is `{ name, llmSafe, tools }` where `tools` is a list of
-// `{ definition, run }`:
+// `{ definition, run, terminal? }`:
 //   - `definition` is a /chat ToolDefinition (name, description, input_schema).
 //   - `run(input, ctx)` executes the call. `ctx` carries the trusted, bound
 //     retrieval context and collaborators; `input` is the model's arguments and
 //     is never trusted to carry scope.
+//   - `terminal: true` marks command proposals that end tool execution. Failed
+//     preparation may allow a final explanation, but never another tool call.
+//     This metadata never enters model definitions.
 export function buildToolRegistry(providers) {
   const definitions = [];
   const handlers = new Map();
+  const terminalTools = new Set();
   for (const provider of providers ?? []) {
     if (provider?.llmSafe !== true) continue;
     for (const spec of provider.tools ?? []) {
@@ -27,11 +31,13 @@ export function buildToolRegistry(providers) {
       }
       definitions.push(spec.definition);
       handlers.set(name, spec.run);
+      if (spec.terminal === true) terminalTools.add(name);
     }
   }
   return {
     definitions,
     handlers,
+    terminalTools,
     has(name) {
       return handlers.has(name);
     },

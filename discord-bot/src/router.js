@@ -2,6 +2,7 @@ import { resolvePrincipal } from './auth/principal.js';
 import { authorize } from './auth/policy.js';
 import { DirectoryUnavailable } from './clients/directoryClient.js';
 import { authMessages } from './messages/auth.js';
+import { checkOnce } from './helperChecks.js';
 
 /**
  * Select the commands registered on the surface where an intent originated.
@@ -29,7 +30,7 @@ function commandsAvailableToIntent(commands, intent, appContext) {
  * @param {object} dependencies Command registry and shared application context.
  * @returns {Promise<object>} Authorized command/principal, or an error reply.
  */
-export async function authorizeCommand(intent, { commands, appContext }) {
+export async function authorizeCommand(intent, { commands, appContext, checks = new Map() }) {
   const command = commands.get(intent.commandName);
   if (!command || !commandsAvailableToIntent(commands, intent, appContext).has(command.name)) {
     return { error: authMessages.denied('forbidden') };
@@ -47,7 +48,9 @@ export async function authorizeCommand(intent, { commands, appContext }) {
   let principal = null;
   if (intent.requireLinked || policy !== 'public' || command.identifyCaller) {
     try {
-      principal = await resolvePrincipal(appContext.directory, intent.discordUserId);
+      principal = await checkOnce(checks, `principal:${intent.discordUserId}`, () =>
+        resolvePrincipal(appContext.directory, intent.discordUserId),
+      );
     } catch (e) {
       if (e instanceof DirectoryUnavailable) {
         // Optional identification must not turn a public command into an
@@ -79,10 +82,17 @@ export async function authorizeCommand(intent, { commands, appContext }) {
 }
 
 /** Dispatch through the shared policy check; unknown commands return null. */
-export async function dispatch(intent, { commands, appContext }) {
+export async function dispatch(intent, { commands, appContext, checks = new Map() }) {
   if (!commands.has(intent.commandName)) return null;
-  const { command, principal, error } = await authorizeCommand(intent, { commands, appContext });
-  if (error) return error;
+  const { command, principal, error } = await authorizeCommand(intent, {
+    commands,
+    appContext,
+    checks,
+  });
+  if (error) {
+    if (intent.requireLinked) throw new Error('Helper command is no longer authorized');
+    return error;
+  }
 
   // --- Dispatch ---
   try {
@@ -91,7 +101,7 @@ export async function dispatch(intent, { commands, appContext }) {
       options: intent.options ?? {},
       subcommand: intent.subcommand ?? null,
       principal,
-      ctx: { ...appContext, commands: availableCommands },
+      ctx: { ...appContext, commands: availableCommands, sharedHelp: intent.sharedHelp === true },
       discordUserId: intent.discordUserId,
       discordHandle: intent.discordHandle,
       discordGuildId: intent.discordGuildId ?? null,
@@ -99,8 +109,13 @@ export async function dispatch(intent, { commands, appContext }) {
       channelUsedParent: Boolean(intent.channelUsedParent),
     });
   } catch (err) {
-    if (intent.requireLinked) console.error(`Helper command ${intent.commandName} failed`);
-    else console.error(`Command ${intent.commandName} failed:`, err);
+    if (intent.requireLinked) {
+      console.error(`Helper command ${intent.commandName} failed`);
+      // Let the pending action stop the batch; do not turn an unexpected
+      // execution failure into an ordinary result or expose backend details.
+      throw new Error('Helper command failed');
+    }
+    console.error(`Command ${intent.commandName} failed:`, err);
     return authMessages.internalError();
   }
 }

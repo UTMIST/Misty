@@ -21,6 +21,12 @@
 // call and before publication; the surface checks again at each send boundary.
 // Callback errors fail closed. These callbacks are never sent to the model.
 
+import { combineHelperActions } from './helperActions.js';
+import { checkOnce } from './helperChecks.js';
+
+const PREPARATION_CLARIFICATION =
+  "All command preparations failed. Nothing was changed. Explain the tool errors or ask for the missing details; for an invalid user ID ask for an explicit member mention, and for an unavailable action suggest checking command access with /help privately. Do not infer the requester's role or disclose account details. Do not call any tools or retry a subset of the request. The user must clarify or submit a new request before any action can be prepared.";
+
 export const DEFAULT_MAX_TOOL_ROUNDS = 4;
 export const DEFAULT_MAX_OUTPUT_TOKENS = 8000;
 export const DEFAULT_PER_CALL_MAX_TOKENS = 1024;
@@ -31,6 +37,7 @@ export const DEFAULT_MAX_DURATION_MS = 120000;
 // Outcomes the caller renders into a surface-appropriate reply.
 export const OUTCOME = {
   ACTION: 'action', // terminal private result or confirmation, never model replay
+  INCOMPLETE_ACTION: 'incomplete_action', // a command proposal failed; nothing executed
   ANSWER: 'answer', // content is the final text; citations may accompany it
   EMPTY: 'empty', // the model produced no usable text
   WITHHELD: 'withheld', // access/evidence could not be revalidated; nothing published
@@ -87,6 +94,7 @@ export function createToolExecutor({
       let toolCalls = 0;
       let documentRequests = 0;
       let exhausted = false;
+      let clarifyPreparation = false;
       let deadline = performance.now() + maxDurationMs;
       const isExhausted = () => exhausted || performance.now() >= deadline;
       // Text answers keep the generation deadline through delivery. A terminal
@@ -175,7 +183,11 @@ export function createToolExecutor({
           res = await withDeadline((signal) =>
             llmClient.chat({
               messages: history,
-              system,
+              system: clarifyPreparation
+                ? [system, PREPARATION_CLARIFICATION].filter(Boolean).join('\n\n')
+                : system,
+              // Replay requires the original definitions even during a final
+              // clarification. The execution gate below rejects further calls.
               tools: registry.definitions,
               maxTokens,
               signal,
@@ -202,6 +214,7 @@ export function createToolExecutor({
           return { outcome: OUTCOME.ANSWER, content, citations, canPublish };
         }
         if (res.stop_reason !== 'tool_use') return { outcome: OUTCOME.EMPTY };
+        if (clarifyPreparation) return { outcome: OUTCOME.INCOMPLETE_ACTION };
         const calls = toolUseBlocks(res.content_blocks);
         if (!calls.length) return { outcome: OUTCOME.EMPTY };
 
@@ -217,6 +230,17 @@ export function createToolExecutor({
         // Reject oversized batches before executing any of their calls.
         toolCalls += calls.length;
 
+        // A terminal command cannot consume document results from this same
+        // response. Reject the incompatible batch before any provider work;
+        // do not silently drop either requested operation.
+        if (
+          calls.some((call) => registry.terminalTools?.has(call.name)) &&
+          calls.some(
+            (call) => registry.handlers.has(call.name) && !registry.terminalTools?.has(call.name),
+          )
+        )
+          return { outcome: OUTCOME.INCOMPLETE_ACTION, reason: 'mixed_tools' };
+
         // Replay the assistant turn verbatim (opaque continuation blocks and all)
         // so the signed/encrypted reasoning transcript stays intact.
         history.push({ role: 'assistant', content: res.content_blocks });
@@ -224,6 +248,7 @@ export function createToolExecutor({
         // Execute each call in order; one tool_result per call id, all before any
         // text, as the /chat history contract requires.
         const results = [];
+        const actions = [];
         for (const call of calls) {
           if (isExhausted()) return { outcome: OUTCOME.EXHAUSTED };
           const handler = registry.handlers.get(call.name);
@@ -242,25 +267,8 @@ export function createToolExecutor({
               withDeadline,
             });
             if (out?.action) {
-              if (!(await canPublish())) return failedCheck();
-              // Stop before another model call or another action. No command
-              // has executed yet. Keep any retrieved evidence authorized while
-              // a user reviews the proposal, too.
-              const check = out.action.check;
-              const setExpiresAt = out.action.setExpiresAt;
-              out.action.setExpiresAt = (expiresAt) => {
-                // A terminal action gets the pending UI's deadline. Generation
-                // is over; retain evidence, spent read capacity and failures.
-                deadline = performance.now() + Math.max(0, expiresAt - Date.now());
-                setExpiresAt?.(expiresAt);
-              };
-              if (check)
-                out.action.check = async () => {
-                  if (!(await canPublish()))
-                    throw new Error('This request expired or access changed. Ask again.');
-                  return check();
-                };
-              return { outcome: OUTCOME.ACTION, action: out.action, canPublish };
+              actions.push(out.action);
+              continue;
             }
             if (typeof out?.revalidate === 'function') checks.push(out.revalidate);
             collect(out?.citations);
@@ -274,6 +282,38 @@ export function createToolExecutor({
             if (isExhausted()) return { outcome: OUTCOME.EXHAUSTED };
             results.push(errorResult(call.id, 'tool failed'));
           }
+        }
+        if (actions.length || calls.some((call) => registry.terminalTools?.has(call.name))) {
+          // Never silently omit a failed proposal or replay private command data.
+          if (
+            !actions.length &&
+            results.every((result) => result.is_error) &&
+            calls.every((call) => registry.terminalTools?.has(call.name))
+          ) {
+            // Only sanitized preparation errors exist: no private previews or
+            // command output. Allow one explanation, never an executable retry.
+            history.push({ role: 'user', content: results });
+            clarifyPreparation = true;
+            continue;
+          }
+          if (!(await canPublish())) return failedCheck();
+          if (!actions.length || results.some((result) => result.is_error))
+            return { outcome: OUTCOME.INCOMPLETE_ACTION };
+          for (const item of actions) {
+            const check = item.check;
+            item.check = async (validation = new Map()) => {
+              if (!(await checkOnce(validation, canPublish, canPublish)))
+                throw new Error('This request expired or access changed. Ask again.');
+              return check?.(validation);
+            };
+          }
+          const action = combineHelperActions(actions);
+          const setExpiresAt = action.setExpiresAt;
+          action.setExpiresAt = (expiresAt) => {
+            deadline = performance.now() + Math.max(0, expiresAt - Date.now());
+            setExpiresAt?.(expiresAt);
+          };
+          return { outcome: OUTCOME.ACTION, action, canPublish };
         }
         history.push({ role: 'user', content: results });
       }

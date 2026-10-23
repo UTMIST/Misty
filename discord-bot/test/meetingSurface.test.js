@@ -342,7 +342,7 @@ test('a failed join is logged and never throws', async () => {
   }
 });
 
-test('activeSession returns {sessionId, voiceChannel} while active and null otherwise', async () => {
+test('activeSession binds the session, voice channel and exact text channel while active', async () => {
   const fakes = makeFakes();
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
 
@@ -351,7 +351,11 @@ test('activeSession returns {sessionId, voiceChannel} while active and null othe
 
   assert.equal(surface.activeSession('g1'), null);
   await surface.start({ guildId: 'g1', voiceChannel, textChannel });
-  assert.deepEqual(surface.activeSession('g1'), { sessionId: 'sess-1', voiceChannel });
+  assert.deepEqual(surface.activeSession('g1'), {
+    sessionId: 'sess-1',
+    voiceChannel,
+    textChannelId: 'tc1',
+  });
 
   await surface.stop('g1');
   assert.equal(surface.activeSession('g1'), null);

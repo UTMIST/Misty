@@ -60,6 +60,8 @@ export async function runQnaAction(request, appContext) {
     return { content, allowedMentions, ephemeral: true };
   } catch (error) {
     // Never log provider errors, questions, or generated/document content.
+    if (request.propagateErrors && !(error instanceof MeetingQnaError))
+      throw new Error('Meeting Q&A failed');
     return reply(backendMessage(error instanceof MeetingQnaError ? error.status : 503));
   }
 }

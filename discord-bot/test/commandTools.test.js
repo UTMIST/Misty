@@ -50,21 +50,67 @@ async function tool(f, name, input = {}) {
   return handler(input, { request: f.request, principal: f.principal });
 }
 
-test('team lookup prepares a private action, runs as the actual requester, and keeps results out of model input', async () => {
+test('team lookup prepares a public read, runs as the actual requester, and keeps results out of model input', async () => {
   const f = fixture();
   const result = await tool(f, 'team_list');
   assert.ok(result.action);
   assert.equal(result.action.confirm, false);
+  assert.equal(result.action.publicRead, true);
   assert.equal(
     f.calls.some((c) => c[0] === 'list'),
     false,
   );
   const reply = await result.action.execute();
   assert.match(reply.content, /Infrastructure/);
+  assert.match(reply.publicReply.payload.content, /Infrastructure/);
   assert.ok(
     f.calls.filter((c) => c[0] === 'identify').every((c) => c[1] === f.request.discordUserId),
   );
   assert.equal(JSON.stringify(result.content).includes('Infrastructure'), false);
+});
+
+test('only approved directory/help reads are public by default; DM results stay private', async () => {
+  for (const name of [
+    'team_list',
+    'team_roster',
+    'help',
+    'bug',
+    'my_teams',
+    'whoami',
+    'doc_list',
+    'team_google_status',
+    'channel_access_show',
+    'helper_limits_show',
+    'record_status',
+    'qna',
+  ]) {
+    const f = fixture('admin');
+    const input =
+      name === 'team_roster' || name === 'team_google_status'
+        ? { team: 'infra' }
+        : name === 'qna'
+          ? { question: 'When?' }
+          : {};
+    const { action } = await tool(f, name, input);
+    assert.equal(
+      action.publicRead,
+      ['team_list', 'team_roster', 'help', 'bug'].includes(name),
+      name,
+    );
+  }
+  const f = fixture();
+  delete f.request.discordGuildId;
+  const { action } = await tool(f, 'team_list');
+  assert.equal(action.publicRead, false);
+  assert.equal((await action.execute()).publicReply, undefined);
+});
+
+test('recording status can run publicly only in its exact origin channel', async () => {
+  const f = fixture();
+  f.request.recordingTextChannelId = f.request.discordChannelId;
+  assert.equal((await tool(f, 'record_status')).action.publicRead, false);
+  f.request.recordingTextChannelId = f.request.sourceChannelId;
+  assert.equal((await tool(f, 'record_status')).action.publicRead, true);
 });
 
 test('member cannot prepare an admin write despite a claimed admin principal', async () => {
@@ -161,6 +207,82 @@ test('channel access previews identify the trusted guild and parent channel', as
   assert.match(result.action.summary, /222222222222222222/);
   assert.match(result.action.summary, /333333333333333333/);
   assert.match(result.action.summary, /parent/i);
+});
+
+test('member previews escape labels while keeping the exact member, team and thread identifiable', async () => {
+  const f = fixture('admin');
+  const identify = f.ctx.directory.getPersonByDiscordId;
+  f.ctx.directory.getPersonByDiscordId = async (id) =>
+    id === '123' ? { id: 'target', display_name: '**Sam** @everyone' } : identify(id);
+  const result = await tool(f, 'team_remove', { user: '123', team: 'infra' });
+  assert.match(result.action.summary, /<@123>/);
+  assert.match(result.action.summary, /Infrastructure/);
+  assert.match(result.action.summary, /<#444444444444444444>/);
+  assert.ok(result.action.summary.includes('\\*\\*Sam\\*\\*'));
+  assert.ok(!result.action.summary.includes('@everyone'));
+  assert.doesNotMatch(JSON.stringify(result.content), /Sam|Infrastructure/);
+});
+
+test('optional preview labels fall back to the member mention and team slug on lookup failure', async () => {
+  const f = fixture('admin');
+  const identify = f.ctx.directory.getPersonByDiscordId;
+  f.ctx.directory.getPersonByDiscordId = async (id) => {
+    if (id === '123') throw new Error('Sensitive person detail');
+    return identify(id);
+  };
+  f.ctx.directory.getTeamBySlug = async () => {
+    throw new Error('Sensitive team detail');
+  };
+  const result = await tool(f, 'team_remove', { user: '123', team: 'infra' });
+  assert.ok(result.action);
+  assert.match(result.action.summary, /<@123>/);
+  assert.match(result.action.summary, /infra/);
+  assert.doesNotMatch(result.action.summary, /Sensitive/);
+  assert.equal(
+    f.calls.some((call) => call[0] === 'update'),
+    false,
+  );
+});
+
+test('the turn deadline still rejects a preview whose optional label lookup stalls', async () => {
+  const f = fixture('admin');
+  let labels = 0;
+  f.ctx.directory.getTeamBySlug = async () => {
+    labels++;
+    return new Promise(() => {});
+  };
+  await assert.rejects(
+    f.ctx.toolRegistry.handlers.get('team_rename')(
+      { slug: 'infra', new_label: 'New' },
+      {
+        request: f.request,
+        principal: f.principal,
+        withDeadline: async (read) => {
+          const pending = read();
+          if (labels) throw new Error('Turn deadline');
+          return pending;
+        },
+      },
+    ),
+    /Turn deadline/,
+  );
+  assert.equal(labels, 1);
+});
+
+test('guild helper help is a shared guide while DM help remains personalized', async () => {
+  for (const input of [{}, { command: 'team' }, { command: 'seed' }]) {
+    const member = fixture();
+    const admin = fixture('admin');
+    const memberReply = await (await tool(member, 'help', input)).action.execute();
+    const adminReply = await (await tool(admin, 'help', input)).action.execute();
+    assert.deepEqual(adminReply.publicReply, memberReply.publicReply);
+    assert.doesNotMatch(JSON.stringify(adminReply), /\/seed|\/team create/);
+  }
+  const admin = fixture('admin');
+  delete admin.request.discordGuildId;
+  const reply = await (await tool(admin, 'help', { command: 'team' })).action.execute();
+  assert.equal(reply.publicReply, undefined);
+  assert.match(JSON.stringify(reply), /create/);
 });
 
 test('a delayed authentication cannot execute an expired action', async (t) => {

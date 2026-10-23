@@ -1,5 +1,7 @@
 import { commands } from './commands/index.js';
 import { authorizeCommand, dispatch } from './router.js';
+import { renderActionSummary } from './messages/helperActions.js';
+import { checkOnce } from './helperChecks.js';
 
 export const llmSafe = true;
 
@@ -33,6 +35,9 @@ const OPERATIONS = [
   ['record', 'stop', true],
   ['qna'],
 ];
+
+// Reply visibility is independent of slash-command authentication/ephemerality.
+const PUBLIC_READS = new Set(['team_list', 'team_roster', 'help', 'bug']);
 
 function optionSchema(option) {
   if (option.type === 'boolean') return { type: 'boolean', description: option.description };
@@ -90,10 +95,16 @@ export function createCommandTools({ appContext }) {
     const command = commands.get(commandName);
     const operation = subcommand ? command.subcommands.find((s) => s.name === subcommand) : command;
     const name = [commandName, subcommand].filter(Boolean).join('_').replaceAll('-', '_');
+    const delivery = PUBLIC_READS.has(name)
+      ? 'Replies publicly in server conversations'
+      : commandName === 'record'
+        ? 'Recording status and successful changes may be announced only in the meeting origin channel; other results are private'
+        : 'Delivers a private result';
     return {
+      terminal: true,
       definition: {
         name,
-        description: `${operation.description}. Authenticates the requesting user. Delivers a private result${confirm ? ' after user confirmation' : ''}. Request one action at a time; this ends the assistant turn.`,
+        description: `${operation.description}. Authenticates the requesting user. ${delivery}${confirm ? ' after private user confirmation' : ''}. Include all requested actions in the same tool-call response (one call per member for team changes, at most four calls total including lookups). Finish any document searches or reads in earlier tool rounds; never mix them with command calls in the same response. Prepared batches end the assistant turn; command results are not returned to the model. If every preparation fails, explain the errors or ask for missing details without further tool calls.`,
         input_schema: {
           type: 'object',
           additionalProperties: false,
@@ -123,22 +134,25 @@ export function createCommandTools({ appContext }) {
           discordChannelId: request.discordChannelId,
           channelUsedParent: Boolean(request.channelUsedParent),
           requireLinked: true,
+          sharedHelp: commandName === 'help' && Boolean(request.discordGuildId),
           expectedPersonId: principal.person.id,
           get expiresAt() {
             return expiresAt;
           },
         });
-        const check = async () => {
-          if (!appContext.helperToolsEnabled) throw new Error('Helper tools are disabled.');
-          const result = await authorizeCommand(intent, { commands, appContext });
-          if (result.error)
-            throw new Error('Your account or permissions no longer authorize this action.');
-          await request.checkSurface?.();
-          if (Date.now() >= intent.expiresAt) throw new Error('This action expired. Ask again.');
-          return result.principal;
-        };
+        const check = async (checks = new Map()) =>
+          checkOnce(checks, check, async () => {
+            if (!appContext.helperToolsEnabled) throw new Error('Helper tools are disabled.');
+            const result = await authorizeCommand(intent, { commands, appContext, checks });
+            if (result.error)
+              throw new Error('Your account or permissions no longer authorize this action.');
+            if (request.checkSurface)
+              await checkOnce(checks, request.checkSurface, request.checkSurface);
+            if (Date.now() >= intent.expiresAt) throw new Error('This action expired. Ask again.');
+            return result.principal;
+          });
         try {
-          await withDeadline(check);
+          await withDeadline(() => check());
         } catch {
           return {
             is_error: true,
@@ -147,49 +161,73 @@ export function createCommandTools({ appContext }) {
         }
         // No model data can override the author, guild, channel or meeting target.
         const runMeeting = request.runMeeting;
-        return {
-          content: { status: confirm ? 'confirmation_required' : 'private_result' },
-          action: {
-            userId: intent.discordUserId,
-            confirm,
-            summary: [
-              operation.description,
-              intent.discordGuildId
-                ? `Server: ${request.guildLabel ?? ''} (${intent.discordGuildId})`
-                : 'Direct message',
-              intent.discordGuildId
-                ? `Channel${intent.channelUsedParent ? ' (parent)' : ''}: ${intent.discordChannelId}`
-                : null,
-              intent.channelUsedParent ? `Request thread: ${request.sourceChannelId}` : null,
-              commandName === 'record' && subcommand === 'start'
-                ? `Recording location: your voice channel at confirmation. Minutes channel: ${request.sourceChannelId}`
-                : null,
-              commandName === 'record' && subcommand === 'start'
-                ? `Save transcript and minutes as a Google Doc: ${(options.save ?? true) ? 'yes' : 'no'}`
-                : null,
-              commandName === 'record' && subcommand === 'stop'
-                ? `Recording voice channel: ${request.recordingVoiceChannelId ?? 'no active recording'}. Applies only to the recording active when you asked.`
-                : null,
-              ...Object.entries(input).map(
-                ([key, value]) => `${key.replaceAll('_', ' ')}: ${JSON.stringify(value)}`,
-              ),
-            ]
-              .filter(Boolean)
-              .join('\n')
-              .replaceAll('`', '\\u0060'),
-            check,
-            setExpiresAt(value) {
-              expiresAt = value;
-            },
-            async execute() {
-              await check();
-              if (commandName === 'record' || commandName === 'qna') {
-                if (!runMeeting) return { content: 'Use this action in a server channel.' };
-                return runMeeting({ commandName, subcommand, options });
-              }
-              return dispatch(intent, { commands, appContext });
-            },
+        // Preparation decides whether to open a private interaction. The
+        // recording adapter rechecks the exact origin/session when publishing.
+        const publicRead = Boolean(
+          request.discordGuildId &&
+          (PUBLIC_READS.has(name) ||
+            (name === 'record_status' &&
+              request.recordingTextChannelId &&
+              request.recordingTextChannelId === request.sourceChannelId)),
+        );
+        // Resolve display labels only after authorization, without performing a write.
+        // The preview and execution both use the frozen, validated options.
+        const people = {};
+        const readLabel = (read) =>
+          withDeadline(async () => {
+            try {
+              return await read();
+            } catch {
+              return null;
+            }
+          });
+        for (const option of operation.options) {
+          if (option.type === 'user' && options[option.name]) {
+            const id = options[option.name].id;
+            people[id] = await readLabel(() => appContext.directory.getPersonByDiscordId(id));
+          }
+        }
+        const teamSlug = options.team ?? (commandName === 'team' ? options.slug : null);
+        const team =
+          teamSlug && !(commandName === 'team' && subcommand === 'create')
+            ? await readLabel(() => appContext.directory.getTeamBySlug(teamSlug))
+            : null;
+        const action = {
+          userId: intent.discordUserId,
+          confirm,
+          publicRead,
+          summary: renderActionSummary({
+            commandName,
+            subcommand,
+            operation,
+            options,
+            request,
+            people,
+            team,
+          }),
+          check,
+          setExpiresAt(value) {
+            expiresAt = value;
           },
+          async execute(checks = new Map()) {
+            await action.check(checks);
+            if (commandName === 'record' || commandName === 'qna') {
+              if (!runMeeting) return { content: 'Use this action in a server channel.' };
+              return runMeeting({ commandName, subcommand, options }, checks);
+            }
+            const payload = await dispatch(intent, { commands, appContext, checks });
+            return publicRead ? { ...payload, publicReply: { payload } } : payload;
+          },
+        };
+        return {
+          content: {
+            status: confirm
+              ? 'confirmation_required'
+              : publicRead
+                ? 'public_result'
+                : 'private_result',
+          },
+          action,
         };
       },
     };

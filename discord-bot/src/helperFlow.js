@@ -15,6 +15,10 @@ export const COULDNT_COMPLETE =
   "I couldn't finish that one — please try again, or narrow the question.";
 export const WITHHELD_ANSWER =
   "I couldn't confirm continued access to the sources for that answer. Please try again.";
+export const INCOMPLETE_ACTION =
+  "I couldn't prepare the full request, so nothing was changed. Check command access with `/help` privately and include the required arguments, then ask again.";
+export const MIXED_ACTION_REQUEST =
+  'Please ask for document research and commands separately. Nothing was changed.';
 
 // Derive the trusted retrieval context from the answer's destination. This is
 // the single place scope is decided, from the surface, never from the model:
@@ -113,6 +117,10 @@ export async function prepareHelperReply(appContext, turns, principal, destinati
         return { content: COULDNT_COMPLETE };
       case OUTCOME.WITHHELD:
         return { content: WITHHELD_ANSWER };
+      case OUTCOME.INCOMPLETE_ACTION:
+        return {
+          content: result.reason === 'mixed_tools' ? MIXED_ACTION_REQUEST : INCOMPLETE_ACTION,
+        };
       default:
         return { content: EMPTY_ANSWER };
     }

@@ -438,9 +438,11 @@ for replay, cost limits, revalidation tradeoffs, and offline coverage.
 
 ### Commands through mentions and DMs
 
-With helper tools enabled, ask for one action at a time: `@Misty show my teams`,
-`@Misty show the robotics roster`, or `@Misty start recording`. The same tools
-work in DMs where the underlying command does not need a server or channel.
+With helper tools enabled, ask `@Misty show my teams`, `@Misty show the robotics
+roster`, or `@Misty remove @Alex and @Sam from infrastructure`. Misty prepares
+all command calls in the same model response for one review, within the shared
+limit of four tool calls per request (including document lookups). The same
+tools work in DMs where the underlying command does not need a server or channel.
 
 | Capability | Available actions |
 | --- | --- |
@@ -459,18 +461,48 @@ context come from Discord, never from model arguments. Backend calls continue to
 use the bot's scoped service credentials; this does not mint personal API keys.
 Account linking and email verification remain explicit slash-command flows.
 
-Command results go directly to the requester privately and do not enter model
-history. Misty sends a DM, or offers a **View privately** button if DMs are closed.
-Reads and meeting Q&A start only after a private DM send succeeds or the requester
-opens that button. A later result-delivery failure never reruns the action.
+Command results are rendered directly and do not enter model history. In server
+conversations, team lists, team rosters, help and bug-report links reply publicly
+without a button. Public help is a shared guide that does not reveal the
+requester's access level; use `/help` privately for personalized command help.
+Other command results stay private by default, including
+personal lookups, document lists, meeting Q&A and administrative operations.
+Document search retains the channel-authorized retrieval rules above; full
+document reads remain DM-only.
+
+For private results, Misty posts a **Review privately** button for writes or
+**View privately** for reads. Only the requester can use it; the
+preview and results appear as ephemeral replies in that same conversation.
+No DM is opened for a server request. Discord requires the button interaction
+before it can show an ephemeral reply to a mention. Requests made in DMs stay
+there. Private reads and meeting Q&A start only after the requester opens the
+private response (or a private acknowledgement is delivered for a DM request). A later
+result-delivery failure never reruns the action.
 Every write, including recording start/stop, first shows its arguments and
-destination in a private preview with **Confirm** and **Cancel**. Only the
-requester can confirm. The confirmation window lasts two minutes from the first
-successful private preview; generation time does not shorten it, and reopening
+destination in a private preview with **Confirm** and **Cancel**. Member changes
+show the directory names, Discord mentions and team label/slug. If an optional
+name lookup fails, the preview still identifies the member by mention and the
+team by slug. A multi-action
+request lists every proposed action; one confirmation approves the whole list.
+Commands run sequentially and report each result while access and expiry checks
+still permit delivery; they are not an atomic transaction. If a later action
+loses permission, earlier results are still delivered when their own checks
+pass. A result whose access or expiry check fails is withheld even if its action
+completed. Inspect the current state before asking again.
+A mixed public/private batch uses the private interaction, then
+delivers each result with its own visibility. An unexpected execution error stops
+the remaining actions without retrying earlier ones. If some command calls prepare
+and others fail, the entire proposal is withheld and Misty explains that nothing
+was changed. If every command fails preparation, Misty can explain the sanitized
+errors or ask for missing details. No further tools run until the user submits a
+new request. Only the requester can confirm. The confirmation window lasts two
+minutes from the first successful private preview; generation time does not
+shorten it, and reopening
 the preview does not extend it. Access changes or exhausted evidence checks can
 still block an action. Unopened actions expire after two minutes. Actions are
-single-use and disappear on restart. There can be at most eight pending actions
-per user and 500 per process. Capacity is reserved before delivery or execution;
+single-use and disappear on restart. A batch occupies one pending slot. There
+can be at most eight pending actions per user and 500 per process. Capacity is
+reserved before delivery or execution;
 a full queue asks you to cancel an action or wait. A failed action is never retried
 automatically; inspect the current state before asking again if its result could
 not be delivered.
@@ -481,12 +513,25 @@ the requester's voice channel at confirmation time and posts minutes to the
 original request channel. Its preview states whether the transcript and minutes
 will be saved as a Google Doc (default yes, matching `/record start`; ask for
 `save=false` to opt out). A stop confirmation applies only to the recording
-that was active when requested. Source-channel access is checked again before
-execution and private delivery.
+that was active when requested. Recording status replies publicly only when
+requested in that meeting's exact origin text channel or thread. If that recording
+ends and no new recording has started before the status runs, Misty reports that
+no recording is in progress; it rechecks the session before posting. A replacement
+recording in another channel cannot publish its status here. Successful
+start/stop actions also announce there after private confirmation, while keeping
+the full result in the requester's ephemeral response. These public messages
+omit voice-channel locations and requester-specific details. Requests
+elsewhere and unsuccessful recording actions keep their results private. An
+auto-created helper thread is not substituted for the meeting's origin, and a
+thread never publishes into its parent. Source-channel access is checked again
+before execution and every public or private message part.
 
-The first prepared command action ends the helper turn; ask separately for
-additional actions. Existing slash commands remain available. Enabling this
-feature uses the same flag and rollout acceptance below; no new environment
+The prepared command batch ends the helper turn. Document research must finish
+in earlier tool rounds; a model response mixing document tools and commands is
+rejected before either runs, with a request to ask separately.
+Existing slash commands retain
+their current reply visibility. Enabling this feature uses the same flag and
+rollout acceptance below; no new environment
 variables, backend endpoints, or slash registrations are required.
 
 ### Channel scope and activation
@@ -714,6 +759,7 @@ local `.env`.
 | `src/toolExecutor.js` | Bounded document tool loop, requester revalidation, and terminal command-action handoff. |
 | `src/commandTools.js` | Explicit command-tool allowlist, strict arguments, current-user authorization, and private action previews. |
 | `src/helperActions.js` | Bounded, expiring, single-use actions bound to their requester. |
+| `src/helperChecks.js` | Share duplicate authorization work within one validation step; never cache across operations or messages. |
 | `src/registerCommands.js` | Slash-command registration (global by default; testing-guild only when `beta = true`). Runs as Railway's persistent-environment `preDeployCommand`; ephemeral PR copies use the [preview override](../docs/pr-previews.md#automatic-railway-pr-environments). `npm run register` runs it locally. |
 | `src/defineCommand.js` | Neutral, surface-agnostic command factory. |
 | `src/adapters/discord/index.js` | Discord event wiring; dispatches to the router or dedicated recording handler. |
