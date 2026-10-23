@@ -26,6 +26,7 @@ from src.embedding import HttpEmbeddingClient
 from src.fetch import registry
 from src.fetch.connectors import ConnectorsFetcher, SOURCE_GONE_DETAIL
 from tests.retrieval_cases import FIXTURE, P1, P2, P3, T1, T2, expected_response, vector
+from tests.fake_embedder import FAKE_MODEL
 
 BOOTSTRAP_KEY = "integration-bootstrap"
 EMAILS = {P1: "alice@example.test", P2: "bob@example.test", P3: "other@example.test"}
@@ -592,7 +593,7 @@ class IngestionRetrievalCases:
         assert flow.store.list_doc_chunks(UUID(doc["id"])) == chunks
         assert flow.search() == before
         flow.citations(before, doc, LONG)  # The retained hits explicitly name the OLD version.
-        assert UUID(doc["id"]) in flow.store.list_docs_for_indexing()
+        assert UUID(doc["id"]) in flow.store.list_docs_for_indexing(models=[FAKE_MODEL])
         if failure == "storage":
             monkeypatch.setattr(flow.store, "replace_doc_chunks_if_current", original)
         result = flow.retry()

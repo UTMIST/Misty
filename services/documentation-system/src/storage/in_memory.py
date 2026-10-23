@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from math import sqrt
 from threading import Lock
@@ -12,6 +13,8 @@ from contracts.types import (
     DocContentMeta,
     DocGrant,
     DocIndexState,
+    IndexCoverage,
+    IndexModelCoverage,
     Source,
     SourceGrant,
 )
@@ -45,7 +48,8 @@ class InMemoryStorageAdapter:
         self._grants: dict[UUID, list[DocGrant]] = {}
         # doc_id -> (content_text, content_hash, fetched_at)
         self._content: dict[UUID, tuple[str, str, datetime | None]] = {}
-        self._chunks: dict[UUID, list[DocChunk]] = {}
+        # doc_id -> embedding_model -> that model's complete set, by ordinal
+        self._chunks: dict[UUID, dict[str, list[DocChunk]]] = {}
         self._source_refresh_lock = Lock()
         self._source_refresh_run: UUID | None = None
         self._meeting_lock = Lock()
@@ -240,7 +244,7 @@ class InMemoryStorageAdapter:
         for doc in self._docs.values():
             if not doc.active or not self._visible(doc, visibility):
                 continue
-            for chunk in self._chunks.get(doc.id, []):
+            for chunk in self._doc_chunks(doc.id):
                 if (
                     chunk.embedding_model != embedding.model
                     or chunk.dimensions != embedding.dimensions
@@ -550,11 +554,24 @@ class InMemoryStorageAdapter:
         _text, content_hash, fetched_at = entry
         return DocContentMeta(content_hash=content_hash, fetched_at=fetched_at)
 
+    def _doc_chunks(self, doc_id: UUID) -> list[DocChunk]:
+        sets = self._chunks.get(doc_id, {})
+        return [chunk for model in sorted(sets) for chunk in sets[model]]
+
+    def _store_set(self, doc_id: UUID, validated: list[DocChunk], *, keep_others: bool) -> None:
+        sets = self._chunks.get(doc_id, {}) if keep_others and validated else {}
+        if validated:
+            sets = {**sets, validated[0].embedding_model: validated}
+        if sets:
+            self._chunks[doc_id] = sets
+        else:
+            self._chunks.pop(doc_id, None)
+
     def replace_doc_chunks(self, doc_id: UUID, chunks: list[DocChunk]) -> bool:
         validated = validate_doc_chunks(chunks)
         if doc_id not in self._docs or self._docs[doc_id].purged_at:
             return False
-        self._chunks[doc_id] = validated
+        self._store_set(doc_id, validated, keep_others=False)
         return True
 
     def list_doc_chunks(
@@ -563,7 +580,7 @@ class InMemoryStorageAdapter:
         doc = self._docs.get(doc_id)
         if doc is None or not self._visible(doc, visibility):
             return []
-        return [chunk.model_copy(deep=True) for chunk in self._chunks.get(doc_id, [])]
+        return [chunk.model_copy(deep=True) for chunk in self._doc_chunks(doc_id)]
 
     def replace_doc_chunks_if_current(
         self,
@@ -583,7 +600,7 @@ class InMemoryStorageAdapter:
             or content_hash(doc.title or "") != expected_title_hash
         ):
             return False
-        self._chunks[doc_id] = validated
+        self._store_set(doc_id, validated, keep_others=True)
         return True
 
     def clear_doc_chunks_if_unindexable(self, doc_id: UUID) -> bool:
@@ -602,38 +619,90 @@ class InMemoryStorageAdapter:
         self._chunks.pop(doc_id, None)
         return True
 
-    def get_doc_index_state(self, doc_id: UUID) -> DocIndexState | None:
-        chunks = self._chunks.get(doc_id) if doc_id in self._docs else None
-        if not chunks:
-            return None
-        return DocIndexState(
-            source_content_hash=chunks[0].source_content_hash,
-            source_title_hash=chunks[0].source_title_hash,
-            embedding_model=chunks[0].embedding_model,
-            chunk_count=len(chunks),
-        )
+    def get_doc_index_states(self, doc_id: UUID) -> dict[str, DocIndexState]:
+        if doc_id not in self._docs:
+            return {}
+        return {
+            model: DocIndexState(
+                source_content_hash=chunks[0].source_content_hash,
+                source_title_hash=chunks[0].source_title_hash,
+                embedding_model=model,
+                chunk_count=len(chunks),
+            )
+            for model, chunks in sorted(self._chunks.get(doc_id, {}).items())
+        }
+
+    def delete_doc_chunks_except(self, doc_id: UUID, keep_models: Sequence[str]) -> bool:
+        sets = self._chunks.get(doc_id, {})
+        kept = {model: chunks for model, chunks in sets.items() if model in keep_models}
+        if len(kept) == len(sets):
+            return False
+        if kept:
+            self._chunks[doc_id] = kept
+        else:
+            self._chunks.pop(doc_id, None)
+        return True
 
     def list_docs_for_indexing(
-        self, *, stale_only: bool = True, after: UUID | None = None, limit: int = 100
+        self,
+        *,
+        models: Sequence[str],
+        stale_only: bool = True,
+        after: UUID | None = None,
+        limit: int = 100,
     ) -> list[UUID]:
         out = []
         for doc_id in sorted(self._docs):
             if after is not None and doc_id <= after:
                 continue
             content = self._content.get(doc_id)
-            chunks = self._chunks.get(doc_id)
+            sets = self._chunks.get(doc_id, {})
             if self._docs[doc_id].active and content is not None:
-                due = (
-                    not stale_only
-                    or not chunks
-                    or chunks[0].source_content_hash != content[1]
-                    or chunks[0].source_title_hash != content_hash(self._docs[doc_id].title or "")
+                title_hash = content_hash(self._docs[doc_id].title or "")
+                due = not stale_only or (
+                    (
+                        any(
+                            model not in sets
+                            or sets[model][0].source_content_hash != content[1]
+                            or sets[model][0].source_title_hash != title_hash
+                            for model in models
+                        )
+                        or any(model not in models for model in sets)
+                    )
+                    # Whitespace-only text has nothing to embed: indexing it
+                    # clears its chunks and records nothing.
+                    and (bool(sets) or bool(content[0].strip()))
                 )
             else:
-                due = bool(chunks)
+                due = bool(sets)
             if due:
                 out.append(doc_id)
         return out[:limit]
+
+    def get_index_coverage(self, models: Sequence[str]) -> IndexCoverage:
+        indexable = [
+            doc_id for doc_id, doc in self._docs.items() if doc.active and doc_id in self._content
+        ]
+        stored: dict[str, list[list[DocChunk]]] = {model: [] for model in models}
+        for sets in self._chunks.values():
+            for model, chunks in sets.items():
+                stored.setdefault(model, []).append(chunks)
+        return IndexCoverage(
+            indexable_docs=len(indexable),
+            models=[
+                IndexModelCoverage(
+                    model=model,
+                    docs=len(doc_sets),
+                    chunks=sum(len(chunks) for chunks in doc_sets),
+                    chunk_chars=sum(len(c.chunk_text) for chunks in doc_sets for c in chunks),
+                    missing_docs=sum(
+                        bool(self._chunks.get(doc_id)) and model not in self._chunks[doc_id]
+                        for doc_id in indexable
+                    ),
+                )
+                for model, doc_sets in sorted(stored.items())
+            ],
+        )
 
     # --- Sources ---
 

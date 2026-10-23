@@ -1,3 +1,4 @@
+from tests.reembed_integration_cases import ReembedIntegrationCases
 from tests.doc_identity_cases import DocIdentityCases
 from tests.google_identity_cases import GoogleIdentityCases
 from datetime import datetime, timedelta, timezone
@@ -446,3 +447,11 @@ class TestDocIdentity(DocIdentityCases):
         from tests.conftest import build_seed_sources
 
         return InMemoryStorageAdapter(seed_sources=build_seed_sources())
+
+
+class TestReembedIntegration(ReembedIntegrationCases):
+    @pytest.fixture
+    def adapter(self):
+        from tests.conftest import build_seed_sources
+
+        return InMemoryStorageAdapter(build_seed_sources())

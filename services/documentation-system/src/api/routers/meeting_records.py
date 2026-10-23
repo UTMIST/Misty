@@ -10,7 +10,13 @@ from contracts.embedder import Embedder
 from contracts.meeting import MeetingPayload, MeetingRetryResult, MeetingWriter, PersistenceStatus
 from contracts.storage import StorageAdapter
 from src.api.auth import get_actor, require_scope
-from src.api.deps import get_directory, get_embedder, get_meeting_writer, get_storage
+from src.api.deps import (
+    get_directory,
+    get_embedder,
+    get_meeting_writer,
+    get_storage,
+    get_target_embedder,
+)
 from src.config import get_settings
 from src.meeting_records import MeetingRecords
 
@@ -32,8 +38,11 @@ def get_records(
     writer: MeetingWriter = Depends(get_meeting_writer),
     directory: DirectoryClient = Depends(get_directory),
     embedder: Embedder = Depends(get_embedder),
+    target: Embedder | None = Depends(get_target_embedder),
 ):
-    return MeetingRecords(storage, writer, directory, get_settings(), embedder=embedder)
+    return MeetingRecords(
+        storage, writer, directory, get_settings(), embedder=embedder, target=target
+    )
 
 
 @router.post("/retry-due", response_model=MeetingRetryResult)

@@ -1,5 +1,7 @@
 import json
+import logging
 import re
+import time
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -42,6 +44,35 @@ class _SearchRoute(APIRoute):
 
 
 router = APIRouter(tags=["search"], route_class=_SearchRoute)
+logger = logging.getLogger(__name__)
+
+# Retrieval excludes chunks embedded by any model but the query's (#209), so a
+# doc indexed only under another model drops out of results. That is expected
+# never to happen outside a premature SEARCH_EMBED_MODEL switch; check at most
+# this often per process and warn, without a coverage query on every search.
+MISMATCH_CHECK_SECONDS = 60.0
+_next_mismatch_check = 0.0
+
+
+def _warn_on_excluded_docs(storage: StorageAdapter, model: str) -> None:
+    global _next_mismatch_check
+    now = time.monotonic()
+    if now < _next_mismatch_check:
+        return
+    _next_mismatch_check = now + MISMATCH_CHECK_SECONDS
+    try:
+        coverage = storage.get_index_coverage([model])
+    except Exception as e:  # diagnostics must never fail a search
+        logger.warning("embedding-model coverage check failed: %s", type(e).__name__)
+        return
+    missing = next(c.missing_docs for c in coverage.models if c.model == model)
+    if missing:
+        logger.warning(
+            "%d docs are indexed only under other embedding models and are excluded from "
+            "search under %s; run POST /docs/index (see GET /docs/index/status)",
+            missing,
+            model,
+        )
 
 
 @router.post("/search", response_model=SearchResponse)
@@ -96,4 +127,5 @@ def search(
         )
     except RetrievalUnavailable:
         raise HTTPException(503, "retrieval storage unavailable") from None
+    _warn_on_excluded_docs(storage, embedding.model)
     return SearchResponse(results=results)

@@ -189,7 +189,7 @@ def test_legacy_web_form_enters_refresh_and_preserves_identity_and_manual_grants
     ).json()["doc"]
     doc_id = UUID(old["id"])
     grants = store.list_grants(doc_id)
-    assert store.get_doc_index_state(doc_id) is not None
+    assert store.get_doc_index_states(doc_id)
     assert discover(client, "form", "gdrive")["status"] == "registered"
     assert discover(client, "form", "gdrive")["status"] == "registered"
     assert len(fetchers.calls) == 1

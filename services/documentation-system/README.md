@@ -189,7 +189,9 @@ documentation-system/
 │       ├── 008_doc_chunks.py      pgvector embeddings and generated keyword metadata
 │       ├── 009_remove_retired_source.py  Retires a source while preserving its documents
 │       ├── 010_chunk_title_hash.py  Embedding title provenance and stale-index detection
-│       └── 011_source_refresh_run.py  Persistent singleton runner guard
+│       ├── 011_source_refresh_run.py  Persistent singleton runner guard
+│       ├── 012–016                  Meeting persistence and recovery
+│       └── 017_chunk_sets_per_model.py  Complete chunk sets per embedding model
 │
 ├── tests/                      Fast suite plus gated Postgres integration tests
 │   ├── conftest.py              build_seed_sources() — shared seed matching migration 002
@@ -212,6 +214,7 @@ documentation-system/
 │   ├── test_migration_009.py     Retired-source cleanup and registry rollback
 │   ├── test_migration_010.py     Title provenance migration and preservation of existing chunks
 │   ├── test_migration_011.py     Runner guard migration and catalog preservation
+│   ├── test_migration_017.py     Per-model sets and populated staging preservation
 │   ├── test_ingest.py
 │   ├── test_postgres_adapter.py   Integration tests (requires running Postgres; gated)
 │   ├── test_protocols.py
@@ -284,7 +287,7 @@ Machine-readable OpenAPI schema: `GET /openapi.json`. Interactive Swagger UI: `G
 | `LLM_BASE_URL` | `http://localhost:8002` | Platform LLM service for chunk and query embeddings |
 | `LLM_API_KEY` | empty | Secret consumer key with `embed`; missing key makes search return 503 |
 | `SEARCH_EMBED_MODEL` | `openai-embed-3-small` | Neutral embedding alias; `openai-embed-3-large` is also supported at 1536 dimensions |
-| `EMBED_MODEL` | unset | Indexing override; defaults to `SEARCH_EMBED_MODEL`. Keep models aligned for retrieval |
+| `EMBED_MODEL` | unset | Re-embed target; while it names another model, indexing also builds that model's sets beside the served ones. See [re-embedding](docs/DEPLOYMENT.md#re-embedding-after-a-model-change-209) |
 | `EMBED_MAX_REQUEST_CHARS` | `400000` | Indexing request character budget; keep at or below the LLM service's limit |
 | `SEARCH_MIN_COSINE` | `0.3` | Absolute vector relevance floor, greater than 0 and at most 1; complete keyword matches qualify independently |
 

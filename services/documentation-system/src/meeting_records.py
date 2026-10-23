@@ -59,12 +59,15 @@ def render_html(record):
 
 
 class MeetingRecords:
-    def __init__(self, storage, writer, directory, settings, *, embedder=None, now=None):
+    def __init__(
+        self, storage, writer, directory, settings, *, embedder=None, target=None, now=None
+    ):
         self.storage = storage
         self.writer = writer
         self.directory = directory
         self.settings = settings
         self.embedder = embedder
+        self.target = target
         self.now = now or (lambda: datetime.now(timezone.utc))
 
     def accept(self, meeting_id, payload, *, actor):
@@ -176,7 +179,9 @@ class MeetingRecords:
     def _index(self, record):
         if self.embedder is None or not record or record.removed_at or not record.index_pending:
             return
-        outcome = index_doc(record.doc_id, storage=self.storage, embedder=self.embedder)
+        outcome = index_doc(
+            record.doc_id, storage=self.storage, embedder=self.embedder, target=self.target
+        )
         pending = outcome.status in {"failed", "skipped"}
         self._change(
             record,

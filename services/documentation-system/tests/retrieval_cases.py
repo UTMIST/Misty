@@ -219,6 +219,43 @@ class RetrievalCases:
             )
         assert search(adapter) == []
 
+    def test_coexisting_model_sets_are_searched_one_model_at_a_time(self, adapter):
+        # A re-embed (#209) builds a second set beside the served one. Each
+        # search reads only its own model's set: no duplicate or mixed hits.
+        large = "text-embedding-3-large"
+        for doc in seed(adapter).values():
+            text = adapter.get_doc_content(doc.id)
+            title_hash = content_hash(doc.title or "")
+            adapter.update_doc(doc.id, {"active": True}, actor="test")
+            for model, prefix in ((FIXTURE["model"], [1, 0]), (large, [0, 1])):
+                chunk = make_chunk(
+                    text=text,
+                    embedding=vector(prefix),
+                    embedding_model=model,
+                    source_title_hash=title_hash,
+                )
+                assert adapter.replace_doc_chunks_if_current(
+                    doc.id, chunk.source_content_hash, [chunk], expected_title_hash=title_hash
+                )
+
+        def hits(model, prefix):
+            found = adapter.search_chunks(
+                query="CPSIF",
+                embedding=QueryEmbedding(model=model, vector=vector(prefix)),
+                visibility=ALICE,
+                k=10,
+                min_cosine=0.3,
+            )
+            assert len({(h.doc_id, h.chunk.ordinal) for h in found}) == len(found)
+            return {h.doc_id for h in found}
+
+        served = hits(FIXTURE["model"], [1, 0])
+        assert served and hits(large, [0, 1]) == served
+        for doc_id in served:
+            adapter.delete_doc_chunks_except(doc_id, [large])
+        assert hits(FIXTURE["model"], [1, 0]) == set()
+        assert hits(large, [0, 1]) == served
+
     def test_relevance_floor_keyword_override_and_zero_vector(self, adapter):
         doc = make_doc(adapter)
         adapter.add_grant(doc.id, grantee_type="person", grantee_id=P1, actor="test")

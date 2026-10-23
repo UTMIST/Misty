@@ -47,22 +47,10 @@ def test_posts_inputs_with_key_and_returns_resolved_model():
         return _ok(["a", "b"])
 
     batch = HttpEmbedder("http://llm/", "k", client=_client(handler)).embed(["a", "b"])
-    assert seen == [{"inputs": ["a", "b"]}]
+    assert seen == [{"inputs": ["a", "b"], "model": "openai-embed-3-small"}]
     assert batch.model == "text-embedding-3-small"
     assert batch.dimensions == 1536
     assert [v[0] for v in batch.vectors] == [0.0, 1.0]
-
-
-def test_sends_configured_model_alias():
-    requests = []
-    embedder = HttpEmbedder(
-        "http://llm",
-        "k",
-        model="openai-embed-3-small",
-        client=_client(_recording_handler(requests)),
-    )
-    embedder.embed(["a"])
-    assert requests[0]["model"] == "openai-embed-3-small"
 
 
 def test_vectors_follow_response_index_not_response_order():
@@ -186,12 +174,23 @@ def test_malformed_body_is_rejected(body):
         embedder.embed(["a"])
 
 
-def test_model_change_between_batches_is_unavailable():
-    models = iter(["model-a", "model-b"])
+def test_sends_configured_model_alias_and_reports_its_resolved_id():
+    requests = []
+    embedder = HttpEmbedder(
+        "http://llm",
+        "k",
+        model="openai-embed-3-large",
+        client=_client(_recording_handler(requests, model="text-embedding-3-large")),
+    )
+    assert embedder.model == "text-embedding-3-large"
+    assert embedder.embed(["a"]).model == "text-embedding-3-large"
+    assert requests[0]["model"] == "openai-embed-3-large"
 
-    def handler(request):
-        return _ok(json.loads(request.content)["inputs"], model=next(models))
 
-    embedder = HttpEmbedder("http://llm", "k", max_request_chars=1, client=_client(handler))
-    with pytest.raises(EmbedderUnavailable, match="model changed"):
-        embedder.embed(["a", "b"])
+def test_response_from_another_model_is_rejected():
+    # An llm-side mapping change must not store vectors under the wrong set.
+    embedder = HttpEmbedder(
+        "http://llm", "k", client=_client(_recording_handler([], model="text-embedding-3-large"))
+    )
+    with pytest.raises(EmbedderRejected, match="requested text-embedding-3-small"):
+        embedder.embed(["a"])

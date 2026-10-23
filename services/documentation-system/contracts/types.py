@@ -159,6 +159,29 @@ class DocIndexState(BaseModel):
     chunk_count: int
 
 
+class IndexModelCoverage(BaseModel):
+    """How much of the catalog one embedding model's chunk sets cover."""
+
+    model_config = ConfigDict(extra="forbid")
+    model: str
+    # Docs with a set for this model, its chunks, and their total chunk_text
+    # length in characters (the input size behind a re-embed estimate).
+    docs: int
+    chunks: int
+    chunk_chars: int
+    # Active docs with content indexed under some other model but not this
+    # one. Search under this model cannot return them (#209).
+    missing_docs: int
+
+
+class IndexCoverage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Active docs with stored content: everything indexing should cover.
+    indexable_docs: int
+    # Every stored model plus each requested one, ordered by model id.
+    models: list[IndexModelCoverage]
+
+
 class DocChunk(BaseModel):
     """An embedded slice of a document, identified within its replacement set.
 
