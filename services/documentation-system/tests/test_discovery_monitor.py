@@ -174,10 +174,10 @@ def test_monitor_failure_preserves_work_and_never_replays_it(monitored_cli, fail
     outcome["monitor_failure"] = failed
     assert main(["--require-monitor"]) == 2
     assert sum(r.url.path == "/docs/discovery" for r in requests) == 2
-    if failed == "/run-secret/start":
-        assert "/complete-secret" not in events
-        assert events[-1] == "/run-secret/fail"
-    elif failed == "/complete-secret":
+    # A clean scan still resets the completion deadline, but any earlier
+    # delivery failure must keep the run check failed.
+    assert "/complete-secret" in events
+    if failed != "/run-secret":
         assert events[-1] == "/run-secret/fail"
     output = capsys.readouterr()
     assert "secret" not in output.out + output.err

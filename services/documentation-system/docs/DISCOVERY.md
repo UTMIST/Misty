@@ -182,7 +182,8 @@ and rejects using the same check for both signals. Monitor requests use a separa
 HTTP client, empty POST bodies, a per-invocation UUID, 10-second phase timeouts,
 and no redirects or retries. HTTP 200 must contain exactly `OK` after trimming;
 unknown/rate-limited responses are failures. See the [ping API](https://healthchecks.io/docs/http_api/).
-A failed start ping does not prevent discovery work, but prevents a success ping.
+A failed start ping does not prevent discovery work or the completion ping, but
+the run check then receives failure.
 Any monitor-delivery failure exits 2 without replaying imports. Final pings happen
 while the checkpoint lock remains held; an overlapping invocation sends failure
 without sending start or completion, so it cannot hide the active run.

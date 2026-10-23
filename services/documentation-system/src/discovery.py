@@ -474,7 +474,7 @@ def main(argv=None) -> int:
         # Partial scans and errors must never reset the full-scan deadline.
         # Only a newly completed clean traversal (exit 0) sends this success.
         if completion_monitor and code == 0:
-            monitor_failed = not completion_monitor.ping("success")
+            monitor_failed = not completion_monitor.ping("success") or monitor_failed
         if monitor:
             event = "success" if code == 0 and not monitor_failed else "fail"
             monitor_failed = not monitor.ping(event) or monitor_failed
