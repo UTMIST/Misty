@@ -175,7 +175,6 @@ Migration history:
 - **`011_source_refresh_run`** — adds the singleton refresh-runner guard. Apply before
   starting the new runner; stop runners before downgrading. See the
   [refresh recovery procedure](#recovery-credential-rotation-and-disablerollback).
-
 - **`012`–`016`** — meeting records and recovery state; see the
   [meeting persistence migrations](#meeting-record-persistence).
 - **`017_chunk_sets_per_model`** — widens the chunk key to retain complete sets
@@ -184,6 +183,15 @@ Migration history:
   Downgrading to `016` refuses if any document has multiple models: first finish
   the [model cleanup](#re-embedding-after-a-model-change-209), stop indexing writers,
   and verify that every doc has at most one model. The downgrade preserves that set.
+- **`018_google_source_urls`** — replaces existing Drive file display URLs with native
+  Docs/Sheets/Slides editor links, or `/view` links for `gdrive`. Only recognized Drive
+  URLs matching the file identity in `url_normalized` qualify, including retired rows.
+  Editor/manual links, URLs carrying a `resourcekey` query parameter, and non-Google
+  sources stay intact. Normalized keys, grants, content, chunks and audit fields are unchanged; no provider calls or re-indexing
+  are needed. The transaction briefly locks catalog writes while snapshotting and
+  updating links. `doc_source_url_backfill` retains exact originals for rollback.
+  Downgrading to `017` restores only rows still carrying the replacement URL and drops
+  that rollback table; later URL edits and newly inserted documents survive.
 
 Downgrading `008` removes the chunk table/index, preserving catalog records and full
 content. The database-level `vector` extension remains installed, even if `008`

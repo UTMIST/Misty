@@ -155,6 +155,12 @@ Migration `004` adds a **partial unique index** on `url_normalized WHERE active`
 database enforces dedup rather than only ingest's read-then-write. `WHERE active` lets a
 soft-deleted doc's URL be catalogued again.
 
+`url` is the display/source link returned by document reads and search hits;
+`url_normalized` is its deduplication identity. Discovery chooses native Google editor
+links from the source type without an extra provider call (see [discovery lifecycle](DISCOVERY.md#recovery-and-lifecycle)).
+The migration-owned `doc_source_url_backfill` table retains original and replacement
+URLs for exact rollback of migration `018`; application adapters do not use it.
+
 ### `doc_grants`
 
 Who may see a doc (migrations `003` and `007`). Ownership is metadata only. One row per grant:
@@ -259,7 +265,7 @@ The document FK cascades on hard deletion. Each row stores `chunk_text`, half-op
 Migration `010` adds nullable `source_title_hash`: SHA-256 of the title (None treated
 as empty). It records embedding context separately from the body hash used by citations.
 Existing chunks retain NULL provenance until the normal stale-index pass rebuilds them.
-Migration `017` widens the key to `(doc_id, embedding_model, ordinal)`, so a doc can
+Migration `018` widens the key to `(doc_id, embedding_model, ordinal)`, so a doc can
 hold one complete set per model while a re-embed runs (see
 [Model changes](#model-changes-209)). Its downgrade refuses while any doc still holds
 two models' sets rather than guess which to discard.

@@ -35,6 +35,27 @@ def discover(client, file_id="file", source_id="gdocs"):
     return response.json()
 
 
+@pytest.mark.parametrize(
+    "source_id,url",
+    [
+        ("gdocs", "https://docs.google.com/document/d/file/edit"),
+        ("gsheets", "https://docs.google.com/spreadsheets/d/file/edit"),
+        ("gslides", "https://docs.google.com/presentation/d/file/edit"),
+        ("gdrive", "https://drive.google.com/file/d/file/view"),
+    ],
+)
+def test_discovery_stores_source_link_and_preserves_drive_identity(ctx, source_id, url):
+    client, store, fetchers = ctx
+    result = discover(client, source_id=source_id)
+    doc = store.get_doc(UUID(result["doc_id"]))
+    assert doc.url == url
+    assert doc.url_normalized == "https://drive.google.com/file/d/file"
+    assert fetchers.calls == [(source_id, url)]
+    assert discover(client, source_id=source_id)["doc_id"] == str(doc.id)
+    assert len(fetchers.calls) == len(store.list_docs()) == 1
+    assert client.get(f"/docs/{doc.id}", headers=AUTH).json()["url"] == url
+
+
 def test_discovery_indexes_with_actual_acl_and_skips_repeated_fetch(ctx, fake_embedder):
     client, store, fetchers = ctx
     result = discover(client)

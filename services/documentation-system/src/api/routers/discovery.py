@@ -27,6 +27,8 @@ from src.source_access import GOOGLE_SOURCE_IDS
 
 router = APIRouter(prefix="/docs/discovery", tags=["docs"])
 
+_EDITOR_PATHS = {"gdocs": "document", "gsheets": "spreadsheets", "gslides": "presentation"}
+
 
 class DiscoveryImport(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -89,7 +91,12 @@ def import_discovered(
         )
     result = ingest_doc(
         DocIngest(
-            url=f"https://drive.google.com/file/d/{payload.file_id}",
+            url=(
+                f"https://docs.google.com/{_EDITOR_PATHS[payload.source_id]}"
+                f"/d/{payload.file_id}/edit"
+                if payload.source_id in _EDITOR_PATHS
+                else f"https://drive.google.com/file/d/{payload.file_id}/view"
+            ),
             source_id=payload.source_id,
         ),
         storage=storage,

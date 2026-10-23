@@ -2,6 +2,24 @@ const MESSAGE_LIMIT = 2000;
 export const DELIVERY_ERROR = 'I couldn’t send the full reply. Please try again shortly.';
 
 function preferredBoundary(text, limit, markers, fence) {
+  const sources = [
+    ...text.matchAll(/^(?:• \[[^\r\n]*\]\(<https?:\/\/[^\r\n]*>\)|<https?:\/\/[^\r\n]*>)$/gm),
+  ];
+  function keepSourceWhole(boundary) {
+    const source = sources.find(
+      (line) => line.index < boundary && boundary < line.index + line[0].length,
+    );
+    // Oversized lines must still make progress through the normal splitter.
+    if (!source || source[0].length > MESSAGE_LIMIT) return boundary;
+    const end = source.index + source[0].length;
+    const heading = headings.findLast((item) => item.index + item[0].length === source.index);
+    if (heading && end - heading.index <= MESSAGE_LIMIT) {
+      if (heading.index > 0) return heading.index;
+      if (end <= limit) return end;
+    }
+    if (source.index > 0) return source.index;
+    return source[0].length <= limit ? source[0].length : boundary;
+  }
   const available = text.slice(0, limit);
   const headings = [...available.matchAll(/^ {0,3}#{1,6}[\t ]+[^\r\n]*(?:\r?\n[\t ]*)*/gm)].filter(
     (heading) => {
@@ -17,7 +35,7 @@ function preferredBoundary(text, limit, markers, fence) {
   const section = headings.findLast(
     (heading) => available.slice(0, heading.index).trim().length > 0,
   );
-  if (section) return section.index;
+  if (section) return keepSourceWhole(section.index);
   // Keep separators with the preceding text. Prefer complete paragraphs and
   // sentences; within whitespace, prefer a line break over a space or tab.
   for (const pattern of [/\r?\n[\t ]*\r?\n/g, /[.!?]["'”’\])]*\s+/g, /\n/g, /\s+/g]) {
@@ -31,9 +49,9 @@ function preferredBoundary(text, limit, markers, fence) {
       );
       if (match.index > 0 && !separatesHeading) boundary = candidate;
     }
-    if (boundary) return boundary;
+    if (boundary) return keepSourceWhole(boundary);
   }
-  return limit;
+  return keepSourceWhole(limit);
 }
 
 /** Split at prose boundaries, balancing fenced code blocks within each message. */

@@ -209,6 +209,65 @@ test('authorized citations survive the real Discord mention and DM delivery path
   }
 });
 
+test('oversized citations preserve complete links through channel and DM delivery', async () => {
+  const urls = [1850, 1970, 1971, 1972, 1978, 1980].map((size) => {
+    const url = 'https://example.test/' + 'a'.repeat(size);
+    return [url, url];
+  });
+  urls.push(
+    ...[1953, 1959, 1970].map((size) => [
+      'https://example.test/' + 'a'.repeat(size) + '?q=```',
+      'https://example.test/' + 'a'.repeat(size) + '?q=%60%60%60',
+    ]),
+    ['https://example.test/' + ')'.repeat(640), 'https://example.test/' + '%29'.repeat(640)],
+    ['https://example.test/' + ')'.repeat(700), 'https://example.test/' + '%29'.repeat(700)],
+  );
+  for (const [url, href] of urls) {
+    const longHit = {
+      ...hit,
+      title: '[WIP] @everyone '.repeat(10),
+      url,
+    };
+    for (const kind of ['channel', 'person']) {
+      let calls = 0;
+      const sent = [];
+      const ctx = app(
+        { chat: async () => (calls++ === 0 ? use() : answer('Here is the answer.')) },
+        { searchDocs: async () => [longHit] },
+      );
+      const target = {
+        id: '200',
+        isThread: () => false,
+        sendTyping: async () => {},
+        send: async (part) => sent.push(part),
+        messages: { fetch: async () => new Map() },
+      };
+      const message = {
+        id: '300',
+        author: { id: 'member-1' },
+        content: 'Read the document',
+        channel: target,
+        guildId: '100',
+        startThread: async () => target,
+      };
+      await (kind === 'channel' ? handleMention : handleDirectMessage)(message, {
+        appContext: ctx,
+        botId: 'bot-1',
+      });
+      assert.match(sent.join('\n'), /Here is the answer/);
+      assert.ok(sent.every((part) => part.length <= 2000));
+      if (href.length + 2 <= 2000) {
+        assert.equal(sent.filter((part) => part.includes(`<${href}>`)).length, 1);
+        const source = renderHelperAnswer('', [longHit]).split('\n').at(-1);
+        assert.ok(sent.some((part) => part.includes(source)));
+      } else {
+        assert.ok(sent.some((part) => part.includes('Source link is too long to display.')));
+        assert.equal(sent.join('\n').includes('https://example.test/'), false);
+      }
+    }
+  }
+});
+
 test('a generated reply is checked again at the send boundary and between parts', async () => {
   let allowed = true,
     calls = 0;
@@ -274,9 +333,42 @@ test('source rendering deduplicates links and rejects unsafe URL schemes', () =>
     hit,
     hit,
     { doc_id: 'evil', title: 'bad', url: 'javascript:alert(1)' },
+    { doc_id: 'credentials', title: 'private', url: 'https://user:password@example.test/doc' },
+    { doc_id: 'invalid', title: 'invalid', url: 'not a URL' },
   ]);
-  assert.equal(rendered.split(hit.url).length, 2);
-  assert.equal(rendered.includes('javascript:'), false);
+  assert.equal(rendered, `Answer\n\nSources:\n• [Test document](<${hit.url}>)`);
+  assert.equal(renderHelperAnswer('Answer', [{ url: 'javascript:alert(1)' }]), 'Answer');
+});
+
+test('source titles cannot escape masked links or trigger mentions', () => {
+  const title = '](https://evil.test)\n@everyone \\`*_{}<>#|~';
+  const rendered = renderHelperAnswer('Answer', [{ ...hit, title }]);
+  const escaped = '\\]\\(https://evil.test\\) @\u200beveryone \\\\\\`\\*\\_\\{\\}\\<\\>\\#\\|\\~';
+  assert.equal(rendered, `Answer\n\nSources:\n• [${escaped}](<${hit.url}>)`);
+});
+
+test('bracketed source titles retain the existing Markdown escaping', () => {
+  assert.equal(
+    renderHelperAnswer('Answer', [{ ...hit, title: '[WIP] Plan' }]),
+    `Answer\n\nSources:\n• [\\[WIP\\] Plan](<${hit.url}>)`,
+  );
+});
+
+test('source hrefs encode masked-link delimiters and whitespace', () => {
+  const url = 'https://example.test/a(b) c<d>?q=hello world)#fragment)';
+  assert.equal(
+    renderHelperAnswer('Answer', [{ ...hit, url }]),
+    'Answer\n\nSources:\n• [Test document](<https://example.test/a%28b%29%20c%3Cd%3E?q=hello%20world%29#fragment%29>)',
+  );
+});
+
+test('untitled sources still have a clickable label', () => {
+  for (const title of [undefined, null, '', ' \n\t ']) {
+    assert.equal(
+      renderHelperAnswer('Answer', [{ ...hit, title }]),
+      `Answer\n\nSources:\n• [Document](<${hit.url}>)`,
+    );
+  }
 });
 
 test('production context wiring enforces the guard through the HTTP clients', async (t) => {
