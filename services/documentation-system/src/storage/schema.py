@@ -86,6 +86,17 @@ docs = Table(
     Index("ix_docs_source", "source_id"),
 )
 
+# Migration-owned rollback data; application adapters never read or write it.
+doc_source_url_backfill = Table(
+    "doc_source_url_backfill",
+    metadata,
+    Column(
+        "doc_id", UUID(as_uuid=True), ForeignKey("docs.id", ondelete="CASCADE"), primary_key=True
+    ),
+    Column("original_url", Text, nullable=False),
+    Column("replacement_url", Text, nullable=False),
+)
+
 doc_tags = Table(
     "doc_tags",
     metadata,

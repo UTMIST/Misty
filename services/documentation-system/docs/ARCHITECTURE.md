@@ -155,6 +155,12 @@ Migration `004` adds a **partial unique index** on `url_normalized WHERE active`
 database enforces dedup rather than only ingest's read-then-write. `WHERE active` lets a
 soft-deleted doc's URL be catalogued again.
 
+`url` is the display/source link returned by document reads and search hits;
+`url_normalized` is its deduplication identity. Discovery chooses native Google editor
+links from the source type without an extra provider call (see [discovery lifecycle](DISCOVERY.md#recovery-and-lifecycle)).
+The migration-owned `doc_source_url_backfill` table retains original and replacement
+URLs for exact rollback of migration `012`; application adapters do not use it.
+
 ### `doc_grants`
 
 Who may see a doc (migrations `003` and `007`). Ownership is metadata only. One row per grant:

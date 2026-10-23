@@ -151,6 +151,11 @@ is provisioned by this code change.
 
 ## Recovery and lifecycle
 
+New discoveries store native Docs, Sheets and Slides editor links ending in `/edit`;
+other Drive files use `/view`. The display URL is separate from the normalized Drive
+identity used for deduplication. Migration `012` repairs existing Drive display links
+without a re-crawl; see the [migration and rollback notes](DEPLOYMENT.md#migrations-alembic).
+
 Existing catalog entries are identified by Google file id across supported Docs,
 Sheets, Slides, Forms edit, Drive file and `open?id=` URL aliases, including old
 manual records and editor URLs with `u/<number>/` account selectors. New ingests

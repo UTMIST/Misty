@@ -173,6 +173,15 @@ Migration history:
 - **`011_source_refresh_run`** — adds the singleton refresh-runner guard. Apply before
   starting the new runner; stop runners before downgrading. See the
   [refresh recovery procedure](#recovery-credential-rotation-and-disablerollback).
+- **`012_google_source_urls`** — replaces existing Drive file display URLs with native
+  Docs/Sheets/Slides editor links, or `/view` links for `gdrive`. Only recognized Drive
+  URLs matching the file identity in `url_normalized` qualify, including retired rows.
+  Editor/manual links and non-Google sources stay intact. Normalized keys, grants,
+  content, chunks and audit fields are unchanged; no provider calls or re-indexing
+  are needed. The transaction briefly locks catalog writes while snapshotting and
+  updating links. `doc_source_url_backfill` retains exact originals for rollback.
+  Downgrading to `011` restores only rows still carrying the replacement URL and drops
+  that rollback table; later URL edits and newly inserted documents survive.
 
 Downgrading `008` removes the chunk table/index, preserving catalog records and full
 content. The database-level `vector` extension remains installed, even if `008`
