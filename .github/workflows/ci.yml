@@ -293,6 +293,12 @@ jobs:
         run: npm ci
       - name: Run tests
         run: npm test
+      - name: Readiness checker regressions
+        working-directory: .
+        run: |
+          node --check scripts/readiness-checker.js
+          node --check scripts/readiness-checker.test.js
+          node --test scripts/readiness-checker.test.js
       # Mirrors the ruff check + ruff format --check pair that gates every
       # Python service. ESLint covers correctness; Prettier covers formatting.
       # Scoped to *.js on purpose — the hand-wrapped Markdown is not Prettier's.
