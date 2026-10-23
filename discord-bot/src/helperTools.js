@@ -12,7 +12,7 @@
 //   { onBehalfOf: personId }   -> DM / person
 //   { guildId, channelId }     -> shared channel
 //
-// Residual risk, prompt injection via retrieved content: snippets and document
+// Residual risk, prompt injection via retrieved content: passages and document
 // bodies flow back to the model as tool results, so a document the asker is
 // authorized to see can carry instructions the model may follow. Scope binding
 // (above) contains the blast radius. Injected text cannot widen the context or
@@ -25,27 +25,20 @@ const MAX_QUERY_LEN = 2000; // service caps query at 2000 code points
 const MAX_RESULTS = 10; // service default k
 // Byte budget for a fetched document body before it rides back in a tool_result
 // (and into the revalidation fingerprint). The real governing limit is the
-// service's per-block MAX_JSON_BYTES (65_536): a ToolResultBlock whose content
-// strings sum past that is rejected, failing the *next* /chat request wholesale.
-// So bound the body in UTF-8 *bytes* (not UTF-16 units), well under 64 KiB, to
-// leave room for the title, keys, and JSON overhead in the same block.
+// service's per-block MAX_JSON_BYTES (65_536), including JSON escaping and
+// metadata. Bound both raw text and serialized content before the next /chat.
 const MAX_DOC_CONTENT_BYTES = 49152; // 48 KiB
 // Search returns source chunks, not UI previews. Preserve their detail within
 // the same per-text byte cap; packHits still enforces the whole-result budget.
 const MAX_SEARCH_CHUNK_BYTES = MAX_DOC_CONTENT_BYTES;
 const MAX_TITLE_LEN = 300; // units; a label, bounded so a fat title can't blow the block
 const MAX_URL_LEN = 2048; // units; real links fit, pathological ones can't bloat a hit
-// Real ids are snowflakes ([0-9]{1,20}); this matches get_document's input cap.
-// Bounding the one remaining service-controlled field keeps a pathological id
-// from bloating a hit past the aggregate budget (which would otherwise drop the
-// whole result set, since packHits stops at the first hit that won't fit).
+// Document ids use the same cap as get_document's input.
+// Bounding service-controlled metadata leaves room for evidence in every hit.
 const MAX_DOC_ID_LEN = 128;
 // Aggregate byte budget for the whole `{ results: [...] }` block a search
-// returns. Per-field caps bound a single hit, but ten hits (each a fat title +
-// a ~2 KB url + a snippet, all multibyte) still sum past the service's 64 KiB
-// per-block MAX_JSON_BYTES, so the combined result 422s the next /chat request.
-// Budget the serialized block (a conservative upper bound on the string bytes
-// the service actually counts) and keep it under the limit with headroom.
+// returns. Also use this headroom for direct-document results. Raw UTF-8 caps
+// alone do not account for JSON escaping, metadata, or multiple passages.
 const MAX_SEARCH_RESULT_BYTES = 61440; // 60 KiB
 
 const utf8Len = (value) => Buffer.byteLength(value, 'utf8');
@@ -63,20 +56,28 @@ function truncateUnits(value, max) {
   return value.slice(0, end);
 }
 
-// Truncate to at most `maxBytes` of UTF-8 without splitting a character. Iterate
-// by code point (never between surrogate halves) and stop before the budget is
-// exceeded, so the result is always well-formed and within the byte limit.
-function truncateUtf8(value, maxBytes) {
-  if (utf8Len(value) <= maxBytes) return value;
+// Bound text by raw UTF-8 bytes and its JSON-escaped bytes (excluding quotes).
+// Both projections use this so replay fingerprints describe the actual evidence.
+// Iterate by code point only when a cap bites, never between surrogate halves.
+function boundText(value, maxBytes, maxEscapedBytes) {
+  if (
+    typeof value !== 'string' ||
+    (utf8Len(value) <= maxBytes && jsonLen(value) - 2 <= maxEscapedBytes)
+  ) {
+    return { text: value, truncated: false };
+  }
   let bytes = 0;
+  let escapedBytes = 0;
   let end = 0;
   for (const ch of value) {
-    const next = bytes + utf8Len(ch);
-    if (next > maxBytes) break;
-    bytes = next;
+    const size = utf8Len(ch);
+    const escapedSize = ch < ' ' || ch === '"' || ch === '\\' ? jsonLen(ch) - 2 : size;
+    if (bytes + size > maxBytes || escapedBytes + escapedSize > maxEscapedBytes) break;
+    bytes += size;
+    escapedBytes += escapedSize;
     end += ch.length; // 1 for BMP, 2 for an astral pair
   }
-  return value.slice(0, end);
+  return { text: value.slice(0, end), truncated: true };
 }
 
 // Bound an optional service-provided string field (title/url) in units, leaving
@@ -92,20 +93,26 @@ function normalizeString(value, max) {
 }
 
 // Project a /search hit (SearchHit) down to what the model needs to answer and
-// cite. We forward the ids, title, source url, and a bounded text snippet — not
+// cite. We forward the ids, title, source url, and a bounded source passage — not
 // raw service internals. `citation` carries the chunk descriptor for access
-// revalidation and source rendering.
+// revalidation and source rendering. Keep the `snippet` field name for consumers.
 function projectHit(hit) {
   const docId = boundField(hit?.doc_id, MAX_DOC_ID_LEN);
-  const text = typeof hit?.text === 'string' ? hit.text : '';
   const title = boundField(hit?.title, MAX_TITLE_LEN);
   const url = boundField(hit?.url, MAX_URL_LEN);
+  const fields = { doc_id: docId, title, url };
+  // Each projection must fit by itself, independently of rank or other hits.
+  // Reserve the truncation marker and complete envelope before bounding text.
+  const overhead = jsonLen({ results: [{ ...fields, snippet: '', truncated: true }] });
+  const { text, truncated } = boundText(
+    typeof hit?.text === 'string' ? hit.text : '',
+    MAX_SEARCH_CHUNK_BYTES,
+    MAX_SEARCH_RESULT_BYTES - overhead,
+  );
   return {
-    doc_id: docId,
-    title,
-    url,
-    snippet: text ? truncateUtf8(text, MAX_SEARCH_CHUNK_BYTES) : undefined,
-    ...(utf8Len(text) > MAX_SEARCH_CHUNK_BYTES ? { truncated: true } : {}),
+    ...fields,
+    snippet: text || undefined,
+    ...(truncated ? { truncated: true } : {}),
     citation: {
       doc_id: docId,
       title,
@@ -124,20 +131,23 @@ function forModelShape({ citation, ...rest }) {
 // Admit projected hits in rank order while the serialized results block stays
 // within `maxBytes`. Per-field caps bound one hit, but ten can still sum past
 // the service's per-block limit, so cap the aggregate here, before fingerprints
-// are recorded. We drop whole trailing hits rather than trimming a kept hit's
+// are recorded. We skip whole overflowing hits rather than trimming a kept hit's
 // fields: a kept hit must stay byte-for-byte equal to projectHit(), or
 // revalidation (which re-projects each current hit and matches fingerprints)
 // would reject it. A dropped hit is never shown, cited, or fingerprinted, so
-// withholding it is safe. Later hits only add bytes, so the first overflow ends
-// admission.
+// withholding it is safe. A later, smaller hit can still fit; preserve its rank
+// relative to the other kept hits. Count each row once, plus envelope and commas.
 function packHits(projected, maxBytes) {
   const kept = [];
   const forModel = [];
+  let bytes = jsonLen({ results: [] });
   for (const hit of projected) {
-    const candidate = [...forModel, forModelShape(hit)];
-    if (jsonLen({ results: candidate }) > maxBytes) break;
+    const candidate = forModelShape(hit);
+    const added = jsonLen(candidate) + (kept.length ? 1 : 0);
+    if (bytes + added > maxBytes) continue;
     kept.push(hit);
-    forModel.push(candidate[candidate.length - 1]);
+    forModel.push(candidate);
+    bytes += added;
   }
   return { kept, forModel };
 }
@@ -151,12 +161,20 @@ function retrievalArgs(context) {
 
 function projectDoc(doc, docId) {
   const full = typeof doc.content === 'string' ? doc.content : (doc.content_snapshot ?? null);
-  const truncated = typeof full === 'string' && utf8Len(full) > MAX_DOC_CONTENT_BYTES;
-  return {
+  const fields = {
     found: true,
     doc_id: boundField(doc.id ?? docId, MAX_DOC_ID_LEN),
     title: boundField(doc.title, MAX_TITLE_LEN),
-    content: truncated ? truncateUtf8(full, MAX_DOC_CONTENT_BYTES) : full,
+  };
+  const overhead = jsonLen({ ...fields, content: '', truncated: true });
+  const { text, truncated } = boundText(
+    full,
+    MAX_DOC_CONTENT_BYTES,
+    MAX_SEARCH_RESULT_BYTES - overhead,
+  );
+  return {
+    ...fields,
+    content: text,
     // Tell the model the body was cut so it does not treat a partial read as the
     // whole document. Part of the fingerprint too, so revalidation stays exact.
     ...(truncated ? { truncated: true } : {}),
@@ -196,7 +214,7 @@ export function createDocumentTools({ docClient }) {
         const results = await readDocument(key, read);
         const projected = (results ?? []).map(projectHit);
         // Enforce the aggregate block budget: keep as many ranked hits as fit
-        // under the 64 KiB per-block limit, dropping the overflow tail so the
+        // under the 64 KiB per-block limit, skipping overflowing hits so the
         // combined result can't 422 the next /chat request.
         const { kept, forModel } = packHits(projected, MAX_SEARCH_RESULT_BYTES);
         // `citations` ride alongside the model-visible content so the executor
@@ -214,7 +232,7 @@ export function createDocumentTools({ docClient }) {
           async revalidate(readForPass = readDocument) {
             if (!fingerprints.length) return true;
             const current = await readForPass(key, read);
-            const visible = new Set(current.map((hit) => JSON.stringify(projectHit(hit))));
+            const visible = new Set((current ?? []).map((hit) => JSON.stringify(projectHit(hit))));
             return fingerprints.every((hit) => visible.has(hit));
           },
         };
@@ -224,7 +242,7 @@ export function createDocumentTools({ docClient }) {
       definition: {
         name: 'get_document',
         description:
-          'Fetch one document by its id to read more than a search snippet, for example to follow up on a search hit. Only available when answering a direct message; in a shared channel, cite the source link from search_documents instead. Returns not-found when the asker is not authorized to see the document.',
+          'Fetch one document by its id to read beyond a search passage, for example to follow up on a search hit. Only available when answering a direct message; in a shared channel, use the authorized passages and source links from search_documents instead. Returns not-found when the asker is not authorized to see the document.',
         input_schema: {
           type: 'object',
           properties: {
@@ -238,8 +256,8 @@ export function createDocumentTools({ docClient }) {
         if (!docId) return { content: { error: 'doc_id is required' }, is_error: true };
         // Direct-document fetch is person-scoped only. A shared channel has no
         // authorized direct-document endpoint (the channel grant covers search
-        // citations, not arbitrary doc reads), so refuse rather than attempt a
-        // read that would either fail or escape the channel's scope.
+        // passages and citations, not arbitrary doc reads), so refuse a read
+        // that would either fail or escape the channel's scope.
         const onBehalfOf = ctx.context?.onBehalfOf;
         if (onBehalfOf == null) {
           return {

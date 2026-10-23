@@ -143,6 +143,8 @@ test('get_document reports not-found (never forbidden) for a null doc', async ()
 });
 
 const MAX_DOC_CONTENT_BYTES = 49152; // mirrors helperTools.js
+const MAX_SEARCH_CHUNK_BYTES = 49152; // independent search-passage contract
+const MAX_SEARCH_RESULT_BYTES = 61440;
 const u8 = (s) => Buffer.byteLength(s, 'utf8');
 
 test('get_document caps an oversized body by bytes and flags it truncated', async () => {
@@ -220,7 +222,7 @@ test('get_document byte truncation never splits a character', async () => {
 });
 
 test('oversized search passage is byte-capped without splitting a character', async () => {
-  const text = 'a'.repeat(MAX_DOC_CONTENT_BYTES - 1) + '😀';
+  const text = 'a'.repeat(MAX_SEARCH_CHUNK_BYTES - 1) + '😀';
   const { search } = tools({
     async searchDocs() {
       return [{ doc_id: 'd1', title: 'T', url: 'u', text, chunk: {} }];
@@ -228,8 +230,8 @@ test('oversized search passage is byte-capped without splitting a character', as
   });
   const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
   const snippet = out.content.results[0].snippet;
-  assert.equal(snippet, 'a'.repeat(MAX_DOC_CONTENT_BYTES - 1));
-  assert.ok(u8(snippet) <= MAX_DOC_CONTENT_BYTES);
+  assert.equal(snippet, 'a'.repeat(MAX_SEARCH_CHUNK_BYTES - 1));
+  assert.ok(u8(snippet) <= MAX_SEARCH_CHUNK_BYTES);
   assert.equal(snippet.isWellFormed(), true);
   assert.equal(out.content.results[0].truncated, true);
 });
@@ -265,7 +267,6 @@ test('search bounds service-controlled title and url in the model content', asyn
 // The service's per-block MAX_JSON_BYTES is 65_536. Per-field caps bound one
 // hit; this guards the combined block, which ten fat multibyte hits can push
 // past the limit even when every field is individually within its cap.
-const MAX_JSON_BYTES = 65536;
 // Ten hits, each a fat multibyte (3-byte) title/url/text well over the per-field
 // caps, so each projected hit is near its max and the ten together overflow.
 const fatHits = () =>
@@ -286,7 +287,7 @@ test('search caps the combined result block under the per-block byte limit', asy
   const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
   // The whole serialized block (what rides in the tool_result) stays under the
   // service limit, not merely each field.
-  assert.ok(u8(JSON.stringify(out.content)) <= MAX_JSON_BYTES);
+  assert.ok(u8(JSON.stringify(out.content)) <= MAX_SEARCH_RESULT_BYTES);
   // The aggregate budget actually bit: the overflow tail was dropped.
   assert.ok(out.content.results.length < 10);
   assert.ok(out.content.results.length >= 1);
@@ -300,15 +301,141 @@ test('search caps the combined result block under the per-block byte limit', asy
   }
 });
 
-test('revalidation covers kept hits and ignores the dropped tail', async () => {
+test('revalidation covers kept hits and ignores changes to dropped hits', async () => {
+  let current = fatHits();
   const { search } = tools({
     async searchDocs() {
-      return fatHits();
+      return current;
     },
   });
   const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
   // Same hits still visible -> every kept fingerprint is found.
   assert.equal(await out.revalidate(), true);
+  const keptIds = new Set(out.content.results.map((r) => r.doc_id));
+  assert.ok(keptIds.size < current.length);
+  current = current.map((r) => (keptIds.has(r.doc_id) ? r : { ...r, text: 'Changed unseen text' }));
+  assert.equal(await out.revalidate(), true);
+});
+
+test('search skips an overflow hit and retains later small passages in rank order', async () => {
+  let current = Array.from({ length: 10 }, (_, i) => ({
+    ...hit,
+    doc_id: `d${i}`,
+    text: i < 4 ? 'a'.repeat(16384) : `Small passage ${i}`,
+  }));
+  const { search } = tools({ searchDocs: async () => current });
+  const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
+  const expectedIds = ['d0', 'd1', 'd2', 'd4', 'd5', 'd6', 'd7', 'd8', 'd9'];
+  assert.deepEqual(
+    out.content.results.map((r) => r.doc_id),
+    expectedIds,
+  );
+  assert.deepEqual(
+    out.citations.map((r) => r.doc_id),
+    expectedIds,
+  );
+  assert.equal(out.content.results[0].snippet, current[0].text);
+  assert.ok(u8(JSON.stringify(out.content)) <= MAX_SEARCH_RESULT_BYTES);
+  // Revalidation compares original evidence, independently of new rank order.
+  current = current.filter((r) => r.doc_id !== 'd3').reverse();
+  assert.equal(await out.revalidate(), true);
+  current = current.filter((r) => r.doc_id !== 'd9');
+  assert.equal(await out.revalidate(), false);
+});
+
+for (const text of [
+  '\u0001'.repeat(16000),
+  '"\\\n\r\t\b\f'.repeat(6000),
+  ('😀中' + '\u001f'.repeat(20)).repeat(1600),
+]) {
+  test(`search retains escaped evidence within both byte caps (${u8(text)} raw bytes)`, async () => {
+    let current = [{ ...hit, title: '界'.repeat(300), url: 'u'.repeat(2048), text }];
+    const { search } = tools({ searchDocs: async () => current });
+    const out = await search.run({ query: 'q' }, { context: { guildId: '100', channelId: '200' } });
+    assert.equal(out.content.results.length, 1);
+    const result = out.content.results[0];
+    assert.equal(result.truncated, true);
+    assert.ok(result.snippet.length > 400);
+    assert.ok(text.startsWith(result.snippet));
+    assert.equal(result.snippet.isWellFormed(), true);
+    assert.ok(u8(result.snippet) <= MAX_SEARCH_CHUNK_BYTES);
+    assert.ok(u8(JSON.stringify(out.content)) <= MAX_SEARCH_RESULT_BYTES);
+    assert.deepEqual(out.citations[0].chunk, hit.chunk);
+    assert.equal(await out.revalidate(), true);
+    // Even a change past the old preview boundary in a JSON-capped hit matters.
+    current = [{ ...current[0], text: text.slice(0, 500) + 'replacement' + text.slice(511) }];
+    assert.equal(await out.revalidate(), false);
+  });
+}
+
+test('search fills the aggregate budget exactly, including array commas', async () => {
+  const row = { doc_id: 'd', title: 't', url: 'u', text: 'a', chunk: {} };
+  const modelRow = { doc_id: 'd', title: 't', url: 'u', snippet: '' };
+  const overhead = u8(JSON.stringify({ results: [modelRow, modelRow] }));
+  const firstText = 'a'.repeat(32768);
+  const secondText = 'b'.repeat(MAX_SEARCH_RESULT_BYTES - overhead - firstText.length);
+  const { search } = tools({
+    searchDocs: async () => [
+      { ...row, text: firstText },
+      { ...row, text: secondText },
+    ],
+  });
+  const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
+  assert.equal(out.content.results.length, 2);
+  assert.equal(out.content.results[1].snippet, secondText);
+  assert.equal(u8(JSON.stringify(out.content)), MAX_SEARCH_RESULT_BYTES);
+});
+
+test('JSON-budget truncation stops before an emoji and still revalidates source revision', async () => {
+  const fields = { doc_id: hit.doc_id, title: hit.title, url: hit.url };
+  const overhead = u8(JSON.stringify({ results: [{ ...fields, snippet: '', truncated: true }] }));
+  const prefixBytes = MAX_SEARCH_RESULT_BYTES - overhead - 3;
+  const prefix = '\u0001'.repeat(Math.floor(prefixBytes / 6)) + 'a'.repeat(prefixBytes % 6);
+  let current = { ...hit, text: prefix + '😀' + 'tail'.repeat(10) };
+  const { search } = tools({ searchDocs: async () => [current] });
+  const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
+  assert.equal(out.content.results[0].snippet, prefix);
+  assert.equal(out.content.results[0].snippet.isWellFormed(), true);
+  assert.equal(out.content.results[0].truncated, true);
+  assert.ok(u8(JSON.stringify(out.content)) <= MAX_SEARCH_RESULT_BYTES);
+  assert.equal(await out.revalidate(), true);
+  // Even if the visible prefix stays identical, a new source revision is stale.
+  current = { ...current, chunk: { ...hit.chunk, source_content_hash: 'replacement-hash' } };
+  assert.equal(await out.revalidate(), false);
+});
+
+for (const missing of [null, undefined, []]) {
+  test(`search revalidation fails closed for missing results (${String(missing)})`, async () => {
+    let current = [hit];
+    const { search } = tools({ searchDocs: async () => current });
+    const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
+    current = missing;
+    assert.equal(await out.revalidate(), false);
+  });
+
+  test(`initial empty search stays empty without fabricated evidence (${String(missing)})`, async () => {
+    const { search } = tools({ searchDocs: async () => missing });
+    const out = await search.run({ query: 'q' }, { context: { onBehalfOf: 'p' } });
+    assert.deepEqual(out.content, { results: [] });
+    assert.deepEqual(out.citations, []);
+    assert.equal(await out.revalidate(), true);
+  });
+}
+
+test('get_document bounds JSON escaping and revalidates the retained body', async () => {
+  const text = '\u0001'.repeat(20000) + '😀';
+  let doc = { id: 'd', title: '界'.repeat(300), content_snapshot: text };
+  const { get } = tools({ getDoc: async () => doc });
+  const out = await get.run({ doc_id: 'd' }, { context: { onBehalfOf: 'p' } });
+  assert.equal(out.content.truncated, true);
+  assert.ok(out.content.content.length > 400);
+  assert.ok(text.startsWith(out.content.content));
+  assert.ok(u8(out.content.content) <= MAX_DOC_CONTENT_BYTES);
+  assert.ok(u8(JSON.stringify(out.content)) <= 65536);
+  assert.equal(out.content.content.isWellFormed(), true);
+  assert.equal(await out.revalidate(), true);
+  doc = { ...doc, content_snapshot: text.slice(0, 500) + 'changed' + text.slice(507) };
+  assert.equal(await out.revalidate(), false);
 });
 
 test('a pathological doc_id is bounded and does not suppress other hits', async () => {
