@@ -47,11 +47,15 @@ curl -sS -X POST http://localhost:8003/verification/request-code \
   -H "X-API-Key: dev-api-key-change-me" -H "Content-Type: application/json" \
   -d '{"subject": "person:42", "email": "alex@example.com"}'
 
-# Confirm it
+# Confirm it (replace the illustrative code with the one received by email)
 curl -sS -X POST http://localhost:8003/verification/confirm-code \
   -H "X-API-Key: dev-api-key-change-me" -H "Content-Type: application/json" \
   -d '{"subject": "person:42", "code": "123456"}'
 ```
+
+The default fake backend has no manual inbox and never logs codes. To complete
+this flow by email, configure a real backend; automated tests use a retained,
+injected sender (see [local setup](docs/CONTRIBUTING.md#local-setup)).
 
 **Ports:** this service runs on **8003** (team-tracking uses 8000, documentation-system 8001) and its Postgres container is exposed on **5434**.
 
@@ -63,10 +67,10 @@ curl -sS -X POST http://localhost:8003/verification/confirm-code \
 
 Auth is provided by the shared `platform_auth` package (`build_auth` in `src/api/auth.py`), configured **env-key-only**:
 
-- Every request needs `X-API-Key`. The only accepted key is the shared bootstrap env key (`API_KEY`), which carries the `admin` scope. There is **no key-issuing CLI and no DB-backed keys** here — `NullApiKeyStore` (`src/storage/null_keys.py`) short-circuits all key lookups, so the `vf_<prefix>_<secret>` envelope is reserved but unused. The env key must therefore be a plain opaque string, not shaped like that envelope.
+- Both verification POST endpoints require `X-API-Key`. The only accepted key is the shared bootstrap env key (`API_KEY`), which carries the `admin` scope. There is **no key-issuing CLI and no DB-backed keys** here — `NullApiKeyStore` (`src/storage/null_keys.py`) short-circuits all key lookups, so the `vf_<prefix>_<secret>` envelope is reserved but unused. The env key must therefore be a plain opaque string, not shaped like that envelope.
 - `require_scope("verification:write")` gates both verification endpoints. The scopes recognized are **`verification:write`** and **`admin`** (a wildcard that satisfies any check); the env key's `admin` scope covers both.
-- `/health` is unauthenticated.
-- `AuditLogMiddleware` (from `platform_auth`, logger `verification.audit`) logs one line per request with the resolved actor. The bootstrap key honors an `X-Actor` header for the audit actor; `dev:spoof` is disabled.
+- `/health`, `/openapi.json` and the interactive API documentation routes are unauthenticated.
+- `AuditLogMiddleware` (from `platform_auth`, logger `verification.audit`) logs one line per request. Authenticated requests have `key_name=env-bootstrap`; `X-Actor` does not change attribution on these routes. See the [authentication caveat](docs/API.md#authentication). `dev:spoof` is disabled.
 
 ## API at a glance
 
@@ -114,9 +118,12 @@ Schema is managed by Alembic (`migrations/`). Migration `001` creates `verificat
 
 ## Email providers
 
-The sender is chosen by `EMAIL_BACKEND` and wired in `src/api/deps.py` behind the `EmailSender` Protocol (`src/email/base.py`); any provider failure is normalized to `EmailSendError` → a clean 502.
+The sender is chosen by `EMAIL_BACKEND` and wired in `src/api/deps.py` behind the
+`EmailSender` Protocol (`src/email/base.py`). Failures normalized to
+`EmailSendError` return 502; some setup and transport exceptions currently escape
+as 500s (see [request-code errors](docs/API.md#errors)).
 
-- **`fake`** (default; `src/email/fake.py`) — captures messages in memory instead of sending. Used in tests and the dev playground; refused in non-`local` `VF_ENV`.
+- **`fake`** (default; `src/email/fake.py`) — captures messages in memory instead of sending. Tests inject a retained sender; the running service exposes no code inbox. Refused in non-`local` `VF_ENV`.
 - **`resend`** (`src/email/resend.py`) — Resend HTTP API (HTTPS, works on any Railway plan). Requires `RESEND_API_KEY` and `EMAIL_FROM`.
 - **`gmail`** (`src/email/gmail.py`) — Gmail API via a service account with domain-wide delegation, impersonating `GMAIL_SENDER`. Requires `GMAIL_SENDER` and `GMAIL_CREDENTIALS_JSON` (base64-encoded service-account JSON).
 

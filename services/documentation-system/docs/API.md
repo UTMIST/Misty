@@ -166,11 +166,15 @@ Two kinds of key are accepted:
 
 | Scope | Grants |
 |-------|--------|
-| `docs:read` | Read endpoints (`GET`, except `GET /docs/index/status`) — but see visibility below: **alone, it returns nothing** |
-| `docs:read:all` | Read endpoints, bypassing per-doc visibility (sees every doc) |
-| `docs:write` | All mutating endpoints (`POST`, `PATCH`, `DELETE`) except `POST /docs/index` |
+| `docs:read` | Catalog reads, `/sources` reads, and `/search`; catalog reads need the visibility context below |
+| `docs:read:all` | Catalog reads and `/search`; bypasses per-doc visibility only on direct reads without `X-On-Behalf-Of`. Does not grant `/sources` reads, which require `docs:read` (or `admin`) |
+| `docs:write` | Mutating `/docs` endpoints (`POST`, `PATCH`, `DELETE`) except `POST /docs/index` |
 | `docs:index` | `POST /docs/index` — admin (re-)indexing, which spends embedding-provider budget — and `GET /docs/index/status` |
-| `admin` | Wildcard — satisfies any scope check |
+| `act-as-user` | Literal additional scope for `X-On-Behalf-Of`, including for admins and writes with person context |
+| `admin` | Wildcard for endpoint scopes; does not substitute for literal assertion scopes |
+
+Search always requires person or channel context; see [authorized retrieval](#authorized-retrieval-post-search)
+for its assertion scopes. Meeting endpoints use the separate [meeting scopes](#meeting-records).
 
 A request with a valid key but the wrong scope is rejected with **403 Forbidden**
 (`{"detail": "missing scope: docs:write"}`).
@@ -191,7 +195,7 @@ Docs are **not all world-readable to any valid key.** Every read is evaluated ag
 |---|---|---|
 | `docs:read:all` (or `admin`) key, no `X-On-Behalf-Of` | **SEE_ALL** | every doc |
 | `docs:read` key, no `X-On-Behalf-Of` | **DENY** | **nothing** — an empty list, and `404` on every id |
-| Any read-scoped key **+** `X-On-Behalf-Of: <person-uuid>` | that person | only what that person may see |
+| `docs:read`, `docs:read:all`, or `admin` key **with literal `act-as-user`** + `X-On-Behalf-Of: <person-uuid>` | that person | only what that person may see |
 
 The `DENY` row is the surprising one and it is deliberate: a plain `docs:read` key has no
 identity of its own, so it has no basis to see anything. A consumer like the Discord bot is
@@ -215,12 +219,15 @@ manual `org`-granted docs still resolve, team-granted ones are withheld rather t
 including the write routes. Distinguishing the two would leak the existence of a doc the
 caller isn't allowed to know about.
 
-`X-On-Behalf-Of` must be a valid person UUID; a malformed value is `400`, and a caller
-lacking a read scope is `403`. Neither falls through to `SEE_ALL`.
+Direct-document reads and per-document writes using `X-On-Behalf-Of` require literal
+`act-as-user`, including for admins; without it the response is `403`. Once that scope passes,
+a malformed person UUID is `400`. Reads also require a read scope (`403` if missing).
+None of these errors falls through to `SEE_ALL`.
 
-> On **write** routes, a request with *no* `X-On-Behalf-Of` gets `SEE_ALL` — holding a
-> `docs:write` key is itself the trust boundary. Supply the header and writes are
-> additionally constrained to what that person can see.
+> On **per-document write** routes, a request with *no* `X-On-Behalf-Of` gets `SEE_ALL` — holding a
+> `docs:write` key is itself the trust boundary. Supply the header with literal
+> `act-as-user` and writes using person context are additionally constrained to what
+> that person can see.
 
 ## Endpoints at a glance
 
@@ -363,13 +370,18 @@ For Google sources, repeated ingest also reconciles source grants and refreshes 
 only when that source's `content_fetch_enabled` setting is true. Disabled sources never
 retrieve or store new content through initial ingest, repeated ingest, or scheduled refresh.
 
-**An idempotent hit never fetches.** Even when the existing doc has no stored content —
-the case a fetch would repair — dedup stays a cheap, network-free merge, so `POST /docs`
-keeps predictable latency however many times a URL is re-submitted. Content repair is
-`POST /docs/{id}/refetch`'s job; the `doc-backfill` CLI drives it in bulk over every
-contentless doc (see [`DEPLOYMENT.md`](DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli)).
-Keeping one repair path also keeps one copy of refetch's rule that an empty fetch must not
-wipe stored text.
+**An idempotent hit skips source fetching for non-Google or fetch-disabled sources.**
+Enabled Google sources make connector/directory calls to reconcile grants (including
+revocations) and refresh fetched content, title, and metadata. Confirmed `SourceGone`
+can remove stored content and chunks. After any ingest, including a dedup hit, indexing
+may call the embedding provider if the stored content's index needs work; unchanged,
+current chunks are a no-op. Repeated `POST /docs` is therefore not a network-free guarantee.
+Discovery uses `refresh_existing=False` and does not refetch existing docs; see
+[discovery operations](DISCOVERY.md).
+
+For explicit content repair, use `POST /docs/{id}/refetch`; `doc-backfill` drives it in
+bulk over contentless docs (see
+[`DEPLOYMENT.md`](DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli)).
 
 The gap is still reported: when the existing doc has no stored content, `warnings` also
 contains `no content is stored for this doc`. That states the fact and not the remedy on
@@ -384,9 +396,9 @@ sources), the service tries to fetch a title, snapshot and full content at inges
 failure is **never** fatal: the doc is still created, `title` falls back to the caller's
 title or the URL, and a warning is appended.
 
-`web` and `github` fetch in-process; the Google sources (`gdrive`, `gdocs`, `gsheets`,
+`web` fetches in-process; `github` and the Google sources (`gdrive`, `gdocs`, `gsheets`,
 `gslides`) fetch via the [connectors](../../connectors/) service, which holds the Google
-credentials — migration `006` enabled them. `youtube` has no fetcher and
+credentials — migration `006` enabled Google-source fetching. `youtube` has no fetcher and
 `content_fetch_enabled: false`, so its links are catalogued without content and fetching
 is silently skipped.
 

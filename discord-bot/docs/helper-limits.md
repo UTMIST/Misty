@@ -28,9 +28,10 @@ concurrent mentions from sharing the last available slot.
   authorization failures do not consume a slot. Rejections do not consume more
   slots or extend the existing reset deadline.
 - This is a request-count allowance, **not an exact token or dollar cap**. The
-  current helper makes one LLM call per answer and retains its existing history
-  and output bounds. Variable prompt sizes/model prices still vary cost. Any
-  future multi-call/tool loop must revisit accounting before adding paid calls.
+  text-only path makes one LLM call; a tool-enabled request can make up to five
+  model calls plus bounded retrieval and revalidation work for the same single
+  allowance. Prompt sizes and model prices vary cost. See the
+  [tool loop's work and output limits](CONTRIBUTING.md#the-authorized-helper-tool-loop-71).
   No enforcement is added to `services/llm`, other bot commands, or meeting calls.
 
 ## Reset and lifetime

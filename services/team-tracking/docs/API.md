@@ -31,7 +31,7 @@ Each endpoint requires a specific scope. A key only reaches an endpoint if its s
 
 | Domain | Scopes |
 |--------|--------|
-| People | `people:read`, `people:write` |
+| People | `people:read`, `people:write`, `people:elevate` (additional gate for privileged creation / access-level updates) |
 | Teams | `teams:read`, `teams:write` |
 | Role kinds | `role_kinds:read` |
 | Memberships | `memberships:read`, `memberships:write` |
@@ -116,8 +116,9 @@ curl -sS http://localhost:8000/api-keys/self \
   -H "X-API-Key: dev-api-key-change-me"
 ```
 
-Returns `401` if the key is missing or invalid. Never returns `403` (there
-is no scope to lack).
+Returns `401` if the key is missing or invalid. No additional scope is required,
+but the production `dev:spoof` guard still returns `403` for a key carrying that
+literal scope.
 
 ---
 
@@ -125,7 +126,8 @@ is no scope to lack).
 
 ### POST /people
 
-Create a new person. **Scope:** `people:write`.
+Create a new person. **Scope:** `people:write`, plus `people:elevate` when
+`access_level` is not `member` (the `admin` wildcard satisfies both).
 
 **Request body:**
 
@@ -133,10 +135,11 @@ Create a new person. **Scope:** `people:write`.
 |-------|------|----------|-------|
 | `display_name` | string | yes | Free-form; handles any name convention |
 | `primary_email` | string | yes | Normalized to lowercase; must be unique |
+| `access_level` | string | no | `member` (default), `admin`, or `superuser`; non-`member` requires `people:elevate` |
 
 **Response:** `Person` object, HTTP 201.
 
-**Errors:** 409 if `primary_email` already exists. 422 if required fields are missing.
+**Errors:** 403 if a non-`member` `access_level` is supplied without `people:elevate`. 409 if `primary_email` already exists. 422 if required fields are missing or `access_level` is invalid.
 
 ```bash
 curl -sS -X POST http://localhost:8000/people \
@@ -154,6 +157,7 @@ curl -sS -X POST http://localhost:8000/people \
   "display_name": "Alex Chen",
   "primary_email": "alex@utmist.ca",
   "active": true,
+  "access_level": "member",
   "created_at": "2026-06-30T12:00:00Z",
   "updated_at": "2026-06-30T12:00:00Z",
   "created_by": "bootstrap-script",
@@ -229,7 +233,7 @@ curl -sS "http://localhost:8000/people/550e8400-e29b-41d4-a716-446655440000" \
 
 ### PATCH /people/{person_id}
 
-Update one or more fields on a person. Only fields present in the request body are changed (standard partial-update semantics). **Scope:** `people:write`.
+Update one or more fields on a person. Only fields present in the request body are changed (standard partial-update semantics). **Scope:** `people:write`, plus `people:elevate` for any non-null `access_level`, including demotion or restating the current value. The `admin` wildcard satisfies both.
 
 **Path parameters:**
 
@@ -244,10 +248,11 @@ Update one or more fields on a person. Only fields present in the request body a
 | `display_name` | string | |
 | `primary_email` | string | Normalized to lowercase; must be unique |
 | `active` | boolean | Set to `false` to soft-retire a person |
+| `access_level` | string | `member`, `admin`, or `superuser`; any non-null value requires `people:elevate` |
 
 **Response:** Updated `Person` object, HTTP 200.
 
-**Errors:** 404 if not found. 409 if new `primary_email` conflicts with an existing record. 422 if a field fails validation.
+**Errors:** 403 if a non-null `access_level` is supplied without `people:elevate`. 404 if not found. 409 if new `primary_email` conflicts with an existing record. 422 if a field fails validation.
 
 ```bash
 # Soft-retire a person
@@ -439,7 +444,7 @@ A team with no row has never been synced, either because Google Groups is unconf
 
 ### GET /teams/google-groups
 
-Every team's mapping (including retired teams, whose groups are kept but emptied). **Scope:** `teams:read`.
+Every team's mapping (including retired teams, whose groups are kept and reconciled to remove managed MEMBER-only memberships). Owners and managers remain; see [the reconciliation contract](ARCHITECTURE.md#managed-google-groups). **Scope:** `teams:read`.
 
 ### GET /teams/{team_id}/google-group
 
@@ -447,7 +452,7 @@ One team's mapping. **Scope:** `teams:read`. **Errors:** 404 if the team has no 
 
 ### GET /teams/by-synced-google-group/{email}
 
-The team (same body as `GET /teams/{team_id}`) whose managed group has this address, matched case-insensitively. Fails closed for access decisions: it answers only when the team's last sync is `synced`. Retired teams still resolve (check `active` in the body); their synced group is empty, so the mapping grants no one access. **Scope:** `teams:read`.
+The team (same body as `GET /teams/{team_id}`) whose managed group has this address, matched case-insensitively. Fails closed for access decisions: it answers only when the team's last sync is `synced`. Retired teams still resolve (check `active` in the body); sync removes managed MEMBER-only memberships but retains owners/managers and existing Drive shares. Retirement alone is not complete access revocation; see [the reconciliation contract](ARCHITECTURE.md#managed-google-groups). **Scope:** `teams:read`.
 
 **Errors:** 404 for an unknown address or a mapping in `needs_external_members` or `failed`. This reads the recorded sync state and makes no Google call.
 
@@ -714,14 +719,14 @@ Link an external account to a person.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `provider` | string | yes | Must be an active provider ID; **not** `email` (rejected — use [`POST /people/{id}/emails`](#post-peopleperson_idemails)) |
+| `provider` | string | yes | Must be an existing provider ID; `active` is not checked. **Not** `email` (rejected — use [`POST /people/{id}/emails`](#post-peopleperson_idemails)) |
 | `external_id` | string | yes | The stable external identifier (e.g. snowflake, numeric id) |
 | `handle` | string | no | Optional human-readable handle or display name |
 
 **Response:** `PersonIdentifier` object, HTTP 201.
 
 **Errors:** 
-- 400 if `provider` does not exist or is inactive
+- 400 if `provider` does not exist (an inactive provider can still receive new links)
 - 404 if person not found
 - 409 if person already has that provider linked, if (provider, external_id) is linked to a different person, or if `provider="email"` (rejected — use [`POST /people/{id}/emails`](#post-peopleperson_idemails) instead)
 - 422 if required fields are missing or validation fails
@@ -899,11 +904,11 @@ Create a new membership. **Scope:** `memberships:write`.
 | `role_kind_id` | string | no | FK → role_kinds.id; defaults to `"member"` |
 | `is_team_admin` | boolean | no | Default `false` |
 | `started_at` | date | no | ISO 8601 date (e.g. `"2026-01-15"`); defaults to today at storage layer |
-| `ended_at` | date | no | ISO 8601 date; null = currently active |
+| `ended_at` | date | no | ISO 8601 date; exclusive upper bound; null = no end date |
 
 **Response:** `TeamMembership` object, HTTP 201.
 
-**Errors:** 400 if `person_id`, `team_id`, or `role_kind_id` does not exist. 422 if required fields are missing or types are wrong.
+**Errors:** 400 if `person_id`, `team_id`, or `role_kind_id` does not exist, or the date range overlaps another membership for the same person and team (regardless of role). Adjacent half-open ranges are allowed; see [temporal integrity](../README.md#behavior-notes). 422 if required fields are missing or types are wrong.
 
 ```bash
 curl -sS -X POST http://localhost:8000/memberships \
@@ -949,7 +954,7 @@ List memberships, with optional filters. All filters are AND-combined. **Scope:*
 |-------|------|---------|-------|
 | `team_id` | UUID | — | Filter to memberships on this team |
 | `person_id` | UUID | — | Filter to memberships held by this person |
-| `active_only` | boolean | `false` | If `true`, returns only rows where `ended_at IS NULL` |
+| `active_only` | boolean | `false` | If `true`, returns rows where `ended_at IS NULL OR ended_at > today`; does not check `started_at` |
 | `as_of` | date | — | ISO 8601 date; returns rows where `started_at <= as_of AND (ended_at IS NULL OR ended_at > as_of)` |
 | `is_team_admin` | boolean | — | If provided, filters to rows matching this admin flag |
 
@@ -959,11 +964,11 @@ List memberships, with optional filters. All filters are AND-combined. **Scope:*
 
 ```bash
 # Current members of the Partnerships team
-curl -sS "http://localhost:8000/memberships?team_id=660e8400-e29b-41d4-a716-446655440001&active_only=true" \
+curl -sS "http://localhost:8000/memberships?team_id=660e8400-e29b-41d4-a716-446655440001&as_of=$(date +%F)" \
   -H "X-API-Key: dev-api-key-change-me"
 
 # All memberships Alex currently holds
-curl -sS "http://localhost:8000/memberships?person_id=550e8400-e29b-41d4-a716-446655440000&active_only=true" \
+curl -sS "http://localhost:8000/memberships?person_id=550e8400-e29b-41d4-a716-446655440000&as_of=$(date +%F)" \
   -H "X-API-Key: dev-api-key-change-me"
 
 # Roster as of a past date
@@ -971,7 +976,7 @@ curl -sS "http://localhost:8000/memberships?team_id=660e8400-e29b-41d4-a716-4466
   -H "X-API-Key: dev-api-key-change-me"
 
 # Current admins of a team
-curl -sS "http://localhost:8000/memberships?team_id=660e8400-e29b-41d4-a716-446655440001&is_team_admin=true&active_only=true" \
+curl -sS "http://localhost:8000/memberships?team_id=660e8400-e29b-41d4-a716-446655440001&is_team_admin=true&as_of=$(date +%F)" \
   -H "X-API-Key: dev-api-key-change-me"
 ```
 
@@ -1018,7 +1023,7 @@ Update one or more fields on a membership. Use this for general edits (changing 
 
 **Response:** Updated `TeamMembership` object, HTTP 200.
 
-**Errors:** 404 if not found. 400 if `role_kind_id` does not exist.
+**Errors:** 404 if not found. 400 if `role_kind_id` does not exist or the resulting date range overlaps another membership for the same person and team.
 
 ```bash
 # Promote to lead
@@ -1051,18 +1056,20 @@ End a membership by setting its `ended_at` date. This is a semantic shortcut ove
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `ended_at` | date | yes | ISO 8601 date; the last day of membership |
+| `ended_at` | date | yes | ISO 8601 date; the first excluded day (exclusive upper bound) |
 
 **Response:** Updated `TeamMembership` object with `ended_at` set, HTTP 200.
 
-**Errors:** 404 if not found.
+**Errors:** 404 if not found. 400 if the resulting date range overlaps another membership for the same person and team.
+
+To include April 30 as the last day of membership, set `ended_at` to May 1:
 
 ```bash
 curl -sS -X POST "http://localhost:8000/memberships/770e8400-e29b-41d4-a716-446655440002/end" \
   -H "X-API-Key: dev-api-key-change-me" \
   -H "X-Actor: admin" \
   -H "Content-Type: application/json" \
-  -d '{"ended_at": "2026-04-30"}'
+  -d '{"ended_at": "2026-05-01"}'
 ```
 
 ---
@@ -1070,20 +1077,21 @@ curl -sS -X POST "http://localhost:8000/memberships/770e8400-e29b-41d4-a716-4466
 ## Common queries recipe book
 
 These examples use placeholder UUIDs. Substitute real IDs from your data.
+Current-roster queries use `as_of` with today's date to check both date bounds.
 
 **Who is currently on the Partnerships team?**
 
 ```bash
-curl -sS "http://localhost:8000/memberships?team_id=<partnerships-uuid>&active_only=true" \
+curl -sS "http://localhost:8000/memberships?team_id=<partnerships-uuid>&as_of=$(date +%F)" \
   -H "X-API-Key: dev-api-key-change-me"
 ```
 
-Returns all membership rows with `ended_at IS NULL` for that team. To resolve person details, call `GET /people/{person_id}` for each `person_id` in the results.
+Returns that team's membership rows where `started_at <= today AND (ended_at IS NULL OR ended_at > today)`. To resolve person details, call `GET /people/{person_id}` for each `person_id` in the results.
 
 **Who are the current team admins of Partnerships?**
 
 ```bash
-curl -sS "http://localhost:8000/memberships?team_id=<partnerships-uuid>&is_team_admin=true&active_only=true" \
+curl -sS "http://localhost:8000/memberships?team_id=<partnerships-uuid>&is_team_admin=true&as_of=$(date +%F)" \
   -H "X-API-Key: dev-api-key-change-me"
 ```
 
@@ -1099,7 +1107,7 @@ Returns rows where `started_at <= 2024-12-15` AND (`ended_at IS NULL` OR `ended_
 **What teams is Alex currently on?**
 
 ```bash
-curl -sS "http://localhost:8000/memberships?person_id=<alex-uuid>&active_only=true" \
+curl -sS "http://localhost:8000/memberships?person_id=<alex-uuid>&as_of=$(date +%F)" \
   -H "X-API-Key: dev-api-key-change-me"
 ```
 

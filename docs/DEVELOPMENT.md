@@ -14,27 +14,28 @@ This page is the *technical* path. The *process* side — zone ownership, how
 work gets assigned, PR review norms, what's expected of you — is
 [`ONBOARDING.md`](ONBOARDING.md).
 
-The platform is **six backend services plus the Discord bot**. You almost never
+The platform is **seven backend services plus the Discord bot**. You almost never
 need all of them at once — stand up only what you're touching.
 
 | Service | Port | DB | What it is |
 |---------|------|----|------------|
 | [`team-tracking`](../services/team-tracking/README.md) | 8000 | Postgres :5433 | The directory — people, teams, roles, identities. Source of truth. |
 | [`documentation-system`](../services/documentation-system/README.md) | 8001 | Postgres :5434 | The docs catalog. Validates owners against team-tracking; per-doc visibility + grants. |
-| [`llm`](../services/llm/README.md) | 8002 | — | Stateless `POST /chat` proxy over Amazon Bedrock. No DB. |
+| [`llm`](../services/llm/README.md) | 8002 | — | Stateless chat/embedding proxy; OpenAI default, optional Bedrock chat. No DB. |
 | [`verification`](../services/verification/README.md) | 8003 | Postgres :5434 ⚠️ | Email one-time codes (request / confirm). Backs `/link` and `/add-email`. |
-| [`meeting`](../services/meeting/README.md) | 8004 | — | **Stateful, ephemeral.** Live voice transcription → minutes PDF. No DB; state is in-process only. |
+| [`meeting`](../services/meeting/README.md) | 8004 | — | **Stateful.** Live voice transcription → minutes/PDF; saved text is handed to the catalog. No local DB. |
 | [`connectors`](../services/connectors/README.md) | 8005 | — | Stateless `POST /fetch` adapter — pulls Google Docs/Sheets/Slides/Drive content as text for the catalog. No DB. |
+| [`gateway`](../services/gateway/README.md) | 8006 | Postgres :5435 | Public scoped API; owns its issued-key registry. |
 | [`discord-bot`](../discord-bot/README.md) | 3001 (playground) | — | Discord slash commands + a browser playground that needs no Discord token. |
 
 > ⚠️ **Known port clash:** `documentation-system` and `verification` both bind
 > host port **5434** for their dev Postgres
 > (`services/*/docker-compose.yml`). They cannot run at the same time as
 > written. If you need both, override one:
-> `docker compose run -p 5435:5432 postgres` and point that service's
-> `DATABASE_URL` at 5435.
+> use an unused host port in a local Compose override and point that service's
+> `DATABASE_URL` at it. Gateway already uses 5435; 5436 is an option if free.
 
-Only `team-tracking`, `documentation-system`, and `verification` own a database
+`team-tracking`, `documentation-system`, `verification`, and `gateway` own a database
 (and therefore Alembic migrations). `llm`, `meeting`, and `connectors` are
 DB-free.
 
@@ -42,7 +43,7 @@ DB-free.
 
 ## Quickstart
 
-Prerequisites: Docker, Python 3.11+, [`uv`](https://github.com/astral-sh/uv), Node 20+, git.
+Prerequisites: Docker, Python 3.11+, [`uv`](https://github.com/astral-sh/uv), Node 22.12+, git (see the runtime mismatch below).
 
 **Directory API (team-tracking):**
 
@@ -97,8 +98,10 @@ uv sync --extra dev
 uv run uvicorn src.api.app:app --reload --port 8002
 ```
 
-`POST /chat` requires the `chat` scope and real AWS credentials for Bedrock;
-without them the service still boots and `/health` answers.
+`POST /chat` requires the `chat` scope and credentials for the selected
+provider: OpenAI by default, or AWS for an explicitly selected Bedrock backend.
+Local mode can boot and answer `/health` without provider credentials; that
+does not verify a real chat/embedding request.
 
 **Meeting API** — no Docker, no database, no ffmpeg binary (PyAV bundles its
 own):
@@ -159,12 +162,12 @@ Stuck, or new to this stack? Keep reading.
 
 ## Prerequisites (new to this stack?)
 
-Install these once per machine. All six services are Python; the bot is Node.
-Docker is needed by the three DB-backed services **and by the bot's playground**.
+Install these once per machine. All seven services are Python; the bot is Node.
+Docker is needed by the four DB-backed services **and by the bot's playground**.
 
 - **git** — you have it if `git --version` works.
 - **Docker** ([Docker Desktop](https://www.docker.com/products/docker-desktop/)) —
-  runs the local Postgres for the three DB-backed services.
+  runs the local Postgres for the four DB-backed services.
   `docker compose up -d postgres` starts it; the data lives in a named volume
   that survives reboots. Not needed for `llm` or `meeting`, but it **is** needed
   for the bot's playground: `npm run dev:web` shells out to
@@ -177,13 +180,16 @@ Docker is needed by the three DB-backed services **and by the bot's playground**
   (`uv run ...`). You do not `pip install` or activate a venv by hand. Install
   `uv`, and it manages Python for you. The repo is a single **uv workspace**:
   one root `pyproject.toml` (`services/*`, `packages/*`) and one root `uv.lock`
-  cover all six services and the shared `packages/auth` (`platform_auth`)
+  cover all seven services and the shared `packages/auth` (`platform_auth`)
   library — `uv sync` resolves the whole workspace even when run from a service
   subdirectory.
   No `ffmpeg` binary is needed anywhere, including for `meeting` — Opus decode
   runs in-process via PyAV, which bundles its own ffmpeg libraries.
-- **Node 20+** — for the discord-bot. Check with `node --version`. The bot reads
-  its `.env` via Node's built-in `--env-file`, so no `dotenv` package needed.
+- **Node 22.12+** — required by the locked `@discordjs/voice` dependency.
+  The bot package declaration, Dockerfile and CI still select/allow Node 20;
+  this is an unresolved runtime/dependency mismatch, not a compatibility guarantee.
+  See the [bot prerequisites](../discord-bot/README.md#prerequisites).
+  Check with `node --version`. The bot reads its `.env` via Node's built-in `--env-file`, so no `dotenv` package needed.
 
 Sanity check: `git --version`, `docker --version`, `uv --version`, `node --version`
 should all print a version.
@@ -196,12 +202,13 @@ Every service and the bot ship a committed `.env.example`. The setup is always
 the same — `cp .env.example .env` inside that directory — and `.env` is
 gitignored everywhere, so a filled-in file never gets committed.
 
-**The important thing to know: the Python services all boot with zero edits.**
+**The internal Python services provide local development defaults.**
 Their examples are pre-filled with working local defaults (`TT_ENV=local`,
 `API_KEY=dev-api-key-change-me`, a `DATABASE_URL` matching the service's own
 `docker-compose.yml`). Copy and run. The `*_ENV=local` tier is what makes that
-safe: outside `local`, each service calls `verify_production_secrets()` at boot
-and refuses to start while any secret is still a built-in default.
+safe: non-local boot checks reject the configured dev defaults according to
+each service’s policy. Gateway is different: it has no inbound bootstrap
+`API_KEY`; follow its [setup and issued-key instructions](../services/gateway/README.md).
 
 Where those values come from — and who to ask when they're org-owned — is
 [`ACCESS.md`](ACCESS.md). The short answer is that you need **no UTMIST
@@ -213,7 +220,8 @@ What you must supply yourself, and only when you need that capability:
 |---|---|---|
 | `DISCORD_TOKEN`, `DISCORD_CLIENT_ID` | `npm start` — the real Discord surface | [Discord Developer Portal](https://discord.com/developers/applications). **Not needed for `npm run dev:web`.** |
 | `DIRECTORY_API_KEY` | the bot talking to team-tracking | Mint it — see below. Blank in the example on purpose. |
-| `AWS_REGION` + AWS credentials | `llm` actually calling Bedrock; `meeting` actually transcribing | Your AWS profile, or explicit `AWS_ACCESS_KEY_ID`/`SECRET`. Both services **boot and answer `/health` without them**; only the real calls fail. The test suites fake both. |
+| `AWS_REGION` + AWS credentials | Optional Bedrock chat; meeting transcription | Supported AWS credential chain. Local mode can boot without provider credentials; non-local boot checks have service-specific requirements. |
+| `OPENAI_API_KEY` | Default LLM chat and embeddings | A key for the configured OpenAI project; offline tests use fakes. |
 | `RESEND_API_KEY` / `GMAIL_*` | `verification` sending real mail | Not needed locally — `EMAIL_BACKEND=fake` is the default and drops mail. |
 
 **The bot is the strict one.** `discord-bot/src/config.js` hard-fails at startup
@@ -259,38 +267,20 @@ writes the directory over HTTP, and fans out to the other services for specific
 commands. Each service owns its **own** database (or none); they never share
 tables, and everything talks over HTTP (no in-process consumers).
 
-```
-  documentation-system ──validates owner ids──▶ team-tracking
-   (docs catalog)         resolves labels        (directory / source of truth)
-        │       ▲                                      ▲
-        │ /fetch│ degrades gracefully if the directory  │
-        ▼       │            is down                    │
-   connectors   │                                       │
-   (Google docs)│  /doc                                 │  /link /whoami /team /seed
-        └───────┴────────── discord-bot ────────────────┘
-                            │   │   │
-              /link ────────┘   │   └──────── /record
-              /add-email        │
-                    ▼           ▼                  ▼
-              verification    (none direct)     meeting ──/chat──▶ llm ──▶ Bedrock
-              (email codes)                    (live transcript,        (stateless
-                                                minutes, PDF)            proxy)
-```
+The [platform dependency map](ARCHITECTURE.md#the-services) covers directory
+lookups, catalog retrieval/embedding, connector fetching and saved-meeting handoff.
 
-The bot is the only thing that talks to `verification` and `meeting`, and
-`documentation-system` the only thing that talks to `connectors`. **Two things
-call `llm`:** `meeting` (for minutes at `/stop`) and the bot itself — `LLM_BASE_URL`
-and `LLM_API_KEY` are hard-required boot vars, and `helperService` calls `/chat`
-when a member @-mentions Misty or sends a ping-on reply to Misty in a
-Misty-created thread
-(`src/context.js`, `src/adapters/discord/mentions.js`). All six backends are
-built the same way on purpose — learning one gives you ~80% of the others. The
-core conventions (the `contracts/` Protocol boundary, swappable storage
-adapters, scoped API-key auth, attested actor, Alembic migrations) are listed in
-the [root README → Working conventions](../README.md#working-conventions) and
-explained in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+The bot calls verification and meeting, and the catalog calls connectors.
+`llm` serves the bot’s helper chat, meeting minutes/Q&A, and the catalog’s
+embeddings. The bot requires `LLM_BASE_URL` and `LLM_API_KEY` at startup;
+retrieval also needs the catalog’s embed-scoped LLM key. Meeting hands saved
+text to the catalog, whose Google writer uses connectors.
 
-Two services deviate deliberately, and it's worth knowing why before you read
+The shared conventions are listed in the
+[root README](../README.md#working-conventions) and explained in
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+Some services deviate deliberately, and it's worth knowing why before you read
 their code:
 
 - **`llm`, `meeting`, and `connectors` have no database.** Their API keys are
@@ -299,7 +289,8 @@ their code:
   variable and redeploying; there is no `revoke` command.
 - **`verification` has a database but no key table.** It uses a
   `NullApiKeyStore`, so only the bootstrap `API_KEY` authenticates — there are no
-  per-consumer keys to mint. Its database holds only verification codes.
+  per-consumer keys to mint. Its database retains verification request state
+  and code hashes; expiry does not delete rows.
 - **`meeting` is stateful.** It holds one in-memory session per live meeting.
   It cannot be horizontally scaled without sticky routing on `session_id`, and
   a restart drops every in-flight meeting. See
@@ -337,14 +328,17 @@ or catalog with real owner validation), bring them up in this order:
      `documentation-system` first if it's running.
    - **`/link` / `/add-email` end-to-end** — also start `verification` (8003) and
      set `VERIFICATION_BASE_URL` / `VERIFICATION_API_KEY` in `discord-bot/.env`.
-     With `EMAIL_BACKEND=fake` no mail is sent; read the code out of the
-     verification service's logs.
+     `EMAIL_BACKEND=fake` is for injected tests/in-process inspection: it sends
+     no mail and never logs codes. A manual end-to-end flow needs a configured
+     test mailbox/provider; see the [verification testing guide](../services/verification/docs/CONTRIBUTING.md).
    - **`/record` end-to-end** — start `llm` (8002) **then** `meeting` (8004),
      since `meeting` calls `llm` for minutes. Set `MEETING_BASE_URL` /
      `MEETING_API_KEY` in `discord-bot/.env` and run the real Discord surface
      (`npm start`) — voice capture has no playground equivalent. Leave
      `MEETING_BASE_URL` blank and the bot still boots; `/record` just reports
-     "not configured".
+     "not configured". For the default saved-text path, also configure the
+     [catalog/connector persistence dependencies](../services/documentation-system/docs/DEPLOYMENT.md#meeting-record-persistence);
+     a successful PDF-only recording does not verify Google Doc saving.
 
 **Minting keys for the DB-free services.** `llm` and `meeting` have no
 `api_keys` table, so their CLIs *print* a key and its `CONSUMER_KEYS` JSON entry
@@ -386,6 +380,7 @@ is the workflow around them.
    - [llm CONTRIBUTING](../services/llm/docs/CONTRIBUTING.md)
    - [meeting CONTRIBUTING](../services/meeting/docs/CONTRIBUTING.md)
    - [connectors CONTRIBUTING](../services/connectors/docs/CONTRIBUTING.md)
+   - [gateway CONTRIBUTING](../services/gateway/docs/CONTRIBUTING.md)
    - [discord-bot CONTRIBUTING](../discord-bot/docs/CONTRIBUTING.md)
 
 3. **Run the fast tests locally** before you push.
@@ -398,11 +393,10 @@ is the workflow around them.
    make check    # lint + format check + fast tests, everywhere
    ```
 
-   > **`make check` is not CI-equivalent.** It runs the *fast* suites, skipping
-   > the 65 Postgres-adapter tests CI runs across the three DB-backed services
-   > (plus 3 behind `RUN_PG_TESTS`). It's the right pre-push check for most
-   > work, but **if you touched storage, an adapter, or a migration, run
-   > `make test-full`** with Postgres up — otherwise CI can still go red.
+   > **`make check` is not CI-equivalent.** It runs the fast suites. For storage,
+   > adapter or migration changes, follow [database test setup](#database-test-setup).
+   > `make test-full` collects all suites, but does not set the environment flags
+   > that enable every Postgres/migration suite. Starting Postgres alone is insufficient.
 
    `make help` lists the rest (`make test`, `make format`, `make test-full`).
    It's a convenience wrapper over the per-directory commands below, not a
@@ -410,14 +404,14 @@ is the workflow around them.
    authoritative, and if the Makefile ever disagrees with CI, CI is right.
 
    To run one service on its own — for a DB-backed API (team-tracking,
-   documentation-system, verification):
+   documentation-system, verification, gateway):
 
    ```bash
    cd services/<service>
    uv run pytest --ignore=tests/test_postgres_adapter.py   # fast, in-memory adapter
    ```
 
-   `llm` and `meeting` have no Postgres adapter, so it's just `uv run pytest` —
+   `llm`, `meeting`, and `connectors` have no Postgres adapter, so it's just `uv run pytest` —
    no Docker, no network, no AWS credentials (the Bedrock/Transcribe clients are
    faked via `app.dependency_overrides`).
 
@@ -439,13 +433,11 @@ is the workflow around them.
 4. **Open a PR into `staging`.** Every PR runs
    [`ci.yml`](../.github/workflows/ci.yml): full test suites against real
    Postgres, `ruff` lint, and Docker builds with boot smoke tests. Green CI is
-   required. Three other workflows also fire on PRs —
-   [`pr-zone-check`](../.github/workflows/pr-zone-check.yml) (warns, non-blocking,
-   if a PR spans multiple CODEOWNERS zones),
-   [`discord-pr-notify`](../.github/workflows/discord-pr-notify.yml) (posts to
-   Discord when review is requested), and
-   [`blocked-ready-automation`](../.github/workflows/blocked-ready-automation.yml)
-   (keeps `blocked`/`ready` issue labels in sync from `Blocked by:` lines).
+   required. PR workflows also check ownership/labels and PR size; the
+   [zone check](../.github/workflows/pr-zone-check.yml) warns when a PR spans
+   multiple zones, and [review notifications](../.github/workflows/discord-pr-notify.yml)
+   notify Discord. [Blocked/ready automation](../.github/workflows/blocked-ready-automation.yml)
+   runs on issue events, not PR events; see its [current limits](ONBOARDING.md#getting-work).
 
    > **`services/meeting` went to staging with no CI coverage at all** — no test
    > job, and `docker-build` skipped its image. Both are now wired up
@@ -506,19 +498,38 @@ for queue settings and failure handling.
 
 ---
 
+## Database test setup
+
+Use each service’s test guide and the environment settings in
+[CI](../.github/workflows/ci.yml) as the authority. `make test-full` runs plain
+pytest in each Python directory; it does not enable opt-in suites for you.
+
+- Team-tracking and verification need their configured test Postgres databases.
+- Documentation-system's `RUN_PG_TESTS=1` enables its Postgres adapter tests
+  **and some destructive migration tests**. Additional migration suites also
+  require `RUN_PG_MIGRATION_TESTS=1`. Use a disposable database even when the
+  second flag is unset; follow the [catalog test guide](../services/documentation-system/docs/CONTRIBUTING.md).
+- Gateway requires `RUN_PG_TESTS=1` and an explicit `GATEWAY_TEST_DATABASE_URL`
+  for a disposable database; see [gateway testing](../services/gateway/docs/CONTRIBUTING.md).
+
+Do not point migration regressions at retained development or production data.
+Run service-specific commands with their documented database settings; a green
+run with skipped suites is not the same coverage as CI.
+
 ## Troubleshooting
 
-- **Port already in use (5433 / 5434 / 8000–8005).** API ports are 8000
+- **Port already in use (5433–5435 / 8000–8006).** API ports are 8000
   team-tracking, 8001 documentation-system, 8002 llm, 8003 verification, 8004
-  meeting, 8005 connectors. Dev Postgres is 5433 for team-tracking and 5434 for *both*
-  documentation-system and verification. If a port is taken, find the process
+  meeting, 8005 connectors, 8006 gateway. Dev Postgres is 5433 for team-tracking,
+  5434 for *both* documentation-system and verification, and 5435 for gateway.
+  If a port is taken, find the process
   (`lsof -i :5434`) or stop a stray `docker compose` from another service.
 - **documentation-system and verification can't run at once.** Both
   `docker-compose.yml` files bind host **5434**, so the second `docker compose
   up -d postgres` fails with a port-allocation error — or, worse, you connect to
   the *other* service's database and Alembic reports a revision it doesn't
-  recognize. Remap one of them (`-p 5435:5432`) and update that service's
-  `DATABASE_URL` to match.
+  recognize. Remap one to an unused port (5436 if free) in a local Compose override
+  and update its `DATABASE_URL`; gateway already uses 5435.
 - **`npm run dev:web` fails to bind 8001, or dies on `docker compose up`.** The
   playground spawns its own team-tracking on **8001** — the same port
   `documentation-system` uses — and requires Docker for the Postgres it clones
@@ -551,12 +562,13 @@ for queue settings and failure handling.
 - **`/record` says "not configured".** `MEETING_BASE_URL` is unset on the bot.
   That's the intended graceful degradation, not a crash — set it (plus
   `MEETING_API_KEY`) to enable the command.
-- **`meeting` or `llm` refuses to start.** Outside `MEETING_ENV`/`LLM_ENV=local`
-  both call `verify_production_secrets()` at boot and exit, listing every var
-  that's still unset. `llm` requires `API_KEY` (changed from the dev default)
-  and `AWS_REGION`; `meeting` requires those two **plus `LLM_BASE_URL` and
-  `LLM_API_KEY`**. A misconfigured deploy is meant to die at boot, not on first
-  request.
+- **`meeting` or `llm` refuses to start.** Outside local mode, each service
+  validates its configured credentials/dependencies at boot. LLM needs a
+  non-default bootstrap key and OpenAI key for embeddings, plus an AWS region
+  when selecting Bedrock. Meeting needs its non-default bootstrap key, AWS
+  region and LLM URL/key. Check the service configuration guide for the exact
+  policy: meeting's current known-default comparison does not reject an empty
+  bootstrap value, so operators must still provide a strong key.
 - **`CONSUMER_KEYS` rejected at boot.** `llm` and `meeting` both require it to be
   a **JSON array** (`[{...}]`), not a bare object or a comma-separated string.
   Anything else fails fast at startup by design.

@@ -96,13 +96,13 @@ Issues carry labels on three independent axes:
 | Knowledge | `area/*` (often two or three) | Which parts of the system are involved, and so what you'd need to know to pick it up. |
 | State | `blocked` / `ready` | Whether it can be started right now. |
 
-**`ready` means up for grabs:** no open blockers and nobody assigned. The
-state labels are automated, not applied by hand. Each issue form has a
-**"Blocked by"** field (`#40, #42`), and a workflow keeps the labels in sync:
-closing the last blocker flips an issue from `blocked` to `ready`, reopening
-a blocker re-blocks it, and assigning yourself removes `ready` because the
-issue just left the queue. That's why claiming means *assigning yourself*,
-not just leaving a comment.
+**Check blockers and assignees before claiming a `ready` issue.** Each issue
+form’s **"Blocked by"** field (`#40, #42`) drives the state-label workflow.
+Closing the last blocker adds `ready`, reopening one re-blocks it, and assigning
+yourself removes `ready`. Two current limits matter: closing a blocker can add
+`ready` to an already-assigned dependent, and a new/edited issue with no blocker
+references is not automatically labeled `ready`. The label is a useful filter,
+not proof the work is unclaimed. Claim by *assigning yourself*, not just commenting.
 
 ### Filing an issue
 

@@ -84,7 +84,7 @@ uv --project . run team-tracking-keys issue --name discord-bot \
 # Verify the token starts with tt_ — a doc_-prefixed key means the shared venv
 # resolved documentation-system's CLI instead, and team-tracking will reject it.
 # scripts/provision-directory-key.sh is the source of truth for the bot's scopes
-# (people:elevate is what lets /seed promote people to admin/superuser).
+# (people:elevate lets /seed create new people at admin/superuser level).
 ```
 
 ### Daily startup
@@ -119,7 +119,7 @@ uv run uvicorn src.api.app:app --reload --port 8000
 
 # Terminal 2
 cd discord-bot
-npm start                                # or: npm run dev for both surfaces
+npm start
 ```
 
 Before starting Discord mode, enable **Message Content Intent** under Discord
@@ -163,8 +163,11 @@ cd discord-bot
 npm run dev                              # ENABLE_DISCORD=true ENABLE_WEB=true
 ```
 
-Discord connects to main, the web surface still uses its own scratch DB
-managed by the orchestrator. Fine for parallel testing; noisy in one terminal.
+Both surfaces share the configured directory and application context; this
+command does not create a scratch DB. The directory key must include `dev:spoof`
+and target a non-production directory. Web edits affect the same data as Discord
+commands. For directory isolation, run `npm start` and `npm run dev:web` in
+separate terminals; only `dev:web` orchestrates the scratch directory.
 
 ### Stopping everything
 
@@ -205,8 +208,9 @@ and skips them.
 > *without* deploying, use the Railway-targeted wrappers — `npm run register:all`
 > (staging then production), or `npm run register:staging` /
 > `npm run register:production` for one environment. There's also a guarded
-> `./scripts/register.sh <staging|production|all>` that confirms before touching
-> production. See [RAILWAY-DEPLOYMENT.md §5](../docs/RAILWAY-DEPLOYMENT.md).
+> `./scripts/register.sh <staging|production|all>` (run from the repository root).
+> It confirms before touching production. See
+> [RAILWAY-DEPLOYMENT.md §5](../docs/RAILWAY-DEPLOYMENT.md).
 
 ## Commands
 
@@ -263,7 +267,8 @@ and skips them.
 - `/channel-access set team:<> [team2:<> … team5:<>]` (admin) — replace the channel's
   team list (up to five). Team options use slug autocomplete.
 - `/channel-access append team:<> [team2:<> … team5:<>]` (admin) — add teams to the
-  existing list without removing ones already configured (union, then the same PUT).
+  existing list without removing ones already configured (atomic union through
+  the directory's append endpoint).
 - `/channel-access clear` (admin) — clear the channel's team list (no document access).
 - `/doc <add|list|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
 - `/doc search query:<text>` (linked) — search the documents you can access and get the top matches
@@ -349,10 +354,10 @@ The bot itself needs only:
   and Send Messages (Send Messages in Threads for a thread) in the original
   destination. No Google credentials are added to the bot.
 
-The bot does **not** need ffmpeg, AWS credentials, or `MAX_RECORDING_MS` /
-`RECORDING_SILENCE_MS` — those are requirements of the `meeting` service
-(`services/meeting`), not the bot. See `services/meeting/README.md` and its
-`.env.example` for that service's infra requirements.
+The bot does **not** need ffmpeg or AWS credentials. The meeting service owns
+`MAX_MEETING_MS` and `DISCONNECT_GRACE_S`; see its
+[configuration](../services/meeting/README.md#configuration). Empty-channel
+stopping uses a separate, fixed 20-second grace period in the bot.
 
 ## Auth layer
 
@@ -370,7 +375,10 @@ parallel to team-tracking's scoped-key auth.
 
 ## Setup
 
-1. **Node 20+** required.
+1. **Node 22.12.0+** meets the locked `@discordjs/voice` dependency's declared
+   runtime floor. The package's `engines` field still permits Node 20, and the
+   Docker image and CI still use Node 20. That mismatch needs a separate runtime
+   update and compatibility check; Node 20 compatibility is not established here.
 2. `cp .env.example .env` and fill in:
    - Discord app credentials (`DISCORD_TOKEN`, `DISCORD_CLIENT_ID`).
    - `DISCORD_GUILD_ID` — dedicated testing guild ID. **Beta** commands register
@@ -659,13 +667,20 @@ helper transcript; **Reset DB** also clears it.
 ### Picker only shows *linked* people
 
 The "Acting as" datalist only surfaces people whose Discord identifier is
-already linked. A person you've seeded via `POST /people` but never `/link`ed
-lives in the DB but doesn't appear in the dropdown. To bring them in:
+already linked. A person you've seeded via `POST /people` without a Discord
+identifier lives in the DB but doesn't appear in the dropdown. The simplest
+local setup is to [seed the identifier in main](#seeding-your-main-db) and reset
+the scratch DB. To exercise email linking instead, run a separate verification
+service with a working email backend and configure `VERIFICATION_BASE_URL` and
+`VERIFICATION_API_KEY`. `dev:web` does not start that service; its default fake
+sender has no manual code inbox (see
+[verification local setup](../services/verification/docs/CONTRIBUTING.md#local-setup)).
 
 1. Type any placeholder Discord snowflake into "Acting as" (any numeric string
    works — e.g., your real snowflake with Developer Mode on).
 2. Run `/link email:<their-email>`.
-3. Refresh (Cmd+R). The person now appears in the datalist tied to that
+3. Run `/verify-code code:<emailed-code>` with the same acting Discord ID.
+4. Refresh (Cmd+R). The person now appears in the datalist tied to that
    Discord ID.
 
 ### Seeding your main DB
@@ -691,10 +706,11 @@ That requires the **main** team-tracking uvicorn to be running on port 8000:
 cd ../services/team-tracking && uv run uvicorn src.api.app:app --port 8000
 ```
 
-Once seeded, click **Reset DB** in the playground and your new identity shows
-in the scratch clone. Note: only the `people` row is durable; a `/link` inside
-the playground writes to scratch and gets wiped on reset — so you'll need to
-`/link` again after each reset, or seed the Discord identifier directly:
+Once seeded, click **Reset DB** in the playground to copy the person into
+scratch; the picker still needs a Discord identifier. Only the `people` row is
+durable at this point. Completing `/link` and `/verify-code` in the playground
+writes the identifier to scratch, so both steps are needed again after a reset.
+To include the link in every clone, seed the Discord identifier in main directly:
 
 ```bash
 # Get the person's id first
@@ -735,7 +751,8 @@ If you've already provisioned a team-tracking instance manually (specific
 version, remote host, whatever) and just want to run the bot's web server
 against it, use `npm run dev:web:plain` — same web UI, no orchestration, no
 scratch DB, reads `DIRECTORY_BASE_URL` and `DIRECTORY_API_KEY` from your
-local `.env`.
+local `.env`. The directory must be non-production and the key must include
+`dev:spoof`; web edits go directly to that configured directory.
 
 ## Architecture
 
@@ -817,7 +834,7 @@ tested against a mocked directory client. discord.js handlers are kept thin.
 Discord role sync, `/unlink`, and any bot-side persistence. (Email verification is
 now implemented — `/link` + `/verify-code` via the verification service.)
 
-Team archive/unarchive, `/team info`, editing role/team-admin on existing memberships, team-admin delegation authority, dynamic role_kinds fetch for slash choices, LLM adapter.
+Team archive/unarchive, `/team info`, editing role/team-admin on existing memberships, team-admin delegation authority, dynamic role_kinds fetch for slash choices.
 
 ## Durable meeting records
 

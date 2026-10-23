@@ -41,7 +41,7 @@ uv run uvicorn src.api.app:app --reload --port 8002
 
 The API is now at `http://localhost:8002`. Interactive Swagger UI is at `http://localhost:8002/docs`; the machine-readable schema is at `http://localhost:8002/openapi.json`.
 
-The default dev bootstrap key is `dev-api-key-change-me` (set in `.env`, carries the `admin` wildcard scope). Pass it as `X-API-Key` on every request:
+The default dev bootstrap key is `dev-api-key-change-me` (set in `.env`, carries the `admin` wildcard scope). Pass it as `X-API-Key` on chat and embedding requests:
 
 ```bash
 curl -sS http://localhost:8002/chat \
@@ -80,7 +80,7 @@ Default chat and embeddings bill through **OpenAI**. Selecting a Bedrock chat ba
 
 Auth is scoped API keys via the shared `platform_auth` package, matching team-tracking and documentation-system — but **DB-free**. There is no `api_keys` table.
 
-- Every request needs `X-API-Key`. A key is either the shared bootstrap env key (`API_KEY`, scope: `admin`) or a per-consumer key seeded from the `CONSUMER_KEYS` env var.
+- `POST /chat` and `POST /embed` need `X-API-Key`; health and the API documentation/schema routes are unauthenticated. A key is either the shared bootstrap env key (`API_KEY`, scope: `admin`) or a per-consumer key seeded from the `CONSUMER_KEYS` env var.
 - **`CONSUMER_KEYS` is a JSON array**, each entry `{"name", "prefix", "key_hash", "scopes"}`. At boot, `key_store_from_config()` (`packages/auth/platform_auth/memory_store.py`) parses it into an in-memory store that satisfies `platform_auth`'s `ApiKeyStore` protocol — the stateless equivalent of team-tracking's Postgres key table, swappable for a persistent store later. Keys are stored only as Argon2 hashes; a malformed `CONSUMER_KEYS` fails fast at startup.
 - Keys use the **`llm_` envelope** (`llm_<prefix>_<secret>`). There is **no `X-Actor` header** and no `dev:spoof` scope — this is a service-to-service API, so the audit actor is always the authenticated key's own name (attested actor).
 
@@ -101,7 +101,7 @@ Append the printed JSON object to the service's `CONSUMER_KEYS` array and redepl
 
 ## API at a glance
 
-Every endpoint except `/health` requires `X-API-Key`.
+`POST /chat` and `POST /embed` require `X-API-Key`. `/health` and the API documentation/schema routes (`/docs`, `/redoc`, `/openapi.json`) are unauthenticated within the service's network exposure.
 
 | Method | Path | Scope | Description |
 |--------|------|-------|-------------|
@@ -118,7 +118,7 @@ Every endpoint except `/health` requires `X-API-Key`.
 | `messages` | `[{role, content}]` | Required, non-empty. `role` is `user` or `assistant`; `content` is non-empty text or structured blocks. |
 | `system` | string \| null | Optional system prompt. |
 | `model` | string \| null | Optional. Defaults to `LLM_MODEL`; must belong to the selected provider’s [catalog](docs/API.md#post-chat). |
-| `max_tokens` | int | Default `16000`, range `1`–`64000`. |
+| `max_tokens` | int | Default `16000`; OpenAI `16`–`64000`, Bedrock `1`–`64000`. |
 | `thinking` | bool \| null | Defaults to `THINKING_DEFAULT`; GPT-6.1 Sol maps true/false to medium/low. |
 | `tools` | list \| null | Optional client-executed tool definitions; see the [tool-use contract](docs/API.md#client-executed-tools). |
 

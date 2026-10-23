@@ -2,17 +2,18 @@
 
 Base URL (local): `http://localhost:8005` · Swagger UI: `/docs` · Schema: `/openapi.json`
 
-Everything except `/health` requires `X-API-Key`.
+Business endpoints require `X-API-Key`. `/health` and the API documentation/schema routes (`/docs`, `/redoc`, `/openapi.json`) are unauthenticated within the service's network exposure.
 
 | Method | Path | Scope | Description |
 |---|---|---|---|
 | POST | `/discover/google` | `discover` | List one metadata page of direct shares or folder children |
 | POST | `/fetch` | `fetch` | Fetch a document's text content from a source |
+| POST / PUT / GET / DELETE | `/google/docs` route group | `meeting-write` / `meeting-fetch` | Meeting-Doc operations; see [per-route scopes](#meeting-writer-googledocs) |
 | GET | `/health` | — | Liveness probe |
 
 ## Authentication
 
-Every request carries the key in the `X-API-Key` header:
+Every business request carries the key in the `X-API-Key` header:
 
 ```
 X-API-Key: connectors_<prefix>_<secret>
@@ -25,7 +26,7 @@ There is **no `X-Actor` header** and no `X-On-Behalf-Of`. This is a service-to-s
 | Failure | Status |
 |---|---|
 | Missing or unparseable `X-API-Key` | 401 |
-| Valid key lacking the `fetch` scope | 403 |
+| Valid key lacking the endpoint's required scope | 403 |
 
 ---
 
@@ -46,16 +47,20 @@ Resolve a document URL to plain text.
 
 `gdrive` is the catch-all for anything that isn't a native Google editor file: uploaded PDFs, `.docx`, and `text/*` uploads. In practice any of the four ids will fetch any Google file, since the extractor is chosen by the file's actual MIME type rather than by `source_id`; the id only selects *which source implementation* handles the URL.
 
-`github` takes a repository URL (`github.com/{owner}/{repo}`, optionally `/tree/{ref}`) and returns its README, titled `owner/repo`, or a `/blob/{ref}/{path}` URL and returns that text file. The ref may contain `/` (`feature/docs`); it is matched against the repository's branches and tags (longest match wins), or taken as a commit SHA once GitHub confirms that commit exists; an unknown ref or an empty repository is 404. A renamed repository's redirect is followed. A repository without a README returns `content: null` with a warning. `permissions` is omitted for GitHub.
+`github` takes a repository URL (`github.com/{owner}/{repo}`, optionally `/tree/{ref}`) and returns its README, titled `owner/repo`, or a `/blob/{ref}/{path}` URL and returns that text file. The ref may contain `/` (`feature/docs`); it is matched against the repository's branches and tags (longest match wins), or taken as a commit SHA once GitHub confirms that commit exists; an unknown ref or an empty repository is 404. A renamed repository's redirect is followed. A repository without a README omits `content` and returns a warning. `permissions` is omitted for GitHub.
 
 **Response** (`FetchResponse`) — `200`:
 
 | Field | Type | Notes |
 |---|---|---|
-| `title` | string \| null | The Drive file name |
-| `content` | string \| null | Extracted text, truncated at `MAX_CONTENT_CHARS` (default 1,200,000) |
+| `title` | string \| omitted | Source title; omitted when unavailable |
+| `content` | string \| omitted | Extracted text, truncated at `MAX_CONTENT_CHARS` (default 1,200,000); omitted when unavailable |
 | `warnings` | string[] | Non-fatal information loss. Empty on a clean fetch. |
 | `permissions` | object[] \| omitted | Complete effective Google Drive ACL. Omitted only for sources without an ACL contract. |
+
+`/fetch` omits fields whose internal value is `None`, including optional permission
+fields; it does not serialize those values as JSON `null`. Successful Google
+fetches always include `permissions`, which may be an empty list.
 
 Each permission carries `permission_id`, `principal_type` (`user`, `group`, `domain`, or
 `anyone`), `principal` (email/domain when applicable), `role`, `inherited`, `inherited_from` (folder or
@@ -75,7 +80,17 @@ curl -sS http://localhost:8005/fetch \
 {
   "title": "2026 Sponsorship Plan",
   "content": "# 2026 Sponsorship Plan\n\n## Goals\n...",
-  "warnings": []
+  "warnings": [],
+  "permissions": [
+    {
+      "permission_id": "example-permission-id",
+      "principal_type": "group",
+      "principal": "sponsorship@example.org",
+      "role": "reader",
+      "inherited": false,
+      "inherited_from": []
+    }
+  ]
 }
 ```
 
@@ -91,7 +106,7 @@ The extractor is chosen by the file's MIME type, from `EXTRACTORS` in `src/sourc
 | `application/pdf` | PDF (`pypdf`, parsed locally) | One `## Page N` section per page |
 | `.docx` (`…wordprocessingml.document`) | Docx (`python-docx`, parsed locally) | Markdown mirroring the Docs extractor |
 | `application/vnd.google-apps.form` | Forms (native API) | Markdown: title, description, section headings, questions + options |
-| `text/*` (uploaded) | Drive export fallback | Raw text |
+| `text/*` (uploaded) | Drive media download fallback | Raw text |
 | anything else | — | `422` |
 
 Legacy `.doc` (`application/msword`) is a different format from `.docx` and is **not** supported — `python-docx` cannot read it.
@@ -151,7 +166,13 @@ responses fail as upstream errors rather than returning incomplete text.
 | Upstream Drive/Docs API failure | 502 | `source upstream error` |
 | Missing/invalid `X-API-Key` | 401 | — |
 
-The **403 vs 503** distinction matters when debugging: 403 means the credential works but the file isn't shared with the service account's address; 503 means there's no usable credential at all.
+For Google reads, upstream HTTP 403 maps to `SourceForbidden` without inspecting
+Google's reason; file sharing is only one possible cause. Check credential
+identity, OAuth scopes, API enablement, and permission to read the complete ACL.
+Upstream 404 maps to `SourceNotFound`; other Google HTTP failures map to
+`SourceUnavailable` (502). A 503 means local source configuration is unavailable,
+such as missing or malformed credentials. Scope failures can also return 403
+before Google is called.
 
 ---
 
@@ -173,7 +194,7 @@ Answers `200` even when `GOOGLE_CREDENTIALS_JSON` is unset — no credential is 
 
 ## Audit log
 
-Every request emits one JSON line with the resolved actor, endpoint, status, and duration. `/fetch` additionally records `source_id`, and on success the number of `warnings` returned (`request.state.audit_extra`). The document's URL and content are never logged.
+Every request emits one JSON line with the resolved actor, endpoint, status, and duration. `/fetch` additionally records `source_id`, and on success the number of `warnings` returned (`request.state.audit_extra`). The status is the connector's response status, not the upstream Google status or reason. The document's URL and content are never logged.
 
 ## `POST /discover/google`
 
@@ -226,15 +247,19 @@ configuration selects the root and the authenticated key attests the actor.
 | `PUT /google/docs/{id}/sharing` | `meeting-write` | `{commenters: [group emails]}` → complete read-back ACL |
 | `POST /google/docs/{id}/fetch` | `meeting-fetch` | Owner-read title, text and full ACL in the existing fetch response shape |
 | `GET /google/docs/{id}/status` | `meeting-fetch` | `{status: exists \| trashed \| inaccessible}` |
-| `DELETE /google/docs/{id}` | `meeting-write` | Revoke direct shares, permanently delete; `{status: deleted}` |
+| `DELETE /google/docs/{id}` | `meeting-write` | Attempt direct-share revocation, permanently delete; `{status: deleted}` |
 
 Creation converts an in-memory HTML upload to a native Google Doc in one Drive
 request. It does not subsequently write the body. Both the root and voice-channel
 subfolder ACLs must contain only configured admin principals before upload.
 The Doc initially inherits only those admins. Only the canonical ID chosen by
 documentation-system may receive direct team group commenter shares. Read-back
-refuses unexpected access and revokes direct shares before reporting
-`unexpected_acl`; the catalog then removes that record.
+refuses unexpected access and attempts direct-share revocation before reporting
+`unexpected_acl`. Revocation is best effort and skips owners and inherited
+permissions; the error does not prove access was removed. The catalog starts
+removal, but external access may persist until Google deletion is confirmed.
+Complete catalog removal and Google cleanup/reconciliation using the
+[persistence runbook](../../documentation-system/docs/DEPLOYMENT.md#meeting-record-persistence).
 
 Writer failures return a content-free `detail: {code, uncertain}` object: 503
 for an unconfigured writer, 502 for ambiguous upstream outcomes, 409 for a

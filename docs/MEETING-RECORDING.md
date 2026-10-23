@@ -214,7 +214,7 @@ documentation-system ── create Doc ──▶ connectors ──▶ Google Dri
 (cataloged). `creating` can instead go to `create_uncertain`, which is
 reconciled as above before anything else happens. After
 `MEETING_RECORD_MAX_ATTEMPTS` (default 8) the record becomes `failed`, which is
-surfaced to admins via the audit log and `GET /meeting-records?status=failed`.
+surfaced to admins via the audit log and `GET /meeting-records?persistence_status=failed`.
 Every step after `doc_created` is idempotent against the stored document ID,
 so it can be retried after a crash. Removal sets `removing` and `removed_at`
 before external cleanup, then `removed` once known Google files and catalog
@@ -393,8 +393,10 @@ infra/Drive admin principals, including inherited Shared Drive members; a
 principal is not trusted merely because it has an elevated Drive role.
 
 **Unexpected access is a security removal, not a persistence retry.** If any
-other principal has access, connectors immediately revokes direct shares and
-reports `unexpected_acl`. For an adopted canonical Doc, documentation-system
+other principal has access, connectors immediately attempts to revoke direct
+shares and reports `unexpected_acl`. The current revocation is best effort and
+skips owners/inherited permissions; the error alone does not prove access was
+removed. External access can persist until Google deletion is confirmed. For an adopted canonical Doc, documentation-system
 starts the `/remove` cascade: set the removal marker, disable link delivery,
 permanently delete the Doc, purge any catalog copy, and retain the tombstone.
 Deletion is required even when an unwanted inherited permission cannot be
@@ -556,8 +558,9 @@ session state and do not wait on any of this.
 The bot's `meetingClient.encodeFrame` and the service's `_parse_frame` are inverses. **If you change one, change the other.**
 
 - **WebSocket:** `{wsUrl}/meetings/{sessionId}/stream?guild_id={guildId}` — the consumer key is sent as the **first WS text frame** `{"key": "…"}` (keeps it out of URLs/logs); the service also still accepts a `?key=` query param.
-- **Binary audio frame:** `[2-byte big-endian speaker_id length][speaker_id UTF-8][8-byte big-endian ts_ms][raw Opus payload]`
+- **Binary audio frame:** `[2-byte big-endian speaker_id length][speaker_id UTF-8][8-byte big-endian ts_ms][raw Opus payload]`. `ts_ms` is elapsed monotonic milliseconds since recording start on one shared clock for every speaker, including silence; it is not an epoch or per-speaker clock.
 - **Control frame (text/JSON):** `{"speaker_id": "...", "display_name": "..."}` — registers the display name shown for a speaker.
+- **Audio-complete control:** after draining capture, send `{"end_of_audio":true}` before `POST /stop`. The service waits for this barrier before quiescing ingestion; older clients fall back to a bounded five-second wait that can leave a short transcript. See the [complete wire/stop contract](../services/meeting/docs/API.md).
 - **Auth:** the `platform_auth` consumer key — on the WS as the first text frame `{"key": "…"}` (or a `?key=` query param; both server-supported), and on `GET /transcript` / `POST /stop` as the `X-API-Key` header. The `meetings` scope is required.
 - **`POST /stop` request:** optional `title` (up to 100 characters) and `record` context; see the [durable stop contract](../services/meeting/docs/API.md#durable-record-context). A supplied title wins over the LLM-generated title. **Response:** `{ transcript, minutes, pdf_b64, record }` (PDF base64-encoded). The bot posts it @-mentioning whoever ran `/record start` — including on the auto-stop path, where there is no interaction to read the requester off.
 
@@ -587,18 +590,19 @@ active channel and auto-stop guidance. That stop guard has one exception:
 not apply once the recorded channel is already empty of humans (the same
 `humansIn` head-count auto-stop itself uses). Without that carve-out, a missed
 `voiceStateUpdate`, or a recorded channel that's since gone private, full, or
-been deleted, would strand the recording until the 4h backstop with nobody
-able to stop it. Status always names the recorded channel; when idle it tells
+been deleted, could strand the session with nobody able to finalize it. The
+four-hour ingestion cutoff does not stop the session or deliver minutes. Status always names the recorded channel; when idle it tells
 the caller that Misty will join the voice channel when recording starts, and
 when the recorded channel is empty it notes the imminent auto-stop and the
 `/record stop` option. Start attempts while the recorded channel is empty
 similarly explain that Misty is wrapping up and can be ended immediately with
 `/record stop`.
 
-If a moderator moves Misty during a recording, the adapter updates the session's
-voice channel before checking auto-stop. Status, stop permissions, and the
-empty-channel check then follow the destination channel. The minutes still post
-to the text channel where recording was started.
+If a moderator moves Misty during a **saved** recording (`save:true`, the
+default), capture stops and the meeting finalizes to preserve its original
+audience. Only PDF-only recordings (`save:false`) continue in the destination:
+status, stop permissions and empty-channel checks then follow that channel.
+Delivery still targets the text channel where recording started.
 
 **Auto-stop.** `wireDiscordClient` listens for `voiceStateUpdate` (via `createAutoStop`); when the channel being recorded goes empty of non-bot members it **debounces** — schedules a stop after a grace period (`AUTO_STOP_GRACE_MS`) and cancels it if a human is back either on a later event or at fire time (re-check). This avoids a transient client blip or a voice-region failover irreversibly finalizing a live meeting on a single stray "last member left" event. When it does fire it calls `meetingSurface.stop(guildId)` — the same path as `/record stop`. The recorded channel is read from the live session via `meetingSurface.activeSession(guildId)` (which returns the `{ sessionId, voiceChannel }` snapshot opaquely, so `meetingSurface` keeps no `discord.js` dependency), which keeps the head-count honest and makes the listener a no-op once a session is torn down. Each pending timer is **bound to its `sessionId`**, so a timer scheduled for one recording can never terminate a *later* recording that reuses the same guild (a real bug caught in review): a new recording always schedules its own full-grace timer, and a stale one no-ops at fire time. The head-count is computed from **`guild.voiceStates.cache`** (maintained by the `GuildVoiceStates` intent — the same one that powers voice receive), *not* from `channel.members`. `channel.members` resolves each occupant to a `GuildMember` via `guild.members.cache`, which only the privileged `GuildMembers` intent keeps populated; without it that resolution is unreliable and miscounts occupants — including the recorder bot itself, whose member often isn't cached — which is what made auto-stop silently never fire in an early version. Counting voice states avoids that dependency entirely, and the recorder bot is excluded by its own user id (`client.user.id`), so `GuildMembers` is deliberately **not** required.
 
@@ -611,6 +615,6 @@ to the text channel where recording was started.
 - **Concurrent stream limits:** one open Transcribe stream per active speaker, held for the whole meeting — a 10-person call is 10 concurrent streams. Confirm the account's concurrent-stream quota before a large meeting; exceeding it surfaces as a `meeting.audit` warning and that speaker retries, then drops out.
 - **AWS session restarts:** Transcribe ends a session on its own (idle timeout, 4h cap). The wrapper reopens on the next audio and offsets the new session's word times by the audio already delivered — unit-tested against a fake, not yet observed against a real timeout.
 - **Speaker-timeline anchoring:** a speaker's stream carries only the frames they spoke, so word times are mapped onto meeting time via anchors recorded at each detected silence. The 200 ms tolerance is reasoned from Discord's ~20 ms cadence, not measured live.
-- **Meeting length backstop:** the normal end is `/record stop` or auto-stop-on-empty, with a **4h `max_meeting_ms` backstop** so a forgotten meeting can't run indefinitely. Set `MAX_MEETING_MS` to another value, or `None`, to change or disable it.
-- **A dropped WebSocket is recoverable, not fatal.** The service holds a disconnected session for `DISCONNECT_GRACE_S` (default 60s) instead of discarding it, and the bot responds to an unexpected `onClose`/`onError` by running the normal finalize (`POST /stop`) rather than announcing a lost meeting — so the minutes still post. The channel only sees "could not be recovered" if that finalize itself fails. Both halves are required: without the server-side hold the bot's `/stop` would 404, and without the bot-side salvage the held session would just expire. The close code is logged on both sides, which is what makes the *next* dropped socket diagnosable.
+- **Meeting length cutoff:** `MAX_MEETING_MS` defaults to four hours. Once exceeded, the service drops new audio frames; it does not close the socket, finalize the session or deliver minutes. `/record stop` or auto-stop-on-empty is still required. Configure a millisecond limit through the service setting; do not rely on the cap to recover a stranded recording.
+- **Dropped WebSocket recovery has a deadline.** The service holds a disconnected session for `DISCONNECT_GRACE_S` (default 60s), and the bot responds to an unexpected `onClose`/`onError` by attempting normal finalization (`POST /stop`). Starting stop does not cancel the grace timer: if the session remains registered at expiry, teardown can interrupt an unfinished transcript flush. Recovery is therefore best effort; see the [disconnect contract](../services/meeting/docs/API.md#disconnect). A failed finalize reports "could not be recovered". Both the server-side hold and prompt bot-side salvage are required, and the close code is logged on both sides.
 - **Live Q&A:** `/qna question:<text>` is in progress and registered globally in every server the bot is in. It runs only in the recording’s original text channel, replies privately, and makes no directory lookup. The meeting service snapshots the last 15 minutes, shortens unusually dense windows with explicit disclosure, and returns validated speaker/timestamp references. No Q&A history is retained. See the [API contract](../services/meeting/docs/API.md#post-meetingssession_idqna) and [pipeline architecture](../services/meeting/docs/ARCHITECTURE.md#live-meeting-qa).

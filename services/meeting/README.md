@@ -4,12 +4,12 @@ Stateful HTTP + WebSocket service that ingests live per-speaker Discord voice au
 
 ## What this service does
 
-A Discord bot opens one WebSocket per meeting and streams each speaker's raw Opus audio frame-by-frame as it arrives from voice channels. `meeting` decodes each frame to PCM in-process (one stateful PyAV Opus decoder per speaker) and streams it straight into that speaker's **persistent Amazon Transcribe session**, held open for the whole meeting. Audio is sent once and never replayed, so the rolling transcript is a free read of what those sessions have finalized so far. When the meeting ends (`POST /stop` or a client disconnect), it assembles the final transcript, calls the `llm` service to summarize decisions/action items into structured minutes, and renders a PDF — returning transcript, minutes, and PDF. Meeting audio is never mixed, persisted, or returned.
+A Discord bot opens one WebSocket per meeting and streams each speaker's raw Opus audio frame-by-frame as it arrives from voice channels. `meeting` decodes each frame to PCM in-process (one stateful PyAV Opus decoder per speaker) and streams it straight into that speaker's **persistent Amazon Transcribe session**, held open for the whole meeting. Audio is sent once and never replayed, so the rolling transcript is a free read of what those sessions have finalized so far. On `POST /stop`, it assembles the final transcript, calls the `llm` service for structured minutes, and renders a PDF — returning transcript, minutes, and PDF. Summarization has [input and parsing limits](docs/API.md#post-meetingssession_idstop). A client disconnect instead holds the session for recovery (see below), without automatically producing artifacts. Meeting audio is never mixed, persisted, or returned.
 
 Two design choices shape everything:
 
 - **Stateful, but ephemeral.** Unlike `llm`, this service *does* hold state — one `MeetingSession` per active meeting, alive only in process memory for the meeting's duration (see the STATEFULNESS note below). Live sessions have no database and do not survive a restart. Completed records accepted by documentation-system do survive; see the [hand-off contract](docs/API.md#durable-record-context).
-- **`llm` as the summarization choke point.** `meeting` never calls Bedrock directly. It POSTs the assembled transcript to the `llm` service's `/chat` endpoint (via `LLM_BASE_URL`/`LLM_API_KEY`) and parses the completion into `Minutes`. Swapping models, providers, or prompts happens in `llm`, not here.
+- **`llm` as the summarization choke point.** `meeting` never calls Bedrock directly. It POSTs bounded transcript text to the `llm` service's `/chat` endpoint (via `LLM_BASE_URL`/`LLM_API_KEY`) and parses the completion into `Minutes`. Model/provider configuration lives in `llm`; meeting owns the minutes and Q&A prompts in `src/pipeline/` (see the [prompt walkthrough](docs/CONTRIBUTING.md#walkthrough-change-the-minutes-prompt-or-pdf)).
 
 ## Quick start
 
@@ -39,7 +39,7 @@ The default dev bootstrap key is `dev-api-key-change-me` (set in `.env`, carries
 
 ### Environment tiers (`MEETING_ENV`)
 
-`MEETING_ENV` declares which environment this instance represents: `local` (default), `staging`, or `production`. Outside `local`, `create_app()` calls `verify_production_secrets()` and **refuses to start** unless all four of `API_KEY` (overridden from the dev default), `AWS_REGION`, `LLM_BASE_URL`, and `LLM_API_KEY` are set to real values — the error names every one that isn't. A misconfigured deploy dies at boot, not on first request.
+`MEETING_ENV` declares which environment this instance represents: `local` (default), `staging`, or `production`. Outside `local`, `create_app()` calls `verify_production_secrets()`: it rejects the built-in `API_KEY` default and empty `AWS_REGION`, `LLM_BASE_URL`, or `LLM_API_KEY`. An explicitly empty `API_KEY` currently passes this guard, so startup alone does not establish usable caller credentials. Provision real keys; see the [boot-check limits](docs/DEPLOYMENT.md#variables) and conditional catalog credential check there.
 
 ### Configuration
 
@@ -58,7 +58,7 @@ All settings load from the environment (`src/config.py`, `.env` in dev):
 | `DOCS_API_KEY` | `""` | Consumer key with `meetings:write`; required outside local when `DOCS_BASE_URL` is configured. |
 | `RECORD_HANDOFF_HOLD_S` | `1800` | In-memory retry window after a failed catalog hand-off. |
 | `MAX_MEETING_MS` | `14400000` (4h) | Safety backstop: a session stops accepting audio past this. The normal end is `/record stop` or auto-stop-on-empty; this only bounds a forgotten meeting. 4h is also AWS Transcribe's per-stream cap. |
-| `DISCONNECT_GRACE_S` | `60` | How long a session survives an abrupt WebSocket disconnect. The transcript is already assembled server-side, so within this window `POST /stop` still turns a dropped recording into minutes instead of losing it. `0` discards immediately. |
+| `DISCONNECT_GRACE_S` | `60` | Delay before tearing down a session after an abrupt WebSocket disconnect. Call `/stop` promptly to attempt recovery; starting stop does not cancel the timer. `0` discards immediately. See the [disconnect contract](docs/API.md#disconnect). |
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR`. Applied at boot by `configure_logging`. INFO is the default because the volume is a startup note plus per-meeting summaries, not per-request chatter — the alternative is losing them entirely. |
 
 ## Auth model
@@ -115,9 +115,9 @@ The wire contract the Discord-bot side mirrors.
 
    `{"speaker_id": "<id>", "display_name": "<name>"}` — registers/updates the display name shown for a speaker_id. Send this whenever a speaker's identity becomes known (e.g. a Discord user joins voice).
 
-   `{"end_of_audio": true}` — send **once**, after the bot stops recording and has forwarded every frame it captured. The socket delivers in order, so the server treats this as proof that all audio has arrived, and `POST /stop` waits for it before finalizing. Without it (an older bot, a crash, a dropped socket) `/stop` proceeds after `sessions.AUDIO_DRAIN_TIMEOUT_S` (5s) and logs a warning; the tail of the transcript may then be short, which is the failure this signal exists to prevent.
+   `{"end_of_audio": true}` — send **once**, after the bot stops recording and has forwarded every frame it captured. The socket delivers in order, so the server treats this as proof that all audio has arrived, and `POST /stop` waits for it before finalizing. If neither this signal nor a disconnect has been observed, `/stop` proceeds after `sessions.AUDIO_DRAIN_TIMEOUT_S` (5s) and logs a warning; the tail of the transcript may then be short. An observed disconnect marks audio complete and skips that wait.
 
-   Unknown/malformed text frames are ignored, not fatal.
+   Invalid JSON and unrecognized control shapes are ignored. Send string `speaker_id` and `display_name` values: malformed control values are not fully validated and can end the handler (see the [current limitation](docs/API.md#messages-the-server-accepts)).
 2. **Audio** (WebSocket binary frame), one raw Opus packet per frame, framed as:
 
    ```text
@@ -127,9 +127,9 @@ The wire contract the Discord-bot side mirrors.
    [remaining bytes]             raw Opus packet payload
    ```
 
-   i.e. a length-prefixed speaker id, then an 8-byte millisecond timestamp, then the raw Opus payload with no further framing. Truncated/undersized frames are dropped, not fatal.
+   i.e. a length-prefixed speaker id, then an 8-byte millisecond timestamp, then the raw Opus payload with no further framing. `ts_ms` is nonnegative elapsed time since recording start, including silence, using one shared monotonic clock for all speakers; it is neither Unix time nor accumulated speaking time. Truncated/undersized frames are dropped, not fatal.
 
-**Disconnect:** if the client disconnects (or errors) without a preceding `POST /stop`, the server tears the session down itself (`session.discard()`) — a lightweight cleanup (abort each speaker's Transcribe stream, deregister) that deliberately skips the finalize pipeline (transcription flush, minutes, PDF), since that involves a blocking `llm` HTTP call not worth paying for on an abrupt drop.
+**Disconnect:** if the client disconnects (or errors) without a preceding `POST /stop`, the server holds the session for `DISCONNECT_GRACE_S` (default 60 s) and marks audio complete. Call `/stop` promptly to attempt recovery. Starting stop does not cancel the grace timer: if the session is still registered at expiry, `session.discard()` aborts its streams and deregisters it, potentially interrupting an unfinished transcript flush. Discard itself produces no artifacts. `DISCONNECT_GRACE_S=0` discards immediately; see the [disconnect contract](docs/API.md#disconnect).
 
 ## Private deploy (Railway)
 
@@ -140,7 +140,7 @@ This service is not exposed publicly. It sits on Railway's private network, addr
 Unlike `llm`, **this service holds state in process memory**: `SessionRegistry` (`src/sessions.py`) keeps one `MeetingSession` per active meeting — one live Transcribe stream per speaker plus the rolling transcript they produce — for the lifetime of that meeting. The audio itself is not held: each chunk goes straight to AWS and is dropped. This means:
 
 - **Not horizontally scalable as-is.** A given `session_id`'s WebSocket, `/transcript` polls, and `/stop` call must all land on the *same* process/instance. Running multiple replicas behind a load balancer without sticky routing on `session_id` will misroute `/transcript` and `/stop` calls to a process that never saw that session.
-- **Ephemeral by design — nothing is persisted.** A process restart or crash mid-meeting loses all in-flight state: buffered audio, the rolling transcript, everything. There is no database and no durable queue backing the session, and **nothing is ever written to disk**. If a meeting's minutes/PDF matter, the consumer (the bot) must call `POST /stop` and persist the response itself — this service will not retain it after replying.
+- **Live sessions are ephemeral.** A process restart or crash loses the rolling transcript and open streams. There is no database or durable queue backing the session, and **nothing is written to disk**. `/stop` deregisters the session; callers must retain the PDF response. With `record` context, finalized text/metadata is handed to documentation-system or held temporarily in memory for retry after the reply. A restart loses unaccepted hand-offs; accepted records survive in the catalog. See the [retention contract](docs/API.md#durable-record-context).
 
 ## Live-verify caveats (flagged for sub-plan 3 integration, not this task)
 
@@ -166,11 +166,11 @@ uv run ruff format .
 
 ## Status
 
-v0.1: stateful per-meeting session registry, live per-speaker audio ingest over WebSocket with binary frame parsing, persistent per-speaker Transcribe streams behind a free-to-poll rolling transcript, `llm`-backed minutes generation, and PDF rendering — all in-memory/ephemeral, with no ffmpeg binary and no disk use.
+Stateful per-meeting session registry, live per-speaker audio ingest over WebSocket with binary frame parsing, persistent per-speaker Transcribe streams behind a free-to-poll rolling transcript, `llm`-backed minutes generation, and PDF rendering. Live state and pending hand-offs stay in memory; completed text records are persisted by documentation-system. No ffmpeg binary or runtime disk writes.
 
 **Not implemented (by design):**
 
-- **Persistence** — no database, no durable session store. A process restart loses all in-flight meetings.
+- **Durable live sessions** — no database or durable session store here. A process restart loses all in-flight meetings and unaccepted hand-offs.
 - **Horizontal scaling** — one process must own a given session end-to-end; no shared session state across replicas.
 
 ## Documentation

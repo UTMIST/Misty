@@ -14,10 +14,9 @@ name: blocked-ready-automation
 #
 # - When an issue is OPENED or EDITED: it evaluates its OWN `Blocked by:` line and
 #   sets its own state — `blocked` if any blocker is still open, `ready` if all are
-#   closed (or there is no `Blocked by:` line to act on). This is what makes a
-#   freshly-created blocked issue land its state without manual labelling.
+#   closed. With no blocker references it returns without updating labels.
 # - When a blocker issue is CLOSED: every issue it blocks whose blockers are now
-#   ALL closed gets `blocked` removed + `ready` added.
+#   ALL closed gets `blocked` removed + `ready` added, even if already assigned.
 # - When a blocker issue is REOPENED: the issues it blocks get re-blocked
 #   (`ready` removed + `blocked` added).
 #

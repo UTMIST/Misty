@@ -5,8 +5,8 @@ name: pr-zone-check
 # A PR touching more than one zone gets a warning (non-blocking) — keep changes
 # scoped to a single zone so ownership/review stays clean.
 #
-# To ENFORCE instead of discourage, change the `exit 0` at the end to `exit 1`
-# and add this job as a required status check in branch protection.
+# To ENFORCE, add `exit 1` inside the count > 1 branch, preserving the final
+# `exit 0` for valid PRs, and require this job in branch protection.
 #
 # See issue #34.
 
@@ -75,5 +75,5 @@ jobs:
             echo "OK: single-zone PR."
           fi
 
-          # Non-blocking by design. Change to `exit 1` (and require this check) to enforce.
+          # Non-blocking. To enforce, fail inside the multi-zone branch, not here.
           exit 0

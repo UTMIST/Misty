@@ -11,7 +11,7 @@ Railway + Neon dashboards / CLIs.
 | `team-tracking` | `/` | Neon (own project) | `alembic upgrade head` | Deploy first — everything references it. |
 | `documentation-system` | `/` | Neon (own project) | `alembic upgrade head` | Consumes team-tracking (hard dependency) and connectors (soft — recommended to deploy connectors first, not required). |
 | `verification` | `/` | Neon (own project) | `alembic upgrade head` | Email one-time codes. |
-| `llm` | `/` | **none** | — | Stateless Bedrock chat + OpenAI embedding API; keys from `CONSUMER_KEYS`. |
+| `llm` | `/` | **none** | — | Stateless OpenAI chat/embedding API with optional Bedrock chat; keys from `CONSUMER_KEYS`. |
 | `meeting` | `/` | **none** | — | **Stateful in-memory**; keys from `CONSUMER_KEYS`. See the single-replica warning in step 2, and the WebSocket keepalive note in the Notes section — its `startCommand` is the one that isn't the plain template. |
 | `connectors` | `/` | **none** | — | Stateless outbound adapter (Google Drive/Docs); keys from `CONSUMER_KEYS`. Recommended to deploy before `documentation-system` (not required) — see its `CONNECTORS_API_KEY` note in step 3. |
 | `gateway` | `/` | Neon (own project) | `alembic upgrade head` | Public scoped reads; one replica. See [gateway setup](../services/gateway/docs/DEPLOYMENT.md). |
@@ -32,9 +32,10 @@ deployment flow is unchanged.
 - A Railway account + the `railway` CLI (`railway login`).
 - A Neon account.
 - `uv` locally (for the key-provisioning script and the key-minting CLIs).
-- An AWS account with Bedrock **and** Amazon Transcribe enabled in your
-  `AWS_REGION`, for `llm` chat and `meeting` respectively.
-- An OpenAI API key for `llm` embeddings, configured before the target environment auto-deploys.
+- An AWS account with Amazon Transcribe enabled in your `AWS_REGION` for meeting.
+  Bedrock access/credentials are needed only if you select a Bedrock chat backend.
+- An OpenAI API key for the default chat backend and embeddings, configured before
+  the target environment auto-deploys; embeddings require it even with Bedrock chat.
 
 ## Branching + auto-deploy model
 Each Railway environment is wired to a git branch. Merging a PR flips a deploy.
@@ -55,8 +56,8 @@ feature branch  ──PR──▶  staging  ──PR──▶  main
   ([`.github/workflows/main-source-guard.yml`](../.github/workflows/main-source-guard.yml)),
   which fails any PR to `main` whose head is not `staging`. Every merge to
   `main` auto-deploys to the `production` Railway environment.
-- Both branches are protected; **all ten** CI jobs are required status checks,
-  and `main` additionally requires `main-source-guard`. See
+- Keep branch-protection requirements aligned with the current CI job inventory;
+  `main` also needs `main-source-guard`. Verify the actual GitHub settings. See
   [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md) for what each job covers.
 - CI supports a merge queue on `staging`; enable it only after the workflow
   support has landed. See the [rollout guide](DEVELOPMENT.md#merge-queue-on-staging).
@@ -113,7 +114,7 @@ Set these per environment (staging vs production) per service.
 |---|---|---|---|
 | `DATABASE_URL` | tt Neon branch | docs Neon branch | verification Neon branch |
 | `API_KEY` | a strong random secret | a strong random secret | a strong random secret |
-| env tier | `TT_ENV` = `staging`/`production` | — | `VF_ENV` = `staging`/`production` |
+| env tier | `TT_ENV` = `staging`/`production` | `DOCS_ENV` = `staging`/`production` | `VF_ENV` = `staging`/`production` |
 | `PORT` | `8000` | `8000` | `8000` |
 | `DIRECTORY_BASE_URL` | — | `http://${{team-tracking.RAILWAY_PRIVATE_DOMAIN}}:${{team-tracking.PORT}}` | — |
 | `DIRECTORY_API_KEY` | — | *(set by the provisioning script — step 4)* | — |
@@ -126,7 +127,8 @@ Set these per environment (staging vs production) per service.
 | `CODE_HMAC_SECRET` | — | — | a strong random secret |
 | `EMAIL_BACKEND` | — | — | `resend` (or `gmail`) — **not** `fake` |
 | `EMAIL_FROM` | — | — | `UTMIST <noreply@utmist.ca>` |
-| `RESEND_API_KEY` | — | — | from Resend |
+| `RESEND_API_KEY` | — | — | required for `EMAIL_BACKEND=resend` |
+| `GMAIL_SENDER`, `GMAIL_CREDENTIALS_JSON` | — | — | both required for `EMAIL_BACKEND=gmail`; see [Gmail setup](../services/verification/docs/DEPLOYMENT.md) |
 | `GOOGLE_GROUPS_CUSTOMER_ID`, `GOOGLE_GROUPS_DOMAIN`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` | optional, all-or-nothing; OAuth grant needs `cloud-identity.groups` and `apps.groups.settings` for automatic group settings; enables managed team Google Groups, plus a daily `team-tracking-groups sync` cron — see [team-tracking DEPLOYMENT.md](../services/team-tracking/docs/DEPLOYMENT.md#managed-google-groups) | — | — |
 
 > **documentation-system boots fine without `CONNECTORS_API_KEY`.** Unlike
@@ -147,14 +149,14 @@ Set these per environment (staging vs production) per service.
 | `CONSUMER_KEYS` | JSON array — see step 4b | JSON array — see step 4b | JSON array — see step 4b |
 | `PORT` | `8000` | `8000` | `8000` |
 | `AWS_REGION` | e.g. `us-east-1` (Bedrock) | e.g. `us-east-1` (Transcribe) | — |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | yes | yes | — |
-| `LLM_PROVIDER` / `LLM_MODEL` | `bedrock-converse` / `claude-sonnet-4-6` (chat) | — | — |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | for Bedrock chat only | for Transcribe (or another supported AWS credential-chain source) | — |
+| `LLM_PROVIDER` / `LLM_MODEL` | default `openai` / `gpt-6.1-sol`; optional `bedrock-converse` / `claude-sonnet-4-6`; see [provider configuration](../services/llm/README.md) | — | — |
 | `EMBED_MODEL` | `openai-embed-3-small` → `text-embedding-3-small`, **1536 dimensions** | — | — |
 | `OPENAI_API_KEY` | required outside `local` | — | — |
 | `EMBED_MAX_REQUEST_CHARS` | optional; default `400000` total characters, a coarse input guard | — | — |
 | `LLM_BASE_URL` | — | `http://${{llm.RAILWAY_PRIVATE_DOMAIN}}:${{llm.PORT}}` | — |
 | `LLM_API_KEY` | — | an `llm` consumer key with the `chat` scope | — |
-| `MAX_MEETING_MS` | — | optional; defaults to the 4h backstop | — |
+| `MAX_MEETING_MS` | — | optional; defaults to a 4h audio-ingestion cutoff, which does not finalize the session | — |
 | `DISCONNECT_GRACE_S` | — | optional; defaults to 60s. How long a disconnected session is held so `POST /stop` can still finalize it | — |
 | `GOOGLE_CREDENTIALS_JSON` | — | — | base64 Google service-account key; empty is a valid running state (Google fetches 503, rest of the service works) |
 | `GITHUB_TOKEN` | — | — | optional fine-grained read-only PAT; empty fetches public repositories only (private ones 404) |
@@ -165,7 +167,7 @@ Set these per environment (staging vs production) per service.
 > not credential validity; follow the
 > [llm rollout prerequisites](../services/llm/docs/DEPLOYMENT.md#embeddings-post-embed).
 
-> Bedrock chat usage bills as **Amazon Bedrock** (credits apply) — do *not* point
+> If selected, Bedrock chat usage bills as **Amazon Bedrock** (credits apply) — do *not* point
 > `llm` at Claude Platform on AWS. Embeddings use **OpenAI billing**, not AWS
 > credits.
 
@@ -183,6 +185,7 @@ Set these per environment (staging vs production) per service.
 | `DIRECTORY_BASE_URL` / `DIRECTORY_API_KEY` | team-tracking; key set by the provisioning script |
 | `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system; key scopes `docs:read docs:write act-as-user`, literal `act-as-channel` for shared-channel helper retrieval, and `meetings:read meetings:write` for saved meeting link delivery (see its [key docs](../services/documentation-system/docs/DEPLOYMENT.md#issuing-api-keys-doc-keys-cli)) |
 | `VERIFICATION_BASE_URL` / `VERIFICATION_API_KEY` | verification |
+| `LLM_BASE_URL` / `LLM_API_KEY` | required; llm URL and the bot’s own `chat`-scoped consumer key (step 4b) |
 | `INFRASTRUCTURE_DISCORD_USERNAME` | *optional* — Discord username or ID shown by `/bug` for infrastructure support |
 | `MEETING_BASE_URL` / `MEETING_API_KEY` | meeting; a `meetings`-scoped consumer key |
 | `MEETING_WS_URL` | *optional* — derived from `MEETING_BASE_URL` if unset |
@@ -241,8 +244,8 @@ TT_DATABASE_URL="<team-tracking Neon branch DATABASE_URL for this env>" \
 This issues scoped `team-tracking-keys` for discord-bot + documentation-system
 and sets each service's `DIRECTORY_API_KEY`. The discord-bot key's scopes
 include `people:elevate` (alongside its `people:*`/`teams:*`/`memberships:*`/
-`channels:read`/`channels:write` scopes) so its `/seed` can promote people to
-`admin`/`superuser` — plain `people:write` cannot set a non-`member`
+`channels:read`/`channels:write` scopes) so its `/seed` can create people with
+`admin`/`superuser` access — plain `people:write` cannot set a non-`member`
 `access_level` — and so `/channel-access` can read and replace channel team
 settings. The documentation-system key stays read-only (`people:read teams:read
 memberships:read identifiers:read channels:read`) so it can resolve verified
@@ -253,9 +256,9 @@ manually (`team-tracking-keys revoke <id>`).
 
 The dedicated staging `doc-source-refresh` cron uses
 `/services/documentation-system/railway.source-refresh.json` and the same deployed
-revision as documentation-system. It calls the bounded refresh endpoint hourly with
-its own `docs:write` key, without database or Google credentials. Apply API migration
-`011` first: the runner acquires a persistent guard through HTTP before heartbeats,
+revision as documentation-system. Its staging command uses `--meeting-records`
+and an hourly schedule, so its key needs both `docs:write` and `meetings:write`,
+without database or Google credentials. Apply the current API migration head first: the runner acquires a persistent guard through HTTP before heartbeats,
 so a duplicate cannot mask a stuck run. Set `DOCS_BASE_URL`,
 `DOCS_API_KEY`, and the secret `SOURCE_REFRESH_MONITOR_URL` on that service only.
 The config disables migrations, HTTP healthchecks, failure restarts, and PR-preview
@@ -289,7 +292,7 @@ is unchanged.
 `provision-directory-key.sh` does not cover them; this step is manual, and you
 repeat it per environment.
 
-Three keys are needed:
+Provision the separate consumers below, plus the catalog embedding key described afterward:
 
 ```bash
 # 1. A key for meeting -> llm (scope: chat)
@@ -300,6 +303,9 @@ uv --project services/meeting run meeting-keys --name discord-bot --scopes meeti
 
 # 3. A key for documentation-system -> connectors (scope: fetch)
 uv --project services/connectors run connectors-keys --name documentation-system --scopes fetch
+
+# 4. A separate key for discord-bot -> llm (scope: chat)
+uv --project services/llm run llm-keys --name discord-bot --scopes chat
 ```
 
 Each CLI prints the **plaintext key to stdout** (shown exactly once — it is
@@ -308,7 +314,8 @@ stderr**. Wire them like this:
 
 | Printed to stderr (the JSON entry) | Printed to stdout (the plaintext key) |
 |---|---|
-| append to `llm`'s `CONSUMER_KEYS` array | set as `meeting`'s `LLM_API_KEY` |
+| append meeting’s entry to `llm`’s `CONSUMER_KEYS` array | set as `meeting`’s `LLM_API_KEY` |
+| append the bot’s entry to `llm`’s `CONSUMER_KEYS` array | set as `discord-bot`’s `LLM_API_KEY` |
 | append to `meeting`'s `CONSUMER_KEYS` array | set as `discord-bot`'s `MEETING_API_KEY` |
 | append to `connectors`'s `CONSUMER_KEYS` array | set as `documentation-system`'s `CONNECTORS_API_KEY` |
 
@@ -401,7 +408,7 @@ secrets:
 ```bash
 cd discord-bot
 npm run register:staging      # or register:production, or register:all
-./scripts/register.sh all     # same, but prompts before touching production
+../scripts/register.sh all    # repo-root wrapper; prompts before production
 ```
 
 > **Not** `npm run register` — that hardcodes `--env-file=.env` and only hits
@@ -468,13 +475,15 @@ attach your Discord account to the seeded person record. New admins get added
 by an existing admin running `/seed` from Discord.
 
 ## 7. Verify
-- **APIs:** for each of the six services —
-  `railway run --service <name> --environment <env> -- bash -c 'curl -s localhost:$PORT/health'`
-  → `{"status":"ok"}`. `/health` is unauthenticated on every service, so no key
-  is needed. For team-tracking, documentation-system, and gateway, also request
-  `/health/ready` to verify their own database connections; Railway uses that
-  path for those services. For the four DB-backed services, pre-deploy
-  logs should also show `alembic upgrade head` ran.
+- **APIs:** verify each deployed service from inside its container or an
+  authorized host that can reach the same-environment private network. From
+  the service container, request `http://localhost:$PORT/health`; from another
+  host, use that service’s reachable address. Expect `{"status":"ok"}`.
+  `railway run` executes **locally** with injected variables, so a localhost
+  probe through it does not verify the deployment. Health is unauthenticated.
+  For team-tracking, documentation-system and gateway, also check
+  `/health/ready` for their database connections. Confirm `alembic upgrade head`
+  succeeded in all four DB-backed services’ pre-deploy logs.
 - **Bot:** Railway checks `/health/ready` on its injected `PORT`. It returns
   `503` before Discord is ready or after a disconnect, and 200 once connected.
   The pre-deploy step exits 0 and its log shows `Registered N stable commands
@@ -485,23 +494,26 @@ by an existing admin running `/seed` from Discord.
 - **End-to-end (`/record`):** join a staging voice channel, `/record start
   name:Smoke-Test`, talk for ~30s, `/record stop`. Within roughly 30–60s a
   named PDF should be posted to the text channel. This exercises the whole chain —
-  bot → `meeting` (WS) → Transcribe → `llm` → Bedrock → PDF. Failure modes to
+  bot → `meeting` (WS) → Transcribe → `llm` → configured chat provider → PDF. Failure modes to
   check in order: `MEETING_API_KEY` wrong (WS closes with code 1008),
   `LLM_API_KEY`/`LLM_BASE_URL` wrong on `meeting` (PDF arrives with degraded,
   unsummarized minutes rather than failing), or AWS credentials missing
   (transcript comes back empty).
 
 ## Notes
-- All six Python Dockerfiles build with the repo root as context and
+- All seven Python Dockerfiles build with the repo root as context and
   `uv sync --frozen --no-dev --package <name>` to install just that workspace
   member (plus the shared `platform_auth` leaf from `packages/auth`) — that's
   why their Railway root directory is `/` while `discord-bot`'s stays
   `discord-bot`.
 - **`meeting`'s image needs no `ffmpeg` binary.** Opus decode runs in-process
   via PyAV, which bundles its own ffmpeg libraries, and nothing shells out.
-- **Nothing from a meeting outlives it.** No database, no object store, and no
-  disk writes at all — audio streams straight to AWS Transcribe and is dropped.
-  If the minutes matter, the PDF the bot posted to Discord is the only copy.
+- **Audio is not persisted by the platform.** Saved recordings default to
+  `save:true`: transcript/minutes can persist in the catalog and Google Doc,
+  in addition to the Discord PDF. Meeting temporarily retains pending text
+  handoffs for retry; the catalog owns the configured retention/removal policy.
+  See [meeting record persistence](#meeting-record-persistence), including
+  `save:false` for PDF-only delivery and the handoff crash-loss limits.
 - APIs bind **`--host 0.0.0.0`**. Railway's IPv6 private network routes to the
   container's port regardless of the bind family, and `0.0.0.0` is what
   Railway's healthcheck reaches (an IPv6-only bind like `::` fails healthcheck
@@ -544,7 +556,7 @@ Deploy order for the durable Google Doc path:
 1. Configure the connector [Workspace OAuth writer and restricted root](../services/connectors/docs/DEPLOYMENT.md#meeting-writer-setup).
    Use `drive.file`, explicitly grant the root to this OAuth app, and list the
    owning/inherited infra admin principals. Keep the existing read account separate.
-2. Apply documentation-system migrations through **016** and deploy its
+2. Apply documentation-system migrations with `alembic upgrade head` and deploy its
    [meeting endpoints](../services/documentation-system/docs/API.md#meeting-records).
    Its connector key needs `meeting-write,meeting-fetch` plus existing scopes.
    Its directory key must read identifiers, channel teams and Google Group state.

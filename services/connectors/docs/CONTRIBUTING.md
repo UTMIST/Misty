@@ -7,9 +7,9 @@ Written for rotating contributors. When in doubt, copy the shape of the nearest 
 ## Conventions you need to know first
 
 - **The Protocol is the hinge.** `src/sources/base.py` defines `SourceFetcher` (one method: `fetch(url) -> SourceResult`) and the five-error hierarchy. The router depends on those, never on `GoogleSource`.
-- **Sources never import FastAPI.** Anything under `src/sources/` is a plain library. If you find yourself wanting `HTTPException` in there, you want a `SourceError` subclass instead — the router maps it.
-- **Raise the normalized error, never the vendor one.** Route every Google API call through `execute()` (`google_extractors/base.py`) so `HttpError` → `SourceForbidden`/`SourceNotFound`/`SourceUnavailable` happens in one place.
-- **Validate byte responses before parsing.** For downloads and exports use `execute_bytes()`, which delegates to `execute()` and rejects non-bytes responses as `SourceUnavailable`. Metadata and native JSON API requests still use `execute()`.
+- **Sources never import FastAPI.** Anything under `src/sources/` is a plain library. Read sources raise `SourceError` subclasses; meeting operations expose `MeetingWriteError` from `contracts/meeting.py`. Their routers map those errors to HTTP.
+- **Raise the normalized error, never the vendor one.** Read-source Google calls (fetch, discovery, and extractors) use `execute()` (`google_extractors/base.py`) so `HttpError` → `SourceForbidden`/`SourceNotFound`/`SourceUnavailable` happens in one place. The meeting writer uses its own `_execute()` with `request.execute(num_retries=0)` and preserves `MeetingWriteError.uncertain`; do not replace it with the read helper. See [meeting writes](ARCHITECTURE.md#meeting-writes).
+- **Validate read-source byte responses before parsing.** For read-source downloads and exports use `execute_bytes()`, which delegates to `execute()` and rejects non-bytes responses as `SourceUnavailable`. Read-source metadata and native JSON API requests use `execute()`. Preserve the writer's separate error contract when changing its reads or writes.
 - **Keep the media transport bounded.** Drive clients built by `GoogleSource` wrap the HTTP transport with `BoundedDriveHttp`; media must use that client so missing/stale size metadata cannot bypass `MAX_FILE_BYTES`. `execute()` preserves the transport's normalized size-limit error. See [download bounds](ARCHITECTURE.md#where-the-truncation-actually-happens).
 - **Extractors declare their own needs.** `scopes` and `services` are attributes on the extractor. `required_scopes()` / `required_services()` union across the registry — never hard-code a scope at the build site.
 - **Warnings, not silent loss.** Any partial extraction (a truncated sheet tab, a PDF with no text layer) appends to `ExtractedText.warnings`, which propagates to the response. Losing content silently is the bug this exists to prevent.
@@ -149,7 +149,7 @@ CI runs `connectors-test`: `uv sync --extra dev`, `uv run pytest`, `ruff check`,
 - [ ] New extractor is registered in `EXTRACTORS`, and declares its own `scopes` / `services`.
 - [ ] Any genuinely new Google API has an `_API_VERSIONS` entry.
 - [ ] A new scope is reflected in the README's Scopes list **and** the service-account runbook.
-- [ ] Every Google API call goes through `execute()`; no bare `HttpError` escapes.
+- [ ] Read-source Google calls use `execute()` / `execute_bytes()`; no bare `HttpError` escapes. Writer operations preserve `MeetingWriteError` and its uncertainty flag, with retries disabled in the writer helper.
 - [ ] Lossy extraction appends a warning rather than silently dropping content.
 - [ ] Credential settings are `SecretStr`, unwrapped only at the boundary.
 - [ ] Supported-types table in the README matches the registry.

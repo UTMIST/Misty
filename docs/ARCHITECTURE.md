@@ -26,13 +26,13 @@ services and the public external gateway, plus the Discord bot as a consumer:
 |---------|--------|-------------|
 | [`team-tracking`](../services/team-tracking) | The directory — people, teams, roles, memberships | the org model everything else references |
 | [`documentation-system`](../services/documentation-system) | The docs catalog — the org's index of URLs | validates owner ids against team-tracking |
-| [`services/llm`](../services/llm) | Stateless LLM proxy | `POST /chat` over Amazon Bedrock; requires the `chat` scope; holds no DB/state |
+| [`services/llm`](../services/llm) | Stateless LLM proxy | `POST /chat` via OpenAI (default) or Bedrock; `POST /embed` for retrieval; no database |
 | [`services/verification`](../services/verification) | Email ownership verification | request/confirm an email code; `verification:write` scope |
-| [`services/meeting`](../services/meeting) | **Stateful** live meeting transcription + minutes | WS audio stream in → rolling transcript → minutes/PDF on stop; `meetings` scope. The one stateful service — see [MEETING-RECORDING.md](MEETING-RECORDING.md) |
-| [`services/connectors`](../services/connectors) | Outbound document fetch | `POST /fetch` returns a Google Doc/Sheet/Slides/Drive file as text; `fetch` scope; no DB/state. Not a gateway and not an authorization boundary — see its [ARCHITECTURE](../services/connectors/docs/ARCHITECTURE.md) |
+| [`services/meeting`](../services/meeting) | **Stateful** live meeting transcription + minutes | WS audio stream in → rolling transcript → minutes/PDF on stop; `meetings` scope. Owns live sessions in one process — see [MEETING-RECORDING.md](MEETING-RECORDING.md) |
+| [`services/connectors`](../services/connectors) | Outbound content/discovery/writer adapter | Google/GitHub fetch, Google discovery and meeting-Doc operations; per-route scopes, no local DB. See its [API](../services/connectors/docs/API.md). |
 | [`services/gateway`](../services/gateway) | Public external API | Curated `/v1` operations; per-consumer scoped keys in its own database; private HTTP calls to the owning services. |
 
-> **Meeting recording** spans two components (the `meeting` service + a Discord *voice surface* in the bot) and is the platform's one stateful service and its one non-neutral-command bot path. Its cross-cutting design — and *why* it breaks both conventions — is documented separately in **[MEETING-RECORDING.md](MEETING-RECORDING.md)**.
+> **Meeting recording** spans two components (the `meeting` service + a Discord *voice surface* in the bot) with live session state and a dedicated bot voice path. Its cross-cutting design is documented separately in **[MEETING-RECORDING.md](MEETING-RECORDING.md)**.
 
 The rest of this document details the team-tracking ↔ documentation-system
 relationship, the platform's main cross-service data flow. It has **two** legs:
@@ -41,40 +41,43 @@ relationship, the platform's main cross-service data flow. It has **two** legs:
 2. **Visibility resolution** on reads — the catalog asks the directory for an
    actor's active team ids to decide which docs that person may see.
 
-Both are plain authenticated HTTP calls through the same `DirectoryClient`
-Protocol, and both degrade rather than fail when the directory is down — see
-"degrade-on-directory-down" below and
-[documentation-system's ARCHITECTURE](../services/documentation-system/docs/ARCHITECTURE.md)
-for the visibility rule itself.
+Both use authenticated HTTP through `DirectoryClient`. Owner-label lookup can
+degrade during a directory outage. Direct reads preserve their documented
+visibility rules; authorized retrieval and meeting acceptance fail closed when
+their required directory context cannot be resolved. See the
+[catalog authorization and retrieval contract](../services/documentation-system/docs/API.md#authorized-retrieval-post-search).
 
 The other services are independent and share the conventions below:
 `verification` owns its own database and migrations; `llm` and `connectors` are
 stateless with no database at all; `meeting` has no database either but *is*
 stateful in memory.
 
-There are **three** service-to-service dependencies outside the catalog →
-directory pair, and they differ in how hard they are:
+Other service-to-service dependencies include:
 
-- **`meeting` → `llm`** (hard). `meeting` calls `/chat` for minutes generation
-  and refuses to boot without `LLM_BASE_URL`/`LLM_API_KEY` outside `local`.
-  Deploy `llm` first.
-- **`gateway` → `team-tracking`** (hard for resolver requests). The public
-  resolver requires the private directory and returns 503 when it is unavailable.
-- **`documentation-system` → `connectors`** (soft). The catalog calls `/fetch`
-  for Google source content. With connectors unreachable or unconfigured, the
-  fetch degrades to a warning on the ingested doc and the catalog works
-  normally — the same degrade-on-dependency-down posture it takes toward the
-  directory.
+- **`meeting` → `llm`** for minutes and Q&A. Non-local startup requires LLM
+  configuration. A minutes-provider failure still permits stop to return the
+  transcript/PDF with a placeholder; it does not guarantee generated minutes.
+- **`gateway` → `team-tracking`** for resolver requests, which return 503 when
+  the directory is unavailable. Gateway's rate limits are process-local;
+  [run one replica/worker](../services/gateway/docs/DEPLOYMENT.md).
+- **`documentation-system` → `connectors`** for Google/GitHub content and
+  Google ACLs, discovery and meeting writes. Fetch warnings can preserve a
+  catalog record, but do not establish searchable content or source access.
+  Meeting persistence has its own [retry/recovery contract](../services/documentation-system/docs/DEPLOYMENT.md#meeting-record-persistence).
+- **`documentation-system` → `llm`** for query/index embeddings. Search fails
+  closed when its required embedding capability is unavailable.
+- **`meeting` → `documentation-system`** for saved text handoff; the catalog
+  owns durable meeting records and uses the connector's Google writer.
 
 ## The core principle: a source of truth is API-only
 
 Each service is a **source of truth** for one domain — the directory owns the org
 model (people/teams/roles/memberships); the catalog owns the index of the org's URLs.
-The defining rule is that **nothing runs inside a source of truth**. There are no
-in-process plugins, no shared library that consumers import, no batch jobs reaching
-into the database. Every consumer — a Discord bot, a dashboard, the docs catalog
-itself — talks to the service the same way: over HTTP, against its published OpenAPI
-contract.
+The defining rule is that **consumers use the owning service’s HTTP API**.
+Services do not share tables or import each other’s application code. A service
+can own internal processing: the directory runs Google-group reconciliation,
+and the catalog owns ingestion/indexing and meeting persistence. External
+consumers still use the published HTTP contract.
 
 Why enforce this:
 
@@ -120,7 +123,10 @@ Step by step, when `POST /docs` arrives at the catalog
 ([`services/documentation-system/src/ingest.py`](../services/documentation-system/src/ingest.py)):
 
 1. **Normalize + dedup.** The URL is normalized; if it's already catalogued, ingest
-   is idempotent — new tags merge onto the existing doc and nothing else happens.
+   reuses the existing identity and merges tags/grants. Ordinary repeat ingest
+   of an enabled Google source also refreshes content/ACLs and can revoke source
+   grants; discovery explicitly opts out of that refresh. See the
+   [ingestion contract](../services/documentation-system/docs/API.md).
 2. **Derive source + fetch.** The URL's source kind (`web`, `github`, `gdrive`, …) is
    derived, and if that source has fetching enabled the catalog grabs a best-effort
    title/content snapshot. Fetch failures become warnings, not errors.
@@ -145,8 +151,9 @@ Step by step, when `POST /docs` arrives at the catalog
 
 The crucial distinction: **a wrong id is a client error; an unreachable directory is
 not.** The catalog refuses to invent ownership, but it also refuses to let a
-directory outage block cataloguing work. Availability of the catalog never depends on
-availability of the directory.
+directory outage block best-effort owner-label cataloguing. This does not apply
+to operations that need authenticated access context: authorized retrieval and
+meeting acceptance can return 503 when the directory is unavailable.
 
 ## Shared architectural conventions
 
@@ -157,7 +164,7 @@ describes how it applies them concretely.
 - **`contracts/` Protocol boundary.** Each service has a `contracts/` package holding
   Pydantic domain types and `Protocol` interfaces. Application code (ingest, routers)
   depends on the Protocol, never a concrete class. `contracts/` imports nothing from
-  `src/`, so the boundary can't erode. The catalog has three such Protocols —
+  `src/`, so the boundary can't erode. The catalog’s Protocols include
   `StorageAdapter`, `Fetcher`, and `DirectoryClient` — and the directory dependency
   described above is just the `DirectoryClient` Protocol with an HTTP implementation.
 - **Storage adapter swap.** Every Protocol has a fast in-memory implementation for
@@ -165,13 +172,16 @@ describes how it applies them concretely.
   `PostgresStorageAdapter` is the canonical example: swapping to Postgres required
   zero changes to ingest logic or routers. The concrete adapter is wired to its
   Protocol in exactly one place per service (`src/api/deps.py`).
-- **Scoped API-key auth.** Every request carries `X-API-Key`. Keys are Argon2-hashed
+- **Scoped API-key auth.** Protected HTTP endpoints use `X-API-Key`; health and
+  schema/UI routes remain unauthenticated within the service’s network exposure. Keys are Argon2-hashed
   in the database and carry a set of per-resource scopes (e.g. `people:read`,
   `docs:write`, with `admin` as a wildcard). Specific privileged operations are
   gated behind their own dedicated scopes rather than a broad write scope — e.g.
   setting a non-`member` `access_level` on a person requires `people:elevate`
   (plain `people:write` cannot escalate), and the `llm` service's `POST /chat`
-  requires the `chat` scope; `admin` still satisfies these. A shared bootstrap env key exists for
+  requires the `chat` scope; `admin` still satisfies these ordinary checks.
+  Person/channel assertions separately require their literal assertion scopes,
+  including for admins; see the catalog API contract. A bootstrap env key exists for
   local dev; production uses per-consumer keys issued via each service's CLI
   (`team-tracking-keys`, `doc-keys`). The auth machinery itself (key hashing, the
   scope model, the `build_auth(...)` FastAPI deps, and the audit-log middleware)
@@ -191,15 +201,17 @@ describes how it applies them concretely.
 - **Alembic migrations.** Schema is versioned as Alembic migrations applied with
   `alembic upgrade head`. The SQLAlchemy Core table definitions in
   `src/storage/schema.py` are the schema source of truth. This applies to the
-  three services that own a database (team-tracking **007**,
-  documentation-system **006**, verification **001**); `llm`, `meeting`, and
-  `connectors` have no schema and therefore no `preDeployCommand`.
+  four services that own a database (team-tracking, documentation-system,
+  verification and gateway); inspect their migration directories for the
+  current heads rather than pinning a deployment to an old revision. For
+  cleanup/rollback exceptions, follow the service deployment guide. `llm`,
+  `meeting`, and `connectors` have no schema.
 - **Three auth storage models.** The convention is scoped, argon2-hashed keys
   behind `platform_auth`'s `ApiKeyStore` protocol — but where they *live* varies
   with how many consumers a service has:
-  - **team-tracking, documentation-system** — an `api_keys` table, minted by a
-    CLI that writes to it (`team-tracking-keys`, `doc-keys`). Revocation is a
-    row update.
+  - **team-tracking, documentation-system, gateway** — separate `api_keys`
+    tables, minted/revoked with each service’s CLI. Gateway accepts only issued
+    `gw_` keys and has no inbound bootstrap env key.
   - **`llm`, `meeting`, `connectors`** — no table. Keys are seeded at boot from
     a `CONSUMER_KEYS` JSON array env var, so their "mint" CLIs only *print* a key
     and its JSON entry. Adding or revoking one is a variable edit plus a
@@ -279,16 +291,17 @@ That entity lives in the directory. Build the catalog first and "owner" degenera
 into a free-text string that rots exactly the way the links it's trying to organize
 do.
 
-So the directory comes first because it supplies *identity and meaning* to everything
-downstream. The catalog comes second because it consumes that meaning. Search comes
-last (and is deferred) because it indexes what the catalog has already captured —
-there's nothing to search until docs are catalogued, and the content snapshots search
-will index are already being stored in anticipation.
+So the directory supplies identity and meaning, and the catalog stores the
+content and access information that retrieval uses.
 
-## What's deferred
+## Search and retrieval
 
-The **search / retrieval plugin** is designed but not built. When it lands it will
-index the catalog's stored content snapshots for full-text and semantic search.
-Consistent with the API-only principle, it will be another HTTP consumer of the
-catalog — not something running inside it. It is out of scope until the catalog has
-enough content to make search worthwhile.
+Authorized lexical/vector retrieval is implemented inside documentation-system
+at `POST /search`, using full stored content and LLM embeddings. Consumers call
+that HTTP API; the bot exposes `/doc search` and optional helper document tools.
+Every search needs a person or channel context, with literal assertion scopes,
+and filters candidates before ranking limits. See the
+[retrieval contract](../services/documentation-system/docs/API.md#authorized-retrieval-post-search)
+and [deployment setup](../services/documentation-system/docs/DEPLOYMENT.md).
+Implementation does not establish that any particular live environment has its
+embedding provider, keys, corpus and scheduled refresh configured.

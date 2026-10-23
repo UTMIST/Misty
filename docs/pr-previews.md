@@ -30,8 +30,10 @@ compatibility, not the correctness of arbitrary changes inside that file.
    it yet. Remove the copied `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, and
    `DISCORD_GUILD_ID` from this environment's bot service before deployment.
    Do not make `dev` the base for automatic PR environments.
-3. Give the three database services their own Neon development branches and
-   replace their `DATABASE_URL` values **before running any migrations**.
+3. Give all four database services — `team-tracking`, `documentation-system`,
+   `verification`, and `gateway` — their own Neon development branches. Replace
+   every `DATABASE_URL` **before deploying or running any migrations**; the
+   selector deploys gateway too, and its pre-deploy step runs migrations.
    Follow [the deployment runbook](RAILWAY-DEPLOYMENT.md) for service settings
    and key provisioning. Keep backend URLs as same-environment Railway
    references. Use development email/provider settings appropriate to your
@@ -139,9 +141,11 @@ Each new deployment has a 45-minute wait budget. For a slower cold build, use
 shutdown has one shared 15-minute deadline for all prior bot deployments.
 Build/queue polls back off from 3 to 30 seconds; shutdown and startup-transition
 polls stay at 3 seconds. Actions allows six hours: the
-current seven-service maximum needs up to 330 minutes of waits plus setup and
-API overhead. Review that budget when adding services or changing timeouts;
-use the terminal for sequences that could exceed the Actions limit.
+current inventory has eight deployment targets including the bot (connectors
+is optional). All eight can consume 375 minutes of waits before setup/API
+overhead, exceeding the 360-minute Actions job limit. Use the terminal for
+sequences that could exceed that limit; the per-deployment budgets do not
+guarantee a full cold-stack switch fits Actions.
 
 The command prints the PR's exact commit and target services. Before confirming,
 stop any recording and wait for its minutes to arrive. Switching will disconnect

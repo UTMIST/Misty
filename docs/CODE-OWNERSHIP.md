@@ -71,10 +71,12 @@ until it gets its own line in both files.
 | [`label-consistency.yml`](../.github/workflows/label-consistency.yml) + [`scripts/check-labels.mjs`](../scripts/check-labels.mjs) | Fails when the copies of the list disagree, when `labeler.yml`'s globs resolve a path to a different zone than `zone_for()` does, or when a `services/*` / `packages/*` directory has no zone | **Yes, when made a required check** — the job itself exits non-zero |
 | [`PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md) | Prompts the author to name the zone | No |
 
-`label-consistency` is the only one that fails a run, and only about the list's
-*internal* consistency — nothing here gates a merge on which zones a PR touches.
-`pr-zone-check` becomes enforcing by changing its trailing `exit 0` to `exit 1`
-and adding the job as a required status check in branch protection.
+`label-consistency` fails on taxonomy inconsistencies; `codeowners-valid` also
+fails on invalid owners. A failing job only gates merging when GitHub requires
+that check. The zone check currently warns without rejecting multi-zone PRs.
+To enforce it, add `exit 1` **inside the `count > 1` branch**, preserve the final
+`exit 0` for valid single-zone PRs, and make the job a required status check.
+Changing only the final exit would reject valid PRs too.
 
 ## Zones are for PRs. Areas are for issues.
 
@@ -87,7 +89,7 @@ deliberate:
 | Answers | Which directory bucket, and so who reviews it | Which parts of the system are involved, and so what you need to know to pick it up |
 | Cardinality | **One.** A file has exactly one zone, and a PR is expected to stay inside one | **Several.** Most issues here carry two or three |
 | Set by | [`zone-label.yml`](../.github/workflows/zone-label.yml), from the changed paths | [`area-label-issues.yml`](../.github/workflows/area-label-issues.yml), from the form's Area dropdown |
-| The list | The fourteen above | `bot`, `deployment`, `docs-system`, `integration`, `observability`, `service`, `tooling` |
+| The list | The zones above | `bot`, `deployment`, `docs-system`, `integration`, `observability`, `service`, `tooling` |
 
 The cardinality is the reason they cannot be one namespace. A zone is
 single-valued by construction — that is the whole basis of `pr-zone-check`
@@ -195,7 +197,7 @@ catch that. It checks that the service *has a zone*, not that it has tests.
 
 ## Deliberate gaps, and one that isn't
 
-**The templates offer 12 of the 14 zones, on purpose.** They list `root` but not
+**The templates omit the transitional zones, on purpose.** They list `root` but not
 `services/other` or `packages/other`. Those two are *transitional* buckets — a
 PR landing in one means something was added that nobody registered, and the
 right response is to give it a real zone

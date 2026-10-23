@@ -39,10 +39,11 @@ All configuration is env-driven (`src/config.py`, loaded from the process enviro
 | Env var | Setting | Default | Purpose |
 |---------|---------|---------|---------|
 | `DATABASE_URL` | `database_url` | `postgresql+psycopg://docs:dev_password@localhost:5434/docs` | Postgres connection (SQLAlchemy + psycopg driver) |
-| `API_KEY` | `api_key` | `dev-api-key-change-me` | Bootstrap admin key. **Change or unset in prod.** |
+| `API_KEY` | `api_key` | `dev-api-key-change-me` | Bootstrap admin key. **Replace with a strong, unique value outside `local`.** Unsetting it restores the default (or a `.env` value); it does not disable bootstrap auth. |
+| `DOCS_ENV` | `docs_env` | `local` | `local`, `staging`, or `production`. Set the matching non-local tier on deployments to enable boot checks for the built-in `API_KEY` and `DIRECTORY_API_KEY` defaults. |
 | `DIRECTORY_BASE_URL` | `directory_base_url` | `http://localhost:8000` | Base URL of the team-tracking directory |
 | `DIRECTORY_API_KEY` | `directory_api_key` | `dev-api-key-change-me` | API key this service uses to call the directory |
-| `CONNECTORS_BASE_URL` | `connectors_base_url` | `http://localhost:8005` | Base URL of the connectors service (fetches Google source content) |
+| `CONNECTORS_BASE_URL` | `connectors_base_url` | `http://localhost:8005` | Base URL of the connectors service (fetches GitHub and Google source content) |
 | `CONNECTORS_API_KEY` | `connectors_api_key` | `dev-api-key-change-me` | API key this service uses to call connectors. **Should be overridden outside `local`**, but it's a soft dependency — `verify_production_secrets()` only logs a startup warning on the dev default, it does not refuse to boot (see [`src/config.py`](../src/config.py)). |
 | `LLM_BASE_URL` | `llm_base_url` | `http://localhost:8002` | Platform LLM `/embed` endpoint host. |
 | `LLM_API_KEY` | `llm_api_key` | empty | Secret `embed`-scoped LLM key; missing key keeps catalog operations available but search returns 503. |
@@ -261,9 +262,10 @@ uv run doc-keys revoke <api_key_id>
 ## Repairing docs missing content (`doc-backfill` CLI)
 
 A source fetch that fails during ingest is only a warning: the doc is catalogued, but no
-content is stored. Re-ingesting the same URL does not repair it either — the dedup path
-merges tags and returns before the fetch runs. Records predating content storage are in
-the same state.
+content is stored. For non-Google or fetch-disabled sources, re-ingesting the same URL
+does not refetch it. Enabled Google sources are the exception: repeated ingest refreshes
+source access and content, and can repair it; see [idempotency and tag-merge](API.md#idempotency-and-tag-merge).
+Records predating content storage can also need repair.
 
 `doc-backfill` finds those docs and refetches them. Unlike `doc-keys` it talks to this
 service **over HTTP**, not to the database: the repair is already an endpoint
@@ -335,7 +337,7 @@ skipped  1a2b3c4d-...  https://youtube.com/watch?v=page  source 'youtube' has co
   run re-lists `has_content=false` once and demotes anything still in it.
 - **empty** — the refetch *worked* and produced no text to store. `POST /docs/{id}/refetch`
   returns 200 whenever the fetch ran, and only writes content `if result.content`, so a
-  title-only fetcher (`github`, by design) or a page that extracts to nothing leaves the
+  confirmed GitHub repository with no README or a page that extracts to nothing leaves the
   doc contentless behind a 200. Reported apart from **failed** because nothing is broken
   — but it still exits non-zero, because the doc is still missing content.
 - **failed** — the source still fails. The doc stays contentless and is named with its
@@ -345,11 +347,12 @@ skipped  1a2b3c4d-...  https://youtube.com/watch?v=page  source 'youtube' has co
   does not read as an error every run. The enabled set is read from `GET /sources`, so
   registering a fetcher for a new source needs no change to the CLI.
 
-Exit codes: **0** every contentless doc now has content, **1** at least one does not
-(**failed** or **empty**), **2** fatal (missing key, mis-scoped key, service unreachable,
-or a verification listing that could not be read). A mis-scoped key is a hard error
-rather than an empty run, so it can never be mistaken for "nothing to repair"; likewise
-exit 0 means the corpus is complete, not merely that every request returned 200.
+Exit codes: **0** no attempted eligible repair failed or remained empty, **1** at least
+one did (**failed** or **empty**), **2** fatal (missing key, mis-scoped key, service
+unreachable, or a verification listing that could not be read). Skipped sources can
+remain contentless after exit 0. With `--dry-run`, exit 0 means validation/listing and
+planning succeeded; no content was repaired. A mis-scoped key is a hard error rather
+than an empty run. Exit 0 is not a guarantee of complete corpus coverage.
 
 ---
 
@@ -550,8 +553,12 @@ authorizing a run, using the served model's row in `GET /docs/index/status`:
 ## Source-access refresh schedule
 
 Run `doc-source-refresh` hourly (`0 * * * *`) from Railway or the approved external
-scheduler. It calls `POST /docs/source-access/refresh-due?limit=10` with a dedicated
-`docs:write` key, repeating until `attempted < limit`. The endpoint processes each
+scheduler. The checked-in staging command uses `--meeting-records` and a dedicated
+key with `docs:write` and `meetings:write`. Its document phase calls
+`POST /docs/source-access/refresh-due?limit=10`, repeating until `attempted < limit`.
+See [meeting record persistence](#meeting-record-persistence) for the meeting phase's
+outcomes and recovery. A manually configured docs-only run may omit `--meeting-records`
+and use only `docs:write`. The document endpoint processes each
 document independently and reports `{attempted, refreshed, failed, index_failed}`.
 Only sources with
 `content_fetch_enabled=true` are selected; disabled sources receive no automatic content
@@ -578,17 +585,17 @@ Provision a dedicated key using the intended environment's key-management runboo
 
 ```bash
 # Run from this service's directory with that environment's DATABASE_URL.
-uv --project . run python -m src.cli issue --name source-access-refresh-staging --scopes docs:write
+uv --project . run python -m src.cli issue --name source-access-refresh-staging --scopes docs:write meetings:write
 ```
 
 Store the issued `doc_` token privately as the runner's `DOCS_API_KEY`. It needs no
 `docs:read:all`, impersonation scope, Google credential, or database connection.
-The runner checks its own scope through `GET /api-keys/self` before any POST.
+The runner checks both required scopes through `GET /api-keys/self` before any POST.
 Set `DOCS_BASE_URL` to the intended documentation-system API, then run from the
 repository root with those variables in the process environment:
 
 ```bash
-uv --directory services/documentation-system --project . run python -m src.source_refresh
+uv --directory services/documentation-system --project . run python -m src.source_refresh --meeting-records
 ```
 
 The module invocation pins this service's `src` package in the workspace. The
@@ -603,6 +610,7 @@ Neither invocation loads `.env`.
 | `--timeout` | `600` | Timeout in seconds for each HTTP network phase |
 | `--max-seconds` | `3000` | Elapsed-time budget for starting requests; each request's timeout is capped by the remaining budget |
 | `--require-monitor` | off locally; on in staging cron | Fail before API calls unless `SOURCE_REFRESH_MONITOR_URL` is configured |
+| `--meeting-records` | off locally; on in staging cron | Also process due meeting records; requires `meetings:write` in addition to `docs:write` and shares the time/batch budgets |
 
 The time budget is not a server cancellation or a hard process deadline. A timed-out
 POST may still finish in the API; the runner never immediately retries it. Failed
@@ -610,8 +618,8 @@ document attempts are recorded by the API and become due again after the configu
 refresh interval. Per-document failures do not stop draining other batches.
 
 Output contains aggregate counts, nonsecret run UUIDs and sanitized errors. Exit `0`
-means a short batch was observed and no refresh/index failures occurred; `1` means
-the queue was drained with failures; `2` means configuration/auth/HTTP/response
+means the enabled phases drained and no refresh/index/meeting failures occurred;
+`1` means the queues were drained with failures; `2` means configuration/auth/HTTP/response
 failure, an exhausted budget, or a conflicting runner. An unacknowledged monitor
 ping also exits `2`; `drained` still records whether the API work completed.
 Previously completed batch counts remain in the
@@ -633,7 +641,7 @@ has no database credentials and does not run migrations.
 
 The config reuses the API Dockerfile, clears migrations and HTTP healthchecks,
 sets one replica and restart policy `NEVER`, and runs
-`python -m src.source_refresh --require-monitor`. Only the `staging` override has
+`python -m src.source_refresh --require-monitor --meeting-records`. Only the `staging` override has
 an hourly UTC schedule. The base configuration is disabled; the explicit `pr`
 override also removes the inherited schedule and runs a harmless command so a
 preview cannot issue even one refresh or heartbeat. Exclude the service from
@@ -738,7 +746,7 @@ an API schema rollback; ordinary cron disablement does not require a DB downgrad
 | `monitor_failed=true` | Check the check's URL, existence and integration; inspect Railway run status before retrying anything. A monitoring failure does not undo completed refreshes. |
 | Missing finish/missed-run alert | Inspect active runs and deploy history, duplicate services, schedule/config and private networking. Resolve an outstanding POST before resuming; record how long source grants lacked successful refresh. |
 
-Rotate the catalog key by issuing a new `docs:write` key in staging, storing it
+Rotate the catalog key by issuing a new `docs:write meetings:write` key in staging, storing it
 privately, then updating only the cron's `DOCS_API_KEY` while no run is active.
 Observe the new key's scope check and a complete run before revoking the old key
 by its recorded ID (`python -m src.cli revoke <old-key-id>` from the service directory
