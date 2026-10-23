@@ -33,9 +33,32 @@ phases, truncation, malformed raw responses, auth/scopes, configuration,
 normalized upstream failures, and safe diagnostic logging for schema/SDK failures.
 The full LLM pytest suite, `ruff check`, and `ruff format --check` pass, with source
 paths verified against this checkout.
-Verification made no live model calls or deployment changes. Account access,
-answer quality, and latency still require a deployment smoke check with
-representative bot and minutes prompts, especially at their small output budgets.
+Initial verification made no live model calls or deployment changes. The staging
+cutover check on 2026-10-17 then received a successful OpenAI response that the
+adapter rejected because of extra envelope metadata. Staging was restored to
+Claude while the compatibility fix was prepared; the patched provider returned
+`OK` from GPT-6.1 Sol in a separate local smoke call using the staging credential.
+A second local smoke check completed a synthetic function-call/result round trip
+with medium reasoning and the broader compatibility fix. These confirmed account
+access and provider behavior, not the deployed HTTP path. Representative bot and
+minutes prompts still need deployment verification, especially at small output budgets.
+
+## Response compatibility
+
+OpenAI explicitly permits added JSON response properties as
+[backwards-compatible changes](https://developers.openai.com/api/reference/overview#backwards-compatibility).
+The adapter therefore validates required fields and supported semantics, while
+ignoring extra metadata on known response objects. It preserves bounded extensions
+inside native reasoning items because the
+[reasoning guide](https://developers.openai.com/api/docs/guides/reasoning#preserve-reasoning-without-stored-responses)
+requires those items to survive stateless replay. Unknown item types and unsupported
+tool execution modes still need explicit support. Incomplete responses retain text
+and usage while withholding executable calls, including for new or absent reasons.
+See [the architecture](ARCHITECTURE.md#openai-chat-default) for the validation boundary.
+
+Offline regressions cover additions to the envelope, nested messages/text, tool
+calls, usage, and replayed reasoning items, plus incomplete responses and malformed
+or unsupported executable output. A list of today's field names is insufficient.
 
 ## Usage estimate recorded on 2026-10-16
 
@@ -68,7 +91,7 @@ Paths below are relative to `services/llm`.
 | `contracts/models.py` | One catalog for wire, config, and provider model compatibility. |
 | `contracts/chat.py` | Use the catalog and validate assistant-only phases. |
 | `contracts/tools.py` | Strict, additive encrypted-state and assistant-phase wire fields. |
-| `contracts/tool_validation.py` | Framework-free validation of opaque reasoning items. |
+| `contracts/tool_validation.py` | Validate known reasoning fields while retaining bounded native extensions for replay. |
 | `src/api/routers/chat.py` | Map new blocks, reject incompatible models/state, and map 422/503 failures. |
 | `src/api/app.py` | Describe the supported providers accurately in OpenAPI. |
 | `src/config.py`, `.env.example` | OpenAI defaults; validate provider/model pairs and require AWS only for Bedrock. |

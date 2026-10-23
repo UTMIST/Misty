@@ -1,6 +1,6 @@
 """HTTP-backed fetcher for the connectors service.
 
-Implements the same Fetcher protocol as WebFetcher/GithubFetcher, so ingest and
+Implements the same Fetcher protocol as WebFetcher, so ingest and
 refetch need no changes. source_id is bound at construction because
 Fetcher.fetch takes only a url — the registry has already resolved the source.
 """
@@ -8,8 +8,15 @@ Fetcher.fetch takes only a url — the registry has already resolved the source.
 import httpx
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from contracts.fetcher import FetchError, FetchResult, SourcePermission
+from contracts.fetcher import FetchError, FetchResult, SourceGone, SourcePermission
 from src.fetch.web import SNAPSHOT_CHARS
+
+
+# The connectors service's 404 detail for SourceNotFound
+# (services/connectors/src/api/routers/fetch.py). Google answers 404 both for
+# deleted files and for files the service account can no longer see; either
+# way the doc cannot be refreshed, and clearing its index is the safe side.
+SOURCE_GONE_DETAIL = "file not found for this url"
 
 
 class _ConnectorsResponseBody(BaseModel):
@@ -52,6 +59,12 @@ class ConnectorsFetcher:
             )
             if resp.status_code != 200:
                 detail = _safe_detail(resp)
+                # Only connectors' own not-found answer means the file is gone.
+                # A bare 404 (e.g. a wrong CONNECTORS_BASE_URL path) must stay
+                # a transient FetchError, or a misconfiguration would clear
+                # every Google doc's index.
+                if resp.status_code == 404 and detail == SOURCE_GONE_DETAIL:
+                    raise SourceGone(f"connectors returned 404: {detail}")
                 raise FetchError(f"connectors returned {resp.status_code}: {detail}")
             raw_body = resp.json()
             if not isinstance(raw_body, dict):

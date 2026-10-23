@@ -3,21 +3,51 @@ import {
   TeamNotFound,
   MembershipInvalid,
   DirectoryUnavailable,
+  GoogleGroupsNotConfigured,
+  GoogleGroupSyncConflict,
 } from '../clients/directoryClient.js';
 
 export const llmSafe = true;
 
 const isoDateToday = () => new Date().toISOString().slice(0, 10);
 
-export function createTeamService({ directory, now = isoDateToday } = {}) {
+export function createTeamService({
+  directory,
+  now = isoDateToday,
+  googleProbeTimeoutMs = 2000,
+} = {}) {
   async function createTeam({ slug, label, description }, _opts) {
     try {
       const team = await directory.createTeam({ slug, label, description });
-      return { outcome: 'CREATED', team };
+      // Directory create already schedules a background sync. Calling sync here
+      // is the only way to tell "Google Groups off" (503) from "still
+      // provisioning" (GET 404) without a new API, and returns the real mapping.
+      // Bound the wait: this retry can queue behind the background sync.
+      return { outcome: 'CREATED', team, google: await probeGoogleGroup(team.id) };
     } catch (e) {
       if (e instanceof TeamExists) return { outcome: 'SLUG_EXISTS', detail: e.detail };
       if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
       throw e;
+    }
+  }
+
+  async function probeGoogleGroup(teamId) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), googleProbeTimeoutMs);
+    try {
+      const state = await directory.syncTeamGoogleGroup(teamId, { signal: controller.signal });
+      return { outcome: 'SYNC_RESULT', state };
+    } catch (e) {
+      // httpClient maps abort to DirectoryUnavailable; prefer PENDING while our signal is aborted.
+      if (controller.signal.aborted) return { outcome: 'PENDING' };
+      if (e instanceof GoogleGroupsNotConfigured) return { outcome: 'NOT_CONFIGURED' };
+      if (e instanceof GoogleGroupSyncConflict) {
+        return { outcome: 'RETIRED_NO_GROUP', detail: e.detail };
+      }
+      if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -148,6 +178,36 @@ export function createTeamService({ directory, now = isoDateToday } = {}) {
     }
   }
 
+  async function getGoogleGroupStatus({ teamSlug }, _opts) {
+    try {
+      const team = await directory.getTeamBySlug(teamSlug);
+      if (!team) return { outcome: 'TEAM_NOT_FOUND' };
+      const state = await directory.getTeamGoogleGroup(team.id);
+      if (!state) return { outcome: 'NO_MAPPING', team };
+      return { outcome: 'STATUS', team, state };
+    } catch (e) {
+      if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
+      throw e;
+    }
+  }
+
+  async function syncGoogleGroup({ teamSlug }, _opts) {
+    try {
+      const team = await directory.getTeamBySlug(teamSlug);
+      if (!team) return { outcome: 'TEAM_NOT_FOUND' };
+      const state = await directory.syncTeamGoogleGroup(team.id);
+      return { outcome: 'SYNC_RESULT', team, state };
+    } catch (e) {
+      if (e instanceof TeamNotFound) return { outcome: 'TEAM_NOT_FOUND' };
+      if (e instanceof GoogleGroupsNotConfigured) return { outcome: 'NOT_CONFIGURED' };
+      if (e instanceof GoogleGroupSyncConflict) {
+        return { outcome: 'RETIRED_NO_GROUP', detail: e.detail };
+      }
+      if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
+      throw e;
+    }
+  }
+
   return {
     createTeam,
     listTeams,
@@ -156,6 +216,8 @@ export function createTeamService({ directory, now = isoDateToday } = {}) {
     removeMember,
     getRoster,
     getMyTeams,
+    getGoogleGroupStatus,
+    syncGoogleGroup,
     _now: now,
   };
 }

@@ -1,6 +1,107 @@
-import { answerHelperTurns, resolveHelperCaller } from '../../helperFlow.js';
+import { prepareHelperReply, resolveHelperCaller, WITHHELD_ANSWER } from '../../helperFlow.js';
+import { sendDiscordMessage } from './messages.js';
+import { presentHelperAction } from './helperActions.js';
+import { runRecordAction } from './recording.js';
+import { runQnaAction } from './qna.js';
+import recordCommand from '../../commands/record.js';
+import { ChannelType, PermissionFlagsBits } from 'discord.js';
 
-const DISCORD_MAX_MESSAGE = 2000;
+/** Bind Discord metadata outside model input. Meetings keep the exact source channel. */
+export function createHelperRequest(message, appContext, botId) {
+  const userId = message.author.id;
+  const guildId = message.guild?.id ?? message.guildId ?? null;
+  const sourceChannel = message.channel;
+  const parent = sourceChannel.isThread?.() ? sourceChannel.parentId : null;
+  const recording = guildId ? appContext.meetingSurface?.activeSession?.(guildId) : null;
+  async function sourceAccess() {
+    if (!guildId) return {};
+    const member = await message.guild.members.fetch({ user: userId, force: true });
+    const channel = await message.guild.channels.fetch(sourceChannel.id, { force: true });
+    if (channel?.isThread?.() && channel.parentId) {
+      await message.guild.channels.fetch(channel.parentId, { force: true });
+    }
+    const permissions = channel?.permissionsFor(member);
+    if (!permissions?.has(PermissionFlagsBits.ViewChannel))
+      throw new Error('Channel access changed.');
+    if (
+      channel.type === ChannelType.PrivateThread &&
+      !permissions.has(PermissionFlagsBits.ManageThreads)
+    ) {
+      const membership = await channel.members.fetch({ member: userId, force: true });
+      if (!membership) throw new Error('Thread access changed.');
+    }
+    return { member, channel };
+  }
+  return Object.freeze({
+    discordUserId: userId,
+    discordHandle: message.author.username,
+    discordGuildId: guildId,
+    discordChannelId: parent ?? sourceChannel.id,
+    sourceChannelId: sourceChannel.id,
+    channelUsedParent: Boolean(parent),
+    guildLabel: message.guild?.name,
+    recordingVoiceChannelId: recording?.voiceChannel?.id,
+    checkSurface: sourceAccess,
+    async runMeeting({ commandName, subcommand, options }) {
+      if (!guildId) return { content: 'Use this action in a server channel.' };
+      // Refresh the caller, never use voice state captured during model generation.
+      const { member, channel } = await sourceAccess();
+      if (
+        (commandName === 'qna' || subcommand === 'stop') &&
+        (!recording ||
+          appContext.meetingSurface?.activeSession?.(guildId)?.sessionId !== recording.sessionId)
+      ) {
+        return {
+          content:
+            'The recording ended or changed since your request. Ask again for the current meeting.',
+        };
+      }
+      if (commandName === 'qna') {
+        return runQnaAction(
+          { guildId, channelId: sourceChannel.id, question: options.question },
+          appContext,
+        );
+      }
+      return runRecordAction(
+        {
+          guildId,
+          requesterId: userId,
+          voiceChannel: member.voice?.channel,
+          textChannel: channel,
+          subcommand,
+          name: options.name ?? null,
+          save: options.save ?? true,
+        },
+        appContext,
+        recordCommand,
+        botId,
+      );
+    },
+  });
+}
+
+// Recheck immediately before each send, including later parts of a long reply.
+// A check failure is terminal for this reply; no remaining source text is sent.
+export async function sendHelperReply(send, reply, { message, appContext } = {}) {
+  if (reply.action) return presentHelperAction(message, send, reply.action, appContext);
+  let withheld = false;
+  await sendDiscordMessage(async (part) => {
+    if (withheld) return;
+    if (reply.canPublish) {
+      let allowed = false;
+      try {
+        allowed = (await reply.canPublish()) === true;
+      } catch {
+        // Access lookup outages fail closed.
+      }
+      if (!allowed) {
+        withheld = true;
+        return send(WITHHELD_ANSWER);
+      }
+    }
+    return send(part);
+  }, reply.content);
+}
 
 export function startsWithBotMention(content, botId) {
   const trimmed = (content ?? '').trimStart();
@@ -74,19 +175,6 @@ export function threadHistoryToTurns(fetched, botId) {
     }, []);
 }
 
-export function chunkForDiscord(text) {
-  const chunks = [];
-  let remaining = text ?? '';
-  while (remaining.length > DISCORD_MAX_MESSAGE) {
-    let cut = remaining.lastIndexOf('\n', DISCORD_MAX_MESSAGE);
-    if (cut <= 0) cut = DISCORD_MAX_MESSAGE; // no newline → hard split
-    chunks.push(remaining.slice(0, cut));
-    remaining = remaining.slice(cut).replace(/^\n/, '');
-  }
-  if (remaining.length > 0) chunks.push(remaining);
-  return chunks;
-}
-
 const HISTORY_LIMIT = 100; // Discord's messages.fetch maximum; no pagination
 const THREAD_UNAVAILABLE =
   "I couldn't open a thread for that — please try again. (I may be missing the 'Create Public Threads' or 'Read Message History' permission.)";
@@ -143,8 +231,8 @@ async function prependStarterMessage(thread, ordered) {
 
 // Handle a helper request: either a leading mention or a reply that pings Misty
 // in a Misty-owned thread. Linked-only. In a channel it opens a thread; in a
-// thread it replays the full recent history, including the starter message, as
-// memory.
+// thread it fetches recent history, including the starter message. The flow
+// retains user questions and removes unverified bot answers before model use.
 // Never throws to discord.js.
 export async function handleMention(message, { appContext, botId }) {
   const question = stripLeadingMention(message.content, botId);
@@ -152,7 +240,7 @@ export async function handleMention(message, { appContext, botId }) {
 
   const caller = await resolveHelperCaller(appContext, message.author.id);
   if (!caller.ok) {
-    await message.reply(caller.content).catch(() => {});
+    await sendDiscordMessage((part) => message.reply(part), caller.content).catch(() => {});
     return;
   }
 
@@ -160,11 +248,10 @@ export async function handleMention(message, { appContext, botId }) {
   // Reserve before any more awaits; even concurrent mentions share this limit.
   const allowance = appContext.helperRequestLimiter.tryConsume(message.author.id);
   if (!allowance.allowed) {
-    await message
-      .reply(
-        `Please slow down a little so everyone can use the helper. Try again in ${allowance.retryAfterSeconds} seconds.`,
-      )
-      .catch(() => {});
+    await sendDiscordMessage(
+      (part) => message.reply(part),
+      `Please slow down a little so everyone can use the helper. Try again in ${allowance.retryAfterSeconds} seconds.`,
+    ).catch(() => {});
     return;
   }
 
@@ -174,10 +261,12 @@ export async function handleMention(message, { appContext, botId }) {
     if (message.channel.isThread()) {
       target = message.channel;
       const fetched = await target.messages.fetch({ limit: HISTORY_LIMIT });
-      const ordered = [...fetched.values()].sort(
-        (a, b) => (a.createdTimestamp ?? 0) - (b.createdTimestamp ?? 0),
-      );
+      const ordered = [...fetched.values()]
+        .filter((candidate) => messageIsAtOrBefore(candidate, message))
+        .sort((a, b) => (a.createdTimestamp ?? 0) - (b.createdTimestamp ?? 0));
       await prependStarterMessage(target, ordered);
+      if (!ordered.some((candidate) => candidate.id && candidate.id === message.id) && message.id)
+        ordered.push(message);
       turns = threadHistoryToTurns(ordered, botId);
     } else {
       target = await message.startThread({ name: question.slice(0, 100) });
@@ -192,16 +281,31 @@ export async function handleMention(message, { appContext, botId }) {
     }
   } catch (e) {
     console.error('thread create/fetch failed:', e.message);
-    await message.reply(THREAD_UNAVAILABLE).catch(() => {});
+    await sendDiscordMessage((part) => message.reply(part), THREAD_UNAVAILABLE).catch(() => {});
     return;
   }
   if (!turns.length) return;
 
   await target.sendTyping().catch(() => {});
-  const content = await answerHelperTurns(appContext, turns, caller.principal);
-  for (const chunk of chunkForDiscord(content)) {
-    await target.send(chunk).catch((e) => console.error('helper reply failed:', e.message));
-  }
+  // Shared-channel scope keys on the configured channel, not the thread Misty
+  // opens inside it: in a thread, that's the parent channel. A tool-enabled
+  // answer is scoped to that channel's configured team union (resolved by the
+  // doc service); the asking person's own privileges never widen it.
+  const channelId = message.channel.isThread() ? message.channel.parentId : message.channel.id;
+  const reply = await prepareHelperReply(
+    appContext,
+    turns,
+    caller.principal,
+    {
+      kind: 'channel',
+      guildId: message.guild?.id ?? message.guildId ?? null,
+      channelId: channelId ?? null,
+    },
+    createHelperRequest(message, appContext, botId),
+  );
+  await sendHelperReply((part) => target.send(part), reply, { message, appContext }).catch(() =>
+    console.error('Could not deliver helper reply'),
+  );
 }
 
 export async function handleDirectMessage(message, { appContext, botId }) {
@@ -210,16 +314,15 @@ export async function handleDirectMessage(message, { appContext, botId }) {
 
   const caller = await resolveHelperCaller(appContext, message.author.id);
   if (!caller.ok) {
-    await message.reply(caller.content).catch(() => {});
+    await sendDiscordMessage((part) => message.reply(part), caller.content).catch(() => {});
     return;
   }
   const allowance = appContext.helperRequestLimiter.tryConsume(message.author.id);
   if (!allowance.allowed) {
-    await message
-      .reply(
-        `Please slow down a little so everyone can use the helper. Try again in ${allowance.retryAfterSeconds} seconds.`,
-      )
-      .catch(() => {});
+    await sendDiscordMessage(
+      (part) => message.reply(part),
+      `Please slow down a little so everyone can use the helper. Try again in ${allowance.retryAfterSeconds} seconds.`,
+    ).catch(() => {});
     return;
   }
 
@@ -235,16 +338,22 @@ export async function handleDirectMessage(message, { appContext, botId }) {
     turns = directMessageHistoryToTurns(ordered, message.author.id, botId);
   } catch (e) {
     console.error('DM history fetch failed:', e.message);
-    await message.reply(DM_HISTORY_UNAVAILABLE).catch(() => {});
+    await sendDiscordMessage((part) => message.reply(part), DM_HISTORY_UNAVAILABLE).catch(() => {});
     return;
   }
   if (!turns.length) return;
 
   await message.channel.sendTyping().catch(() => {});
-  const content = await answerHelperTurns(appContext, turns, caller.principal);
-  for (const chunk of chunkForDiscord(content)) {
-    await message.channel
-      .send(chunk)
-      .catch((e) => console.error('helper DM reply failed:', e.message));
-  }
+  // DM: a tool-enabled answer is scoped to the asking person — their own
+  // authorized documents, including anything privately shared with them.
+  const reply = await prepareHelperReply(
+    appContext,
+    turns,
+    caller.principal,
+    { kind: 'person' },
+    createHelperRequest(message, appContext, botId),
+  );
+  await sendHelperReply((part) => message.channel.send(part), reply, { message, appContext }).catch(
+    () => console.error('Could not deliver helper DM reply'),
+  );
 }

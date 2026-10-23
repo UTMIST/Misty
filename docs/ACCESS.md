@@ -55,22 +55,19 @@ Only once you're past local development.
 
 | To do this | You need | Ask |
 |---|---|---|
-| Push a branch, open a PR | GitHub write on `qiuethan/Misty` | <!-- FILL IN: who administers the repo --> |
+| Push a branch, open a PR | GitHub write on `UTMIST/Misty` | @qiuethan (step 1 of [`ONBOARDING.md`](ONBOARDING.md)) |
 | Run a **real** Discord bot (not the playground) | Your own bot token + client id | Nobody — [make your own app](https://discord.com/developers/applications). See below |
-| Test slash commands in a shared server | Invite to the testing guild + its `DISCORD_GUILD_ID` | <!-- FILL IN --> |
-| Exercise `/chat` or live transcription | AWS creds with **Bedrock** and **Transcribe** enabled | <!-- FILL IN: is there a shared UTMIST AWS account, or does each dev use their own? --> |
-| Send real verification email | A Resend API key, or Gmail service-account JSON | <!-- FILL IN --> — rarely needed; `EMAIL_BACKEND=fake` covers local work |
-| View logs, restart, or set variables on a deploy | Railway project member | <!-- FILL IN --> |
-| Inspect or branch a database | Neon project member | <!-- FILL IN --> |
-| Merge to `main` (production release) | Approval per [`RAILWAY-DEPLOYMENT.md`](RAILWAY-DEPLOYMENT.md) | <!-- FILL IN: who signs off on a prod promotion --> |
+| Test slash commands in a shared server | Invite to the testing guild + its `DISCORD_GUILD_ID` | @qiuethan — he'll invite you and give you the guild id |
+| Exercise `/chat` with the default OpenAI backend, or `/embed` | `OPENAI_API_KEY` on `llm` | @qiuethan — say which service and environment you need access for; see [`llm` configuration](../services/llm/docs/DEPLOYMENT.md#variables) |
+| Exercise live transcription | AWS credentials with **Transcribe** access, plus a reachable `llm` service | @qiuethan — he issues scoped IAM credentials per dev from the shared UTMIST AWS account; include your AWS region and environment |
+| Exercise `/chat` with an explicitly selected Bedrock backend | AWS credentials with **Bedrock** access | @qiuethan — request scoped IAM credentials for the AWS region and environment you're testing; select the Bedrock provider/model pair per [`llm` configuration](../services/llm/docs/DEPLOYMENT.md) |
+| Send real verification email | A Resend API key, or Gmail service-account JSON | @qiuethan — rarely needed; `EMAIL_BACKEND=fake` covers local work |
+| View logs, restart, or set variables on a deploy | Railway project member | @qiuethan — added on request; say what you're debugging |
+| Inspect or branch a database | Neon project member | @qiuethan — added on request; say what you're debugging |
+| Merge to `main` (production release) | Approval per [`RAILWAY-DEPLOYMENT.md`](RAILWAY-DEPLOYMENT.md) | @qiuethan signs off on every `staging → main` promotion |
 
-> [!NOTE]
-> The `FILL IN` markers above are honest gaps, not placeholders left by
-> accident. This file was added during an onboarding sweep by someone who could
-> verify the *technical* answers by running the code, but not the
-> *organizational* ones. If you know who grants one of these, please fill it in
-> — a name or a Discord channel is enough, and it's the highest-value edit
-> anyone can make to this page.
+Yes, every row says @qiuethan. That's the current reality of a small org, not
+a policy — as zones get owners, expect some of these to delegate.
 
 ### Making your own Discord app
 
@@ -102,7 +99,7 @@ uv --project services/team-tracking run team-tracking-keys issue \
   --scopes people:read people:write people:elevate \
            identifiers:read identifiers:write \
            teams:read teams:write memberships:read memberships:write \
-           role_kinds:read
+           role_kinds:read channels:read channels:write
 ```
 
 Always pass `--project`, and check the token starts with `tt_` — see the
@@ -135,6 +132,7 @@ routine offboarding step.
 
 ## See also
 
+- [`ONBOARDING.md`](ONBOARDING.md) — joining the team: zones, getting work, PR norms
 - [`DEVELOPMENT.md`](DEVELOPMENT.md) — what each variable does, and local setup
 - [`RAILWAY-DEPLOYMENT.md`](RAILWAY-DEPLOYMENT.md) — the deploy/operate runbook
 - [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md) — why key storage differs per service

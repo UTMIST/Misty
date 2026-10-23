@@ -122,7 +122,7 @@ describe('web server', () => {
   });
 });
 
-test('helper reply playground replays its full in-memory thread context', async () => {
+test('helper reply playground replays user questions without unverified bot answers', async () => {
   const seen = [];
   const directory = {
     getPersonByDiscordId: async (id) => ({ id: `p-${id}`, display_name: `Person ${id}` }),
@@ -160,7 +160,6 @@ test('helper reply playground replays its full in-memory thread context', async 
         authorId: '1',
         authorName: 'Person 1',
       },
-      { role: 'assistant', text: 'answer 1' },
       { role: 'user', text: 'follow up', authorId: '2', authorName: 'Person 2' },
     ]);
 
@@ -384,7 +383,7 @@ test('POST /api/helper/dm keeps history isolated by acting Discord ID', async ()
     assert.equal(first.statusCode, 200);
     assert.equal(second.statusCode, 200);
     assert.equal(followUp.statusCode, 200);
-    assert.deepEqual(seen, [['hello'], ['hello'], ['hello', 'answer 1', 'follow up']]);
+    assert.deepEqual(seen, [['hello'], ['hello'], ['hello', 'follow up']]);
   } finally {
     await server.close();
   }
@@ -479,7 +478,7 @@ test('POST /api/helper/dm serializes overlapping requests for one Discord ID', a
     assert.deepEqual(seen, [['first']]);
     releaseFirst();
     await Promise.all([first, second]);
-    assert.deepEqual(seen, [['first'], ['first', 'answer 1', 'second']]);
+    assert.deepEqual(seen, [['first'], ['first', 'second']]);
   } finally {
     releaseFirst();
     await server.close();

@@ -28,3 +28,21 @@ def test_protocols_importable():
     assert StorageAdapter is not None
     assert Fetcher is not None
     assert DirectoryClient is not None
+
+
+def test_storage_adapters_implement_every_protocol_method():
+    import inspect
+
+    from src.storage.in_memory import InMemoryStorageAdapter
+    from src.storage.postgres import PostgresStorageAdapter
+
+    methods = [
+        name
+        for name, member in vars(StorageAdapter).items()
+        if callable(member) and not name.startswith("_")
+    ]
+    for adapter in (InMemoryStorageAdapter, PostgresStorageAdapter):
+        for name in methods:
+            expected = list(inspect.signature(getattr(StorageAdapter, name)).parameters)
+            actual = list(inspect.signature(getattr(adapter, name)).parameters)
+            assert actual == expected, f"{adapter.__name__}.{name}"

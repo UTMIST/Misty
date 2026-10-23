@@ -1,7 +1,13 @@
 import { defineCommand } from '../defineCommand.js';
 import { myTeamsAutocomplete as teamAutocomplete } from './teamAutocomplete.js';
-import { renderDocAddResult, renderDocListResult, renderDocRemoveResult } from '../messages/doc.js';
+import {
+  renderDocAddResult,
+  renderDocListResult,
+  renderDocRemoveResult,
+  renderDocSearchResult,
+} from '../messages/doc.js';
 import { ACCESS_RANK, rankOf } from '../auth/policy.js';
+import { SEARCH_MAX_QUERY_LENGTH } from '../services/docService.js';
 
 // Re-exported for callers/tests that reference /doc's autocomplete budget. The
 // implementation now lives in the shared teamAutocomplete module.
@@ -88,6 +94,29 @@ export default defineCommand({
         // rankOf(undefined) is 0, so an unlinked caller never gets ids.
         const isAdmin = rankOf(principal?.person?.access_level) >= ACCESS_RANK.admin;
         return renderDocListResult(result, { isAdmin });
+      },
+    },
+    {
+      name: 'search',
+      description: 'Search the documents you can access',
+      auth: 'linked',
+      // Results include the caller's private shares, so never post them publicly.
+      ephemeral: true,
+      options: [
+        {
+          name: 'query',
+          type: 'string',
+          required: true,
+          maxLength: SEARCH_MAX_QUERY_LENGTH,
+          description: 'What to search for',
+        },
+      ],
+      async handler({ options, ctx, principal }) {
+        const result = await ctx.docService.searchDocs({
+          query: options.query,
+          onBehalfOf: principal?.person?.id,
+        });
+        return renderDocSearchResult(result);
       },
     },
     {

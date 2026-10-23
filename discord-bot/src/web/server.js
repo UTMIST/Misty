@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dispatch } from '../router.js';
 import { answerHelperTurns, resolveHelperCaller } from '../helperFlow.js';
+import { meetingDeliveryScenarios, previewMeetingDelivery } from './meetingDeliveryPreview.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -33,6 +34,22 @@ export async function buildServer({ commands, appContext, onReset }) {
     root: path.join(__dirname, 'public'),
     prefix: '/',
   });
+
+  // Synthetic scenarios only: never send to Discord or call a backend service.
+  server.post(
+    '/api/meeting-delivery/preview',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['scenario'],
+          properties: { scenario: { type: 'string', enum: meetingDeliveryScenarios } },
+        },
+      },
+    },
+    async (req) => previewMeetingDelivery(req.body.scenario),
+  );
 
   server.get('/api/commands', async () => {
     return Array.from(commands.values()).map((c) => ({
@@ -186,6 +203,9 @@ export async function buildServer({ commands, appContext, onReset }) {
       }
     }
 
+    // Playground has no Discord channel; use fixed snowflakes (overridable) so
+    // /channel-access can exercise the #238 API against the scratch directory.
+    const { guildId, channelId } = req.body ?? {};
     const intent = {
       surface: 'web',
       commandName: command.name,
@@ -193,6 +213,11 @@ export async function buildServer({ commands, appContext, onReset }) {
       subcommand,
       discordUserId: String(actingAs),
       discordHandle: `spoof-${actingAs}`,
+      discordGuildId:
+        typeof guildId === 'string' && guildId.trim() ? guildId.trim() : '111111111111111111',
+      discordChannelId:
+        typeof channelId === 'string' && channelId.trim() ? channelId.trim() : '222222222222222222',
+      channelUsedParent: false,
     };
     const payload = await dispatch(intent, { commands, appContext });
     return payload ?? {};

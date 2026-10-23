@@ -112,3 +112,14 @@ Worth stating plainly, because it's a recording service:
 - **Transcript is empty but audio was flowing.** Usually AWS credentials or region — Transcribe stream opens fail silently from the client's perspective. Check the logs for stream-open errors.
 - **Speakers' words are interleaved at wrong times.** Timeline anchoring. The 200 ms gap tolerance is unverified against live audio; see [ARCHITECTURE.md → Live-verify caveats](ARCHITECTURE.md#live-verify-caveats).
 - **Everything green but `/record` says "not configured".** That's the *bot*, not this service — `MEETING_BASE_URL` is unset on the discord-bot.
+
+## Durable record hand-off
+
+Set `DOCS_BASE_URL` to documentation-system's private Railway URL and
+`DOCS_API_KEY` to an issued key named for the meeting service with
+`meetings:write`. Outside local, configuring the URL without the key fails at
+boot. `RECORD_HANDOFF_HOLD_S` defaults to 1800 seconds. If hand-off expires,
+admins investigate `meeting.record_handoff_failed` by meeting ID; retain the
+Discord PDF. Pending text is memory-only until accepted by documentation-system.
+Deploy the catalog migration and writer configuration first; see the
+[shared rollout](../../../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).

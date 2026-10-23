@@ -7,6 +7,37 @@ export class MeetingUnavailable extends Error {
   }
 }
 
+export class MeetingQnaError extends MeetingUnavailable {
+  constructor(status) {
+    super(`Meeting Q&A failed (${status})`);
+    this.name = 'MeetingQnaError';
+    this.status = status;
+  }
+}
+
+function validQnaResponse(data) {
+  return (
+    data &&
+    typeof data.answer === 'string' &&
+    data.answer.trim().length > 0 &&
+    Number.isSafeInteger(data.window_start_ms) &&
+    data.window_start_ms >= 0 &&
+    Number.isSafeInteger(data.window_end_ms) &&
+    data.window_end_ms >= data.window_start_ms &&
+    typeof data.shortened === 'boolean' &&
+    Array.isArray(data.references) &&
+    data.references.length <= 3 &&
+    data.references.every(
+      (ref) =>
+        ref &&
+        typeof ref.speaker === 'string' &&
+        Number.isSafeInteger(ref.start_ms) &&
+        ref.start_ms >= data.window_start_ms &&
+        ref.start_ms <= data.window_end_ms,
+    )
+  );
+}
+
 // Transport client for the internal meeting service: a WebSocket audio/control
 // stream plus a small HTTP surface (transcript/stop). Pure transport — no
 // discord.js here; the binary frame layout below MUST byte-match the
@@ -18,6 +49,7 @@ export function createMeetingClient({
   apiKey,
   WebSocketImpl = WsWebSocket,
   fetchImpl = fetch,
+  qnaTimeoutMs = 75_000,
 }) {
   function encodeFrame(speakerId, tsMs, opusBuffer) {
     const id = Buffer.from(speakerId, 'utf8');
@@ -142,13 +174,13 @@ export function createMeetingClient({
     }
   }
 
-  async function stop(sessionId, { title } = {}) {
+  async function stop(sessionId, { title, record } = {}) {
     let resp;
     try {
       resp = await fetchImpl(`${baseUrl}/meetings/${sessionId}/stop`, {
         method: 'POST',
         headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify(title ? { title } : {}),
+        body: JSON.stringify({ ...(title ? { title } : {}), ...(record ? { record } : {}) }),
       });
     } catch {
       throw new MeetingUnavailable('network error reaching meeting service');
@@ -161,5 +193,32 @@ export function createMeetingClient({
     }
   }
 
-  return { encodeFrame, openStream, getTranscript, stop };
+  async function qna(sessionId, question) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), qnaTimeoutMs);
+    try {
+      const resp = await fetchImpl(`${baseUrl}/meetings/${sessionId}/qna`, {
+        method: 'POST',
+        headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question }),
+        signal: controller.signal,
+      });
+      if (!resp.ok) throw new MeetingQnaError(resp.status);
+      let data;
+      try {
+        data = await resp.json();
+      } catch {
+        throw new MeetingQnaError(controller.signal.aborted ? 504 : 502);
+      }
+      if (!validQnaResponse(data)) throw new MeetingQnaError(502);
+      return data;
+    } catch (error) {
+      if (error instanceof MeetingQnaError) throw error;
+      throw new MeetingQnaError(controller.signal.aborted ? 504 : 503);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  return { encodeFrame, openStream, getTranscript, stop, qna };
 }

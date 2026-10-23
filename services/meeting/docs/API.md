@@ -9,6 +9,7 @@ Base URL (local): `http://localhost:8004` · Swagger UI: `/docs` · Schema: `/op
 | GET | `/health` | none | Liveness probe |
 | WS | `/meetings/{id}/stream` | `?key=` or first frame | Live audio ingest + control |
 | GET | `/meetings/{id}/transcript` | `X-API-Key` | Poll the rolling transcript |
+| POST | `/meetings/{id}/qna` | `X-API-Key` | Answer from a snapshot of the last 15 minutes |
 | POST | `/meetings/{id}/stop` | `X-API-Key` | Finalize: transcript + minutes + PDF; accepts an optional title |
 
 ## Authentication
@@ -23,7 +24,7 @@ A key is either the bootstrap env key (`API_KEY`, carries `admin`) or a per-cons
 
 Must match `^[A-Za-z0-9_-]{1,64}$`. The service writes nothing to disk, so this is input hygiene rather than path safety.
 
-A `session_id` unknown to the in-memory registry returns **404** on `/transcript` and `/stop`. "Unknown" covers three cases that are indistinguishable from outside: never started, already stopped, or **the process restarted**. Sessions live only in memory.
+A `session_id` unknown to the in-memory registry returns **404** on `/transcript`, `/qna`, and `/stop`. "Unknown" covers three cases that are indistinguishable from outside: never started, already stopped, or **the process restarted**. Sessions live only in memory.
 
 ---
 
@@ -109,6 +110,79 @@ It is a **cumulative view, not a diff**. Each response is the whole transcript s
 | `session_id` fails the regex | 400 `invalid session_id` |
 | Session not in the registry | 404 `unknown session` |
 | Missing key / no `meetings` scope | 401 / 403 |
+
+---
+
+## `POST /meetings/{session_id}/qna`
+
+Answer a question from finalized speech available at request time. Uses the same
+`meetings` scope as the other endpoints; no user identity is required.
+
+**Request** (`QnaRequest`): `{"question": "What deadline did Alice suggest?"}`.
+The question must contain non-whitespace text and be at most 1,000 characters.
+
+**Response** (`QnaResponse`) — `200`:
+
+```json
+{
+  "answer": "Alice suggested Friday.",
+  "references": [{"speaker": "Alice", "start_ms": 1000000}],
+  "window_start_ms": 900000,
+  "window_end_ms": 1800000,
+  "shortened": false
+}
+```
+
+The window is the last **15 minutes of elapsed meeting time**, including silence.
+Before 15 minutes, it covers the meeting so far. Segments are included by their
+start timestamp, with both endpoints inclusive. Speech still being transcribed
+is absent. The snapshot does not change while the answer is generated, including
+if recording stops after the question has been accepted.
+
+Serialized transcript input (including source IDs, speakers, and timestamps) is
+capped at **60,000 characters**. This is a coarse character guard, **not an exact
+input-token cap or a guarantee of the provider's context capacity**. Oversized
+windows retain the newest contiguous set of complete segments that fits;
+`shortened=true` and `window_start_ms` disclose the retained range. The guard
+applies to transcript text before JSON escaping, not the entire HTTP payload.
+
+References are derived from snapshot segments after validating the model's source
+IDs. Supported answers require one to three distinct valid IDs. These checks
+prevent invented reference metadata; they do not independently prove that an
+answer is entailed by the cited speech. Unsupported questions return
+`"Not discussed in the transcript available for MM:SS–MM:SS."` with no references.
+Empty windows return a clear no-finalized-speech message with no LLM call.
+Timestamps at one hour or more use `HH:MM:SS`.
+
+Non-empty requests call the existing LLM `/chat` once with `thinking=false` and
+`max_tokens=1024`. They use `REQUEST_TIMEOUT_S`, not a separate timeout setting.
+Q&A has a dedicated process-wide worker pool, separate from audio ingestion and
+minutes generation. Its maximum concurrency is **one quarter of the default shared
+executor size, rounded down** (minimum one). The shared default is
+`min(32, (os.cpu_count() or 1) + 4)` on Python 3.11/3.12, using
+`os.process_cpu_count()` instead on 3.13+. For example, a shared maximum of 14
+gives Q&A 3 workers; the shared maximum of 32 gives Q&A 8. It starts once with
+the application;
+the actual capacity is logged at startup. Excess requests fail immediately with
+429 rather than waiting in an unbounded queue. Cancelling a request does not
+release its capacity until its underlying worker finishes. Shutdown refuses new
+jobs and releases the executor without blocking the event loop; running HTTP
+calls finish under their existing timeout behavior.
+
+Neither questions nor answers are persisted or logged; broad questions cover
+only the returned window. LLM failures are errors, never unsupported answers.
+
+| Condition | Status |
+|---|---|
+| Invalid session id / unknown session | 400 / 404 |
+| Missing key / missing scope | 401 / 403 |
+| Invalid question | 422 |
+| Finalization has begun | 409 |
+| All dedicated Q&A workers are occupied | 429 |
+| Newest complete segment alone exceeds the size cap | 413 |
+| Malformed completion or invalid citations | 502 |
+| LLM unavailable or Q&A runner shutting down | 503 |
+| LLM request timeout | 504 |
 
 ---
 
@@ -200,6 +274,38 @@ bot                                  meeting
 ## Constraints worth designing around
 
 - **One process owns a session end-to-end.** No sticky routing means misrouted `/transcript` and `/stop`. Do not scale to multiple replicas without it.
-- **A restart loses every in-flight meeting.** Nothing is persisted.
+- **A restart loses live sessions and unaccepted hand-offs.** Completed records accepted by documentation-system survive in its database and Google Docs.
 - **`MAX_MEETING_MS`** (default 14,400,000 = 4 h) is a backstop: a session stops accepting audio past it. 4 h is also Amazon Transcribe's per-stream cap.
 - **One open Transcribe stream per active speaker**, for the whole meeting. Large meetings can hit the account's concurrent-stream quota.
+
+## Durable record context
+
+`POST /meetings/{session_id}/stop` accepts optional `record` alongside `title`:
+
+```json
+{
+  "title": "Planning",
+  "record": {
+    "guild_id": "123", "text_channel_id": "456", "voice_channel_id": "789",
+    "requester_discord_id": "1234", "started_at": "2026-10-22T14:00:00-04:00",
+    "participants": [{"discord_id": "1234", "display_name": "Angela"}]
+  }
+}
+```
+
+Record context requires a UUID session ID and a guild matching the live session.
+Context and participant models forbid extra fields. Legacy calls without it
+retain the PDF flow. The service adds end time and the existing transcript and
+`Minutes` fields, then PUTs documentation-system before finalization cleanup.
+No second LLM call, PDF parsing, audio persistence, or disk write is involved.
+Concurrent stops share one shielded finalization task, so request cancellation
+does not interrupt the hand-off.
+
+`StopResponse` additionally contains `record: null` for legacy/PDF-only calls,
+or `{status, doc_url, admin_only}`. `status` is the catalog persistence state
+(often `pending`, since acceptance is durable before Google work), or
+`handoff_pending` if acceptance failed. In that case the normal PDF still
+returns; the finalized text is held in memory and retried with backoff for
+`RECORD_HANDOFF_HOLD_S`. Expiry logs `meeting.record_handoff_failed` with only
+the meeting ID. A process crash before acceptance can lose this in-memory
+payload; the Discord PDF and explicit delayed-save notice are the fallback.

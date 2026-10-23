@@ -9,7 +9,7 @@ Every other service on the platform is stateless or state-in-Postgres, and every
 - **It holds state in process memory.** One `MeetingSession` per active meeting, for the meeting's duration.
 - **It has no playground equivalent.** Voice capture needs the real Discord surface.
 
-Both fall out of one fact: a live meeting *is* a long-lived stateful thing. There's no way to model "an open audio stream to AWS, per speaker, for 45 minutes" as a stateless request/response. The honest choice was to accept the statefulness and bound it — nothing persists, nothing survives a restart, and the constraints are documented loudly rather than papered over.
+Both fall out of one fact: a live meeting *is* a long-lived stateful thing. There's no way to model "an open audio stream to AWS, per speaker, for 45 minutes" as a stateless request/response. The honest choice was to accept the statefulness and bound it — live state stays ephemeral, completed text is handed off separately, and the constraints are documented explicitly.
 
 ## Layering
 
@@ -113,7 +113,7 @@ The window is short on purpose. A held session keeps its Transcribe streams park
 
 **Not horizontally scalable as-is.** A session's WebSocket, its `/transcript` polls, and its `/stop` call must all land on the *same* process. Multiple replicas behind a load balancer without sticky routing on `session_id` will send `/transcript` and `/stop` to a process that never saw that session — which returns a clean 404, so the failure is visible rather than silently wrong, but it's still broken.
 
-**Ephemeral by design.** A restart or crash mid-meeting loses everything in flight: the rolling transcript, the open streams, all of it. There is no database, no durable queue, and **nothing is ever written to disk** (there's a test asserting exactly that: `test_session_lifecycle_never_touches_the_filesystem`). If a meeting's minutes matter, the consumer must call `/stop` and persist the response itself — this service retains nothing after replying.
+**Ephemeral by design.** A restart or crash mid-meeting loses everything in flight: the rolling transcript, the open streams, all of it. There is no database, no durable queue, and **nothing is ever written to disk** (there's a test asserting exactly that: `test_session_lifecycle_never_touches_the_filesystem`). Call `/stop` with record context for a durable hand-off before cleanup. Failed hand-offs retain finalized text temporarily in memory; accepted records live in documentation-system and Google Docs. See [durable finalization](#durable-finalization-hand-off).
 
 ## Concurrency in the WebSocket handler
 
@@ -140,6 +140,45 @@ Decode runs in-process via PyAV, which bundles its own ffmpeg libraries. **No `f
 
 This is a genuine hard dependency: `verify_production_secrets()` requires `LLM_BASE_URL` and `LLM_API_KEY` outside `local`, so `meeting` refuses to boot without them. Deploy `llm` first.
 
+## Live meeting Q&A
+
+`POST /meetings/{id}/qna` snapshots finalized speech and elapsed time, then awaits
+its injected asynchronous `qna_runner`. The runner owns a bounded dedicated
+executor; it never submits Q&A to the default executor shared by WebSocket audio
+feeding and report generation. Otherwise concurrent slow questions could starve
+those workers and make `/stop` discard the queued audio tail. Pool capacity is
+one quarter of the runtime's default shared executor size, rounded down (minimum one), so
+Q&A concurrency stays below audio/report capacity. Admission fails immediately
+when full,
+and actual worker completion releases capacity even if its waiter is cancelled.
+The application lifespan creates the singleton and shuts it down, clearing the
+cached registry so future app lifespans cannot reuse a closed runner. Shutdown
+does not block the event loop or claim to cancel already running HTTP calls.
+
+Q&A does not flush or replay audio,
+mutate the meeting lifecycle, or retain conversation history. New questions are
+refused as soon as stop is requested, while the audio tail remains ingestible.
+Already accepted questions own their snapshot and can finish after cleanup.
+
+The pipeline sends the entire bounded recent window to the shared LLM service.
+There is no embedding, retrieval index, or database. Transcript text is treated
+as untrusted evidence, and model citations are validated against request-local
+segment IDs before speaker/timestamp metadata is returned. The exact window,
+size guard, and error contract live in [API.md](API.md#post-meetingssession_idqna).
+As with minutes generation, collaborator wiring belongs only in `wiring.py`.
+
+The question defines the task; only the transcript is treated as evidence rather
+than instructions. The prompt explicitly supports summarizing the available
+discussion and cautiously recognizing contextual speech-recognition near-matches.
+Near-matches should quote the actual transcript spelling and state uncertainty.
+Offline tests check the prompt contract, evidence transport, and citation parsing;
+they do not establish the live model's semantic answer quality.
+
+Parsing accepts plain JSON or a single complete JSON Markdown code block, then
+applies the same strict schema and citation validation. It does not repair
+truncation or extract answers from surrounding prose. Invalid responses are
+rejected without logging.
+
 ## Live-verify caveats
 
 Several integration assumptions are unit-tested against fakes but **not yet confirmed against real Discord audio or a real AWS account**:
@@ -148,3 +187,13 @@ Several integration assumptions are unit-tested against fakes but **not yet conf
 - **AWS session restarts** — Transcribe ends a streaming session on its own (idle timeout, 4 h cap). The wrapper reopens on the next audio and offsets the new session's word times by the audio already delivered. Tested against a fake, never observed against a real timeout.
 - **Concurrent stream limits** — one open Transcribe stream per active speaker, for the whole meeting. Check the account's concurrent-stream quota before a large meeting.
 - **Transcribe streaming generally** — the suite exercises `src/stt/transcribe.py` against a fake client only. Realistic audio pacing is needed to validate end-to-end.
+
+## Durable finalization hand-off
+
+`SessionRegistry` injects a `RecordHandoff` from `wiring.py`. Stop finalizes once
+and hands text/metadata to documentation-system before cleanup. The HTTP adapter
+owns a bounded in-memory retry task, protected from HTTP cancellation; it holds
+no audio. It acknowledges durability only after a 200/202 catalog response.
+After that, Postgres and the catalog's hourly runner own recovery. See the
+[wire contract](API.md#durable-record-context) and
+[accepted crash window](../../../docs/MEETING-RECORDING.md#hand-off-and-retry-closes-the-stop-gap).

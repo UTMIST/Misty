@@ -429,9 +429,9 @@ Syncing happens after the response, never inside it: `POST`/`PATCH /teams`, `POS
 
 `status` meanings:
 
-- `synced`: Google matches Team Tracking as of `last_synced_at`.
-- `needs_external_members`: the group exists but refuses addresses outside the managed domain. A group owner must enable **Allow external members** in Google Groups, then call the sync endpoint below. Internal addresses and removals were still applied.
-- `failed`: the group could not be created or read, or at least one member add/remove failed or hadn't finished on Google's side. Every other change was still attempted, so one bad address never blocks another member's removal. `last_error` lists each failure, separated by `; `. Retry with the sync endpoint.
+- `synced`: Google membership matches Team Tracking as of `last_synced_at`. For active teams, both external-member settings were also verified, even when the group is empty. Retired teams only require membership removal; their settings are left unchanged. A stored result from an older deployment needs a new sync to establish settings verification.
+- `needs_external_members`: settings were verified, but Google still rejected an external addition. Other additions and removals were attempted. Follow the [recovery runbook](DEPLOYMENT.md#external-member-setup-and-recovery) and retry sync.
+- `failed`: group creation/read, settings verification, or a membership change failed or remains unconfirmed. A settings failure holds all new additions but still attempts removals and preserves pending membership writes. `last_error` lists failures separated by `; `. `last_synced_at` remains the historical last success, not evidence the current attempt succeeded. Retry with the sync endpoint.
 
 An unfinished or uncertain membership write stays in `pending_changes` across retries and restarts. A pending addition is not replayed until Google shows its effect. A pending removal can retry against the same membership resource while the person remains unwanted; if they rejoin, sync waits for the original removal to finish before adding them again. The sync then reconciles against current directory membership. An empty Google group alone cannot clear a pending addition or make its mapping `synced`. See [pending-change recovery](DEPLOYMENT.md#pending-membership-changes).
 
@@ -459,7 +459,7 @@ Mappings (same shape as `GET /teams/google-groups`) for the `synced` teams whose
 
 ### POST /teams/{team_id}/google-group/sync
 
-Create the group if it is missing, reconcile its members now, and return the resulting mapping. Safe to repeat. **Scope:** `teams:write`.
+Create the group if it is missing, configure and verify external-member settings for active teams, reconcile members, and return the resulting mapping. Safe to repeat. **Scope:** `teams:write`.
 
 **Errors:** 404 if the team does not exist. 409 if the team is retired and never had a group. 503 if Google Groups is not configured. A Google failure is still a 200, with `status: "failed"` in the body.
 
@@ -531,7 +531,7 @@ curl -sS "http://localhost:8000/role_kinds/lead" \
 
 ## Providers
 
-Providers are the controlled vocabulary of identity provider types. The five seed values are `discord`, `github`, `notion`, `uoft_email`, and `email`. They are read-only through the API (no create/update endpoints). Both endpoints require scope `providers:read`.
+Providers are the controlled vocabulary of identity provider types. The four seed values are `discord`, `github`, `uoft_email`, and `email`. They are read-only through the API (no create/update endpoints). Both endpoints require scope `providers:read`.
 
 The `email` provider is special-cased: it is **multi-valued** (a person may have many `email` identifiers, unlike the "one link per provider" rule that governs every other provider) and is managed through its own dedicated endpoint, `POST /people/{id}/emails`, rather than the generic identifier `POST`/`PATCH`/`DELETE` endpoints below. See that section for details.
 
@@ -581,7 +581,7 @@ Get a single provider by its ID.
 
 | Param | Type | Notes |
 |-------|------|-------|
-| `provider_id` | string | e.g. `discord`, `github`, `notion` |
+| `provider_id` | string | e.g. `discord`, `github`, `uoft_email` |
 
 **Response:** `Provider` object, HTTP 200.
 
@@ -824,7 +824,7 @@ Scopes: `channels:read` for GET, `channels:write` for PUT/DELETE.
 - `version` is a fingerprint of `team_ids` (a truncated SHA-256 of the sorted ids). It changes exactly when the channel's effective access changes, including a retirement, and is not derived from timestamps, so the order concurrent writes commit in cannot hide a change. Use it as a cache key; if it differs from the value you cached, drop what you cached. An unconfigured channel and one configured with no teams share the same version, because both grant nothing.
 - `updated_by` is the key that last configured the channel. `null` when unconfigured.
 
-Concurrent PUTs and DELETEs on the same channel are serialized: the last one to commit wins outright, never a mix of two requests.
+Concurrent PUTs, append POSTs, and DELETEs on the same channel are serialized. Replace and clear: the last one to commit wins outright, never a mix of two requests. Append unions under the same lock, so concurrent appends accumulate and an append cannot resurrect teams a concurrent clear already removed.
 
 ### GET /channels/{guild_id}/{channel_id}/teams
 
@@ -854,6 +854,21 @@ curl -sS -X PUT "http://localhost:8000/channels/111111111111111111/2222222222222
   -H "X-API-Key: dev-api-key-change-me" \
   -H "Content-Type: application/json" \
   -d '{"team_ids": ["660e8400-e29b-41d4-a716-446655440001"]}'
+```
+
+### POST /channels/{guild_id}/{channel_id}/teams/append
+
+Atomically union `team_ids` onto the channel's current active set. Same body shape as PUT. An empty list is a true no-op: it returns the current configuration without rewriting rows (so `updated_by` and mappings for retired teams are unchanged). Holds the same per-channel write lock as PUT/DELETE for the whole read-merge-write.
+
+**Response:** `ChannelTeams`, HTTP 200.
+
+**Errors:** 400 if any id is not an active team; the existing configuration is left unchanged. 422 for duplicate ids, unknown fields, or non-numeric guild/channel ids.
+
+```bash
+curl -sS -X POST "http://localhost:8000/channels/111111111111111111/222222222222222222/teams/append" \
+  -H "X-API-Key: dev-api-key-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"team_ids": ["660e8400-e29b-41d4-a716-446655440002"]}'
 ```
 
 ### DELETE /channels/{guild_id}/{channel_id}/teams

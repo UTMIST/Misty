@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -89,6 +89,29 @@ def ctx(monkeypatch):
         yield client, store, fetchers, obo
 
 
+def test_source_refresh_guard_http_contract(ctx):
+    from tests.test_api_indexing import _key
+
+    client, store, fetchers, _ = ctx
+    writer = _key(store, "docs:write")
+    reader = _key(store, "docs:read")
+    path = f"/docs/source-access/refresh-runs/{uuid4()}"
+    other = f"/docs/source-access/refresh-runs/{uuid4()}"
+    for method in [client.post, client.delete]:
+        assert method(path).status_code == 401
+        assert method(path, headers=reader).status_code == 403
+        assert method("/docs/source-access/refresh-runs/invalid", headers=writer).status_code == 422
+    assert client.post(path, headers=writer).status_code == 200
+    assert client.post(path, headers=writer).status_code == 409
+    assert client.post(other, headers=writer).status_code == 409
+    assert client.delete(other, headers=writer).status_code == 409
+    assert client.delete(path, headers=writer).status_code == 200
+    assert client.delete(path, headers=writer).status_code == 409
+    assert client.post(other, headers=writer).status_code == 200
+    assert client.delete(other, headers=writer).status_code == 200
+    assert fetchers.calls == []
+
+
 @pytest.mark.parametrize("owner_field", ["owning_person_id", "owning_team_id"])
 def test_ingest_ownership_does_not_bypass_another_readers_source_acl(ctx, owner_field):
     client, store, fetchers, obo = ctx
@@ -157,7 +180,7 @@ def test_scheduled_refresh_skips_fetch_disabled_sources_before_applying_limit(ct
     fetchers.calls.clear()
     response = client.post("/docs/source-access/refresh-due?limit=1", headers=ADMIN)
     assert response.status_code == 200
-    assert response.json() == {"attempted": 1, "refreshed": 1, "failed": 0}
+    assert response.json() == {"attempted": 1, "refreshed": 1, "failed": 0, "index_failed": 0}
     assert fetchers.calls == [("gdocs", enabled["url"])]
     assert store.get_doc(UUID(disabled["id"])).content_snapshot is None
     assert store.get_doc_content(UUID(disabled["id"])) is None
@@ -199,6 +222,7 @@ def test_hourly_schedule_refreshes_delayed_document_without_hourly_downloads(ctx
         "attempted": 1,
         "refreshed": 1,
         "failed": 0,
+        "index_failed": 0,
     }
     refreshed = store.get_doc(UUID(doc["id"]))
     assert refreshed.source_access_synced_at == clock[0]

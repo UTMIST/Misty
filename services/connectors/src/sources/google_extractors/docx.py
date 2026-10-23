@@ -16,7 +16,7 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 from src.sources.base import SourceUnsupported
-from src.sources.google_extractors.base import ExtractedText, execute
+from src.sources.google_extractors.base import ExtractedText, execute_bytes
 from src.sources.google_extractors.drive_export import DRIVE_READONLY
 from src.sources.google_extractors.markdown import render_markdown_table
 
@@ -105,7 +105,9 @@ class DocxExtractor:
     services = ("drive",)
 
     def extract(self, services: dict, file_id: str, mime: str) -> ExtractedText:
-        payload = execute(services["drive"].files().get(fileId=file_id, alt="media"))
+        payload = execute_bytes(
+            services["drive"].files().get_media(fileId=file_id, supportsAllDrives=True)
+        )
 
         # A parse failure is a property of the file, not of the upstream
         # call, so it maps to SourceUnsupported (422) rather than

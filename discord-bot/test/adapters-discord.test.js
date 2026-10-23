@@ -76,6 +76,8 @@ test('interactionToIntent extracts flat options', () => {
   const interaction = {
     commandName: 'link',
     guildId: 'guild-1',
+    channelId: 'channel-9',
+    channel: { id: 'channel-9', isThread: () => false },
     user: { id: '1', username: 'alex' },
     options: {
       getString: (n) => (n === 'email' ? 'a@x' : null),
@@ -86,6 +88,8 @@ test('interactionToIntent extracts flat options', () => {
   assert.equal(intent.commandName, 'link');
   assert.equal(intent.surface, 'discord');
   assert.equal(intent.discordGuildId, 'guild-1');
+  assert.equal(intent.discordChannelId, 'channel-9');
+  assert.equal(intent.channelUsedParent, false);
   assert.equal(intent.options.email, 'a@x');
   assert.equal(intent.discordUserId, '1');
   assert.equal(intent.discordHandle, 'alex');
@@ -349,6 +353,8 @@ function fakeRecordInteraction({ subcommand, voiceChannel = null, calls, guildId
     options: { getSubcommand: () => subcommand },
     async deferReply(opts) {
       calls.push({ method: 'deferReply', opts });
+      this.deferred = true;
+      this.ephemeral = Boolean(opts.flags & MessageFlags.Ephemeral);
     },
     async editReply(payload) {
       calls.push({ method: 'editReply', payload });
@@ -359,6 +365,37 @@ function fakeRecordInteraction({ subcommand, voiceChannel = null, calls, guildId
 // The real `record` command in the registry so the adapter reads its per-
 // subcommand auth (start='linked', status/stop='public') straight from metadata.
 const recordCommands = new Map([['record', record]]);
+
+for (const save of [null, false, true]) {
+  test(`/record start preserves the save option (${save})`, async () => {
+    let started;
+    const client = fakeClient();
+    wireDiscordClient(client, {
+      commands: recordCommands,
+      appContext: {
+        directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) },
+        meetingSurface: {
+          start: async (args) => {
+            started = args;
+            return { status: 'recording' };
+          },
+        },
+      },
+    });
+    const interaction = fakeRecordInteraction({
+      subcommand: 'start',
+      voiceChannel: { id: 'vc1' },
+      calls: [],
+    });
+    interaction.options.getBoolean = (name) => {
+      assert.equal(name, 'save');
+      return save;
+    };
+    await client.emit(interaction);
+    assert.equal(started.save, save ?? true);
+    assert.equal(started.requesterId, 'u1');
+  });
+}
 
 test('/record start is denied for an UNLINKED caller and never starts recording', async () => {
   const calls = [];
@@ -869,17 +906,21 @@ const makeAutoStop = (timer, meetingSurface) =>
     clearTimer: timer.clearTimer,
   });
 
-// Use the real session lifecycle so a bot move must update stored state before
-// either the command guard or auto-stop can see the destination channel.
-async function recordingWithTwoChannels() {
+// Use the real lifecycle to verify moves through the Discord adapter. PDF-only
+// sessions follow moves; saved sessions finalize for their original audience.
+async function recordingWithTwoChannels({ save = false } = {}) {
   const original = fakeVoiceChannel('vc1', [botOcc, humanOcc('h1')]);
   const destination = { id: 'vc2', guild: original.guild };
   const cache = original.guild.voiceStates.cache;
   cache.set('h2', { id: 'h2', channelId: 'vc2', member: { user: { bot: false } } });
+  const stops = [];
   const meetingSurface = createMeetingSurface({
     meetingClient: {
       openStream: () => ({ close() {}, endAudio() {} }),
-      stop: async () => ({}),
+      stop: async (id, body) => {
+        stops.push(body);
+        return {};
+      },
     },
     makeRecorder: () => ({ start: async () => {}, stop: async () => {} }),
     poster: async () => {},
@@ -887,7 +928,7 @@ async function recordingWithTwoChannels() {
   const client = fakeClient();
   client.user = { id: BOT_ID };
   wireDiscordClient(client, { commands: recordCommands, appContext: { meetingSurface } });
-  await meetingSurface.start({ guildId: 'g1', voiceChannel: original, textChannel: {} });
+  await meetingSurface.start({ guildId: 'g1', voiceChannel: original, textChannel: {}, save });
 
   function move(userId, from, to) {
     cache.get(userId).channelId = to?.id ?? null;
@@ -897,10 +938,10 @@ async function recordingWithTwoChannels() {
     );
   }
 
-  return { client, meetingSurface, original, destination, move };
+  return { client, meetingSurface, original, destination, move, stops };
 }
 
-test('/record follows a moved bot for status and stop permissions', async () => {
+test('PDF-only /record follows a moved bot for status and stop permissions', async () => {
   const { client, meetingSurface, original, destination, move } = await recordingWithTwoChannels();
   const calls = [];
   move(BOT_ID, original, destination);
@@ -920,6 +961,17 @@ test('/record follows a moved bot for status and stop permissions', async () => 
   );
   assert.match(calls.at(-1).payload.content, /stopped recording in <#vc2>/i);
   assert.equal(meetingSurface.activeSession('g1'), null);
+});
+
+test('a Discord bot move finalizes a saved recording for its original audience', async () => {
+  const { meetingSurface, original, destination, move, stops } = await recordingWithTwoChannels({
+    save: true,
+  });
+  move(BOT_ID, original, destination);
+  assert.equal(meetingSurface.activeSession('g1'), null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stops.length, 1);
+  assert.equal(stops[0].record.voice_channel_id, 'vc1');
 });
 
 test('auto-stop follows a bot move and ignores humans remaining in the old channel', async (t) => {

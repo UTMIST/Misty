@@ -16,9 +16,21 @@ from src.config import get_settings
 from src.pipeline.llm_client import LlmClient
 from src.pipeline.minutes import summarize_minutes
 from src.pipeline.pdf import render_meeting_pdf
+from src.pipeline.qna import answer_question
+from src.pipeline.qna_runner import QnaRunner
 from src.pipeline.transcript import assemble_transcript
 from src.sessions import SessionRegistry
 from src.stt.transcribe import create_transcription_stream
+from src.pipeline.record_handoff import HttpRecordHandoff
+from src.contracts import RecordHandoff
+
+
+@lru_cache(maxsize=1)
+def get_record_handoff() -> RecordHandoff:
+    s = get_settings()
+    return HttpRecordHandoff(
+        s.docs_base_url, s.docs_api_key.get_secret_value(), s.record_handoff_hold_s
+    )
 
 
 class AudioAdapter:
@@ -57,6 +69,23 @@ def _build_report_builder():
     return report_builder
 
 
+def _build_qna_builder():
+    settings = get_settings()
+    client = LlmClient(
+        settings.llm_base_url,
+        settings.llm_api_key.get_secret_value(),
+        settings.request_timeout_s,
+    )
+    return lambda segments, elapsed_ms, question: answer_question(
+        segments, elapsed_ms, question, client
+    )
+
+
+@lru_cache(maxsize=1)
+def get_qna_runner() -> QnaRunner:
+    return QnaRunner(_build_qna_builder())
+
+
 @lru_cache(maxsize=1)
 def get_session_registry() -> SessionRegistry:
     """FastAPI dependency: process-wide ``SessionRegistry`` wired to real
@@ -66,7 +95,16 @@ def get_session_registry() -> SessionRegistry:
         "make_transcription_stream": lambda: create_transcription_stream(get_settings().aws_region),
         "audio": AudioAdapter(),
         "report_builder": _build_report_builder(),
+        "qna_runner": get_qna_runner().run,
         "now": lambda: datetime.now(timezone.utc),
         "max_meeting_ms": get_settings().max_meeting_ms,
+        "record_handoff": get_record_handoff(),
     }
     return SessionRegistry(deps)
+
+
+def shutdown_qna_runner() -> None:
+    if get_qna_runner.cache_info().currsize:
+        get_qna_runner().close()
+    get_session_registry.cache_clear()
+    get_qna_runner.cache_clear()

@@ -44,7 +44,6 @@ def test_migration_008_round_trip_preserves_existing_catalog_and_content(engine)
     adapter = PostgresStorageAdapter(engine)
     doc = None
     try:
-        command.downgrade(cfg, "007")
         doc = make_doc(adapter)
         chunk = make_chunk()
         adapter.upsert_doc_content(
@@ -71,6 +70,7 @@ def test_migration_008_round_trip_preserves_existing_catalog_and_content(engine)
             actor="sync",
         )
         source_grants = adapter.list_grants(doc.id)
+        command.downgrade(cfg, "007")
         command.upgrade(cfg, "head")
         assert adapter.get_doc_content(doc.id) == chunk.chunk_text
         adapter.replace_doc_chunks(doc.id, [chunk])

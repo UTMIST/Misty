@@ -4,10 +4,11 @@ concerns — takes injected storage/fetchers/directory and an actor string."""
 from datetime import datetime, timezone
 
 from contracts.directory import DirectoryClient, DirectoryUnavailable
-from contracts.fetcher import FetchError
-from contracts.storage import DuplicateActiveUrl, StorageAdapter
+from contracts.fetcher import FetchError, SourceGone
+from contracts.storage import DuplicateActiveUrl, ExistingGoogleDoc, StorageAdapter, PurgedDocument
 from contracts.types import DocIngest, IngestResult
 from src.content import clamp_content, content_hash
+from src.google_identity import google_file_id
 from src.fetch.registry import FetcherRegistry
 from src.source_access import (
     GOOGLE_ACCESS_ORIGIN,
@@ -17,6 +18,7 @@ from src.source_access import (
     source_grant_expiry,
 )
 from src.url_norm import derive_source, normalize_url
+from src.meeting_fetch import fetch_catalog_content
 
 
 class BadReference(Exception):
@@ -80,8 +82,11 @@ def _refresh_existing_source_access(
     if source is None or not source.content_fetch_enabled:
         return []
     warnings: list[str] = []
+    expected_content = storage.get_doc_content_meta(existing.id)
     try:
-        result = fetchers.fetch_for(existing.source_id, existing.url)
+        result = fetch_catalog_content(
+            existing.source_id, existing.url, storage=storage, fetchers=fetchers
+        )
         if result.permissions is None:
             raise SourceAccessUnavailable("connector omitted Google source ACL")
         resolved = resolve_google_permissions(result.permissions, directory)
@@ -91,6 +96,13 @@ def _refresh_existing_source_access(
             {"source_access_attempted_at": _now()},
             actor=actor,
         )
+        if isinstance(e, SourceGone):
+            # Same rule as refetch: a confirmed deletion drops the stored text
+            # and its chunks so nothing re-indexes it.
+            removed = storage.delete_doc_content(existing.id, expected=expected_content)
+            if removed:
+                return [f"source file not found ({e}); stored content and search index removed"]
+            return [f"source file not found ({e}); a newer content fetch was retained"]
         return [f"source access refresh failed ({e}); prior source grants retained"]
 
     warnings.extend(result.warnings)
@@ -138,7 +150,10 @@ def ingest_doc(
     directory: DirectoryClient,
     actor: str,
     source_access_max_age_hours: int = 48,
+    refresh_existing: bool = True,
 ) -> IngestResult:
+    # Discovery sets refresh_existing=False: existing/retired identities are
+    # returned without provider work. Refresh and repair retain their own paths.
     warnings: list[str] = []
     url_normalized = normalize_url(payload.url)
 
@@ -148,15 +163,26 @@ def ingest_doc(
     # An on-behalf-of ingest colliding with a doc the actor can't see is a
     # known, accepted limitation (revisit if on-behalf-of ingest is ever
     # introduced).
-    existing = storage.get_doc_by_normalized_url(url_normalized)
-    if existing is not None and existing.active:
-        refresh_warnings = _refresh_existing_source_access(
-            existing,
-            storage=storage,
-            fetchers=fetchers,
-            directory=directory,
-            actor=actor,
-            max_age_hours=source_access_max_age_hours,
+    file_id = google_file_id(url_normalized)
+    existing = (
+        storage.get_doc_by_google_file_id(file_id)
+        if file_id is not None
+        else storage.get_doc_by_normalized_url(url_normalized)
+    )
+    if existing is not None and existing.purged_at:
+        raise BadReference("document was permanently purged")
+    if existing is not None and (existing.active or not refresh_existing):
+        refresh_warnings = (
+            _refresh_existing_source_access(
+                existing,
+                storage=storage,
+                fetchers=fetchers,
+                directory=directory,
+                actor=actor,
+                max_age_hours=source_access_max_age_hours,
+            )
+            if refresh_existing
+            else []
         )
         return _merge_into_existing(
             storage, existing, payload, actor=actor, warnings=refresh_warnings
@@ -184,7 +210,9 @@ def ingest_doc(
         try:
             if source_id in GOOGLE_SOURCE_IDS:
                 source_access_attempted_at = _now()
-            result = fetchers.fetch_for(source_id, payload.url)
+            result = fetch_catalog_content(
+                source_id, payload.url, storage=storage, fetchers=fetchers
+            )
             warnings.extend(result.warnings)
             if source_id in GOOGLE_SOURCE_IDS:
                 if result.permissions is None:
@@ -244,7 +272,14 @@ def ingest_doc(
             fetched_at=fetched_at,
             tags=payload.tags,
             actor=actor,
+            skip_existing_google=not refresh_existing,
         )
+    except PurgedDocument:
+        raise BadReference("document was permanently purged") from None
+    except ExistingGoogleDoc as exc:
+        # Discovery never applies this fetch's content, grants or tags to a
+        # record registered while the provider call was in flight.
+        return IngestResult(doc=exc.doc, created=False, warnings=warnings)
     except DuplicateActiveUrl:
         existing = storage.get_doc_by_normalized_url(url_normalized)
         if existing is not None and existing.active:

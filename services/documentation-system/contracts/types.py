@@ -54,6 +54,7 @@ class Doc(DirectoryBase):
     owning_person_label: str | None = None
     content_snapshot: str | None = None
     fetched_at: datetime | None = None
+    purged_at: datetime | None = None
     source_access_synced_at: datetime | None = None
     source_access_attempted_at: datetime | None = None
     active: bool = True
@@ -148,6 +149,39 @@ class DocContentMeta(BaseModel):
     fetched_at: datetime | None = None
 
 
+class DocIndexState(BaseModel):
+    """Provenance of a doc's current chunk set (one body/title hash and model)."""
+
+    model_config = ConfigDict(extra="forbid")
+    source_content_hash: str
+    source_title_hash: str | None = None
+    embedding_model: str
+    chunk_count: int
+
+
+class IndexModelCoverage(BaseModel):
+    """How much of the catalog one embedding model's chunk sets cover."""
+
+    model_config = ConfigDict(extra="forbid")
+    model: str
+    # Docs with a set for this model, its chunks, and their total chunk_text
+    # length in characters (the input size behind a re-embed estimate).
+    docs: int
+    chunks: int
+    chunk_chars: int
+    # Active docs with content indexed under some other model but not this
+    # one. Search under this model cannot return them (#209).
+    missing_docs: int
+
+
+class IndexCoverage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Active docs with stored content: everything indexing should cover.
+    indexable_docs: int
+    # Every stored model plus each requested one, ordered by model id.
+    models: list[IndexModelCoverage]
+
+
 class DocChunk(BaseModel):
     """An embedded slice of a document, identified within its replacement set.
 
@@ -168,6 +202,9 @@ class DocChunk(BaseModel):
     start_offset: int = Field(ge=0, le=2**31 - 1, strict=True)
     end_offset: int = Field(gt=0, le=2**31 - 1, strict=True)
     source_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # Separate from the raw source hash used by citations. NULL means a legacy
+    # set whose title context is unknown and must be re-indexed once.
+    source_title_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     embedding: tuple[float, ...] = Field(min_length=1536, max_length=1536, repr=False)
     embedding_model: str = Field(min_length=1)
     dimensions: Literal[1536]

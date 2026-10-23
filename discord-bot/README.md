@@ -28,7 +28,7 @@ override is optional in your shell):
 | `MISTY_PREVIEW_ENVIRONMENT_ID` | Literal UUID of the persistent `dev` environment; copies cannot inherit ownership. |
 | `DISCORD_TOKEN_DEV` | Dedicated dev application's bot token. |
 | `DISCORD_CLIENT_ID_DEV` | Dedicated dev application's application ID. |
-| `DISCORD_GUILD_ID_DEV` | Test guild for the dev application, including beta commands. |
+| `DISCORD_GUILD_ID_DEV` | Test guild for the dev application, including guild-scoped testing commands. |
 | `MISTY_PREVIEW_PROJECT_ID` | Optional selector-only project override; export in the shell. Defaults to Misty's project and is overridden by `--project`. The selector does not load `.env`. |
 
 See the [preview runbook](../docs/pr-previews.md) for selection, preflight checks,
@@ -77,7 +77,8 @@ Also issue an API key for the Discord bot (only if you'll use Discord mode):
 cd services/team-tracking
 uv --project . run team-tracking-keys issue --name discord-bot \
   --scopes people:read people:write people:elevate identifiers:read identifiers:write \
-           teams:read teams:write memberships:read memberships:write role_kinds:read
+           teams:read teams:write memberships:read memberships:write role_kinds:read \
+           channels:read channels:write
 # Copy the tt_... key into discord-bot/.env as DIRECTORY_API_KEY.
 # IMPORTANT: this key must be issued against MAIN (port 8000), not scratch.
 # Verify the token starts with tt_ — a doc_-prefixed key means the shared venv
@@ -123,8 +124,10 @@ npm start                                # or: npm run dev for both surfaces
 
 Before starting Discord mode, enable **Message Content Intent** under Discord
 Developer Portal → your application → **Bot** → **Privileged Gateway Intents**.
-The bot requests this intent so it can include the full recent thread history in
-helper requests, including messages that did not mention Misty.
+The bot requests this intent so it can include recent user questions in helper
+requests, including messages that did not mention Misty. Old bot answers are
+omitted because they have no verifiable source provenance; document follow-ups
+retrieve their evidence again.
 
 Wait for `Logged in as <bot name>` in terminal 2, then use the slash commands
 in whichever Discord server you invited the bot to.
@@ -178,19 +181,21 @@ gated purely by the auth layer — an unlinked user can't run gated commands, a
 linked user can. Identity is a Discord user's **global** account (snowflake), so
 a linked person is recognized in every server the bot shares with them.
 
-### Release channels (beta vs stable)
+### Registration scope (global vs testing guild)
 
-Commands are split into two channels by an `export const beta` flag:
+The internal `beta` flag selects registration scope independently of feature
+status. A feature labeled **in progress** can still register globally; `/qna`
+does so with `beta = false`:
 
 - **Stable** (`beta = false` or omitted) — registered **globally**, available in
   every server the bot is in (production).
-- **Beta** (`beta = true`) — registered **only** to the dedicated testing guild
+- **Testing-guild only** (`beta = true`) — registered **only** to the dedicated testing guild
   (`DISCORD_GUILD_ID`), so a new command can be trialed in the test server without
   ever reaching production. Promote it by flipping `beta` to `false`.
 
-`npm run register` sends stable commands globally and beta commands to the test
-guild exclusively (re-running also clears stale/promoted beta commands from the
-guild). If any command is beta and `DISCORD_GUILD_ID` is unset, registration warns
+`npm run register` sends global commands to every server and testing commands to the test
+guild exclusively (re-running also clears stale/promoted testing commands from the
+guild). If any command is testing-guild only and `DISCORD_GUILD_ID` is unset, registration warns
 and skips them.
 
 > **Local vs. Railway.** `npm run register` uses `--env-file=.env`, so it targets
@@ -204,6 +209,27 @@ and skips them.
 > production. See [RAILWAY-DEPLOYMENT.md §5](../docs/RAILWAY-DEPLOYMENT.md).
 
 ## Commands
+
+- `/qna question:<text>` (**public policy**, **in progress: available globally**) —
+  privately answers from the current recording's last 15 minutes of finalized
+  transcript. Run it in the exact text channel where recording started; threads
+  are separate channels. Replies identify the meeting using the exact minutes PDF
+  filename: `<sanitized name>_YYYY-MM-DD_HHMM.pdf`, or
+  `meeting_YYYY-MM-DD_HHMM.pdf` when no usable name is supplied. Both use the same
+  filename function and recording start time in America/Toronto, followed by
+  references and the time range used. An accepted question keeps its original meeting name
+  even if a new recording starts before its answer arrives.
+  Dense windows use less recent history and explicitly disclose
+  the shorter range. No account linking, directory lookup, or Q&A history is used.
+  The window and size/error contract are documented in the
+  [meeting API](../services/meeting/docs/API.md#post-meetingssession_idqna).
+  It works in every server with an active recording; `DISCORD_GUILD_ID` is not
+  required and no testing-guild restriction is applied.
+  The bot defers replies privately and gives the backend request a 75-second
+  deadline, including response-body reading. If the dedicated Q&A capacity is
+  full, it replies privately that Q&A is busy and asks you to retry shortly.
+  The playground only explains where
+  to invoke the command; it does not simulate an active recording.
 
 - `/link email:<your UTMIST email>` (public) — starts linking your Discord account
   to your directory record. Your email must already be in the directory (execs seed
@@ -222,17 +248,36 @@ and skips them.
 - `/team add user:<@mention> team:<slug> [role:<...>] [team_admin:<bool>]` (admin) — add a member. The mentioned user must have already run `/link`.
 - `/team remove user:<@mention> team:<slug>` (admin) — soft-end a membership as of today.
 - `/team roster team:<slug> [as_of:<YYYY-MM-DD>]` (linked) — show a team's current roster.
+- `/team google-status team:<slug>` (admin) — show the team's managed Google Group sync status. Settings failures offer automatic retry and a manual recovery fallback.
+- `/team google-sync team:<slug>` (admin) — retry the same group's automatic settings verification and membership reconciliation. See [recovery and rollout](../services/team-tracking/docs/DEPLOYMENT.md#external-member-setup-and-recovery).
+  - `/team create` probes sync after directory create, separating team creation from Google status. The probe waits at most two seconds before reporting provisioning in progress; use `/team google-status` afterward. Aborting the probe does not cancel backend provisioning.
+  - The backend verifies settings even for empty active groups before recording `synced`. Success needs no manual toggle. An actual external addition still needs live acceptance; an older stored `synced` result requires a new sync after backend rollout.
+  - Recovery links appear only for confirmed managed groups with settings/external-member failures, using the stored email/domain. UTMIST's own Google administrator handles authorization or policy recovery. Generic directory outages are not reported as disabled Google integration.
+  - Deploy the automatic-settings backend and authorize both OAuth scopes before rolling out these replies. Keep the existing status/retry commands; manual instructions are recovery guidance, not the normal onboarding flow.
 - `/my-teams` (linked) — list your active memberships.
+- `/channel-access show` (admin) — show which teams' documents Misty may use in this
+  channel. In a thread, the setting applies to the parent channel. Drive access stays
+  personal; this only scopes Misty's answers. Backed by team-tracking's
+  `/channels/{guild}/{channel}/teams` API. The playground uses fixed guild/channel
+  snowflakes (`111…` / `222…`) so the command works without Discord.
+- `/channel-access set team:<> [team2:<> … team5:<>]` (admin) — replace the channel's
+  team list (up to five). Team options use slug autocomplete.
+- `/channel-access append team:<> [team2:<> … team5:<>]` (admin) — add teams to the
+  existing list without removing ones already configured (union, then the same PUT).
+- `/channel-access clear` (admin) — clear the channel's team list (no document access).
 - `/doc <add|list|remove>` (linked; `remove` is admin) — catalog and look up UTMIST documents and links.
+- `/doc search query:<text>` (linked) — search the documents you can access and get the top matches
+  as titles and links. Replies are always private, because results include your own Drive shares.
+  Needs the bot's doc key to carry the literal `act-as-user` scope (an `admin` key does not imply it).
 
 - `@Misty <question>` (linked) — opens a helper thread and answers using the
-  thread's recent history. In a thread Misty created, replying directly to one of
+  thread's recent user questions. In a thread Misty created, replying directly to one of
   Misty's messages continues the conversation when the reply ping is enabled.
   Ping-off replies, replies to other users, replies in regular channels, and replies
   in threads Misty did not create do not trigger the helper. A typed leading
   `@Misty` remains an independent trigger, including inside a Discord reply.
 
-- `/record start [name:<meeting name>]` (**linked**) — joins your current voice channel and starts
+- `/record start [name:<meeting name>] [save:false]` (**linked**) — joins your current voice channel and starts
   recording the meeting (one recording at a time **per guild** — sessions are
   keyed by `guildId`). `/record status` (**public**) — shows elapsed recording
   time and the voice channel Misty is in; when idle, it explains which voice
@@ -249,9 +294,15 @@ and skips them.
   refused with the active channel and auto-stop guidance — except stopping
   from outside is still allowed once that channel is empty of humans, the
   escape hatch for a runaway recording auto-stop failed to catch. The meeting
-  service persists nothing: it streams audio straight to AWS and never writes
-  audio or transcript to disk. The posted PDF does contain the full
-  transcript, and that lives in Discord like any other attachment.
+  service streams audio straight to AWS and never writes audio to disk.
+  By default, documentation-system also saves a Google Doc containing minutes
+  and the full transcript. Misty posts its link in the exact originating text
+  channel or thread, mentioning the original requester even on automatic stop.
+  You need your own Drive access; posting the link does not change permissions.
+  Missing team/group coverage produces an explicitly admin-only record.
+  `save:false` keeps only the existing PDF attachment. Delayed saves and failed
+  link deliveries are reported separately and recovered automatically. See
+  [delivery and recovery](docs/meeting-delivery.md).
 
   When the first human enters an empty voice channel, the bot @-mentions them
   via direct message and prompts them to run `/record start`.
@@ -266,6 +317,9 @@ and skips them.
 
 Every command is on the **stable** channel (`beta = false`), so they all register
 globally in every server the bot is in. There are currently no beta commands.
+This includes `/qna`; its **in progress** label is informational. The handler uses the invoking
+server's active meeting and exact recording text channel, with no testing-guild
+restriction or user-level permission check.
 
 > `/record` requires the `meeting` service to be deployed in the target
 > environment, with `MEETING_BASE_URL` + `MEETING_API_KEY` set on the bot. It was
@@ -290,6 +344,10 @@ The bot itself needs only:
   service with.
 - The `GuildVoiceStates` gateway intent and Connect permission in the voice
   channel (already required to join voice at all).
+- `DOC_API_KEY` also needs `meetings:read` and `meetings:write` for saved-record
+  lookup and delivery receipts. Discord needs View Channel, Read Message History
+  and Send Messages (Send Messages in Threads for a thread) in the original
+  destination. No Google credentials are added to the bot.
 
 The bot does **not** need ffmpeg, AWS credentials, or `MAX_RECORDING_MS` /
 `RECORDING_SILENCE_MS` — those are requirements of the `meeting` service
@@ -317,19 +375,20 @@ parallel to team-tracking's scoped-key auth.
    - Discord app credentials (`DISCORD_TOKEN`, `DISCORD_CLIENT_ID`).
    - `DISCORD_GUILD_ID` — dedicated testing guild ID. **Beta** commands register
      exclusively here; stable commands are always global. Required only if you
-     have beta commands (see "Release channels" above).
+     have testing-guild-only commands (see "Registration scope" above).
    - `DIRECTORY_BASE_URL` (e.g. `http://localhost:8000`).
    - `DIRECTORY_API_KEY` — issue one from team-tracking:
      ```bash
      cd ../services/team-tracking
      uv --project . run team-tracking-keys issue --name discord-bot \
        --scopes people:read people:write people:elevate identifiers:read identifiers:write \
-                teams:read teams:write memberships:read memberships:write role_kinds:read
+                teams:read teams:write memberships:read memberships:write role_kinds:read \
+                channels:read channels:write
      # The token must start with tt_ (a doc_-prefixed key means the shared venv
      # resolved documentation-system's CLI). scripts/provision-directory-key.sh
      # is the source of truth for these scopes — people:elevate is required so
      # /seed can promote people to admin/superuser (without it, /seed to a
-     # privileged level returns 403).
+     # privileged level returns 403). channels:read/write power /channel-access.
      ```
      **Important:** the CLI writes to whichever DB `.env`'s `DATABASE_URL` points
      at, which is your main `team_tracking` DB by default. Do NOT issue this key
@@ -343,9 +402,121 @@ parallel to team-tracking's scoped-key auth.
 3. `npm install`
 4. `npm run register` — registers the slash commands (run once, or whenever
    command definitions change). **Stable** commands go global (can take ~1h to
-   propagate); **beta** commands go only to the testing guild. See "Release
-   channels" above.
+   propagate); **testing-guild-only** commands go only to that guild. See
+   "Registration scope" above.
 5. `npm start` — then invite the bot to any server via its OAuth2 URL.
+
+## Helper document tools
+
+| Configuration | Default | Meaning |
+| --- | --- | --- |
+| `HELPER_TOOLS_ENABLED` | `false` | Literal `true` enables authorized document retrieval and command tools for Discord mentions and DMs |
+
+Enable only after retrieval and the destination's channel configuration are
+ready. `DOC_API_KEY` needs `docs:read`, literal `act-as-user` for DMs, and literal
+`act-as-channel` for shared channels. Existing command write scopes still apply.
+The bot checks source access during generation and immediately before sending,
+appends source links, and withholds an answer if those checks fail. Previous user
+questions remain available for follow-ups; earlier bot answers are not replayed,
+even after the flag is disabled. The web playground remains text-only.
+
+Search tools supply the returned source passages, rather than cutting each to a
+400-character preview. Each passage is capped at 48 KiB of UTF-8 text and marked
+when truncated. JSON escaping and metadata can reduce that text allowance so a
+single hit fits the 60 KiB serialized result budget. Hits are admitted in rank
+order; one that exceeds the remaining budget is skipped, allowing later smaller
+hits to fit. Only retained hits are cited and revalidated. DM document bodies
+use the same raw-text and serialized-result limits.
+
+Channel answers can use these authorized passages, while opening a full document
+by id remains available only in DMs. The channel grant authorizes returned text
+under the [retrieval contract](../services/documentation-system/docs/API.md#authorized-retrieval-post-search),
+not just links. Publication revalidation covers the text supplied to the model.
+
+See the [helper tool contract](docs/CONTRIBUTING.md#the-authorized-helper-tool-loop-71)
+for replay, cost limits, revalidation tradeoffs, and offline coverage.
+
+### Commands through mentions and DMs
+
+With helper tools enabled, ask for one action at a time: `@Misty show my teams`,
+`@Misty show the robotics roster`, or `@Misty start recording`. The same tools
+work in DMs where the underlying command does not need a server or channel.
+
+| Capability | Available actions |
+| --- | --- |
+| Directory and help | List teams, view a roster, my teams, who am I, help, bug-report link |
+| Documents | List, add, remove; search and read use the retrieval rules below |
+| Team administration | Create, rename, add/remove members, seed a person |
+| Google Groups | View sync status, request a sync |
+| Channel access | Show, set, append, clear the current channel's team access |
+| Helper limits | Show or change request limits |
+| Meetings | Recording status, start, stop, and questions about the current recording |
+
+Every tool requires the requesting Discord user's active linked directory
+account. Each command uses its existing permission policy, checked again before
+execution; admin tools still require an admin. User, server, channel, and meeting
+context come from Discord, never from model arguments. Backend calls continue to
+use the bot's scoped service credentials; this does not mint personal API keys.
+Account linking and email verification remain explicit slash-command flows.
+
+Command results go directly to the requester privately and do not enter model
+history. Misty sends a DM, or offers a **View privately** button if DMs are closed.
+Reads and meeting Q&A start only after a private DM send succeeds or the requester
+opens that button. A later result-delivery failure never reruns the action.
+Every write, including recording start/stop, first shows its arguments and
+destination in a private preview with **Confirm** and **Cancel**. Only the
+requester can confirm. The confirmation window lasts two minutes from the first
+successful private preview; generation time does not shorten it, and reopening
+the preview does not extend it. Access changes or exhausted evidence checks can
+still block an action. Unopened actions expire after two minutes. Actions are
+single-use and disappear on restart. There can be at most eight pending actions
+per user and 500 per process. Capacity is reserved before delivery or execution;
+a full queue asks you to cancel an action or wait. A failed action is never retried
+automatically; inspect the current state before asking again if its result could
+not be delivered.
+
+Channel-access commands in a thread target its parent. Meeting questions use
+the exact channel or thread where recording was started. Recording starts in
+the requester's voice channel at confirmation time and posts minutes to the
+original request channel. Its preview states whether the transcript and minutes
+will be saved as a Google Doc (default yes, matching `/record start`; ask for
+`save=false` to opt out). A stop confirmation applies only to the recording
+that was active when requested. Source-channel access is checked again before
+execution and private delivery.
+
+The first prepared command action ends the helper turn; ask separately for
+additional actions. Existing slash commands remain available. Enabling this
+feature uses the same flag and rollout acceptance below; no new environment
+variables, backend endpoints, or slash registrations are required.
+
+### Channel scope and activation
+
+A helper reply in a thread uses its **parent channel's** configuration. A
+mention in an ordinary channel uses that channel's configuration, including
+when Misty creates a thread for the reply. Configuration commands in
+[#239](https://github.com/UTMIST/Misty/issues/239) must use the same rule; the
+[directory API](../services/team-tracking/docs/API.md#channel-team-access)
+looks up the exact guild/channel pair and does not resolve thread parents.
+Pass Discord snowflakes as their original decimal strings throughout. Do not
+convert them to JavaScript numbers, which can lose precision.
+
+An unconfigured or cleared channel returns an empty search result, without
+embedding the query or searching a wider scope. Missing assertion scopes and
+unavailable channel settings are errors, not empty-channel results; see the
+[retrieval contract](../services/documentation-system/docs/API.md#authorized-retrieval-post-search).
+An empty result gives the model no document evidence and adds no source links.
+
+Activation is coordinated through
+[#278](https://github.com/UTMIST/Misty/issues/278): William leads helper/retrieval
+integration and acceptance; Guneev owns channel configuration and its change
+cases. Keep the flag off until #239 and the real retrieval integration are ready.
+The maintainer with access to the target environment provisions the bot's doc
+key with the scopes above, preserving existing command scopes, and installs it
+as `DOC_API_KEY`; coordinate that operator with the #278 lead. Enable the flag
+in staging for the controlled DM/channel, follow-up, and revocation acceptance.
+Production activation follows recorded acceptance, including the automatic
+sharing flow required by #278. Merging this executor does not flip the flag or
+provision credentials. Disable the flag to stop new tool-enabled answers.
 
 ## Helper-bot request limits
 
@@ -419,15 +590,15 @@ Meetings, Administration, and Help & support. Search matches command names, desc
 and categories. New uncategorized commands remain available under Other commands.
 
 Forms share labeled controls, help text, and Required/Optional indicators.
-Leaving an optional select at **Use default** preserves the command’s server
+Leaving an optional select at **Use default** preserves the command's server
 default; selecting **No** explicitly sends false. Permission badges describe
 the command policy; the server still authorizes every request. Run a command
 to see its reply in **Activity**. Pending requests disable repeat submission.
 
 The layout adapts to narrow screens and supports keyboard navigation. On phones,
 **Commands** opens the category menu; selecting a command closes it.
-**Clear activity** only clears the visible replies; it does not reset Misty’s
-thread context. UTMIST’s existing astronaut logo and cobalt accent are reused
+**Clear activity** only clears the visible replies; it does not reset Misty's
+thread context. UTMIST's existing astronaut logo and cobalt accent are reused
 locally, with no external font, icon, or image requests.
 
 Click **Reset DB** beside the identity picker to re-clone from your main DB
@@ -540,12 +711,18 @@ local `.env`.
 | `src/commands/*.js` | Surface-neutral command handlers + registry. |
 | `src/index.js` | Client setup + interaction routing. |
 | `src/helperFlow.js` | Shared helper-bot authorization and answer handling used by Discord and the web playground. |
-| `src/registerCommands.js` | Slash-command registration (stable → global; beta → testing guild only). Runs as Railway's persistent-environment `preDeployCommand`; ephemeral PR copies use the [preview override](../docs/pr-previews.md#automatic-railway-pr-environments). `npm run register` runs it locally. |
+| `src/toolExecutor.js` | Bounded document tool loop, requester revalidation, and terminal command-action handoff. |
+| `src/commandTools.js` | Explicit command-tool allowlist, strict arguments, current-user authorization, and private action previews. |
+| `src/helperActions.js` | Bounded, expiring, single-use actions bound to their requester. |
+| `src/registerCommands.js` | Slash-command registration (global by default; testing-guild only when `beta = true`). Runs as Railway's persistent-environment `preDeployCommand`; ephemeral PR copies use the [preview override](../docs/pr-previews.md#automatic-railway-pr-environments). `npm run register` runs it locally. |
 | `src/defineCommand.js` | Neutral, surface-agnostic command factory. |
 | `src/adapters/discord/index.js` | Discord event wiring; dispatches to the router or dedicated recording handler. |
 | `src/adapters/discord/interactions.js` | Convert interactions to neutral intents and deliver replies. |
+| `src/adapters/discord/messages.js` | Shared Discord text splitting, embed limits, and channel/DM delivery. |
 | `src/adapters/discord/mentions.js` | Mention and reply helper with thread history. |
-| `src/adapters/discord/recording.js` | Dedicated `/record` interaction path and its authorization. |
+| `src/adapters/discord/helperActions.js` | Private command delivery and requester-only confirmation buttons. |
+| `src/adapters/discord/recording.js` | Shared recording runner for slash commands and authenticated helper actions. |
+| `src/adapters/discord/qna.js` | Shared in-progress meeting Q&A runner; the helper adds requester authentication before invoking it. |
 | `src/adapters/discord/voice.js` | Voice occupancy, meeting prompts, and recording auto-stop. |
 | `src/adapters/discord/meetingPosts.js` | Meeting notifications and minutes attachments. |
 | `scripts/dev-web.js` | Orchestrator: ephemeral scratch DB + scratch team-tracking + web server. |
@@ -558,7 +735,7 @@ local `.env`.
 | `scripts/lib/seedDefaultPersonas.js` | Idempotently seeds Dev Superuser/Admin/Member into scratch. |
 | `src/web/server.js` | Fastify web playground (see "Web playground" above). |
 | `src/web/public/catalog.js` | Presentation labels, categories, search, and option serialization; command definitions stay in the registry. |
-| `src/web/public/utmist-logo.png` | Unmodified copy of the meeting service’s UTMIST brand asset, served within the bot image. |
+| `src/web/public/utmist-logo.png` | Unmodified copy of the meeting service's UTMIST brand asset, served within the bot image. |
 | `src/web/public/mentions.js` | Client-side `<@id>` → user pill rendering. |
 | `src/startupGuard.js` | Refuses web-mode boot if the directory key lacks `dev:spoof`. |
 
@@ -566,6 +743,19 @@ local `.env`.
 registration entrypoints. Commands, reply renderers, and application services
 remain surface-neutral. Import the module that owns a function directly;
 `adapters/discord/index.js` wires events rather than re-exporting its siblings.
+
+All Discord replies use the shared message helpers: text splits within the
+2,000-character limit, preferring Markdown section starts (`#` through `######`)
+before paragraph breaks, then sentence endings, then whitespace (line breaks
+before spaces or tabs). Headings stay with their following text where possible;
+heading-like lines inside fenced code are ignored. A word is split only when no
+suitable boundary fits. Fenced code blocks close and reopen with their language
+across parts. Slash replies edit the deferred message first, then send follow-ups
+with the original visibility. Embeds are
+shortened with `…` to fit their property, field-count, and shared 6,000-character
+limits; files and embeds appear only on the first text part. Failed sends try a
+short error reply; if even that cannot be delivered, deferred replies attempt to
+clear the thinking indicator. Delivery errors are logged without reply content.
 
 ## Testing
 
@@ -582,3 +772,19 @@ Discord role sync, `/unlink`, and any bot-side persistence. (Email verification 
 now implemented — `/link` + `/verify-code` via the verification service.)
 
 Team archive/unarchive, `/team info`, editing role/team-admin on existing memberships, team-admin delegation authority, dynamic role_kinds fetch for slash choices, LLM adapter.
+
+## Durable meeting records
+
+`/record start` saves the finalized transcript and minutes to one Google Doc by
+default, through meeting → documentation-system → connectors. A consent/visibility
+notice is posted before capture. `save:false` keeps the existing PDF-only flow.
+Explicit stop, automatic empty-channel stop and disconnect salvage all send the
+same record context. Failed hand-off still posts the PDF and a delayed-save
+notice; keep that PDF and contact an admin with the meeting ID for recovery.
+Google Docs remain admin-only when complete voice-channel team coverage is
+unavailable. Saved Doc links are delivered and recovered independently of the
+PDF; see [link delivery and recovery](docs/meeting-delivery.md).
+Moving the bot to another voice channel ends a saved recording immediately;
+start a new recording there to use its audience. `save:false` recordings continue
+to follow moves.
+See [setup and recovery](../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).

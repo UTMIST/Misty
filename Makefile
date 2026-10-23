@@ -7,8 +7,8 @@
 # forgetting is a red PR.
 #
 # `make check` covers most changes. It runs the FAST suites — it does NOT run
-# the Postgres-adapter tests CI runs (65 of them across the three DB-backed
-# services, plus 3 gated behind RUN_PG_TESTS). So a green `make check` is not
+# the Postgres-adapter tests CI runs, including suites gated behind
+# RUN_PG_TESTS. So a green `make check` is not
 # proof of a green CI: if you touched storage, an adapter, or a migration, run
 # `make test-full` with Postgres up before pushing.
 #
@@ -23,13 +23,14 @@ PY_DIRS := services/team-tracking \
            services/llm \
            services/meeting \
            services/connectors \
+           services/gateway \
            packages/auth
 
 BOT_DIR := discord-bot
 
-# Only team-tracking, documentation-system and verification have a Postgres
+# team-tracking, documentation-system, verification, and gateway have a Postgres
 # adapter suite. Passing --ignore for a path that does not exist is a harmless
-# no-op in pytest, so the same flag works across all seven directories.
+# no-op in pytest, so the same flag works across all eight directories.
 PG_SUITE := tests/test_postgres_adapter.py
 
 .DEFAULT_GOAL := help
@@ -60,16 +61,16 @@ check-node:
 	  echo ''; \
 	  echo '  node not found. See docs/DEVELOPMENT.md -> Prerequisites.'; \
 	  echo ''; exit 1; }
-	@node -e 'var need=require("./$(BOT_DIR)/package.json").engines.node; \
-	var m=need.replace(/[^0-9.]/g,"").split(".").map(Number); \
-	var c=process.versions.node.split(".").map(Number); \
+	@node -e "var need=require('./$(BOT_DIR)/package.json').engines.node; \
+	var m=need.replace(/[^0-9.]/g,'').split('.').map(Number); \
+	var c=process.versions.node.split('.').map(Number); \
 	var ok=c[0]>m[0]||(c[0]===m[0]&&(c[1]||0)>=(m[1]||0)); \
 	if(!ok){ \
-	  console.error("\n  The bot needs Node "+need+" (from $(BOT_DIR)/package.json engines)."); \
-	  console.error("  You are on v"+process.versions.node+", so its tests and lint will fail"); \
-	  console.error("  in ways that do not mention Node at all.\n"); \
-	  console.error("  Fix: nvm install "+m[0]+" && nvm use "+m[0]+"\n"); \
-	  process.exit(1); }'
+	  console.error('\n  The bot needs Node '+need+' (from $(BOT_DIR)/package.json engines).'); \
+	  console.error('  You are on v'+process.versions.node+', so its tests and lint will fail'); \
+	  console.error('  in ways that do not mention Node at all.\n'); \
+	  console.error('  Fix: nvm install '+m[0]+' && nvm use '+m[0]+'\n'); \
+	  process.exit(1); }"
 
 install: ## Install every dependency (uv workspace + bot)
 	uv sync --extra dev

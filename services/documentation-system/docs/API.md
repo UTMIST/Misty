@@ -20,6 +20,128 @@ The OpenAPI schema is the authoritative, always-current contract. This page expl
 *semantics* the schema can't — idempotency, degrade behavior, and error meaning — and
 links to the schema rather than restating it.
 
+## Authorized retrieval: `POST /search`
+
+This is the shared contract for member search (#210), helper answers (#71), and
+evaluation (#178). The portable [retrieval fixture](fixtures/retrieval.json)
+contains synthetic seed data, sparse fake vectors, and HTTP exchanges for all
+three consumers. Expand sparse vectors with zeros to 1536 values; never call an
+embedding provider for this fixture. `X-API-Key` values are symbolic fixture keys.
+
+The body is `{"query":"CPSIF", "k":10}`. `query` must be nonblank UTF-8,
+contain no NUL, and be at most 2000 Unicode code points. Surrounding whitespace
+is stripped. `k` is an integer from 1 to 50, default 10. Extra fields are rejected,
+including caller-supplied teams, vectors, models, and identity.
+
+Every request needs `docs:read` (or `docs:read:all`/`admin`) and exactly one
+authenticated context:
+
+- Person/DM: `X-On-Behalf-Of: <person UUID>` and literal `act-as-user` scope.
+- Channel: `X-Guild-ID: <decimal snowflake>` and `X-Channel-ID: <decimal snowflake>`,
+  with literal `act-as-channel` scope. The service resolves the configured teams
+  through the authenticated directory API and checks their synced Google Groups.
+
+The admin wildcard grants neither assertion scope. Consumers assert identity
+from their authenticated event/session, outside model-controlled tool arguments.
+A channel search uses only current source-derived grants to those groups. It
+does not include private person shares, manual team grants, or org grants.
+An unconfigured channel returns `{"results":[]}`. There is no unfiltered search,
+even for administrators. Direct `/docs` endpoints retain their existing person
+visibility behavior; channel headers cannot confer access there.
+
+Example person request:
+
+```http
+POST /search
+X-API-Key: <docs consumer key with docs:read and act-as-user>
+X-On-Behalf-Of: 11111111-1111-1111-1111-111111111111
+Content-Type: application/json
+
+{"query":"CPSIF","k":2}
+```
+
+Example response (one chunk per result; a document may appear more than once):
+
+```json
+{
+  "results": [
+    {
+      "doc_id": "00000000-0000-0000-0000-000000000001",
+      "title": "Personal CPSIF notes",
+      "url": "https://example.test/personal-alice",
+      "source_id": "gdocs",
+      "text": "CPSIF CPSIF CPSIF personal notes",
+      "chunk": {
+        "ordinal": 0,
+        "start_offset": 0,
+        "end_offset": 32,
+        "source_content_hash": "12807ddcb015128e5e64d0c725f80d4545880fc30817d8f18243d7938e8537d8"
+      },
+      "score": 0.03278688524590164
+    }
+  ]
+}
+```
+
+`doc_id` resolves through `/docs/{id}` under the same person's context. The source
+`url` is the original link, not a fabricated deep link. `chunk` identifies the
+half-open Unicode code-point range in the exact content revision named by its
+SHA-256. Use the hash to detect stale citations after replacement; JavaScript
+clients must convert code points to UTF-16 indices. No vectors or grants are
+returned. A channel citation links to the source; it does not create a separate
+channel-authorized direct-document endpoint.
+
+Ingest and successful content refresh index inline. An indexing failure preserves
+the previous complete chunk set: search may return its older text and body hash
+until `POST /docs/index` succeeds, even though the stored content or catalog title
+has changed. Citations always describe the returned chunk's revision. They do not
+promise that the source URL still serves that revision or that historical full
+text is available through the API. A newly ingested document with failed indexing
+has no results until a retry succeeds.
+
+Authorization uses current grants on every search, including searches over retained
+older chunks. Successful source-ACL reconciliation revokes access immediately;
+directory membership and channel/group changes apply on the next request. Source
+permission changes become known at repeated Google ingest, refetch, or scheduled
+refresh. A failed reconciliation retains the last complete grants until their
+existing expiry; it never extends them. Manual grants remain independent. See the
+[refresh schedule](DEPLOYMENT.md#source-access-refresh-schedule) and
+[integration verification](INGESTION-RETRIEVAL-AUDIT.md) for the accepted freshness
+window, recovery cases, and release evidence.
+
+Ranking is hybrid exact cosine plus complete keyword matching, with reciprocal
+rank fusion (`1/(60+vector_rank) + 1/(60+keyword_rank)`). Each branch considers up
+to `max(50,5*k)` eligible chunks, with active-document, grant-expiry, context,
+model, and dimension predicates applied **before** its limit. Ties use document
+UUID and chunk ordinal. Vector candidates must meet `SEARCH_MIN_COSINE` (default
+0.3); complete keyword matches qualify independently. Fused scores are rank
+scores, not confidence or cosine values. Empty results are valid.
+
+Keyword terms are lowercase ASCII letter/digit runs, with punctuation separating
+terms and all distinct query terms required. This preserves acronyms, names,
+email components, and dates without stemming or stop-word removal. Keyword rank
+is matching-term occurrences divided by total term occurrences. Non-ASCII-only
+queries use the vector branch. See [architecture](ARCHITECTURE.md#authorized-retrieval)
+for the portable normalization and database query trade-off.
+
+| Condition | Status / body |
+|---|---|
+| No valid key | 401, standard auth detail |
+| Missing read or literal assertion scope | 403, `{"detail":"missing scope: <scope>"}` |
+| Missing, conflicting, or incomplete context | 400, `{"detail":"provide exactly one person or channel context"}` |
+| Malformed person UUID | 400, `{"detail":"X-On-Behalf-Of must be a UUID"}` |
+| Malformed channel IDs | 400, `{"detail":"channel IDs must be decimal snowflakes"}` |
+| Invalid body | 422, Pydantic detail list (`type`, `loc`, `msg`; input omitted) |
+| Directory unreachable, unauthorized, or malformed | 503, `{"detail":"retrieval scope unavailable"}` |
+| Query embedding failure / malformed or incompatible embedding | 502, `{"detail":"query embedding unavailable"}` |
+| Embedding rate limit or unconfigured dependency | 503, same embedding detail |
+| Embedding timeout | 504, same embedding detail |
+| Storage unavailable | 503, `{"detail":"retrieval storage unavailable"}` |
+
+Retrieval fails closed on scope lookup errors, including person membership errors;
+it does not inherit direct-document reads' partial directory degradation.
+No fallback to keyword-only or unfiltered access occurs on dependency failure.
+
 ## Authentication
 
 Other requests require an `X-API-Key` header. A request with a missing or invalid key is
@@ -44,9 +166,10 @@ Two kinds of key are accepted:
 
 | Scope | Grants |
 |-------|--------|
-| `docs:read` | Read endpoints (`GET`) — but see visibility below: **alone, it returns nothing** |
+| `docs:read` | Read endpoints (`GET`, except `GET /docs/index/status`) — but see visibility below: **alone, it returns nothing** |
 | `docs:read:all` | Read endpoints, bypassing per-doc visibility (sees every doc) |
-| `docs:write` | All mutating endpoints (`POST`, `PATCH`, `DELETE`) |
+| `docs:write` | All mutating endpoints (`POST`, `PATCH`, `DELETE`) except `POST /docs/index` |
+| `docs:index` | `POST /docs/index` — admin (re-)indexing, which spends embedding-provider budget — and `GET /docs/index/status` |
 | `admin` | Wildcard — satisfies any scope check |
 
 A request with a valid key but the wrong scope is rejected with **403 Forbidden**
@@ -113,6 +236,10 @@ lacking a read scope is `403`. Neither falls through to `SEE_ALL`.
 | `DELETE` | `/docs/{id}/grants` | `docs:write` | Revoke a grant |
 | `POST` | `/docs/{id}/refetch` | `docs:write` | Re-run the content fetch |
 | `POST` | `/docs/source-access/refresh-due` | `docs:write` | Refresh due Google ACLs/content in a bounded batch |
+| `POST` | `/docs/source-access/refresh-runs/{run_id}` | `docs:write` | Acquire the singleton runner guard |
+| `DELETE` | `/docs/source-access/refresh-runs/{run_id}` | `docs:write` | Release only the matching runner guard |
+| `POST` | `/docs/index` | `docs:index` | (Re-)index stored content for retrieval; retry path |
+| `GET` | `/docs/index/status` | `docs:index` | Chunk coverage per embedding model; re-embed progress |
 | `GET` | `/sources` | `docs:read` | List source kinds |
 | `GET` | `/sources/{id}` | `docs:read` | Get one source |
 | `GET` | `/api-keys/self` | *(any valid key)* | The calling key's own name and scopes |
@@ -196,7 +323,16 @@ Ingest returns an **envelope**, not a bare doc:
 - **`created`** — `true` if a new doc was created, `false` if the URL was already
   catalogued.
 - **`warnings`** — a list of non-fatal, human-readable strings (e.g. a failed content
-  fetch, a deferred owner label). An empty list means everything resolved cleanly.
+  fetch, a deferred owner label, a failed indexing run). An empty list means everything
+  resolved cleanly.
+
+After the catalog write, ingest [indexes](#post-docsindex--re-index-stored-content) the doc's stored content — on the
+idempotent path too, since a repeated Google ingest may store new text. If embedding or
+storing the chunks fails, the doc and its content are still saved and `warnings` contains
+`indexing failed (<reason>); retry with POST /docs/index`. A repeated Google ingest that
+finds the file gone (connectors' `404 file not found for this url`) removes the stored
+content and its chunks and warns `source file not found (...)`. If another fetch has
+stored content since this request started, it retains that newer content and index.
 
 ### Status codes
 
@@ -250,9 +386,9 @@ title or the URL, and a warning is appended.
 
 `web` and `github` fetch in-process; the Google sources (`gdrive`, `gdocs`, `gsheets`,
 `gslides`) fetch via the [connectors](../../connectors/) service, which holds the Google
-credentials — migration `006` enabled them. `notion` and `youtube` have no fetcher and
-`content_fetch_enabled: false`, so they are catalogued without content and are skipped
-with a warning (`notion`, which requires auth) or silently (`youtube`).
+credentials — migration `006` enabled them. `youtube` has no fetcher and
+`content_fetch_enabled: false`, so its links are catalogued without content and fetching
+is silently skipped.
 
 ### Content fetch (best-effort)
 
@@ -350,7 +486,7 @@ Patch a doc. Scope: `docs:write`. Send only the fields you want to change (`DocU
 | `description` | string \| null | |
 | `owning_team_id` | UUID \| null | Re-validated + label re-resolved |
 | `owning_person_id` | UUID \| null | Re-validated + label re-resolved |
-| `active` | bool \| null | Set `false` to soft-delete, `true` to restore |
+| `active` | bool \| null | Set `false` to soft-delete (removes the doc's search chunks), `true` to restore (re-indexes stored content) |
 
 Tags are **not** patched here — use the tag endpoints below.
 
@@ -455,13 +591,45 @@ available even when the source's automatic content fetching is disabled.
 Note the contrast with ingest: at ingest a fetch failure degrades to a warning, but an
 explicit `refetch` surfaces the failure as **502** so the caller knows it didn't work.
 
+A successful refetch [indexes](#post-docsindex--re-index-stored-content) the new content. An indexing failure does not
+change the response (the `Doc` has no warnings field); it is logged, and the doc is listed
+as stale by `POST /docs/index`. When connectors confirms the file is gone (`404 file not
+found for this url`), the route still returns **502**, and also deletes the stored content
+and its chunks so the doc stops being searchable, unless a newer fetch has stored content
+meanwhile; the catalog row stays. Any other failure
+(timeouts, 5xx, 403, a different 404) leaves content and chunks untouched.
+
+## Source refresh runner guard
+
+`POST /docs/source-access/refresh-runs/{run_id}` atomically acquires the catalog's
+single runner slot. `run_id` is a fresh UUID chosen by the caller; `created_by`
+comes from the authenticated key. Requires `docs:write` (or `admin`). Returns
+`200 {"run_id": "..."}`; an occupied slot returns `409`, including reuse of its
+current UUID. Invalid UUIDs return `422`. No document or provider work occurs.
+
+`DELETE` on the same path releases only that exact owner, returning the same
+`200` response; a missing or different owner returns `409`. This is also the
+operator recovery operation, so **first confirm the owning process and its API
+requests have stopped**. Releasing a live owner defeats the guard.
+
+Acquire before any start heartbeat or refresh batch, retain through all batches
+and the final heartbeat, and release only after confirmed completion. A rejected
+runner must send failure, never start/success or release another run. The guard
+persists across restarts with no expiry. On ambiguous HTTP/monitor outcomes,
+leave it for [operator recovery](DEPLOYMENT.md#recovery-credential-rotation-and-disablerollback).
+This coordinates participating clients: `refresh-due` itself remains a standalone
+batch endpoint. Manual callers must follow this protocol or use `doc-source-refresh`.
+
 ## `POST /docs/source-access/refresh-due` — scheduled reconciliation
 
 Scope: `docs:write`. Query parameter `limit` defaults to 10 and is constrained to 1–100.
 Selects active Google docs with `content_fetch_enabled=true` whose latest sync or attempt is
 older than
 `SOURCE_ACCESS_REFRESH_AFTER_HOURS` (24 by default), refreshes each independently, and
-returns `{ "attempted", "refreshed", "failed" }`. One failed document does not stop the
+returns `{ "attempted", "refreshed", "failed", "index_failed" }`. Each refreshed doc is
+re-indexed; `index_failed` counts those whose new content could not be indexed (their prior
+chunks remain until `POST /docs/index` succeeds). A confirmed-gone file is handled as in
+refetch and counts as `failed`. One failed document does not stop the
 batch. Failed rows record their attempt time, so they do not starve later rows during the
 same hourly drain; run until `attempted` is less than `limit`. See the
 [refresh schedule](DEPLOYMENT.md#source-access-refresh-schedule). Disabled sources are skipped
@@ -471,6 +639,90 @@ Source grants expire after `SOURCE_ACCESS_MAX_AGE_HOURS` (48 by default). A fail
 does not erase a last-known-good grant immediately, but an extended connector, directory,
 or scheduler outage eventually makes it unusable. Manual grants remain independent and do
 not expire. Ownership never authorizes access. `MAX_AGE` must be greater than `REFRESH_AFTER`.
+
+## `POST /docs/index` — (re-)index stored content
+
+Scope: `docs:index` (or `admin`). Builds each doc's search index from its **stored**
+`doc_content` — it never fetches. A doc's text is split by the chunker, embedded through the
+llm service's `/embed`, and its whole chunk set is replaced in one transaction. Each
+embedding model has its own set: the one search serves (`SEARCH_EMBED_MODEL`) and,
+during a re-embed, the target's (`EMBED_MODEL`). Ingest,
+refetch, scheduled refresh, and `PATCH active` or `PATCH title` run the same step inline; this endpoint is
+the retry path for their failures and the driver for
+[re-embedding after a model change](DEPLOYMENT.md#re-embedding-after-a-model-change-209).
+Synchronous and bounded.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `doc_ids` | UUID[] \| null | null | 1–100 docs to index. Every id must exist (else **404** before any work) |
+| `stale_only` | bool | `true` | Listing mode (no `doc_ids`): only docs that lack a set for the served or target model, hold one built from older body/title context or without title provenance, hold a set for any other model, or should not have chunks (retired, no content, or whitespace-only text). `false` lists every doc with content |
+| `force` | bool | `false` | Re-embed even when a set's content and title are unchanged. Not needed for a model change: a missing target set is already stale |
+| `after` | UUID \| null | null | Listing-mode cursor: the previous response's `next_after`. Not allowed with `doc_ids` |
+| `limit` | int | 25 | 1–100 docs per call in listing mode |
+
+The response counts each doc's outcome and lists them:
+
+```json
+{
+  "attempted": 2, "indexed": 1, "unchanged": 0, "cleared": 0, "skipped": 0, "failed": 1,
+  "results": [
+    {"doc_id": "…", "status": "indexed", "chunk_count": 7, "detail": null},
+    {"doc_id": "…", "status": "failed", "chunk_count": 0,
+     "detail": "embedding service unavailable for text-embedding-3-small: llm service returned 503"}
+  ],
+  "next_after": null
+}
+```
+
+| `status` | Meaning |
+|----------|---------|
+| `indexed` | A new chunk set replaced the old one (for at least one model) |
+| `unchanged` | Every model's chunks already match the stored content and title; no embedding call (unless `force`). Sets for models no longer served or targeted are still deleted |
+| `cleared` | The doc is retired, missing, or has no indexable text; its chunks were removed |
+| `skipped` | The content or title changed while embedding; nothing written (the newer write re-indexes) |
+| `failed` | Embedding or storage failed for a model (named in `detail`); that model's previous set is intact. The served set is written first, so a failing re-embed target leaves it current |
+
+To drain, repeat with `after: next_after` until `next_after` is null. A failing doc is
+reported and passed over rather than blocking the batch. Reindexing never creates
+duplicates, and a shorter text never leaves chunks from the longer one behind.
+
+| Status | Meaning |
+|--------|---------|
+| **200 OK** | Ran; see per-doc `results` |
+| **404 Not Found** | A `doc_ids` entry does not exist (nothing was indexed) |
+| **401 / 403** | Auth failure / missing `docs:index` — checked before any provider call |
+| **422** | Malformed body — also rejected before any provider call |
+
+## `GET /docs/index/status` — chunk coverage per embedding model
+
+Scope: `docs:index` (or `admin`). Read-only: no provider call. Reports how far a
+[re-embed](DEPLOYMENT.md#re-embedding-after-a-model-change-209) has progressed and whether
+any doc has dropped out of search because it is indexed only under another model.
+
+```json
+{
+  "serving_model": "text-embedding-3-small",
+  "target_model": "text-embedding-3-large",
+  "indexable_docs": 120,
+  "pending_docs": 37,
+  "models": [
+    {"model": "text-embedding-3-large", "docs": 83, "chunks": 610,
+     "chunk_chars": 1180000, "missing_docs": 37},
+    {"model": "text-embedding-3-small", "docs": 120, "chunks": 884,
+     "chunk_chars": 1712000, "missing_docs": 0}
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `serving_model` | Resolved id of `SEARCH_EMBED_MODEL`: the only set search reads |
+| `target_model` | Resolved id of `EMBED_MODEL` when it differs (a re-embed, or the old model kept while readers drain after cutover), else `null` |
+| `indexable_docs` | Active docs with stored content |
+| `pending_docs` | Docs a stale-only `POST /docs/index` would list now. A re-embed is ready to cut over at `0`. Docs whose text is whitespace only have nothing to embed and are not counted |
+| `models[]` | Every stored model plus the served and target ones, by model id |
+| `models[].docs` / `chunks` / `chunk_chars` | Docs with a set for the model, its chunks, and their total text length (input size for a cost estimate) |
+| `models[].missing_docs` | Active docs with content indexed under some other model but not this one. Nonzero for `serving_model` means those docs are excluded from search |
 
 ---
 
@@ -491,10 +743,10 @@ A **source** describes a kind of URL and how the catalog treats it:
 | `content_fetch_enabled` | bool | Whether the catalog attempts a snapshot |
 | `active` | bool | |
 
-The eight seeded sources: `web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`,
-`notion`, `youtube`. All but `notion` and `youtube` have a fetcher and
-`content_fetch_enabled: true` — migration `006` enabled the four Google sources, which
-fetch through the connectors service.
+The seven seeded sources: `web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`,
+`youtube`. All but `youtube` have a fetcher and
+`content_fetch_enabled: true` — migration `006` enabled the four Google sources. `github`
+and the Google sources fetch through the connectors service.
 
 ## `GET /sources/{id}` — get one source
 
@@ -535,3 +787,132 @@ Errors use FastAPI's standard shape:
 
 Validation errors (422) carry the structured `detail` array FastAPI generates. See
 `/openapi.json` for the exact per-endpoint schemas.
+
+## Discovery import — `POST /docs/discovery`
+
+Requires `docs:write`; actor is the authenticated key name. This literal route is
+registered before `/docs/{doc_id}`. Strict body:
+
+```json
+{"file_id": "example", "source_id": "gdocs"}
+```
+
+File ids contain letters, digits, `_` and `-` (1–200 characters); source is one of
+`gdocs`, `gsheets`, `gslides`, `gdrive`. No URLs, owners, grants or claimed actor are
+accepted. The trusted discovery caller supplies the source from the connector's
+MIME classification. The catalog checks active/fetch-enabled source status before
+fetching, then deduplicates by Drive identity, including legacy/manual URL aliases.
+New records use the normal ingest, complete source-ACL reconciliation and indexer.
+Existing records are inspected without refetching or re-embedding. An active legacy
+Google URL catalogued as `web` is reassigned to the enabled Google source supplied
+by discovery, preserving its id, content, tags and manual grants. The existing source
+refresh job (or explicit refetch) then reconciles its actual Google ACL and content;
+until the first successful ACL sync it is reported as `registered`. Retirement is
+honored, including a manual registration/retirement while discovery is fetching:
+the final storage insert checks identity atomically with other Google inserts and
+returns the existing record without applying discovery's fetched data. Scopes and
+validation precede provider work.
+
+Always returns 200 for a classified outcome:
+
+```json
+{"status": "indexed", "doc_id": "11111111-1111-1111-1111-111111111111", "warnings": 0}
+```
+
+`indexed` means new usable chunks were written; `existing` means a current stored
+index already exists and a Google source has completed its initial ACL sync.
+`registered` means catalogued but missing content or initial Google ACL reconciliation;
+`index_failed` reports failed, missing or stale indexing; `retired` is skipped;
+`disabled` means source fetching is disabled/inactive (no doc id). Warnings are a
+count, with no content/principals/raw upstream details. An empty/whitespace extraction,
+unmapped ACL or fetch failure must not be counted as indexed.
+
+Use the existing refetch/source-refresh and `/docs/index` recovery endpoints; discovery
+only corrects the legacy source classification. See [operations and limits](DISCOVERY.md).
+All new Google URL ingests now use file identity for normalized dedup keys; displayed
+original URLs and existing stored keys are preserved. Editor aliases with an optional
+`u/<number>/` account selector share the same identity. Forms edit URLs without an
+explicit source use `gdrive` when no more-specific source pattern matches and that
+source is registered. Published `/d/e/` URLs are
+excluded from Drive identity extraction and keep distinct URL keys. Preexisting
+duplicate records are not merged. The active earliest record wins identity lookup.
+
+## Meeting records
+
+These service-to-service endpoints use attested key actors and strict input
+models. `meeting_id` is the bot's UUID, independent of the Doc title or URL.
+
+| Method/path | Scope | Behavior |
+|---|---|---|
+| `PUT /meeting-records/{meeting_id}` | `meetings:write` | Durable hand-off: 202 on insert; 200 on identical replay; 409 on changed payload |
+| `GET /meeting-records/{meeting_id}` | `meetings:read` | Status, canonical IDs/URL, generation metadata and delivery state; no pending transcript |
+| `GET /meeting-records` | `meetings:read` | Optional `persistence_status` and `delivery_status` filters |
+| `POST /meeting-records/retry-due?limit=10` | `meetings:write` | Bounded oldest-due persistence, reconciliation and expiry with outcome counts; limit 1–100 |
+| `POST /meeting-records/{meeting_id}/retry` | `meetings:admin` | Explicit retry of a failed/inaccessible record; removal remains terminal |
+| `POST /meeting-records/{meeting_id}/remove` | `meetings:admin` | Mark removal before external calls; purge catalog and permanently delete tagged Docs |
+| `PATCH /meeting-records/{meeting_id}/delivery` | `meetings:write` | `{status: posted\|failed, discord_message_id}`; only saved, nonremoved records; posted requires an ID |
+
+The PUT body contains `guild_id`, `text_channel_id`, `voice_channel_id`,
+`requester_discord_id`, timezone-aware `started_at` and `ended_at`, `title`,
+`participants: [{discord_id, display_name}]`, `summary`, `decisions: string[]`,
+`action_items: string[]`, and the full assembled `transcript`. Decisions and
+action items stay discrete JSON fields. Unknown fields, duplicate participants,
+invalid timestamps/IDs, NUL/invalid UTF-8, and oversized content fail with 422.
+Escaped text is capped at 3,500,000 characters to fit the writer transport.
+The directory resolves participant IDs and the complete voice-channel team
+Google Groups; incomplete group coverage results in an admin-only record.
+A directory outage returns 503 so `meeting` holds and retries the hand-off.
+
+Acceptance commits before Google work starts. A background attempt runs once;
+remaining work belongs to the existing hourly runner. State, leases and the
+immutable canonical ID live in Postgres; repeated acceptance never creates
+another row. A timed-out create keeps its lease until reconciliation. Recurring
+scans continue after save, failure and removal and delete late duplicates without
+rewriting the canonical Doc. Admin-only status is represented by empty
+`audience_team_ids`; no org grant or public sharing fallback exists.
+
+Catalog acceptance also sets `index_pending=true` atomically, then indexes the
+stored content immediately. Successful indexing clears the flag. A failure keeps
+the saved Doc and retries through `retry-due` after five minutes without another
+Google write; the hourly runner picks up due retries.
+
+`google_deleted_at` is a durable receipt for a confirmed canonical deletion,
+allowing removal to resume after later cleanup fails. An ambiguous 404 never
+sets that receipt. `google_deletions` maps each cleanup identity to `pending`
+(before the external delete) or `confirmed` (after acknowledgement). Both states
+permanently exclude that identity from canonical adoption; explicit retry can
+create a fresh Doc from the retained payload. Successful reconciliation clears
+`reconcile_failed`, so recovered scans stop reporting cleanup failures.
+
+Removal retries the version check before acknowledging its removal marker.
+
+Removal purges the linked catalog row and every alias of the canonical or discovered
+duplicate Google IDs, even when ordinary ingestion left `doc_id=null` on the
+meeting. `removed_google_document_ids` retains these identity fences so concurrent
+or later registration cannot restore them. Reconciliation also purges catalog
+copies of late duplicates and previously removed meetings with empty owner searches.
+This purge includes every `google_deletions` identity, including confirmed duplicates
+that disappeared from Google search before removal. Pending deletions are retried by
+ID in both removal and reconciliation even when search no longer lists the file.
+Cleanup remains incomplete, with a failed retry result, until deletion is acknowledged;
+an empty listing or ambiguous 404 does not confirm deletion. Older tombstones with
+pending deletions follow the same recovery path.
+
+The retry response contains all of `attempted`, `succeeded`, `failed`,
+`persistence_failed`, `index_failed`, and `cleanup_failed` as nonnegative integers.
+`succeeded + failed = attempted`; `failed` counts meetings once, while the failure
+categories may overlap. A selected meeting with unfinished/failed persistence,
+pending indexing, or failed cleanup counts as failed even though the HTTP request
+completed successfully. An empty queue returns all zeros. The monitored runner
+requires every count and sends a failure heartbeat for any failed meeting work.
+
+`last_error` contains a short code. Inspect failed records with
+`GET /meeting-records?persistence_status=failed`. `inaccessible` means an owner
+fetch cannot confirm deletion; retained snapshots/content/chunks and existing
+grant expiry remain intact. Only independently confirmed trash/deletion or an
+explicit removal triggers purge. A security removal records
+`removed_by=security:unexpected_acl`; admins notify the requester and retain the
+Discord PDF unless its removal is separately requested. The bot implements
+[link delivery and recovery](../../../discord-bot/docs/meeting-delivery.md) in
+#223. Removal notices and deletion of already posted Discord links/PDFs remain
+admin operations; automatic Discord cleanup is outside #223.

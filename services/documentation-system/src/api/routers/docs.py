@@ -1,21 +1,38 @@
 from datetime import datetime, timedelta, timezone
+from typing import get_args
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from contracts.directory import DirectoryClient, DirectoryUnavailable
-from contracts.fetcher import FetchError
+from contracts.embedder import Embedder
+from contracts.fetcher import FetchError, SourceGone
 from contracts.storage import StorageAdapter
-from contracts.types import Doc, DocGrantInput, DocIngest, DocUpdate, IngestResult
+from contracts.types import (
+    Doc,
+    DocGrantInput,
+    DocIngest,
+    DocUpdate,
+    IndexModelCoverage,
+    IngestResult,
+)
 from contracts.visibility import ActorContext
 from src.api.auth import AuthedKey, get_actor, require_scope
 from src.api.authz import get_visible_doc_or_404, read_context, write_context
-from src.api.deps import get_directory, get_fetchers, get_storage
+from src.api.deps import (
+    get_directory,
+    get_embedder,
+    get_fetchers,
+    get_storage,
+    get_target_embedder,
+)
 from src.content import clamp_content, content_hash
 from src.fetch.registry import FetcherRegistry
+from src.indexing import IndexStatus, index_doc, index_embedders, index_warning
 from src.ingest import BadReference, ingest_doc
 from src.config import get_settings
+from src.meeting_fetch import fetch_catalog_content
 from src.source_access import (
     GOOGLE_ACCESS_ORIGIN,
     GOOGLE_SOURCE_IDS,
@@ -37,6 +54,50 @@ class SourceAccessRefreshResult(BaseModel):
     attempted: int
     refreshed: int
     failed: int
+    # Refreshed docs whose new content could not be indexed; POST /docs/index
+    # retries them.
+    index_failed: int = 0
+
+
+class IndexRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Index exactly these docs; otherwise page through the docs that need work.
+    doc_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=100)
+    # Listing mode: only docs whose chunks are missing, stale, or orphaned.
+    # False lists every doc with content (pair with `force` to re-embed all).
+    stale_only: bool = True
+    # Re-embed even when the content hash is unchanged (#209 model change).
+    force: bool = False
+    # Listing-mode cursor: pass the previous response's `next_after`.
+    after: UUID | None = None
+    limit: int = Field(default=25, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def _one_mode(self) -> "IndexRequest":
+        if self.doc_ids is not None and self.after is not None:
+            raise ValueError("pass doc_ids or after, not both")
+        return self
+
+
+class IndexDocResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    doc_id: UUID
+    status: IndexStatus
+    chunk_count: int
+    detail: str | None = None
+
+
+class IndexRunResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    attempted: int
+    indexed: int
+    unchanged: int
+    cleared: int
+    skipped: int
+    failed: int
+    results: list[IndexDocResult]
+    # Listing mode: more docs may follow; send this as `after`. None when done.
+    next_after: UUID | None = None
 
 
 def _source_access_due(doc: Doc, due_before: datetime) -> bool:
@@ -51,6 +112,18 @@ def _source_access_due(doc: Doc, due_before: datetime) -> bool:
     return last_attempt is None or last_attempt <= due_before
 
 
+class IndexStatusResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Resolved model ids: the set search reads, and the re-embed target if any.
+    serving_model: str
+    target_model: str | None
+    # Active docs with stored content.
+    indexable_docs: int
+    # Docs a stale-only POST /docs/index run would list right now.
+    pending_docs: int
+    models: list[IndexModelCoverage]
+
+
 @router.post("", response_model=IngestResult)
 def create_doc(
     payload: DocIngest,
@@ -58,6 +131,8 @@ def create_doc(
     storage: StorageAdapter = Depends(get_storage),
     fetchers: FetcherRegistry = Depends(get_fetchers),
     directory: DirectoryClient = Depends(get_directory),
+    embedder: Embedder = Depends(get_embedder),
+    target: Embedder | None = Depends(get_target_embedder),
     actor: str = Depends(get_actor),
     _: AuthedKey = Depends(require_scope("docs:write")),
 ) -> IngestResult:
@@ -72,8 +147,89 @@ def create_doc(
         )
     except BadReference as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    # After the catalog write, never inside it: an indexing failure is a
+    # warning and the doc stays catalogued. Runs on the dedup path too (a
+    # repeated Google ingest may have stored new text); unchanged content is
+    # a no-op without a provider call.
+    warning = index_warning(
+        index_doc(result.doc.id, storage=storage, embedder=embedder, target=target)
+    )
+    if warning is not None:
+        result.warnings.append(warning)
     response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
     return result
+
+
+@router.post("/index", response_model=IndexRunResult)
+def index_docs(
+    payload: IndexRequest,
+    storage: StorageAdapter = Depends(get_storage),
+    embedder: Embedder = Depends(get_embedder),
+    target: Embedder | None = Depends(get_target_embedder),
+    _: AuthedKey = Depends(require_scope("docs:index")),
+) -> IndexRunResult:
+    """Admin (re-)indexing of stored content: the retry path for indexing
+    failures and the entry point for re-embedding (#209). Synchronous and
+    bounded; a caller loops on `next_after` until it is null."""
+    next_after = None
+    if payload.doc_ids is not None:
+        doc_ids = list(dict.fromkeys(payload.doc_ids))
+        missing = [doc_id for doc_id in doc_ids if storage.get_doc(doc_id) is None]
+        if missing:
+            # Checked for every id before indexing any, so a typo costs nothing.
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"docs not found: {', '.join(map(str, missing))}",
+            )
+    else:
+        doc_ids = storage.list_docs_for_indexing(
+            models=[e.model for e in index_embedders(embedder, target)],
+            stale_only=payload.stale_only,
+            after=payload.after,
+            limit=payload.limit,
+        )
+        if len(doc_ids) == payload.limit:
+            next_after = doc_ids[-1]
+    results = []
+    for doc_id in doc_ids:
+        outcome = index_doc(
+            doc_id, storage=storage, embedder=embedder, target=target, force=payload.force
+        )
+        results.append(
+            IndexDocResult(
+                doc_id=doc_id,
+                status=outcome.status,
+                chunk_count=outcome.chunk_count,
+                detail=outcome.detail,
+            )
+        )
+    counts = {name: sum(r.status == name for r in results) for name in get_args(IndexStatus)}
+    return IndexRunResult(attempted=len(results), results=results, next_after=next_after, **counts)
+
+
+@router.get("/index/status", response_model=IndexStatusResult)
+def index_status(
+    storage: StorageAdapter = Depends(get_storage),
+    embedder: Embedder = Depends(get_embedder),
+    target: Embedder | None = Depends(get_target_embedder),
+    _: AuthedKey = Depends(require_scope("docs:index")),
+) -> IndexStatusResult:
+    """Chunk coverage per embedding model and the docs POST /docs/index would
+    still list: a re-embed (#209) is ready to cut over at zero pending."""
+    models = [e.model for e in index_embedders(embedder, target)]
+    coverage = storage.get_index_coverage(models)
+    pending = 0
+    after = None
+    while page := storage.list_docs_for_indexing(models=models, after=after, limit=500):
+        pending += len(page)
+        after = page[-1]
+    return IndexStatusResult(
+        serving_model=embedder.model,
+        target_model=models[1] if len(models) > 1 else None,
+        indexable_docs=coverage.indexable_docs,
+        pending_docs=pending,
+        models=coverage.models,
+    )
 
 
 @router.get("", response_model=list[Doc])
@@ -98,12 +254,37 @@ def list_docs(
     )
 
 
+@router.post("/source-access/refresh-runs/{run_id}")
+def acquire_source_refresh_run(
+    run_id: UUID,
+    storage: StorageAdapter = Depends(get_storage),
+    actor: str = Depends(get_actor),
+    _: AuthedKey = Depends(require_scope("docs:write")),
+) -> dict[str, UUID]:
+    if not storage.acquire_source_refresh_run(run_id, actor=actor):
+        raise HTTPException(status_code=409, detail="source refresh run already active")
+    return {"run_id": run_id}
+
+
+@router.delete("/source-access/refresh-runs/{run_id}")
+def release_source_refresh_run(
+    run_id: UUID,
+    storage: StorageAdapter = Depends(get_storage),
+    _: AuthedKey = Depends(require_scope("docs:write")),
+) -> dict[str, UUID]:
+    if not storage.release_source_refresh_run(run_id):
+        raise HTTPException(status_code=409, detail="source refresh run owner does not match")
+    return {"run_id": run_id}
+
+
 @router.post("/source-access/refresh-due", response_model=SourceAccessRefreshResult)
 def refresh_due_source_access(
     limit: int = Query(default=10, ge=1, le=100),
     storage: StorageAdapter = Depends(get_storage),
     fetchers: FetcherRegistry = Depends(get_fetchers),
     directory: DirectoryClient = Depends(get_directory),
+    embedder: Embedder = Depends(get_embedder),
+    target: Embedder | None = Depends(get_target_embedder),
     actor: str = Depends(get_actor),
     _: AuthedKey = Depends(require_scope("docs:write")),
 ) -> SourceAccessRefreshResult:
@@ -122,6 +303,7 @@ def refresh_due_source_access(
     ][:limit]
     refreshed = 0
     failed = 0
+    index_failed = 0
     for doc in due:
         try:
             _refetch_doc_source(
@@ -133,15 +315,15 @@ def refresh_due_source_access(
                 source_access_max_age_hours=settings.source_access_max_age_hours,
             )
         except (FetchError, SourceAccessUnavailable):
-            storage.update_doc(
-                doc.id,
-                {"source_access_attempted_at": datetime.now(timezone.utc)},
-                actor=actor,
-            )
+            _record_failed_refetch(doc, storage=storage, actor=actor)
             failed += 1
         else:
             refreshed += 1
-    return SourceAccessRefreshResult(attempted=len(due), refreshed=refreshed, failed=failed)
+            outcome = index_doc(doc.id, storage=storage, embedder=embedder, target=target)
+            index_failed += outcome.status == "failed"
+    return SourceAccessRefreshResult(
+        attempted=len(due), refreshed=refreshed, failed=failed, index_failed=index_failed
+    )
 
 
 @router.get("/{doc_id}", response_model=Doc)
@@ -163,6 +345,8 @@ def update_doc(
     payload: DocUpdate,
     storage: StorageAdapter = Depends(get_storage),
     directory: DirectoryClient = Depends(get_directory),
+    embedder: Embedder = Depends(get_embedder),
+    target: Embedder | None = Depends(get_target_embedder),
     actor: str = Depends(get_actor),
     wctx: ActorContext = Depends(write_context),
     _: AuthedKey = Depends(require_scope("docs:write")),
@@ -184,6 +368,12 @@ def update_doc(
     updated = storage.update_doc(doc_id, values, actor=actor)
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="doc not found")
+    if "active" in values or "title" in values:
+        # Retiring clears the doc's chunks; reactivating rebuilds them. A
+        # failure is logged and left for POST /docs/index (a retired doc that
+        # still has chunks is listed as needing work). Title-only updates
+        # also refresh the context embedded alongside the unchanged body.
+        index_doc(doc_id, storage=storage, embedder=embedder, target=target)
     return updated
 
 
@@ -251,6 +441,8 @@ def refetch(
     storage: StorageAdapter = Depends(get_storage),
     fetchers: FetcherRegistry = Depends(get_fetchers),
     directory: DirectoryClient = Depends(get_directory),
+    embedder: Embedder = Depends(get_embedder),
+    target: Embedder | None = Depends(get_target_embedder),
     actor: str = Depends(get_actor),
     wctx: ActorContext = Depends(write_context),
     _: AuthedKey = Depends(require_scope("docs:write")),
@@ -269,14 +461,21 @@ def refetch(
             source_access_max_age_hours=get_settings().source_access_max_age_hours,
         )
     except (FetchError, SourceAccessUnavailable) as e:
-        storage.update_doc(
-            doc.id,
-            {"source_access_attempted_at": datetime.now(timezone.utc)},
-            actor=actor,
-        )
+        _record_failed_refetch(doc, storage=storage, actor=actor)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+    # A failure is logged and left for POST /docs/index: the doc's chunks no
+    # longer match its content hash, so it is listed as stale.
+    index_doc(doc_id, storage=storage, embedder=embedder, target=target)
     # Reconciliation may have revoked the caller's cached source grant.
     return get_visible_doc_or_404(doc_id, wctx, storage)
+
+
+def _record_failed_refetch(doc: Doc, *, storage: StorageAdapter, actor: str):
+    storage.update_doc(
+        doc.id,
+        {"source_access_attempted_at": datetime.now(timezone.utc)},
+        actor=actor,
+    )
 
 
 def _refetch_doc_source(
@@ -288,7 +487,16 @@ def _refetch_doc_source(
     actor: str,
     source_access_max_age_hours: int,
 ) -> Doc:
-    result = fetchers.fetch_for(doc.source_id, doc.url)
+    if doc.purged_at:
+        raise FetchError("document was permanently purged")
+    expected_content = storage.get_doc_content_meta(doc.id)
+    try:
+        result = fetch_catalog_content(doc.source_id, doc.url, storage=storage, fetchers=fetchers)
+    except SourceGone:
+        # Remove text and chunks together only if no newer fetch stored text
+        # while this request was waiting for the connector.
+        storage.delete_doc_content(doc.id, expected=expected_content)
+        raise
     now = datetime.now(timezone.utc)
     if doc.source_id in GOOGLE_SOURCE_IDS:
         if result.permissions is None:
@@ -335,7 +543,8 @@ def _refetch_doc_source(
         },
         actor=actor,
     )
-    assert updated is not None
+    if updated is None:
+        raise FetchError("document is no longer available for refresh")
     return updated
 
 

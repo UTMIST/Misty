@@ -27,6 +27,8 @@ function makeFakes({ stopImpl, posterImpl } = {}) {
     notifies.push(n);
   };
   const stream = {
+    sendControl: () => {},
+    sendFrame: () => {},
     endAudio: () => {
       callOrder.push('stream.endAudio');
     },
@@ -105,7 +107,7 @@ test('start opens a stream, starts the recorder, and returns recording + session
   assert.equal(fakes.openStreamCalls[0].opts.guildId, 'g1');
   assert.equal(typeof fakes.openStreamCalls[0].opts.onError, 'function');
   assert.equal(fakes.makeRecorderCalls.length, 1);
-  assert.equal(fakes.makeRecorderCalls[0].sink, fakes.stream);
+  assert.equal(typeof fakes.makeRecorderCalls[0].sink.sendFrame, 'function');
   // allow the fire-and-forget recorder.start promise to settle
   await Promise.resolve();
   assert.deepEqual(fakes.recorderStartCalls, [voiceChannel]);
@@ -378,6 +380,7 @@ test('a WS error stops the recorder, not just the stream', async () => {
   const fakes = makeFakes();
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
   await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+  fakes.notifies.length = 0; // Consent notice is covered separately.
   fakes.callOrder.length = 0;
 
   fakes.openStreamOpts.at(-1).onError(new Error('socket died'));
@@ -410,6 +413,7 @@ test('a dropped socket that cannot be salvaged tells the channel, and still leav
   });
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
   await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+  fakes.notifies.length = 0; // Consent notice is covered separately.
   fakes.callOrder.length = 0;
 
   fakes.openStreamOpts.at(-1).onClose();
@@ -483,6 +487,7 @@ test('a normal stop does not announce that the recording died', async () => {
   const fakes = makeFakes();
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
   await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+  fakes.notifies.length = 0; // Consent notice is covered separately.
 
   const result = await surface.stop('g1');
   assert.equal(result.status, 'stopped');
@@ -510,6 +515,7 @@ test('a permanently lost voice connection finalizes the meeting', async () => {
   const fakes = makeFakes();
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
   await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+  fakes.notifies.length = 0; // Consent notice is covered separately.
 
   const { onVoiceLost } = fakes.makeRecorderCalls.at(-1);
   assert.equal(typeof onVoiceLost, 'function', 'onVoiceLost was never wired to the recorder');
@@ -523,4 +529,155 @@ test('a permanently lost voice connection finalizes the meeting', async () => {
   assert.equal(surface.status('g1').status, 'not-recording');
   // ...and they are told why the minutes stop where they do.
   assert.match(fakes.notifies.at(0)?.content ?? '', /voice connection/i);
+});
+
+test('stop hands off identities and context; save:false keeps PDF only', async () => {
+  for (const save of [true, false]) {
+    const fakes = makeFakes();
+    const calls = [];
+    fakes.meetingClient.stop = async (id, body) => {
+      calls.push(body);
+      return {
+        transcript: 't',
+        minutes: {},
+        pdf_b64: 'p',
+        record: save ? { status: 'handoff_pending' } : undefined,
+      };
+    };
+    const surface = createMeetingSurface({ ...fakes, genId: () => 'meeting-id', now: () => 1000 });
+    await surface.start({
+      guildId: '1',
+      voiceChannel: { id: '3' },
+      textChannel: { id: '2' },
+      requesterId: '4',
+      name: 'Planning',
+      save,
+    });
+    fakes.makeRecorderCalls[0].sink.sendControl({ speakerId: '4', displayName: 'Angela' });
+    assert.equal((await surface.stop('1')).status, 'stopped');
+    assert.equal(fakes.posterCalls.length, 1);
+    if (save) {
+      assert.deepEqual(calls[0].record, {
+        guild_id: '1',
+        text_channel_id: '2',
+        voice_channel_id: '3',
+        requester_discord_id: '4',
+        started_at: new Date(1000).toISOString(),
+        participants: [{ discord_id: '4', display_name: 'Angela' }],
+      });
+      assert.match(fakes.notifies[0].content, /Everyone present should consent/);
+      assert.match(fakes.notifies.at(-1).content, /save is delayed/);
+    } else {
+      assert.equal(calls[0].record, undefined);
+      assert.equal(fakes.notifies.length, 0);
+    }
+  }
+});
+
+test('link delivery precedes PDF so attachment failure cannot suppress a saved record', async () => {
+  const fakes = makeFakes({
+    stopImpl: async () => ({ record: { status: 'saved' }, pdf_b64: 'p' }),
+    posterImpl: async () => {
+      throw new Error('PDF failed');
+    },
+  });
+  const delivered = [];
+  const surface = createMeetingSurface({
+    ...fakes,
+    genId: () => 'saved-id',
+    deliverRecord: async (id) => {
+      delivered.push(id);
+      return { status: 'posted' };
+    },
+  });
+  await surface.start({
+    guildId: 'g1',
+    voiceChannel: {},
+    textChannel: { id: '2' },
+    requesterId: '4',
+  });
+  await surface.stop('g1');
+  assert.deepEqual(delivered, ['saved-id']);
+  assert.equal(fakes.stopCalls.length, 1);
+  assert.equal(fakes.notifies.length, 1); // consent only, no false delivery failure
+});
+
+test('failed link delivery reports recovery and still delivers the PDF', async () => {
+  const fakes = makeFakes({
+    stopImpl: async () => ({ record: { status: 'saved' }, pdf_b64: 'p' }),
+  });
+  const surface = createMeetingSurface({
+    ...fakes,
+    deliverRecord: async () => {
+      throw new Error('Discord denied');
+    },
+  });
+  await surface.start({
+    guildId: 'g1',
+    voiceChannel: {},
+    textChannel: { id: '2' },
+    requesterId: '4',
+  });
+  assert.equal((await surface.stop('g1')).status, 'stopped');
+  assert.equal(fakes.posterCalls.length, 1);
+  assert.match(fakes.notifies.at(-1).content, /saved, but its link could not be delivered/);
+});
+
+test('a saved recording stops forwarding immediately on a channel move', async () => {
+  const fakes = makeFakes();
+  const frames = [];
+  const stops = [];
+  fakes.stream.sendFrame = (...args) => frames.push(args);
+  fakes.meetingClient.stop = async (id, body) => {
+    stops.push(body);
+    return {};
+  };
+  const surface = createMeetingSurface({ ...fakes });
+  await surface.start({
+    guildId: '1',
+    voiceChannel: { id: '3' },
+    textChannel: { id: '2' },
+    requesterId: '4',
+  });
+  const sink = fakes.makeRecorderCalls[0].sink;
+  sink.sendControl({ speakerId: '4', displayName: 'Original speaker' });
+  sink.sendFrame('4', 0, Buffer.from('original'));
+  surface.updateVoiceChannel('1', { id: '3' });
+  assert.equal(surface.status('1').status, 'recording');
+  // Draining the recorder can deliver buffered destination-channel audio.
+  // Both it and new frames must be refused before the first stop await.
+  fakes.recorder.stop = async () => {
+    sink.sendFrame('5', 1, Buffer.from('destination drain'));
+    await settle();
+  };
+  const stopping = surface.updateVoiceChannel('1', { id: '99' });
+  sink.sendControl({ speakerId: '5', displayName: 'Destination speaker' });
+  sink.sendFrame('5', 2, Buffer.from('destination'));
+  surface.updateVoiceChannel('1', { id: '100' });
+  assert.equal(surface.status('1').status, 'not-recording');
+  assert.equal((await stopping).status, 'stopped');
+  assert.equal(frames.length, 1);
+  assert.equal(stops.length, 1);
+  assert.equal(stops[0].record.voice_channel_id, '3');
+  assert.deepEqual(stops[0].record.participants, [
+    { discord_id: '4', display_name: 'Original speaker' },
+  ]);
+  assert.equal(fakes.posterCalls.length, 1);
+  assert.match(fakes.notifies.at(-1).content, /moved voice channels/);
+});
+
+test('save:false recordings continue to follow channel moves', async () => {
+  const fakes = makeFakes();
+  const surface = createMeetingSurface({ ...fakes });
+  await surface.start({
+    guildId: '1',
+    voiceChannel: { id: '3' },
+    textChannel: { id: '2' },
+    save: false,
+  });
+  surface.updateVoiceChannel('1', { id: '99' });
+  assert.equal(surface.activeSession('1').voiceChannel.id, '99');
+  assert.equal(surface.status('1').status, 'recording');
+  assert.equal(fakes.stopCalls.length, 0);
+  await surface.stop('1');
 });

@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 from src.config import Settings
 from src.sources.base import SourceFetcher
+from src.sources.github import GITHUB_SOURCE_IDS, GithubSource
 from src.sources.google import GOOGLE_SOURCE_IDS, GoogleSource
 
 
@@ -16,8 +17,18 @@ def _build_google(settings: Settings) -> SourceFetcher:
     )
 
 
+def _build_github(settings: Settings) -> SourceFetcher:
+    return GithubSource(
+        token=settings.github_token.get_secret_value(),
+        max_content_chars=settings.max_content_chars,
+        max_file_bytes=settings.max_file_bytes,
+        request_timeout_s=settings.request_timeout_s,
+    )
+
+
 SOURCE_BUILDERS: dict[str, Callable[[Settings], SourceFetcher]] = {
-    source_id: _build_google for source_id in GOOGLE_SOURCE_IDS
+    **{source_id: _build_google for source_id in GOOGLE_SOURCE_IDS},
+    **{source_id: _build_github for source_id in GITHUB_SOURCE_IDS},
 }
 
 

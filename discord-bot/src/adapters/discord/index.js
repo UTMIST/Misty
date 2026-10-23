@@ -15,6 +15,8 @@ import {
   handleDirectMessage,
 } from './mentions.js';
 import { handleRecordInteraction } from './recording.js';
+import { handleQnaInteraction } from './qna.js';
+import { handleHelperActionInteraction } from './helperActions.js';
 import { createAutoStop, createMeetingPrompt } from './voice.js';
 
 // Discord event wiring. Conversion, mentions, recording, and voice events live
@@ -32,6 +34,14 @@ export function wireDiscordClient(client, { commands, appContext }) {
   }
 
   client.on('interactionCreate', async (interaction) => {
+    if (interaction.isButton?.() && interaction.customId?.startsWith('helper:')) {
+      try {
+        await handleHelperActionInteraction(interaction, appContext);
+      } catch {
+        console.error('Could not deliver private helper action');
+      }
+      return;
+    }
     // Autocomplete interactions are a separate path: they CANNOT be deferred and
     // must respond within 3s. Best-effort — dispatchAutocomplete never throws.
     if (interaction.isAutocomplete()) {
@@ -49,6 +59,15 @@ export function wireDiscordClient(client, { commands, appContext }) {
     }
 
     if (!interaction.isChatInputCommand()) return;
+
+    if (interaction.commandName === 'qna' && commands.has('qna')) {
+      try {
+        await handleQnaInteraction(interaction, appContext);
+      } catch {
+        console.error('Could not deliver private /qna reply');
+      }
+      return;
+    }
 
     // `/record` is a dedicated adapter path (live voice I/O has no neutral
     // equivalent) — intercept it BEFORE the neutral dispatch below so the
@@ -121,8 +140,8 @@ export function wireDiscordClient(client, { commands, appContext }) {
   });
   client.on('voiceStateUpdate', (oldState, newState) => {
     try {
-      // Track bot moves before auto-stop counts occupants. The voice connection
-      // follows Discord's move, so the session must follow it too.
+      // Handle moves before auto-stop counts occupants. Saved recordings end
+      // for their original audience; PDF-only recordings follow the move.
       const botId = client.user?.id;
       if (
         botId &&

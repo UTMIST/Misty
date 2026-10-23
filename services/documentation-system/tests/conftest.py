@@ -48,9 +48,30 @@ def _clear_settings_cache(_no_dotenv):
 
     get_settings.cache_clear()
     deps._directory_client.cache_clear()
+    deps._embedder.cache_clear()
+    deps._embedding_client.cache_clear()
     yield
     get_settings.cache_clear()
     deps._directory_client.cache_clear()
+    deps._embedder.cache_clear()
+    deps._embedding_client.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def fake_embedder(monkeypatch, _clear_settings_cache):
+    """Every app built in a test embeds offline through this shared fake.
+
+    Replaces the class get_embedder constructs rather than overriding the
+    dependency per app, so no test can reach a real llm service by forgetting
+    an override. Tests that need failures set `fake_embedder.fail_on_call`.
+    HttpEmbedder itself is tested directly in test_embed_client.py.
+    """
+    from src.api import deps
+    from tests.fake_embedder import FakeEmbedder
+
+    fake = FakeEmbedder()
+    monkeypatch.setattr(deps, "HttpEmbedder", lambda *args, **kwargs: fake)
+    return fake
 
 
 # (id, label, url_patterns, requires_auth, has_api, content_fetch_enabled)
@@ -61,8 +82,8 @@ def _clear_settings_cache(_no_dotenv):
 # migrations — an in-memory seed that lags them makes the fast suite exercise
 # a different ingest branch than production takes (the "requires auth; no
 # snapshot fetched" path instead of a real fetch), so a test can pass against
-# behavior that does not exist. `notion` and `youtube` remain false: no
-# fetcher is registered for either.
+# behavior that does not exist. `youtube` remains false: no
+# fetcher is registered for it. Migration 009 removes the retired source.
 _SEED = [
     ("web", "Web page", [], False, False, True),
     ("github", "GitHub", ["github.com"], False, True, True),
@@ -70,7 +91,6 @@ _SEED = [
     ("gdocs", "Google Docs", ["docs.google.com/document"], True, True, True),
     ("gsheets", "Google Sheets", ["docs.google.com/spreadsheets"], True, True, True),
     ("gslides", "Google Slides", ["docs.google.com/presentation"], True, True, True),
-    ("notion", "Notion", ["notion.so", "notion.site"], True, True, False),
     ("youtube", "YouTube", ["youtube.com", "youtu.be"], False, True, False),
 ]
 

@@ -400,7 +400,7 @@ def test_revoke_and_touch_pg(adapter):
 
 
 def test_pg_provider_seed_present(adapter):
-    assert {p.id for p in adapter.list_providers()} >= {"discord", "github", "notion", "uoft_email"}
+    assert {p.id for p in adapter.list_providers()} == {"discord", "github", "uoft_email", "email"}
     assert adapter.get_provider("discord").label == "Discord"
 
 
@@ -607,6 +607,36 @@ def test_pg_concurrent_overlapping_replaces_and_clears(adapter, attempt):
     _race(9, op)
     final = adapter.get_channel_teams("1", "2").team_ids
     assert final in ([], sorted(sets[0]), sorted(sets[1]))
+
+
+@pytest.mark.parametrize("attempt", range(5))
+def test_pg_concurrent_appends_accumulate(adapter, attempt):
+    """Serialized appends under the channel lock must keep every addition."""
+    a, b, c = (adapter.create_team(TeamCreate(slug=s, label="T"), actor="t") for s in "abc")
+    adapter.replace_channel_teams("1", "2", [a.id], actor="bot")
+    _race(
+        8,
+        lambda i: adapter.append_channel_teams("1", "2", [[b.id], [c.id]][i % 2], actor="bot"),
+    )
+    assert adapter.get_channel_teams("1", "2").team_ids == sorted([a.id, b.id, c.id])
+
+
+@pytest.mark.parametrize("attempt", range(5))
+def test_pg_concurrent_append_and_clear_never_restores_stale(adapter, attempt):
+    """Append must not resurrect teams that a concurrent clear removed."""
+    a, b = (adapter.create_team(TeamCreate(slug=s, label="T"), actor="t") for s in "ab")
+    adapter.replace_channel_teams("1", "2", [a.id], actor="bot")
+
+    def op(i):
+        if i % 2 == 0:
+            adapter.append_channel_teams("1", "2", [b.id], actor="bot")
+        else:
+            adapter.clear_channel_teams("1", "2")
+
+    _race(8, op)
+    final = adapter.get_channel_teams("1", "2").team_ids
+    # clear-last → []; append-after-clear → [b]; append-then-more-appends → [a,b]
+    assert final in ([], [b.id], sorted([a.id, b.id]))
 
 
 def test_pg_channel_teams_rejects_inactive_and_keeps_config(adapter):

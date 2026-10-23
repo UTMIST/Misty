@@ -50,7 +50,7 @@ curl -sS http://localhost:8005/fetch \
 
 `CONNECTORS_ENV` declares which environment this instance represents: `local` (default), `staging`, or `production`. Outside `local`, `create_app()` calls `verify_production_secrets()` and **refuses to start** unless `API_KEY` is overridden from the dev default — a misconfigured deploy dies at boot, not on first request. `CONSUMER_KEYS` is also validated at boot (`get_key_store()` is called eagerly in `create_app()`), so a malformed value fails the container immediately rather than on the first `/fetch` call.
 
-Google credentials are deliberately **not** part of that boot check: `GOOGLE_CREDENTIALS_JSON` may be empty in any tier. A connectors deploy with no Google account yet still starts, serves `/health`, and returns 503 for Google source fetches.
+The read account is deliberately **not** part of that boot check: `GOOGLE_CREDENTIALS_JSON` may be empty in any tier. The optional meeting writer may be entirely disabled; partial writer configuration fails boot outside local. A connectors deploy with no Google account yet still starts, serves `/health`, and returns 503 for Google source fetches.
 
 ### Configuration
 
@@ -62,9 +62,13 @@ All settings load from the environment (`src/config.py`, `.env` in dev):
 | `API_KEY` | `dev-api-key-change-me` | Env-bootstrap key; carries `admin` scope. Must be overridden outside `local`. |
 | `CONSUMER_KEYS` | `""` | JSON array of per-consumer keys (see auth model). |
 | `GOOGLE_CREDENTIALS_JSON` | `""` | Base64 of the Google service-account JSON key file. Empty is a valid running state — see the runbook below. |
+| `GITHUB_TOKEN` | `""` | Optional fine-grained, read-only GitHub PAT (Contents: read). Empty fetches public repositories only; private ones then return 404. Never part of the boot check. |
 | `MAX_CONTENT_CHARS` | `1200000` | Transport guard: truncates fetched content above this length. Deliberately set above documentation-system's own `MAX_CONTENT_CHARS` (1,000,000) so that clamp — not this one — is the one that actually trips and reports a truncation warning. |
-| `MAX_FILE_BYTES` | `26214400` | Pre-download limit for uploaded PDFs, `.docx` files, and `text/*` media (25 MiB). Oversized files are rejected before download; native Google editor types are not checked here. |
+| `MAX_FILE_BYTES` | `26214400` | Metadata precheck and streamed byte cap for uploaded PDFs, `.docx` files, `text/*` media, and GitHub files (25 MiB). Native Google editor API responses/exports are exempt. |
 | `REQUEST_TIMEOUT_S` | `30` | Per-request timeout to upstream sources (seconds). |
+| `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` | `""` | Optional Workspace user OAuth writer credentials (`drive.file`), separate from the read account. |
+| `GOOGLE_MEETING_ROOT_FOLDER_ID` | `""` | Admin-only root folder accessible to the writer OAuth app. |
+| `GOOGLE_MEETING_ADMIN_EMAILS` | `[]` | JSON array of explicitly trusted infra user/group emails, including inherited Drive admins. |
 
 ## Auth model
 
@@ -102,7 +106,7 @@ Every endpoint except `/health` requires `X-API-Key`.
 | Field | Type | Notes |
 |-------|------|-------|
 | `url` | string | Required, non-empty. The document URL. |
-| `source_id` | string | Required, non-empty. Which source to use (e.g. `gdocs`, `gsheets`, `gslides`, `gdrive`). Supplied by the caller — the caller (e.g. documentation-system) already resolves this during ingest, so it is not re-derived here. |
+| `source_id` | string | Required, non-empty. Which source to use (`gdocs`, `gsheets`, `gslides`, `gdrive`, or `github`). Supplied by the caller — the caller (e.g. documentation-system) already resolves this during ingest, so it is not re-derived here. |
 
 `gdrive` covers everything that isn't a native Google Doc/Slides/Sheet: uploaded `text/*` files (via Drive export), and — per the extractor registered for the file's MIME type — uploaded PDFs, uploaded `.docx` files, and Google Forms.
 
@@ -115,6 +119,15 @@ Every endpoint except `/health` requires `X-API-Key`.
 | `.docx` (uploaded, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`) | Docx (`python-docx`, local parse) | Markdown mirroring the Docs extractor: headings, list bullets, tables |
 | `application/vnd.google-apps.form` (Google Form) | Forms (native API) | Markdown: title, description, section headings, and each question with its multiple-choice options where present. **Responses are never fetched** — they duplicate the linked responses spreadsheet and are applicant personal data. |
 | `text/*` (uploaded) | Drive export fallback | Raw text |
+
+`github` accepts two URL shapes, fetched with plain REST calls against `api.github.com`:
+
+| URL | Fetches | Title |
+|-----|---------|-------|
+| `github.com/{owner}/{repo}` (or `/tree/{ref}`) | The README GitHub resolves for that ref (default branch if none) — any README name/extension | `owner/repo` |
+| `github.com/{owner}/{repo}/blob/{ref}/{path}` | That file at that ref; any UTF-8 text file, not only Markdown | `owner/repo/path` |
+
+A repository with no README returns `content: null` and a `repository has no README` warning. Binary or non-UTF-8 files are 422. GitHub returns 404 for a private repository the token cannot see, so that surfaces as 404, not 403. A ref may contain `/` (`feature/docs`): it is matched against the repository's branches and tags, longest match first, or taken as a commit SHA once GitHub confirms that commit exists; an unknown ref or commit (or an empty repository) is 404, not a README-less repository. Percent-encoded paths (`setup%20guide.md`) are decoded once. A renamed or transferred repository's redirect is followed.
 
 Legacy `.doc` (`application/msword`, the pre-2007 binary Word format) is a different format from `.docx` and stays unsupported — `python-docx` cannot read it.
 
@@ -151,7 +164,7 @@ connectors reads Google Docs/Sheets/Slides/Forms/Drive files as a **service acco
    - **Google Forms API** — required for the native Forms extractor.
 3. **Create a service account** in that project (IAM & Admin → Service Accounts).
 4. **Create a JSON key** for the service account and download it. Treat this file as a secret — do not commit it.
-5. **Share each Drive folder/file connectors needs to read** with the service account's email address (looks like `name@project-id.iam.gserviceaccount.com`), granting **Viewer** access. Nothing is readable until it's explicitly shared.
+5. **Share each Drive folder/file connectors needs to read** with the service account's email address (looks like `name@project-id.iam.gserviceaccount.com`), granting sufficient access to inspect the complete ACL (the verified setup uses **Editor**). Nothing is readable until it's explicitly shared.
 6. **Base64-encode the key file** and set it as `GOOGLE_CREDENTIALS_JSON`:
    ```bash
    base64 -i service-account.json | tr -d '\n'
@@ -181,7 +194,13 @@ Two cases are lossy by design:
 - **A spreadsheet tab larger than `MAX_ROWS_PER_TAB` (2000 rows).** Every tab of a spreadsheet is read (there is no first-tab-only limitation), but a tab over the cap is truncated to the first 2000 rows and a warning naming the tab and its real row count is added to the response's `warnings` list. Slides and Docs have no equivalent size cap.
 - **A scanned PDF with no text layer.** `pypdf` extracts embedded text; it does not run OCR. If every page of a PDF yields no text (the telltale sign of a scanned-image-only document), the extractor emits the `## Page N` headers but no page content, plus a warning that no text layer was found. OCR is out of scope.
 
-Uploaded PDFs, `.docx` files, and `text/*` files larger than `MAX_FILE_BYTES` are rejected before their bytes are downloaded or parsed, with a `422` error. Native Google Docs, Sheets, Slides, and Forms use their native APIs; Drive metadata may omit `size` for those types and that omission does not reject them. If Drive omits the size for a media file, the pre-download guard cannot establish a limit and allows the request to continue.
+Uploaded PDFs, `.docx` files, `text/*` files, and GitHub files larger than
+`MAX_FILE_BYTES` return `422`. Known oversized files are rejected before download;
+the streamed body is also capped before parsing, covering missing or stale Drive
+`size` metadata and files that grow after the metadata read. GitHub requires a
+size from its raw-file `HEAD` request. Native Google editor API responses and
+exports are exempt. See [download bounds](docs/ARCHITECTURE.md#where-the-truncation-actually-happens)
+for the transport and parser-memory limits.
 
 ### Running without Google access
 
@@ -207,6 +226,7 @@ connectors/
 │   │   ├── base.py             SourceFetcher Protocol + normalized error hierarchy
 │   │   ├── registry.py         Config-driven source_id → SourceFetcher wiring
 │   │   ├── google.py           GoogleSource: URL → file id → Drive metadata → extractor
+│   │   ├── github.py           GithubSource: repo README or /blob/ file via the GitHub REST API (httpx)
 │   │   └── google_extractors/  Per-MIME-type extraction strategies (native Docs/Slides/Sheets/Forms APIs,
 │   │                            Drive export, local PDF/.docx parsing)
 │   │
@@ -242,13 +262,13 @@ uv run ruff format .
 
 ## Status
 
-v0.1: a stateless `POST /fetch` adapter over a Google Drive/Docs/Slides/Sheets/Forms service account (plus local parsing of uploaded PDF and `.docx` files), config-seeded scoped API keys (`fetch` / `admin`) with an attested-actor audit trail, and a fast 132-test suite with no external dependencies.
+v0.1: a stateless `POST /fetch` adapter over a Google Drive/Docs/Slides/Sheets/Forms service account (plus local parsing of uploaded PDF and `.docx` files) and GitHub READMEs/files, config-seeded scoped API keys (`fetch` / `admin`) with an attested-actor audit trail, and a fast test suite with no external dependencies.
 
 **Not implemented (by design):**
 
 - **Persistence** — no database. Consumers that need to cache fetched content own that cache themselves.
 - **Per-end-user authorization** — connectors authenticates the calling service, not the end user on whose behalf a fetch happens; that check belongs in the consumer.
-- **Non-Google sources** — the source registry is designed to grow (`SourceFetcher` protocol), but only Google Drive/Docs/Sheets/Slides/Forms (plus PDF/`.docx` parsed via Drive bytes) is wired up today.
+- **GitHub harvesting** — `github` fetches one explicitly supplied README or file; it does not enumerate repositories, sync, or read issues/PRs/wikis.
 - **OCR** — a scanned PDF with no embedded text layer captures nothing; see "Known limitations" above.
 - **Forms responses** — only form structure (title, questions, options) is read; responses are deliberately never fetched (see the Supported types table above).
 
@@ -258,3 +278,6 @@ v0.1: a stateless `POST /fetch` adapter over a Google Drive/Docs/Slides/Sheets/F
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — contributor orientation: why the service is shaped this way, boundaries, trade-offs
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — task walkthroughs and the pre-push checklist
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — deploy shape, variables, key provisioning, troubleshooting
+
+Automatic sharing discovery also exposes [`POST /discover/google`](docs/API.md#post-discovergoogle)
+with a separate `discover` scope. See the [operator/member runbook](../documentation-system/docs/DISCOVERY.md).

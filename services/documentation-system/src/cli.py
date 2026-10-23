@@ -86,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--scopes",
         nargs="*",
         default=[],
-        help="e.g. docs:read docs:write. Use 'admin' for wildcard.",
+        help="e.g. docs:read docs:write (docs:index for POST /docs/index). Use 'admin' for wildcard.",
     )
     p_issue.set_defaults(func=cmd_issue)
 

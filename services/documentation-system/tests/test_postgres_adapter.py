@@ -1,3 +1,6 @@
+from tests.reembed_integration_cases import ReembedIntegrationCases
+from tests.doc_identity_cases import DocIdentityCases
+from tests.google_identity_cases import GoogleIdentityCases
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -7,14 +10,20 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, event, text
+from sqlalchemy.exc import SQLAlchemyError
 
 from contracts.storage import DuplicateActiveUrl
 from contracts.types import MAX_CHUNK_CHARS, DocIngest, SourceGrant
 from contracts.visibility import DENY, SEE_ALL, Actor
 from src.config import get_settings
+from src.content import content_hash
 from src.ingest import ingest_doc
 from src.storage.postgres import PostgresStorageAdapter
 from tests.chunk_storage_cases import ChunkStorageCases, make_chunk, make_doc
+from tests.ingestion_retrieval_cases import IngestionRetrievalCases
+from tests.retrieval_cases import RetrievalCases
+from tests.fake_embedder import FAKE_MODEL
+from tests.meeting_record_cases import MeetingRecordCases
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_PG_TESTS") != "1", reason="set RUN_PG_TESTS=1 to run Postgres tests"
@@ -23,6 +32,151 @@ pytestmark = pytest.mark.skipif(
 
 class TestDocChunks(ChunkStorageCases):
     pass
+
+
+class TestMeetingRecords(MeetingRecordCases):
+    def test_removal_waits_for_an_uncommitted_ordinary_ingest(self, flow, meeting_api, monkeypatch):
+        records, writer, clock, original = flow
+        client, headers = meeting_api
+        writer.fail = "fetch"
+        records.advance(original.meeting_id)
+        writer.fail = None
+        url = records.storage.get_meeting(original.meeting_id).doc_url
+        inserted, release, purging = Event(), Event(), Event()
+        removal_pid = []
+        engine = records.storage._engine
+        purge = records.storage.purge_meeting_catalog
+
+        def observe_purge(*args, **kwargs):
+            purging.set()
+            return purge(*args, **kwargs)
+
+        def pause_insert(conn, cursor, statement, parameters, context, executemany):
+            if statement.startswith("INSERT INTO docs "):
+                inserted.set()
+                assert release.wait(10), "test must release the uncommitted insertion"
+
+        def observe_lock(conn, cursor, statement, parameters, context, executemany):
+            if inserted.is_set() and "pg_advisory_xact_lock" in statement:
+                removal_pid.append(conn.exec_driver_sql("SELECT pg_backend_pid()").scalar_one())
+
+        monkeypatch.setattr(records.storage, "purge_meeting_catalog", observe_purge)
+        event.listen(engine, "after_cursor_execute", pause_insert)
+        event.listen(engine, "before_cursor_execute", observe_lock)
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                ingestion = pool.submit(client.post, "/docs", headers=headers, json={"url": url})
+                try:
+                    assert inserted.wait(5)
+                    removal = pool.submit(
+                        client.post,
+                        f"/meeting-records/{original.meeting_id}/remove",
+                        headers=headers,
+                    )
+                    assert purging.wait(5)
+                    blocked = False
+                    deadline = monotonic() + 5
+                    while monotonic() < deadline:
+                        if removal_pid:
+                            with engine.connect() as observer:
+                                blocked = observer.execute(
+                                    text(
+                                        "SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"
+                                    ),
+                                    {"pid": removal_pid[0]},
+                                ).scalar_one()
+                            if blocked:
+                                break
+                        sleep(0.01)
+                    assert blocked, "removal must wait on insertion's Google identity lock"
+                finally:
+                    release.set()
+                created = ingestion.result(timeout=10)
+                removed = removal.result(timeout=10)
+                assert created.status_code == 201 and removed.status_code == 200
+                doc_id = UUID(created.json()["doc"]["id"])
+                assert records.storage.get_doc(doc_id).purged_at
+                assert not records.storage.get_doc_content(doc_id)
+                assert not records.storage.list_grants(doc_id)
+                assert not records.storage.list_doc_chunks(doc_id)
+        finally:
+            release.set()
+            event.remove(engine, "after_cursor_execute", pause_insert)
+            event.remove(engine, "before_cursor_execute", observe_lock)
+
+
+class TestRetrieval(RetrievalCases):
+    pass
+
+
+class TestIngestionRetrieval(IngestionRetrievalCases):
+    def test_failed_insert_rolls_back_then_real_search_and_retry_recover(self, flow):
+        doc = flow.ingest()
+        before = flow.search()
+        chunks = flow.store.list_doc_chunks(UUID(doc["id"]))
+        flow.providers.documents[doc["url"]]["content"] = (
+            "CPSIF replacement after storage recovery."
+        )
+
+        def fail_insert(conn, cursor, statement, parameters, context, executemany):
+            # The real replacement has already deleted the old rows inside its
+            # transaction. The API must keep the catalog write and roll back
+            # the complete chunk replacement, then recover through /docs/index.
+            if statement.startswith("INSERT INTO doc_chunks"):
+                raise SQLAlchemyError("private insert diagnostics")
+
+        engine = flow.store._engine
+        event.listen(engine, "before_cursor_execute", fail_insert)
+        try:
+            flow.refetch(doc)
+            assert flow.store.list_doc_chunks(UUID(doc["id"])) == chunks
+            assert flow.search() == before
+            result = flow.retry()
+            assert result["failed"] == 1
+            assert result["results"][0]["detail"] == "index write failed: SQLAlchemyError"
+            assert flow.store.list_doc_chunks(UUID(doc["id"])) == chunks
+        finally:
+            event.remove(engine, "before_cursor_execute", fail_insert)
+        assert flow.retry()["indexed"] == 1
+        flow.citations(flow.search(), doc, "CPSIF replacement after storage recovery.")
+        assert flow.retry()["attempted"] == 0
+
+    @pytest.mark.parametrize("context", ["person", "channel"])
+    def test_real_retrieval_sql_error_fails_closed_and_recovers(self, flow, context):
+        doc = flow.ingest()
+
+        def fail_search(conn, cursor, statement, parameters, context, executemany):
+            if "eligible AS MATERIALIZED" in statement:
+                raise SQLAlchemyError("private query diagnostics")
+
+        engine = flow.store._engine
+        event.listen(engine, "before_cursor_execute", fail_search)
+        headers = flow.headers("channel") if context == "channel" else flow.headers()
+        try:
+            response = flow.client.post("/search", headers=headers, json={"query": "CPSIF"})
+            assert response.status_code == 503
+            assert response.json() == {"detail": "retrieval storage unavailable"}
+        finally:
+            event.remove(engine, "before_cursor_execute", fail_search)
+        assert {h["doc_id"] for h in flow.search(context="channel")} == {doc["id"]}
+
+
+@pytest.mark.parametrize("visibility", [SEE_ALL, DENY, None])
+def test_retrieval_context_validation_precedes_database_access(adapter, monkeypatch, visibility):
+    from tests.retrieval_cases import embedding
+
+    def unexpected_connection():
+        pytest.fail("unscoped retrieval must fail before opening a database connection")
+
+    monkeypatch.setattr(adapter._engine, "connect", unexpected_connection)
+    with pytest.raises(ValueError):
+        adapter.search_chunks(
+            query="CPSIF",
+            embedding=embedding(),
+            visibility=visibility,
+            k=1,
+            min_cosine=0.3,
+        )
 
 
 @pytest.mark.parametrize(
@@ -79,6 +233,135 @@ def test_concurrent_chunk_replacements_never_mix_sets(adapter, already_indexed):
     assert adapter.list_doc_chunks(doc.id) in sets
 
 
+@pytest.mark.parametrize("cleanup", ["retirement", "source_gone"])
+def test_cleanup_rechecks_after_a_concurrent_commit(adapter, cleanup):
+    doc = make_doc(adapter)
+    chunks = [make_chunk()]
+    adapter.upsert_doc_content(
+        doc.id,
+        content_text=chunks[0].chunk_text,
+        content_hash=chunks[0].source_content_hash,
+        fetched_at=None,
+    )
+    adapter.replace_doc_chunks(doc.id, chunks)
+    expected = adapter.get_doc_content_meta(doc.id)
+    if cleanup == "retirement":
+        adapter.update_doc(doc.id, {"active": False}, actor="test")
+    started = Event()
+    worker_pid = []
+    worker = local()
+    refreshed_at = datetime.now(timezone.utc)
+
+    def before_execute(conn, cursor, statement, parameters, context, executemany):
+        if getattr(worker, "cleaning", False) and not worker_pid:
+            worker_pid.append(conn.connection.driver_connection.info.backend_pid)
+            started.set()
+
+    def clean():
+        worker.cleaning = True
+        if cleanup == "retirement":
+            return adapter.clear_doc_chunks_if_unindexable(doc.id)
+        return adapter.delete_doc_content(doc.id, expected=expected)
+
+    engine = adapter._engine
+    event.listen(engine, "before_cursor_execute", before_execute)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with engine.begin() as conn:
+                # Leave the newer state uncommitted while cleanup starts.
+                if cleanup == "retirement":
+                    conn.execute(
+                        text("UPDATE docs SET active = true WHERE id = :id"), {"id": doc.id}
+                    )
+                else:
+                    conn.execute(
+                        text("UPDATE doc_content SET fetched_at = :at WHERE doc_id = :id"),
+                        {"at": refreshed_at, "id": doc.id},
+                    )
+                future = pool.submit(clean)
+                assert started.wait(5)
+                blocked = False
+                deadline = monotonic() + 5
+                while not future.done() and monotonic() < deadline:
+                    with engine.connect() as observer:
+                        blocked = observer.execute(
+                            text(
+                                "SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"
+                            ),
+                            {"pid": worker_pid[0]},
+                        ).scalar_one()
+                    if blocked:
+                        break
+                    sleep(0.01)
+                assert blocked or future.done(), "cleanup never reached the database"
+            assert future.result(timeout=5) is False
+    finally:
+        event.remove(engine, "before_cursor_execute", before_execute)
+
+    assert adapter.list_doc_chunks(doc.id) == chunks
+    assert adapter.get_doc_content(doc.id) == chunks[0].chunk_text
+    if cleanup == "retirement":
+        assert adapter.get_doc(doc.id).active
+    else:
+        assert adapter.get_doc_content_meta(doc.id).fetched_at == refreshed_at
+
+
+def test_old_title_writer_rechecks_after_new_title_and_index_commit(adapter):
+    doc = make_doc(adapter)
+    old = make_chunk()
+    adapter.upsert_doc_content(
+        doc.id, content_text=old.chunk_text, content_hash=old.source_content_hash, fetched_at=None
+    )
+    adapter.replace_doc_chunks(doc.id, [old])
+    newer = make_chunk(source_title_hash=content_hash("Renamed"), embedding=[0.5] * 1536)
+    started = Event()
+    worker_pid = []
+    worker = local()
+
+    def before_execute(conn, cursor, statement, parameters, context, executemany):
+        if getattr(worker, "indexing", False) and not worker_pid:
+            worker_pid.append(conn.connection.driver_connection.info.backend_pid)
+            started.set()
+
+    def write_old():
+        worker.indexing = True
+        return adapter.replace_doc_chunks_if_current(
+            doc.id, old.source_content_hash, [old], expected_title_hash=old.source_title_hash
+        )
+
+    engine = adapter._engine
+    event.listen(engine, "before_cursor_execute", before_execute)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("UPDATE docs SET title = 'Renamed' WHERE id = :id"), {"id": doc.id}
+                )
+                adapter._write_chunks(conn, doc.id, [newer])
+                future = pool.submit(write_old)
+                assert started.wait(5)
+                blocked = False
+                deadline = monotonic() + 5
+                while not future.done() and monotonic() < deadline:
+                    with engine.connect() as observer:
+                        blocked = observer.execute(
+                            text(
+                                "SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"
+                            ),
+                            {"pid": worker_pid[0]},
+                        ).scalar_one()
+                    if blocked:
+                        break
+                    sleep(0.01)
+                assert blocked, "old index writer did not wait for the document lock"
+            assert future.result(timeout=5) is False
+    finally:
+        event.remove(engine, "before_cursor_execute", before_execute)
+
+    assert adapter.list_doc_chunks(doc.id) == [newer]
+    assert doc.id not in adapter.list_docs_for_indexing(models=[FAKE_MODEL])
+
+
 @pytest.fixture
 def adapter():
     engine = create_engine(get_settings().database_url, future=True)
@@ -89,6 +372,16 @@ def adapter():
 
 def test_readiness_query(adapter):
     assert adapter.is_ready() is True
+
+
+def test_source_refresh_guard_across_connections(adapter):
+    from tests.source_refresh_guard_cases import assert_refresh_guard
+
+    peer_engine = create_engine(get_settings().database_url, future=True)
+    try:
+        assert_refresh_guard(adapter, PostgresStorageAdapter(peer_engine))
+    finally:
+        peer_engine.dispose()
 
 
 def _mk(adapter, url="https://x.com", tags=None):
@@ -218,6 +511,85 @@ def test_ingest_race_fallback_merges_into_existing(adapter):
         d for d in adapter.list_docs(active_only=True) if d.url_normalized == "https://race.com"
     ]
     assert len(active) == 1
+
+
+def test_discovery_insert_waits_for_uncommitted_manual_alias(adapter):
+    from contracts.fetcher import FetchResult
+    from tests.test_ingest import FakeDirectory, FakeFetchers
+
+    inserted, release, discovery_started = Event(), Event(), Event()
+    worker = local()
+    discovery_pid = []
+
+    def before_execute(conn, cursor, statement, parameters, context, executemany):
+        if (
+            getattr(worker, "name", None) == "discovery"
+            and not discovery_pid
+            and "pg_advisory_xact_lock" in statement
+        ):
+            discovery_pid.append(conn.connection.driver_connection.info.backend_pid)
+            discovery_started.set()
+
+    def after_execute(conn, cursor, statement, parameters, context, executemany):
+        if (
+            getattr(worker, "name", None) == "manual"
+            and context.isinsert
+            and context.compiled.statement.table.name == "docs"
+        ):
+            inserted.set()
+            assert release.wait(10), "manual insert was not released"
+
+    def manual():
+        worker.name = "manual"
+        return GoogleIdentityCases.make(adapter, "https://docs.google.com/document/d/race/edit")
+
+    def discovery():
+        worker.name = "discovery"
+        return ingest_doc(
+            DocIngest(url="https://drive.google.com/file/d/race", source_id="gdocs"),
+            storage=adapter,
+            fetchers=FakeFetchers(result=FetchResult(permissions=[])),
+            directory=FakeDirectory(),
+            actor="discovery",
+            refresh_existing=False,
+        )
+
+    engine = adapter._engine
+    event.listen(engine, "before_cursor_execute", before_execute)
+    event.listen(engine, "after_cursor_execute", after_execute)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(manual)
+            try:
+                assert inserted.wait(5)
+                second = executor.submit(discovery)
+                assert discovery_started.wait(5)
+                # Different URL aliases bypass the active-URL unique index.
+                # The file-identity lock must wait for the uncommitted writer.
+                blocked = False
+                deadline = monotonic() + 5
+                while not second.done() and monotonic() < deadline:
+                    with engine.connect() as conn:
+                        blocked = conn.execute(
+                            text(
+                                "SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = :pid"
+                            ),
+                            {"pid": discovery_pid[0]},
+                        ).scalar_one()
+                    if blocked:
+                        break
+                    sleep(0.01)
+            finally:
+                release.set()
+            winner = first.result(timeout=5)
+            result = second.result(timeout=5)
+    finally:
+        event.remove(engine, "before_cursor_execute", before_execute)
+        event.remove(engine, "after_cursor_execute", after_execute)
+    assert blocked is True
+    assert result.created is False
+    assert result.doc.id == winner.id
+    assert len(adapter.list_docs(active_only=False)) == 1
 
 
 _P1 = UUID("11111111-1111-1111-1111-111111111111")
@@ -583,3 +955,15 @@ def test_ownership_requires_valid_grant_and_source_revocation_hides_doc(adapter,
 
     adapter.add_grant(doc.id, grantee_type="person", grantee_id=_P1, actor="admin")
     assert adapter.get_doc(doc.id, visibility=actor) is not None
+
+
+class TestGoogleIdentity(GoogleIdentityCases):
+    pass
+
+
+class TestDocIdentity(DocIdentityCases):
+    pass
+
+
+class TestReembedIntegration(ReembedIntegrationCases):
+    pass

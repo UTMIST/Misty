@@ -16,6 +16,13 @@ class Actor:
     source_team_ids: frozenset[UUID] = frozenset()
 
 
+@dataclass(frozen=True)
+class Channel:
+    """Only the configured teams' confirmed source-group entitlement."""
+
+    source_team_ids: frozenset[UUID]
+
+
 class _Sentinel(Enum):
     SEE_ALL = "see_all"
     DENY = "deny"
@@ -24,7 +31,8 @@ class _Sentinel(Enum):
 SEE_ALL = _Sentinel.SEE_ALL
 DENY = _Sentinel.DENY
 
-ActorContext = Actor | _Sentinel
+ActorContext = Actor | Channel | _Sentinel
+RetrievalContext = Actor | Channel
 
 
 def doc_visible(
@@ -42,6 +50,14 @@ def doc_visible(
     for grant in grants:
         grantee_type, grantee_id = grant[:2]
         origin = grant[2] if len(grant) == 3 else "manual"
+        if isinstance(ctx, Channel):
+            if (
+                origin == "google_drive"
+                and grantee_type == "team"
+                and grantee_id in ctx.source_team_ids
+            ):
+                return True
+            continue
         if grantee_type == "org":
             return True
         if grantee_type == "person" and grantee_id == ctx.person_id:

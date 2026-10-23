@@ -1,4 +1,5 @@
 import { MessageFlags } from 'discord.js';
+import { DELIVERY_ERROR, discordMessageParts } from './messages.js';
 
 function extractOptions(interaction, activeOptions) {
   const options = {};
@@ -9,6 +10,33 @@ function extractOptions(interaction, activeOptions) {
     // extend for other types as they appear
   }
   return options;
+}
+
+/**
+ * Guild + scope channel for directory channel settings (#238 / #239).
+ * Threads inherit the parent channel's scope; DMs have no guild and no scope.
+ *
+ * @param {object} interaction Discord interaction.
+ * @returns {{ discordGuildId: string|null, discordChannelId: string|null, channelUsedParent: boolean }}
+ */
+export function channelScopeFromInteraction(interaction) {
+  const discordGuildId = interaction.guildId ?? null;
+  if (!discordGuildId) {
+    return { discordGuildId: null, discordChannelId: null, channelUsedParent: false };
+  }
+  const channel = interaction.channel;
+  if (channel && typeof channel.isThread === 'function' && channel.isThread()) {
+    return {
+      discordGuildId,
+      discordChannelId: channel.parentId ?? null,
+      channelUsedParent: Boolean(channel.parentId),
+    };
+  }
+  return {
+    discordGuildId,
+    discordChannelId: interaction.channelId ?? channel?.id ?? null,
+    channelUsedParent: false,
+  };
 }
 
 /**
@@ -23,9 +51,10 @@ export function interactionToIntent(interaction, command) {
   const activeOptions = subcommand
     ? (command.subcommands.find((s) => s.name === subcommand)?.options ?? [])
     : command.options;
+  const scope = channelScopeFromInteraction(interaction);
   return {
     surface: 'discord',
-    discordGuildId: interaction.guildId ?? null,
+    ...scope,
     commandName: interaction.commandName,
     options: extractOptions(interaction, activeOptions),
     subcommand,
@@ -50,6 +79,8 @@ export function payloadToDiscordReply(payload) {
   const out = {};
   if (payload.content !== undefined) out.content = payload.content;
   if (payload.embeds) out.embeds = payload.embeds;
+  if (payload.allowedMentions) out.allowedMentions = payload.allowedMentions;
+  if (payload.components) out.components = payload.components;
   if (payload.ephemeral) out.flags = MessageFlags.Ephemeral;
   return out;
 }
@@ -63,7 +94,8 @@ export function resolveEphemeral(command, subcommandName) {
   return sub?.ephemeral ?? command.ephemeral ?? true;
 }
 
-export async function safeReply(interaction, payload) {
+/** Return true only when every payload part was sent; check access per part. */
+export async function safeReply(interaction, payload, { beforeSend } = {}) {
   const dpayload = payloadToDiscordReply(payload);
   if (!dpayload) {
     // Nothing to say. If we deferred, clear the "thinking…" state so the user
@@ -74,15 +106,35 @@ export async function safeReply(interaction, payload) {
     return;
   }
 
-  // After deferReply(), the first response must edit the deferred message.
-  // Ephemerality was already locked in at defer time, so editReply ignores the
-  // ephemeral flag — strip it to avoid passing an unsupported option.
-  if (interaction.deferred && !interaction.replied) {
-    const { flags, ...editable } = dpayload;
-    await interaction.editReply(editable).catch((e) => console.error('reply failed:', e.message));
-    return;
+  // Discord locks visibility at defer time. Follow-ups must explicitly keep it.
+  const privateReply = interaction.ephemeral ?? Boolean(dpayload.flags & MessageFlags.Ephemeral);
+  const flags = privateReply ? MessageFlags.Ephemeral : undefined;
+  let first = true;
+  const send = async (part) => {
+    await beforeSend?.();
+    const { flags: _flags, ...editable } = part;
+    if (first && interaction.deferred && !interaction.replied) {
+      await interaction.editReply(editable);
+    } else {
+      const method = first && !interaction.replied ? 'reply' : 'followUp';
+      await interaction[method]({ ...editable, ...(flags !== undefined && { flags }) });
+    }
+    first = false;
+  };
+  try {
+    for (const part of discordMessageParts(dpayload)) await send(part);
+    return true;
+  } catch {
+    // Discord errors can contain the rejected payload. Never log reply content.
+    console.error('Could not deliver Discord reply');
+    try {
+      await send({ content: DELIVERY_ERROR, embeds: [], allowedMentions: { parse: [] } });
+    } catch {
+      // If editing the deferred reply also fails, try clearing its spinner.
+      if (first && interaction.deferred && !interaction.replied) {
+        await interaction.deleteReply?.().catch(() => {});
+      }
+    }
+    return false;
   }
-
-  const method = interaction.replied ? 'followUp' : 'reply';
-  await interaction[method](dpayload).catch((e) => console.error('reply failed:', e.message));
 }

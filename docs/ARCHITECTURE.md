@@ -10,6 +10,7 @@ see each service's own `docs/ARCHITECTURE.md`:
 - [`services/llm/docs/ARCHITECTURE.md`](../services/llm/docs/ARCHITECTURE.md)
 - [`services/meeting/docs/ARCHITECTURE.md`](../services/meeting/docs/ARCHITECTURE.md)
 - [`services/connectors/docs/ARCHITECTURE.md`](../services/connectors/docs/ARCHITECTURE.md)
+- [`services/gateway/docs/ARCHITECTURE.md`](../services/gateway/docs/ARCHITECTURE.md)
 - [`discord-bot/README.md`](../discord-bot/README.md) — the Discord bot doesn't have a
   standalone ARCHITECTURE.md yet; the README covers its neutral command shape (a
   single handler serves both the Discord surface and a browser-based web
@@ -18,9 +19,8 @@ see each service's own `docs/ARCHITECTURE.md`:
 
 ## The services
 
-The platform is **six backend services** — four source-of-truth services, each
-owning one domain, plus the stateful `meeting` processing service and the
-stateless `connectors` outbound adapter — plus the Discord bot as a consumer:
+The platform has **seven backend services**: six internal domain/processing
+services and the public external gateway, plus the Discord bot as a consumer:
 
 | Service | Domain | Key surface |
 |---------|--------|-------------|
@@ -30,6 +30,7 @@ stateless `connectors` outbound adapter — plus the Discord bot as a consumer:
 | [`services/verification`](../services/verification) | Email ownership verification | request/confirm an email code; `verification:write` scope |
 | [`services/meeting`](../services/meeting) | **Stateful** live meeting transcription + minutes | WS audio stream in → rolling transcript → minutes/PDF on stop; `meetings` scope. The one stateful service — see [MEETING-RECORDING.md](MEETING-RECORDING.md) |
 | [`services/connectors`](../services/connectors) | Outbound document fetch | `POST /fetch` returns a Google Doc/Sheet/Slides/Drive file as text; `fetch` scope; no DB/state. Not a gateway and not an authorization boundary — see its [ARCHITECTURE](../services/connectors/docs/ARCHITECTURE.md) |
+| [`services/gateway`](../services/gateway) | Public external API | Curated `/v1` operations; per-consumer scoped keys in its own database; private HTTP calls to the owning services. |
 
 > **Meeting recording** spans two components (the `meeting` service + a Discord *voice surface* in the bot) and is the platform's one stateful service and its one non-neutral-command bot path. Its cross-cutting design — and *why* it breaks both conventions — is documented separately in **[MEETING-RECORDING.md](MEETING-RECORDING.md)**.
 
@@ -51,12 +52,14 @@ The other services are independent and share the conventions below:
 stateless with no database at all; `meeting` has no database either but *is*
 stateful in memory.
 
-There are **two** service-to-service dependencies outside the catalog →
+There are **three** service-to-service dependencies outside the catalog →
 directory pair, and they differ in how hard they are:
 
 - **`meeting` → `llm`** (hard). `meeting` calls `/chat` for minutes generation
   and refuses to boot without `LLM_BASE_URL`/`LLM_API_KEY` outside `local`.
   Deploy `llm` first.
+- **`gateway` → `team-tracking`** (hard for resolver requests). The public
+  resolver requires the private directory and returns 503 when it is unavailable.
 - **`documentation-system` → `connectors`** (soft). The catalog calls `/fetch`
   for Google source content. With connectors unreachable or unconfigured, the
   fetch degrades to a warning on the ingested doc and the catalog works
@@ -211,6 +214,55 @@ describes how it applies them concretely.
   documentation-system adds a second layer gating *rows* (who may see which doc),
   driven by an actor supplied via `X-On-Behalf-Of` rather than by the key alone.
   No other service needs this today.
+
+## Access architecture: two doors, not one gateway
+
+The platform has exactly two ways in, and they're deliberately asymmetric — there is
+**no internal gateway**. Internal services trust each other directly; only external
+callers go through a gateway at all.
+
+- **Internal door.** team-tracking, documentation-system, and the gateway's own
+  outbound call to team-tracking all authenticate the same way: a per-consumer key,
+  argon2-hashed, scoped, issued by the target service's own CLI (`team-tracking-keys`,
+  `doc-keys`). The machinery is the shared [`packages/auth`](../packages/auth)
+  (`platform_auth`) library described above — each internal service is its own
+  authority over its own keys. There is no shared internal proxy standing in front of
+  them; adding a service that trusts another means issuing it a key on that service,
+  nothing more.
+- **External door — [`services/gateway/`](../services/gateway/README.md), implemented.**
+  Callers outside the org's trust boundary (a GitHub Action, a future third-party
+  integration) never get a team-tracking key. Instead they hold a key issued by the
+  gateway's own external registry (`gateway-keys`, scoped e.g. `resolve:discord`), and
+  the gateway holds exactly **one** internal team-tracking key
+  (`identifiers:read`) for its own outbound calls. It composes and curates — it never
+  passes an internal response straight through — and adds the protections an
+  externally-facing surface needs that internal services don't: a public Railway
+  domain, per-key rate limiting behind a per-IP flood guard, and audit logging of
+  every external request.
+
+  The asymmetry runs one level deeper than the key registries. Every internal
+  service also accepts an env-bootstrap key (`API_KEY`), which `platform_auth`
+  resolves to the wildcard `admin` scope — the grace path you use to reach the
+  admin API that issues the first real key, and safe because only the private
+  network can reach it. **The gateway does not.** It has no admin API to
+  bootstrap (`gateway-keys` writes to its database directly) and it is the one
+  service on the public internet, so it passes `get_env_key=lambda: None` and
+  every caller must present an issued, scoped key. When adding an
+  externally-reachable service, copy that, not the internal shim.
+
+The gateway's first (and so far only) endpoint is the resolver,
+`GET /v1/resolve/discord/{github_login}` — it turns a GitHub login into the Discord id
+linked to the same person in the directory, and nothing else. It is a working
+example for future gateway operations; no current integration consumes it.
+The Discord notifications implemented for #34 display GitHub reviewer logins,
+but do not call the resolver or ping reviewers' Discord accounts. New external
+use cases get new narrow endpoints on the gateway, not broader access to
+team-tracking itself.
+
+The compute platform will use the same per-consumer gateway contract when its
+required operations are defined. The [gateway architecture](../services/gateway/docs/ARCHITECTURE.md#future-compute-platform-access)
+describes how to add access while preserving service-owned databases and access
+checks; the current permission grants only the Discord resolver.
 
 ## Why the directory is built first
 

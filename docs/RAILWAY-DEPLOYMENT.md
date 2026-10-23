@@ -1,7 +1,7 @@
 # Railway Deployment (staging + production)
 
-Deploys the platform's six backend services plus the discord-bot to Railway,
-backed by Neon Postgres (a branch per environment) for the three services that
+Deploys the platform's seven backend services plus the discord-bot to Railway,
+backed by Neon Postgres (a branch per environment) for the four services that
 own a database. Repo-side config lives in each service's `Dockerfile` +
 `railway.json`; the steps below are the account-side setup you run in the
 Railway + Neon dashboards / CLIs.
@@ -14,10 +14,13 @@ Railway + Neon dashboards / CLIs.
 | `llm` | `/` | **none** | — | Stateless Bedrock chat + OpenAI embedding API; keys from `CONSUMER_KEYS`. |
 | `meeting` | `/` | **none** | — | **Stateful in-memory**; keys from `CONSUMER_KEYS`. See the single-replica warning in step 2, and the WebSocket keepalive note in the Notes section — its `startCommand` is the one that isn't the plain template. |
 | `connectors` | `/` | **none** | — | Stateless outbound adapter (Google Drive/Docs); keys from `CONSUMER_KEYS`. Recommended to deploy before `documentation-system` (not required) — see its `CONNECTORS_API_KEY` note in step 3. |
-| `discord-bot` | `discord-bot` | none | `node src/registerCommands.js` | Node; the only consumer-facing surface. Pre-deploy registers the slash commands with Discord (step 5). |
+| `gateway` | `/` | Neon (own project) | `alembic upgrade head` | Public scoped reads; one replica. See [gateway setup](../services/gateway/docs/DEPLOYMENT.md). |
+| `discord-bot` | `discord-bot` | none | `node src/registerCommands.js` | Node Discord frontend. Pre-deploy registers the slash commands with Discord (step 5). |
 
-All seven are **private** — no public domains. They reach each other over
-Railway's internal network as `<service>.railway.internal:<PORT>`.
+The gateway receives a public HTTPS domain. All other services remain **private**
+and reach each other as `<service>.railway.internal:<PORT>`. Gateway credentials,
+consumer keys, proxy settings, and verification are covered in its
+[deployment runbook](../services/gateway/docs/DEPLOYMENT.md).
 
 For the optional persistent `dev` environment used to test one PR at a
 time with a dedicated Discord bot, see [PR previews](pr-previews.md). That
@@ -59,10 +62,10 @@ feature branch  ──PR──▶  staging  ──PR──▶  main
   support has landed. See the [rollout guide](DEVELOPMENT.md#merge-queue-on-staging).
 
 ## 1. Neon: databases + branches
-Create **three Neon projects** — `team-tracking`, `documentation-system`, and
-`verification` (each service owns its own DB). In each project you get a `main`
+Create **four Neon projects** — `team-tracking`, `documentation-system`,
+`verification`, and `gateway` (each service owns its own DB). In each project you get a `main`
 branch (= production); create a second branch named `staging` (copy-on-write
-from main). Copy the six connection strings (3 projects × 2 branches). Use the
+from main). Copy the eight connection strings (4 projects × 2 branches). Use the
 `postgresql+psycopg://…` form (append `?sslmode=require` if not present).
 
 `llm`, `meeting`, and `connectors` have no database — nothing to provision for them here.
@@ -75,9 +78,9 @@ role's permissions on the target Neon branch as described in the service's
 ## 2. Railway: project, environments, services
 1. Create a Railway project; it starts with a `production` environment — add a
    `staging` environment too.
-2. Add seven services from this repo:
-   - The six Python services (`team-tracking`, `documentation-system`,
-     `verification`, `llm`, `meeting`, `connectors`). Their Dockerfiles build from the **repo
+2. Add eight services from this repo:
+   - The seven Python services (`team-tracking`, `documentation-system`,
+     `verification`, `llm`, `meeting`, `connectors`, `gateway`). Their Dockerfiles build from the **repo
      root** as context (so `packages/` is reachable) and install their workspace
      member with `uv sync --frozen --no-dev --package <name>` into a venv at
      `/app/.venv`. So each one's Railway **root directory is `/`**, with
@@ -88,21 +91,23 @@ role's permissions on the target Neon branch as described in the service's
 
    Railway picks up each service's `railway.json` (Dockerfile build, start
    command, health check, and the pre-deploy step: `alembic upgrade head` for
-   the three DB-backed services, `node src/registerCommands.js` for the bot).
+   the four DB-backed services, `node src/registerCommands.js` for the bot).
    `llm`, `meeting`, and `connectors` have no `preDeployCommand` because they
    have no schema.
-3. Keep **every** service private (no public domain). The bot needs no domain.
+3. Generate a public domain for `gateway` only. The other services stay private.
 4. **Pin `meeting` to a single replica.** It keeps each live meeting's session
    entirely in process memory, so a given `session_id`'s WebSocket,
    `/transcript` polls, and `/stop` call must all land on the same process.
    Scaling it horizontally without sticky routing on `session_id` misroutes
    `/stop` to a process that never saw the meeting, and the recording is lost.
-   Every other service is stateless and scales freely.
+   The gateway also requires one replica and one worker for its in-memory rate
+   limits; see its deployment runbook. Other services are stateless.
 
 ## 3. Environment variables
 Set these per environment (staging vs production) per service.
 
-**The three DB-backed services:**
+**The internal DB-backed services** (gateway variables are in its
+[deployment runbook](../services/gateway/docs/DEPLOYMENT.md#railway-service)):
 
 | Var | team-tracking | documentation-system | verification |
 |---|---|---|---|
@@ -114,12 +119,15 @@ Set these per environment (staging vs production) per service.
 | `DIRECTORY_API_KEY` | — | *(set by the provisioning script — step 4)* | — |
 | `CONNECTORS_BASE_URL` | — | `http://${{connectors.RAILWAY_PRIVATE_DOMAIN}}:${{connectors.PORT}}` | — |
 | `CONNECTORS_API_KEY` | — | a `connectors` consumer key with the `fetch` scope — see step 4b | — |
+| `LLM_BASE_URL` | — | `http://${{llm.RAILWAY_PRIVATE_DOMAIN}}:${{llm.PORT}}` | — |
+| `LLM_API_KEY` | — | an `llm` consumer key with the `embed` scope — see step 4b | — |
+| retrieval model | — | `SEARCH_EMBED_MODEL=openai-embed-3-small`, `SEARCH_MIN_COSINE=0.3`; indexing defaults to the search model — see [retrieval rollout](../services/documentation-system/docs/DEPLOYMENT.md#authorized-retrieval) | — |
 | source ACL cadence | — | `SOURCE_ACCESS_REFRESH_AFTER_HOURS=24`, `SOURCE_ACCESS_MAX_AGE_HOURS=48` | — |
 | `CODE_HMAC_SECRET` | — | — | a strong random secret |
 | `EMAIL_BACKEND` | — | — | `resend` (or `gmail`) — **not** `fake` |
 | `EMAIL_FROM` | — | — | `UTMIST <noreply@utmist.ca>` |
 | `RESEND_API_KEY` | — | — | from Resend |
-| `GOOGLE_GROUPS_CUSTOMER_ID`, `GOOGLE_GROUPS_DOMAIN`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` | optional, all-or-nothing; enables managed team Google Groups, plus a daily `team-tracking-groups sync` cron — see [team-tracking DEPLOYMENT.md](../services/team-tracking/docs/DEPLOYMENT.md#managed-google-groups) | — | — |
+| `GOOGLE_GROUPS_CUSTOMER_ID`, `GOOGLE_GROUPS_DOMAIN`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` | optional, all-or-nothing; OAuth grant needs `cloud-identity.groups` and `apps.groups.settings` for automatic group settings; enables managed team Google Groups, plus a daily `team-tracking-groups sync` cron — see [team-tracking DEPLOYMENT.md](../services/team-tracking/docs/DEPLOYMENT.md#managed-google-groups) | — | — |
 
 > **documentation-system boots fine without `CONNECTORS_API_KEY`.** Unlike
 > `API_KEY`/`DIRECTORY_API_KEY`, `verify_production_secrets()` only logs a
@@ -149,7 +157,8 @@ Set these per environment (staging vs production) per service.
 | `MAX_MEETING_MS` | — | optional; defaults to the 4h backstop | — |
 | `DISCONNECT_GRACE_S` | — | optional; defaults to 60s. How long a disconnected session is held so `POST /stop` can still finalize it | — |
 | `GOOGLE_CREDENTIALS_JSON` | — | — | base64 Google service-account key; empty is a valid running state (Google fetches 503, rest of the service works) |
-| `MAX_FILE_BYTES` | — | — | optional; defaults to 25 MiB. Pre-download limit for uploaded PDF, `.docx`, and `text/*` files |
+| `GITHUB_TOKEN` | — | — | optional fine-grained read-only PAT; empty fetches public repositories only (private ones 404) |
+| `MAX_FILE_BYTES` | — | — | optional; defaults to 25 MiB. Pre-download limit for uploaded PDF, `.docx`, `text/*`, and GitHub files |
 
 > **Before merging or deploying llm**, configure a real `OPENAI_API_KEY` in the target
 > Railway environment, even for chat-only consumers. The boot check verifies presence,
@@ -169,9 +178,10 @@ Set these per environment (staging vs production) per service.
 | `DISCORD_GUILD_ID` | test guild (staging) / blank (prod) |
 | `ENABLE_DISCORD` / `ENABLE_WEB` | `true` / `false` |
 | `HELPER_USER_MAX_REQUESTS` / `HELPER_USER_WINDOW_SECONDS` | optional helper allowance overrides; see [bot configuration and reset semantics](../discord-bot/README.md#helper-bot-request-limits) |
+| `HELPER_TOOLS_ENABLED` | defaults to `false`; literal `true` enables Discord document tools after retrieval/channel setup; see [helper configuration and access checks](../discord-bot/README.md#helper-document-tools) |
 | `PORT` | Railway-injected port for the Discord readiness listener; defaults to `3002` locally |
 | `DIRECTORY_BASE_URL` / `DIRECTORY_API_KEY` | team-tracking; key set by the provisioning script |
-| `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system |
+| `DOC_BASE_URL` / `DOC_API_KEY` | documentation-system; key scopes `docs:read docs:write act-as-user`, literal `act-as-channel` for shared-channel helper retrieval, and `meetings:read meetings:write` for saved meeting link delivery (see its [key docs](../services/documentation-system/docs/DEPLOYMENT.md#issuing-api-keys-doc-keys-cli)) |
 | `VERIFICATION_BASE_URL` / `VERIFICATION_API_KEY` | verification |
 | `INFRASTRUCTURE_DISCORD_USERNAME` | *optional* — Discord username or ID shown by `/bug` for infrastructure support |
 | `MEETING_BASE_URL` / `MEETING_API_KEY` | meeting; a `meetings`-scoped consumer key |
@@ -230,22 +240,31 @@ TT_DATABASE_URL="<team-tracking Neon branch DATABASE_URL for this env>" \
 
 This issues scoped `team-tracking-keys` for discord-bot + documentation-system
 and sets each service's `DIRECTORY_API_KEY`. The discord-bot key's scopes
-include `people:elevate` (alongside its `people:*`/`teams:*`/`memberships:*`
-scopes) so its `/seed` can promote people to `admin`/`superuser` — plain
-`people:write` cannot set a non-`member` `access_level`. The
-documentation-system key stays read-only (`people:read teams:read memberships:read
-identifiers:read`) so it can resolve verified emails, active memberships, and the synced-group
+include `people:elevate` (alongside its `people:*`/`teams:*`/`memberships:*`/
+`channels:read`/`channels:write` scopes) so its `/seed` can promote people to
+`admin`/`superuser` — plain `people:write` cannot set a non-`member`
+`access_level` — and so `/channel-access` can read and replace channel team
+settings. The documentation-system key stays read-only (`people:read teams:read
+memberships:read identifiers:read channels:read`) so it can resolve verified
+emails, active memberships, channel configuration, and the synced-group
 mapping supplied by team-tracking. Re-running issues a fresh key and
 repoints the consumer; the previous key stays active until you revoke it
 manually (`team-tracking-keys revoke <id>`).
 
-Configure a Railway cron/external scheduler to call documentation-system's
-`POST /docs/source-access/refresh-due?limit=10` hourly (`0 * * * *`) with a `docs:write` key, repeating
-until `attempted < limit`. Source-derived grants stop authorizing reads after 48 hours
-without a complete successful refresh. Eligibility still defaults to 24 hours; hourly checks
-avoid skipping a whole day when a document's prior refresh finished after the job started.
-See the service's [refresh schedule](../services/documentation-system/docs/DEPLOYMENT.md#source-access-refresh-schedule)
-for batching and disabled-source behavior.
+The dedicated staging `doc-source-refresh` cron uses
+`/services/documentation-system/railway.source-refresh.json` and the same deployed
+revision as documentation-system. It calls the bounded refresh endpoint hourly with
+its own `docs:write` key, without database or Google credentials. Apply API migration
+`011` first: the runner acquires a persistent guard through HTTP before heartbeats,
+so a duplicate cannot mask a stuck run. Set `DOCS_BASE_URL`,
+`DOCS_API_KEY`, and the secret `SOURCE_REFRESH_MONITOR_URL` on that service only.
+The config disables migrations, HTTP healthchecks, failure restarts, and PR-preview
+schedules; production remains disabled. Review/merge precedes deployment, and manual
+plus scheduled staging evidence precedes release acceptance. See the service's
+[refresh runbook](../services/documentation-system/docs/DEPLOYMENT.md#source-access-refresh-schedule)
+for provisioning, Railway webhook and heartbeat alerts, limits, rotation, recovery,
+and the pending acceptance record. The 24-hour freshness / 48-hour expiry contract
+is unchanged.
 
 > **Gotcha — `src` package collision when minting keys.** Both
 > `services/team-tracking` and `services/documentation-system` declare a top-level
@@ -257,10 +276,11 @@ for batching and disabled-source behavior.
 > ([`packages/auth/platform_auth/hashing.py`](../packages/auth/platform_auth/hashing.py))
 > returns `None` for any token that doesn't start with the `tt_` envelope, so the
 > key is dead on arrival. This actually bit us during key provisioning. Always
-> invoke the CLI with the project pinned —
-> `uv --project services/team-tracking run team-tracking-keys …`, which
-> `scripts/provision-directory-key.sh` already does — and **verify the minted
-> token's prefix is `tt_`, not `doc_`, before wiring it as `DIRECTORY_API_KEY`.**
+> pin the service directory and invoke its module —
+> `uv --directory services/team-tracking --project . run python -m src.cli …`.
+> Project selection alone does not pin imports after all workspace members are
+> installed. **Verify the token prefix is `tt_` before wiring `DIRECTORY_API_KEY`.**
+> Gateway provisioning uses the same pattern; see its deployment runbook.
 
 ## 4b. Provision the `llm` + `meeting` + `connectors` consumer keys (manual)
 
@@ -295,15 +315,19 @@ stderr**. Wire them like this:
 Then redeploy the service whose `CONSUMER_KEYS` you changed — the store is
 built at boot, so the new key isn't live until it restarts.
 
-For an **approved internal embedding caller**, mint an additional key from the repo root:
+documentation-system indexes stored content through llm's `/embed`, so mint it an
+embedding key from the repo root:
 
 ```bash
-uv --project services/llm run llm-keys --name embedding-caller --scopes embed
+uv --project services/llm run llm-keys --name documentation-system --scopes embed
 ```
 
-Install it using [llm's consumer-key steps](../services/llm/docs/DEPLOYMENT.md#consumer-keys).
-`chat` does not grant `embed`; grant both only when needed. This provisions access,
-not a documentation-system indexing pipeline.
+Append the JSON entry to `llm`'s `CONSUMER_KEYS` and set the plaintext key as
+`documentation-system`'s `LLM_API_KEY` (see
+[llm's consumer-key steps](../services/llm/docs/DEPLOYMENT.md#consumer-keys)).
+`chat` does not grant `embed`; grant both only when needed. Like `CONNECTORS_API_KEY`,
+a missing key only logs a warning: docs are catalogued but not indexed until it is set,
+then `POST /docs/index` backfills them.
 
 **Revocation is a redeploy.** There is no `revoke` command; drop the entry from
 `CONSUMER_KEYS` and redeploy. `CONSUMER_KEYS` must stay a JSON **array** —
@@ -447,9 +471,9 @@ by an existing admin running `/seed` from Discord.
 - **APIs:** for each of the six services —
   `railway run --service <name> --environment <env> -- bash -c 'curl -s localhost:$PORT/health'`
   → `{"status":"ok"}`. `/health` is unauthenticated on every service, so no key
-  is needed. For team-tracking and documentation-system, also request
+  is needed. For team-tracking, documentation-system, and gateway, also request
   `/health/ready` to verify their own database connections; Railway uses that
-  path for those two services. For the three DB-backed services, pre-deploy
+  path for those services. For the four DB-backed services, pre-deploy
   logs should also show `alembic upgrade head` ran.
 - **Bot:** Railway checks `/health/ready` on its injected `PORT`. It returns
   `503` before Discord is ready or after a disconnect, and 200 once connected.
@@ -496,3 +520,55 @@ by an existing admin running `/seed` from Discord.
   don't "normalize" it, and keep `railway.json` and the Dockerfile `CMD` in step
   with each other. Railway reads `railway.json`, so that file is what actually
   governs the deploy.
+
+## Automatic sharing discovery
+
+The optional dedicated `doc-discover` cron service uses
+`services/documentation-system/railway.discovery.json` and the documentation-system
+image. It requires a persistent checkpoint volume, an environment/connector identity
+label, a catalog `docs:write` key and a connectors `discover` key. It has no migrations,
+HTTP healthcheck or automatic failure restart. Keep `DISCOVERY_ENABLED=false` until
+operators configure and approve staging acceptance. Do not enable PR-preview cron
+copies. Follow the [service runbook](../services/documentation-system/docs/DISCOVERY.md)
+for all settings, schedule, monitoring, recovery, member instructions and the separate
+production activation gate. Keep #292's existing-document refresh scheduled as well.
+
+## Meeting record persistence
+
+Deploy order for the durable Google Doc path:
+
+1. Configure the connector [Workspace OAuth writer and restricted root](../services/connectors/docs/DEPLOYMENT.md#meeting-writer-setup).
+   Use `drive.file`, explicitly grant the root to this OAuth app, and list the
+   owning/inherited infra admin principals. Keep the existing read account separate.
+2. Apply documentation-system migrations through **016** and deploy its
+   [meeting endpoints](../services/documentation-system/docs/API.md#meeting-records).
+   Its connector key needs `meeting-write,meeting-fetch` plus existing scopes.
+   Its directory key must read identifiers, channel teams and Google Group state.
+3. Issue a catalog key named for `meeting` with `meetings:write`; configure
+   `DOCS_BASE_URL`, `DOCS_API_KEY`, and optionally `RECORD_HANDOFF_HOLD_S` on meeting.
+4. Add `meetings:write` to the source-refresh cron key before deploying its
+   `--meeting-records` start command. The same monitored hourly staging job now
+   retries, reconciles and expires records. Production scheduling remains gated.
+5. Deploy the bot/meeting stop-context wire change together. The bot announces
+   persistence/consent before capture; `/record start save:false` opts out.
+   Configure voice-channel teams through `/channel-access` and healthy synced
+   Google Groups for member access. Missing coverage saves admin-only.
+6. For link delivery, add `meetings:read meetings:write` to the bot's
+   `DOC_API_KEY`. In each originating text channel/thread grant the bot View
+   Channel, Read Message History and Send Messages/Send Messages in Threads.
+   On Discord readiness the bot recovers saved records with pending/failed
+   delivery, then polls every ten minutes. No new cron or Google key is needed.
+
+Rollout checks use a consented staging meeting: explicit and empty-channel stop,
+Doc sections and full transcript, native MIME type and configured destination,
+team commenter access, catalog source grants, repeat stop/persistence, recovery
+from a connector outage, and catalog visibility after a restart. Real Google
+credentials are never used by automated tests. Keep the PDF behavior; #223 posts
+the already-created Doc link and records its Discord message ID for recovery
+and the existing admin-owned removal workflow. Test delivery failures separately
+from save failures and recover after a bot restart; see the bot's
+[delivery runbook](../discord-bot/docs/meeting-delivery.md). Follow the
+[record removal runbook](../services/documentation-system/docs/DEPLOYMENT.md#meeting-record-persistence)
+for failed, inaccessible or unsafe-ACL records. The generic `docs:purge` endpoint
+remains a rollout follow-up from #212; meeting removal already uses an internal
+atomic purge with restoration guards.

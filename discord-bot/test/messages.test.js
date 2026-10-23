@@ -11,11 +11,14 @@ import {
   renderRemoveMemberResult,
   renderRosterResult,
   renderMyTeamsResult,
+  renderGoogleGroupStatusResult,
+  renderGoogleGroupSyncResult,
 } from '../src/messages/team.js';
 import {
   renderDocAddResult,
   renderDocListResult,
   renderDocRemoveResult,
+  renderDocSearchResult,
 } from '../src/messages/doc.js';
 import { renderAddEmailResult, renderVerifyEmailResult } from '../src/messages/email.js';
 
@@ -130,11 +133,14 @@ test('buildWhoamiEmbed sorts identifiers alphabetically and formats handle vs no
     [
       { provider: 'github', external_id: '9876', handle: 'eeetan' },
       { provider: 'discord', external_id: '123', handle: 'alex' },
-      { provider: 'notion', external_id: 'notion-uuid', handle: null },
+      { provider: 'uoft_email', external_id: 'member@mail.utoronto.ca', handle: null },
     ],
   ).embeds[0];
   const byName = Object.fromEntries(embed.fields.map((f) => [f.name, f.value]));
-  assert.equal(byName['Identities'], 'discord: <@123>\ngithub: eeetan (9876)\nnotion: notion-uuid');
+  assert.equal(
+    byName['Identities'],
+    'discord: <@123>\ngithub: eeetan (9876)\nuoft_email: member@mail.utoronto.ca',
+  );
 });
 
 test('buildWhoamiEmbed renders discord identity as a mention (drops stored handle)', () => {
@@ -168,15 +174,291 @@ test('renderSeedResult covers outcomes', () => {
 });
 
 test('renderCreateTeamResult covers outcomes', () => {
-  assert.match(
-    renderCreateTeamResult({ outcome: 'CREATED', team: { slug: 'ml', label: 'ML' } }).content,
-    /ML|ml/,
-  );
+  const team = { slug: 'ml', label: 'ML' };
+  const needsSetup = renderCreateTeamResult({
+    outcome: 'CREATED',
+    team,
+    google: {
+      outcome: 'SYNC_RESULT',
+      state: {
+        group_email: 'ml@utmist.skule.ca',
+        group_name: 'groups/ml',
+        status: 'needs_external_members',
+        last_error: 'Allow external members',
+      },
+    },
+  }).content;
+  assert.match(needsSetup, /Created team.*ML/s);
+  assert.match(needsSetup, /Misty group owner/);
+  assert.match(needsSetup, /https:\/\/groups\.google\.com\/a\/utmist\.skule\.ca\/g\/ml\/settings/);
+  assert.match(needsSetup, /Allow external members/);
+  assert.match(needsSetup, /Who can add external members/);
+  assert.match(needsSetup, /UTMIST's Google administrator/);
+  assert.doesNotMatch(needsSetup, /infrastructure@|Super Admin|not yet verified/i);
+
+  // Settings verification also runs for empty groups; normal success needs no manual step.
+  const syncedFresh = renderCreateTeamResult({
+    outcome: 'CREATED',
+    team,
+    google: {
+      outcome: 'SYNC_RESULT',
+      state: { group_email: 'ml@utmist.skule.ca', group_name: 'groups/ml', status: 'synced' },
+    },
+  }).content;
+  assert.match(syncedFresh, /synced/i);
+  assert.doesNotMatch(syncedFresh, /groups\.google\.com|manual|Allow external members/);
+
+  const unconfigured = renderCreateTeamResult({
+    outcome: 'CREATED',
+    team,
+    google: { outcome: 'NOT_CONFIGURED' },
+  }).content;
+  assert.match(unconfigured, /Created team/);
+  assert.match(unconfigured, /not configured/i);
+  assert.doesNotMatch(unconfigured, /groups\.google\.com/);
+
   assert.match(renderCreateTeamResult({ outcome: 'SLUG_EXISTS', detail: 'x' }).content, /already/i);
   assert.match(
     renderCreateTeamResult({ outcome: 'DIRECTORY_DOWN' }).content,
     /unavailable|try again/i,
   );
+});
+
+test('renderGoogleGroupStatusResult covers outcomes', () => {
+  const team = { slug: 'ml', label: 'ML' };
+  assert.match(
+    renderGoogleGroupStatusResult({
+      outcome: 'STATUS',
+      team,
+      state: { group_email: 'ml@utmist.skule.ca', status: 'synced' },
+    }).content,
+    /synced/i,
+  );
+  const needs = renderGoogleGroupStatusResult({
+    outcome: 'STATUS',
+    team,
+    state: {
+      group_email: 'ml@utmist.skule.ca',
+      group_name: 'groups/ml',
+      status: 'needs_external_members',
+      last_error: 'Allow external members',
+    },
+  }).content;
+  assert.match(needs, /external-member/i);
+  assert.match(needs, /Who can add external members/);
+  assert.match(needs, /groups\.google\.com/);
+  assert.match(
+    renderGoogleGroupStatusResult({ outcome: 'NO_MAPPING', team }).content,
+    /No Google Group mapping/i,
+  );
+  assert.match(renderGoogleGroupStatusResult({ outcome: 'TEAM_NOT_FOUND' }).content, /no team/i);
+});
+
+test('renderGoogleGroupSyncResult covers outcomes', () => {
+  const team = { slug: 'ml', label: 'ML' };
+  assert.match(
+    renderGoogleGroupSyncResult({
+      outcome: 'SYNC_RESULT',
+      team,
+      state: { group_email: 'ml@utmist.skule.ca', status: 'failed', last_error: 'boom' },
+    }).content,
+    /failed|boom/i,
+  );
+  assert.match(
+    renderGoogleGroupSyncResult({ outcome: 'NOT_CONFIGURED' }).content,
+    /not configured/i,
+  );
+  assert.match(renderGoogleGroupSyncResult({ outcome: 'RETIRED_NO_GROUP' }).content, /retired/i);
+});
+
+test('settings failure offers automatic retry and manual recovery on every reply path', () => {
+  const team = { slug: 'renamed', label: 'Renamed' };
+  const state = {
+    group_email: 'original@staging.groups.utmist.ca',
+    group_name: 'groups/123',
+    status: 'failed',
+    last_error: 'group settings: HTTP 403; check Settings API authorization',
+  };
+  const replies = [
+    renderCreateTeamResult({ outcome: 'CREATED', team, google: { outcome: 'SYNC_RESULT', state } }),
+    renderGoogleGroupStatusResult({ outcome: 'STATUS', team, state }),
+    renderGoogleGroupSyncResult({ outcome: 'SYNC_RESULT', team, state }),
+  ];
+  for (const { content, ephemeral } of replies) {
+    assert.equal(ephemeral, true);
+    assert.match(content, /failed/i);
+    assert.match(content, /automatically/);
+    assert.match(content, /google-sync/);
+    assert.match(content, /UTMIST's Google administrator/);
+    assert.match(content, /API authorization/);
+    assert.match(content, /manual recovery/);
+    assert.match(content, /\/a\/staging\.groups\.utmist\.ca\/g\/original\/settings/);
+    assert.doesNotMatch(content, /infrastructure@|Super Admin|\/g\/renamed\//);
+  }
+});
+
+test('long group errors leave room for recovery instructions', () => {
+  const { content } = renderGoogleGroupSyncResult({
+    outcome: 'SYNC_RESULT',
+    team: { slug: 'ml', label: 'ML' },
+    state: {
+      group_email: 'ml@utmist.ca',
+      group_name: 'groups/123',
+      status: 'failed',
+      last_error: 'group settings: ' + 'failure; '.repeat(500),
+    },
+  });
+  assert.ok(content.length < 2000);
+  assert.match(content, /google-sync/);
+  assert.match(content, /manual recovery/);
+});
+
+test('unconfirmed group creation never offers settings actions on any reply path', () => {
+  const team = { slug: 'ml', label: 'ML' };
+  const state = {
+    group_email: 'ml@utmist.skule.ca',
+    group_name: null,
+    status: 'failed',
+    last_error: 'create group: ml@utmist.skule.ca is already in use by another group',
+  };
+  const replies = [
+    renderCreateTeamResult({ outcome: 'CREATED', team, google: { outcome: 'SYNC_RESULT', state } }),
+    renderGoogleGroupStatusResult({ outcome: 'STATUS', team, state }),
+    renderGoogleGroupSyncResult({ outcome: 'SYNC_RESULT', team, state }),
+  ];
+  for (const { content } of replies) {
+    assert.match(content, /already in use/);
+    assert.match(content, /google-sync/);
+    assert.doesNotMatch(content, /groups\.google\.com|Allow external members/);
+  }
+});
+
+test('group recovery uses the stored domain for each environment after a team rename', () => {
+  for (const domain of ['staging.groups.utmist.ca', 'utmist.ca', 'legacy.example.org']) {
+    const { content } = renderGoogleGroupStatusResult({
+      outcome: 'STATUS',
+      team: { slug: 'renamed', label: 'Renamed' },
+      state: {
+        group_email: `original@${domain}`,
+        group_name: 'groups/123',
+        status: 'needs_external_members',
+      },
+    });
+    assert.ok(content.includes(`https://groups.google.com/a/${domain}/g/original/settings`));
+    assert.doesNotMatch(content, /infrastructure@|utmist\.skule\.ca|\/g\/renamed\//);
+  }
+});
+
+test('group recovery does not invent a settings address when the stored email is missing', () => {
+  for (const group_email of [undefined, null, '', 'missing-domain', '@example.org', 'ml@']) {
+    const { content } = renderGoogleGroupStatusResult({
+      outcome: 'STATUS',
+      team: { slug: 'ml', label: 'ML' },
+      state: { group_email, group_name: 'groups/123', status: 'needs_external_members' },
+    });
+    assert.match(content, /needs external-member recovery/);
+    assert.doesNotMatch(content, /groups\.google\.com|utmist\.skule\.ca/);
+  }
+});
+
+test('a timed-out create probe preserves team success and directs the user to status', () => {
+  const { content } = renderCreateTeamResult({
+    outcome: 'CREATED',
+    team: { slug: 'ml', label: 'ML' },
+    google: { outcome: 'PENDING' },
+  });
+  assert.match(content, /Created team/);
+  assert.match(content, /provisioning.*progress/i);
+  assert.match(content, /google-status/);
+  assert.doesNotMatch(content, /groups\.google\.com|is \*\*synced\*\*/);
+});
+
+// #272 Done checklist — offline cases for Google Group setup / recovery replies.
+test('Google Group offline cases: in-progress, disabled, setup, empty synced, failed, recovery', () => {
+  const team = { slug: 'ml', label: 'ML' };
+
+  // Provisioning still in progress (no mapping yet).
+  const inProgress = renderGoogleGroupStatusResult({ outcome: 'NO_MAPPING', team }).content;
+  assert.match(inProgress, /No Google Group mapping/i);
+  assert.match(inProgress, /google-sync|Provisioning/i);
+
+  // Disabled integration — create must not present a settings link.
+  const disabled = renderCreateTeamResult({
+    outcome: 'CREATED',
+    team,
+    google: { outcome: 'NOT_CONFIGURED' },
+  }).content;
+  assert.match(disabled, /not configured/i);
+  assert.doesNotMatch(disabled, /groups\.google\.com/);
+  assert.match(
+    renderGoogleGroupSyncResult({ outcome: 'NOT_CONFIGURED' }).content,
+    /not configured/i,
+  );
+
+  // Setup required.
+  const setup = renderGoogleGroupSyncResult({
+    outcome: 'SYNC_RESULT',
+    team,
+    state: {
+      group_email: 'ml@utmist.skule.ca',
+      group_name: 'groups/ml',
+      status: 'needs_external_members',
+      last_error: 'Allow external members',
+    },
+  }).content;
+  assert.match(setup, /Allow external members/);
+  assert.match(setup, /Who can add external members/);
+  assert.match(setup, /groups\.google\.com/);
+
+  // Empty groups also pass backend settings verification before becoming synced.
+  const emptySynced = renderGoogleGroupStatusResult({
+    outcome: 'STATUS',
+    team,
+    state: { group_email: 'ml@utmist.skule.ca', status: 'synced' },
+  }).content;
+  assert.match(emptySynced, /synced/i);
+  assert.doesNotMatch(emptySynced, /groups\.google\.com|not proof|manual/i);
+
+  // Failed sync (generic + external-members flavored).
+  const failed = renderGoogleGroupSyncResult({
+    outcome: 'SYNC_RESULT',
+    team,
+    state: { group_email: 'ml@utmist.skule.ca', status: 'failed', last_error: 'timeout' },
+  }).content;
+  assert.match(failed, /failed/i);
+  assert.match(failed, /timeout/);
+  assert.doesNotMatch(failed, /groups\.google\.com|Allow external members/);
+  const failedExternal = renderGoogleGroupSyncResult({
+    outcome: 'SYNC_RESULT',
+    team,
+    state: {
+      group_email: 'ml@utmist.skule.ca',
+      group_name: 'groups/ml',
+      status: 'failed',
+      last_error: 'group rejects external members',
+    },
+  }).content;
+  assert.match(failedExternal, /Allow external members/);
+  assert.match(failedExternal, /groups\.google\.com/);
+
+  // Successful recovery after settings + sync.
+  const recovered = renderGoogleGroupSyncResult({
+    outcome: 'SYNC_RESULT',
+    team,
+    state: { group_email: 'ml@utmist.skule.ca', status: 'synced' },
+  }).content;
+  assert.match(recovered, /synced/i);
+  assert.match(recovered, /Google Group for \*\*ML\*\*/);
+
+  // Create-time probe could not reach Google — team still created, no fake ready group.
+  const probeDown = renderCreateTeamResult({
+    outcome: 'CREATED',
+    team,
+    google: { outcome: 'DIRECTORY_DOWN' },
+  }).content;
+  assert.match(probeDown, /Created team/);
+  assert.match(probeDown, /could not be checked|google-status/i);
+  assert.doesNotMatch(probeDown, /is \*\*synced\*\*/);
 });
 
 test('renderListTeamsResult covers outcomes', () => {
@@ -322,6 +604,8 @@ test('personal/admin render functions return ReplyPayload with ephemeral: true',
     renderAddMemberResult({ outcome: 'DIRECTORY_DOWN' }),
     renderRemoveMemberResult({ outcome: 'DIRECTORY_DOWN' }),
     renderMyTeamsResult({ outcome: 'DIRECTORY_DOWN' }),
+    renderGoogleGroupStatusResult({ outcome: 'DIRECTORY_DOWN' }),
+    renderGoogleGroupSyncResult({ outcome: 'DIRECTORY_DOWN' }),
   ];
   for (const p of payloads) {
     assert.equal(typeof p.content, 'string');
@@ -408,8 +692,51 @@ test('renderDocRemoveResult REMOVED is ephemeral', () => {
   assert.match(r.content, /removed/i);
 });
 
+test('renderDocSearchResult FOUND numbers docs in rank order with titles and links', () => {
+  const r = renderDocSearchResult({
+    outcome: 'FOUND',
+    docs: [
+      { id: 'd2', title: 'Team A guide', url: 'https://example.test/a', source_id: 'gdocs' },
+      { id: 'd1', title: null, url: 'https://example.test/untitled', source_id: 'gdocs' },
+    ],
+  });
+  assert.equal(
+    r.content,
+    [
+      '1. **Team A guide** · gdocs — <https://example.test/a>',
+      '2. **https://example.test/untitled** · gdocs — <https://example.test/untitled>',
+    ].join('\n'),
+  );
+  assert.doesNotMatch(r.content, /d1|d2/);
+});
+
+test('renderDocSearchResult covers NO_MATCH, EMPTY_QUERY, QUERY_TOO_LONG, and unknown outcomes', () => {
+  assert.match(renderDocSearchResult({ outcome: 'NO_MATCH' }).content, /no documents/i);
+  assert.match(renderDocSearchResult({ outcome: 'EMPTY_QUERY' }).content, /enter something/i);
+  assert.match(renderDocSearchResult({ outcome: 'QUERY_TOO_LONG' }).content, /too long/i);
+  assert.match(renderDocSearchResult({ outcome: 'WAT' }).content, /something went wrong/i);
+});
+
+test('renderDocSearchResult is always ephemeral', () => {
+  for (const result of [
+    { outcome: 'FOUND', docs: [{ id: 'd1', title: 'T', url: 'https://x.com' }] },
+    { outcome: 'NO_MATCH' },
+    { outcome: 'EMPTY_QUERY' },
+    { outcome: 'QUERY_TOO_LONG' },
+    { outcome: 'DOC_DOWN' },
+    { outcome: 'WAT' },
+  ]) {
+    assert.equal(renderDocSearchResult(result).ephemeral, true);
+  }
+});
+
 test('doc renderers map DOC_DOWN', () => {
-  for (const fn of [renderDocAddResult, renderDocListResult, renderDocRemoveResult]) {
+  for (const fn of [
+    renderDocAddResult,
+    renderDocListResult,
+    renderDocRemoveResult,
+    renderDocSearchResult,
+  ]) {
     assert.match(fn({ outcome: 'DOC_DOWN' }).content, /unavailable/i);
   }
 });

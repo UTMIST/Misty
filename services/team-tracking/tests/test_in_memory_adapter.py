@@ -1,3 +1,5 @@
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from uuid import uuid4
 
@@ -426,7 +428,6 @@ def test_list_and_get_providers():
     assert {p.id for p in a.list_providers()} == {
         "discord",
         "github",
-        "notion",
         "uoft_email",
         "email",
     }
@@ -680,6 +681,72 @@ def test_channel_teams_replace_retire_clear(adapter):
     adapter.clear_channel_teams("1", "2")
     assert adapter.get_channel_teams("1", "2").team_ids == []
     adapter.clear_channel_teams("1", "2")
+
+
+def test_channel_teams_append_unions(adapter):
+    a = adapter.create_team(TeamCreate(slug="a", label="A"), actor="t")
+    b = adapter.create_team(TeamCreate(slug="b", label="B"), actor="t")
+    adapter.replace_channel_teams("1", "2", [a.id], actor="bot")
+    out = adapter.append_channel_teams("1", "2", [b.id, a.id], actor="bot")
+    assert out.team_ids == sorted([a.id, b.id])
+    assert adapter.get_channel_teams("1", "2").team_ids == sorted([a.id, b.id])
+
+
+@pytest.mark.parametrize("competing_write", ["append", "replace", "clear"])
+def test_channel_teams_append_serializes_with_other_writes(adapter, monkeypatch, competing_write):
+    a = adapter.create_team(TeamCreate(slug="a", label="A"), actor="t")
+    b = adapter.create_team(TeamCreate(slug="b", label="B"), actor="t")
+    c = adapter.create_team(TeamCreate(slug="c", label="C"), actor="t")
+    adapter.replace_channel_teams("1", "2", [a.id], actor="original")
+    read_paused, resume = threading.Event(), threading.Event()
+    competing_started, competing_finished = threading.Event(), threading.Event()
+    get_channel_teams = adapter.get_channel_teams
+
+    def pause_after_first_read(guild_id, channel_id):
+        current = get_channel_teams(guild_id, channel_id)
+        if not read_paused.is_set():
+            read_paused.set()
+            assert resume.wait(5), "append was never resumed"
+        return current
+
+    monkeypatch.setattr(adapter, "get_channel_teams", pause_after_first_read)
+
+    def write():
+        competing_started.set()
+        if competing_write == "clear":
+            adapter.clear_channel_teams("1", "2")
+        else:
+            method = getattr(adapter, f"{competing_write}_channel_teams")
+            method("1", "2", [c.id], actor="second")
+        competing_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        appending = pool.submit(adapter.append_channel_teams, "1", "2", [b.id], actor="first")
+        try:
+            assert read_paused.wait(5), "append never read the current teams"
+            competing = pool.submit(write)
+            assert competing_started.wait(5), "competing writer never started"
+            finished_while_paused = competing_finished.wait(0.2)
+        finally:
+            resume.set()
+        appending.result(timeout=5)
+        competing.result(timeout=5)
+
+    expected = {"append": [a.id, b.id, c.id], "replace": [c.id], "clear": []}
+    assert adapter.get_channel_teams("1", "2").team_ids == sorted(expected[competing_write])
+    assert not finished_while_paused, "writer bypassed the in-flight append"
+
+
+def test_channel_teams_empty_append_is_true_noop(adapter):
+    a = adapter.create_team(TeamCreate(slug="a", label="A"), actor="t")
+    b = adapter.create_team(TeamCreate(slug="b", label="B"), actor="t")
+    adapter.replace_channel_teams("1", "2", [a.id, b.id], actor="bot")
+    adapter.update_team(b.id, TeamUpdate(active=False), actor="t")
+    out = adapter.append_channel_teams("1", "2", [], actor="other")
+    assert out.team_ids == [a.id]
+    assert out.updated_by == "bot"
+    adapter.update_team(b.id, TeamUpdate(active=True), actor="t")
+    assert adapter.get_channel_teams("1", "2").team_ids == sorted([a.id, b.id])
 
 
 def test_channel_version_survives_out_of_order_retirement(adapter, monkeypatch):

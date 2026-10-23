@@ -7,6 +7,8 @@ import {
   renderAddMemberResult,
   renderRemoveMemberResult,
   renderRosterResult,
+  renderGoogleGroupStatusResult,
+  renderGoogleGroupSyncResult,
 } from '../messages/team.js';
 
 const ROLE_CHOICES = [
@@ -177,6 +179,50 @@ export default defineCommand({
         if (options.as_of !== null && options.as_of !== undefined) args.asOf = options.as_of;
         const result = await ctx.teamService.getRoster(args, { caller });
         return renderRosterResult(result);
+      },
+    },
+    {
+      name: 'google-status',
+      description: "Show a team's Google Group sync status (admin)",
+      auth: 'admin',
+      options: [
+        {
+          name: 'team',
+          type: 'string',
+          required: true,
+          description: 'Team slug',
+          autocomplete: allTeamsAutocomplete,
+        },
+      ],
+      async handler({ options, principal, ctx }) {
+        const caller = principal?.person;
+        const result = await ctx.teamService.getGoogleGroupStatus(
+          { teamSlug: options.team },
+          { caller },
+        );
+        return renderGoogleGroupStatusResult(result);
+      },
+    },
+    {
+      name: 'google-sync',
+      description: 'Retry Google Group sync and automatic settings (admin)',
+      auth: 'admin',
+      options: [
+        {
+          name: 'team',
+          type: 'string',
+          required: true,
+          description: 'Team slug',
+          autocomplete: allTeamsAutocomplete,
+        },
+      ],
+      async handler({ options, principal, ctx }) {
+        const caller = principal?.person;
+        const result = await ctx.teamService.syncGoogleGroup(
+          { teamSlug: options.team },
+          { caller },
+        );
+        return renderGoogleGroupSyncResult(result);
       },
     },
   ],

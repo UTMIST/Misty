@@ -368,3 +368,140 @@ def test_discard_after_grace_leaves_a_session_that_stop_already_claimed():
     asyncio.run(_discard_after_grace(registry, session, "claimed", 0))
 
     assert session.discard_called is False
+
+
+def test_qna_endpoint_passes_validated_question_and_preserves_references(
+    client, registry, consumer_key
+):
+    from src.contracts import QnaResponse, QnaReference
+
+    session = registry.create("s1", "g1")
+    calls = []
+
+    async def qna(question):
+        calls.append(question)
+        return QnaResponse(
+            answer="Friday",
+            references=[QnaReference(speaker="Alice", start_ms=12)],
+            window_start_ms=0,
+            window_end_ms=123000,
+        )
+
+    session.qna = qna
+    response = client.post(
+        "/meetings/s1/qna", json={"question": " When? "}, headers={"X-API-Key": consumer_key}
+    )
+    assert response.status_code == 200
+    assert calls == ["When?"]
+    assert response.json()["references"] == [{"speaker": "Alice", "start_ms": 12}]
+
+
+@pytest.mark.parametrize("question", ["", " \n ", "x" * 1001, None])
+def test_qna_invalid_questions_fail_before_session_or_provider(
+    client, registry, consumer_key, question
+):
+    assert (
+        client.post(
+            "/meetings/unknown/qna",
+            json={"question": question},
+            headers={"X-API-Key": consumer_key},
+        ).status_code
+        == 422
+    )
+
+
+def test_qna_auth_and_unknown_session(client, consumer_key, store):
+    assert client.post("/meetings/s/qna", json={"question": "What?"}).status_code == 401
+    assert (
+        client.post(
+            "/meetings/unknown/qna", json={"question": "What?"}, headers={"X-API-Key": consumer_key}
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            "/meetings/bad.id/qna", json={"question": "What?"}, headers={"X-API-Key": consumer_key}
+        ).status_code
+        == 400
+    )
+    plaintext, prefix, key_hash = generate_key()
+    store.add(prefix=prefix, key_hash=key_hash, name="no-scope", scopes=[])
+    assert (
+        client.post(
+            "/meetings/s/qna", json={"question": "What?"}, headers={"X-API-Key": plaintext}
+        ).status_code
+        == 403
+    )
+
+
+@pytest.mark.parametrize(
+    "kind,status",
+    [
+        ("stopping", 409),
+        ("busy", 429),
+        ("closed", 503),
+        ("too-large", 413),
+        ("invalid", 502),
+        ("unavailable", 503),
+        ("timeout", 504),
+    ],
+)
+def test_qna_failures_are_safe_and_typed(client, registry, consumer_key, caplog, kind, status):
+    from src.pipeline.llm_client import LlmTimeout, LlmUnavailable
+    from src.pipeline.qna import QnaInvalidResponse, QnaWindowTooLarge
+    from src.pipeline.qna_runner import QnaBusy, QnaRunnerClosed
+    from src.sessions import MeetingNotActiveError
+
+    errors = {
+        "stopping": MeetingNotActiveError,
+        "busy": QnaBusy,
+        "closed": QnaRunnerClosed,
+        "too-large": QnaWindowTooLarge,
+        "invalid": QnaInvalidResponse,
+        "unavailable": LlmUnavailable,
+        "timeout": LlmTimeout,
+    }
+    session = registry.create("s", "g")
+
+    async def qna(question):
+        raise errors[kind]("PRIVATE DOCUMENT CONTENT")
+
+    session.qna = qna
+    response = client.post(
+        "/meetings/s/qna",
+        json={"question": "PRIVATE QUESTION"},
+        headers={"X-API-Key": consumer_key},
+    )
+    assert response.status_code == status
+    assert "PRIVATE" not in response.text
+    assert "PRIVATE" not in caplog.text
+
+
+def test_qna_malformed_upstream_envelope_returns_safe_provider_error(
+    client, registry, consumer_key, monkeypatch, caplog
+):
+    import httpx
+    from src.pipeline.llm_client import LlmClient
+    from src.pipeline.qna import answer_question
+
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda url, **kwargs: httpx.Response(
+            200, json=["PRIVATE CONTENT"], request=httpx.Request("POST", url)
+        ),
+    )
+    session = registry.create("s", "g")
+
+    async def qna(question):
+        return answer_question(session._segments, 1, question, LlmClient("http://fake", "key"))
+
+    session.qna = qna
+    response = client.post(
+        "/meetings/s/qna",
+        json={"question": "PRIVATE QUESTION"},
+        headers={"X-API-Key": consumer_key},
+    )
+    assert response.status_code == 503
+    assert "PRIVATE" not in response.text
+    assert "PRIVATE" not in caplog.text

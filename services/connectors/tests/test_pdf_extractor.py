@@ -1,7 +1,10 @@
 import io
+import logging
 
 import pytest
+from drive_http import DriveHttp, drive_service
 from pypdf import PdfWriter
+from pypdf.generic import NumberObject, TextStringObject
 
 from src.sources.base import SourceUnsupported
 from src.sources.google_extractors.pdf import PdfExtractor
@@ -9,27 +12,23 @@ from src.sources.google_extractors.pdf import PdfExtractor
 PDF_MIME_TYPE = "application/pdf"
 
 
-class _FakeFiles:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def get(self, *, fileId, alt=None):
-        return self
-
-    def execute(self):
-        return self._payload
-
-
-class _FakeDrive:
-    def __init__(self, payload):
-        self._files = _FakeFiles(payload)
-
-    def files(self):
-        return self._files
+@pytest.fixture
+def application_logs():
+    # pytest also attaches capture handlers directly to non-propagating
+    # loggers. Observe the application's root output separately.
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logger = logging.getLogger()
+    logger.addHandler(handler)
+    try:
+        yield stream
+    finally:
+        logger.removeHandler(handler)
 
 
 def _extract(payload: bytes):
-    return PdfExtractor().extract({"drive": _FakeDrive(payload)}, "file123", PDF_MIME_TYPE)
+    drive = drive_service(DriveHttp(payload, PDF_MIME_TYPE))
+    return PdfExtractor().extract({"drive": drive}, "file123", PDF_MIME_TYPE)
 
 
 def _blank_pdf(pages: int = 1, encrypt: str | None = None) -> bytes:
@@ -72,6 +71,45 @@ def test_an_encrypted_pdf_is_unsupported():
 def test_corrupt_bytes_are_unsupported_not_unavailable():
     with pytest.raises(SourceUnsupported):
         _extract(b"this is definitely not a pdf")
+
+
+def test_recoverable_pdf_does_not_log_document_content(caplog, capsys, application_logs):
+    # pypdf recovers this malformed key but includes its value in a warning.
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    writer.root_object[TextStringObject("PRIVATE_DOCUMENT_SENTINEL")] = NumberObject(1)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+
+    with caplog.at_level(logging.DEBUG):
+        result = _extract(buffer.getvalue())
+        logging.getLogger("connectors.audit").info("fetch completed")
+
+    assert result.text == "## Page 1"
+    assert "no extractable text layer" in result.warnings[0]
+    assert "PRIVATE_DOCUMENT_SENTINEL" not in application_logs.getvalue() + capsys.readouterr().err
+    assert "fetch completed" in caplog.text
+
+
+def test_unreadable_pdf_does_not_log_document_content(caplog, capsys, application_logs):
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(SourceUnsupported, match="pdf could not be parsed") as exc:
+            _extract(b"PRIVATE_DOCUMENT_SENTINEL is not a PDF")
+
+    assert "PRIVATE" not in str(exc.value)
+    assert "PRIVA" not in application_logs.getvalue() + capsys.readouterr().err
+
+
+@pytest.mark.parametrize("level", [logging.WARNING, logging.ERROR, logging.CRITICAL])
+def test_pypdf_child_diagnostics_are_silent_even_with_an_explicit_level(
+    caplog, capsys, application_logs, level
+):
+    # A parent logger's level/disabled flag does not block a child with its
+    # own level; error diagnostics can contain document bytes too.
+    with caplog.at_level(logging.DEBUG, logger="pypdf._page"):
+        logging.getLogger("pypdf._page").log(level, "PRIVATE_DOCUMENT_SENTINEL")
+
+    assert "PRIVATE_DOCUMENT_SENTINEL" not in application_logs.getvalue() + capsys.readouterr().err
 
 
 def test_page_text_appears_under_its_own_heading(monkeypatch):
