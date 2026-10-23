@@ -64,7 +64,7 @@ All settings load from the environment (`src/config.py`, `.env` in dev):
 | `GOOGLE_CREDENTIALS_JSON` | `""` | Base64 of the Google service-account JSON key file. Empty is a valid running state — see the runbook below. |
 | `GITHUB_TOKEN` | `""` | Optional fine-grained, read-only GitHub PAT (Contents: read). Empty fetches public repositories only; private ones then return 404. Never part of the boot check. |
 | `MAX_CONTENT_CHARS` | `1200000` | Transport guard: truncates fetched content above this length. Deliberately set above documentation-system's own `MAX_CONTENT_CHARS` (1,000,000) so that clamp — not this one — is the one that actually trips and reports a truncation warning. |
-| `MAX_FILE_BYTES` | `26214400` | Pre-download limit for uploaded PDFs, `.docx` files, `text/*` media, and GitHub files (25 MiB). Oversized files are rejected before download; native Google editor types are not checked here. |
+| `MAX_FILE_BYTES` | `26214400` | Metadata precheck and streamed byte cap for uploaded PDFs, `.docx` files, `text/*` media, and GitHub files (25 MiB). Native Google editor API responses/exports are exempt. |
 | `REQUEST_TIMEOUT_S` | `30` | Per-request timeout to upstream sources (seconds). |
 
 ## Auth model
@@ -191,7 +191,13 @@ Two cases are lossy by design:
 - **A spreadsheet tab larger than `MAX_ROWS_PER_TAB` (2000 rows).** Every tab of a spreadsheet is read (there is no first-tab-only limitation), but a tab over the cap is truncated to the first 2000 rows and a warning naming the tab and its real row count is added to the response's `warnings` list. Slides and Docs have no equivalent size cap.
 - **A scanned PDF with no text layer.** `pypdf` extracts embedded text; it does not run OCR. If every page of a PDF yields no text (the telltale sign of a scanned-image-only document), the extractor emits the `## Page N` headers but no page content, plus a warning that no text layer was found. OCR is out of scope.
 
-Uploaded PDFs, `.docx` files, `text/*` files, and GitHub files larger than `MAX_FILE_BYTES` are rejected before their bytes are downloaded or parsed, with a `422` error (for GitHub, a `HEAD` request reads the file's size before any bytes are fetched; a file whose size GitHub does not report is rejected too, and the streamed download stops at the limit as a backstop). Native Google Docs, Sheets, Slides, and Forms use their native APIs; Drive metadata may omit `size` for those types and that omission does not reject them. If Drive omits the size for a media file, the pre-download guard cannot establish a limit and allows the request to continue.
+Uploaded PDFs, `.docx` files, `text/*` files, and GitHub files larger than
+`MAX_FILE_BYTES` return `422`. Known oversized files are rejected before download;
+the streamed body is also capped before parsing, covering missing or stale Drive
+`size` metadata and files that grow after the metadata read. GitHub requires a
+size from its raw-file `HEAD` request. Native Google editor API responses and
+exports are exempt. See [download bounds](docs/ARCHITECTURE.md#where-the-truncation-actually-happens)
+for the transport and parser-memory limits.
 
 ### Running without Google access
 

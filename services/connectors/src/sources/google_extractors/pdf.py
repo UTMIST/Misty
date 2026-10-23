@@ -6,6 +6,7 @@ new API client. pypdf rather than pymupdf: pymupdf is AGPL.
 """
 
 import io
+import logging
 
 import pypdf
 
@@ -18,6 +19,13 @@ PDF_MIME = "application/pdf"
 NO_TEXT_LAYER_WARNING = (
     "pdf has no extractable text layer (likely a scanned document); no content was captured"
 )
+
+# Malformed PDFs can put document text in pypdf diagnostics. Stop child
+# records at the package boundary, including ERRORs and explicit child levels.
+# Configure once: toggling logging around extraction races concurrent fetches.
+_pypdf_logger = logging.getLogger("pypdf")
+_pypdf_logger.addHandler(logging.NullHandler())
+_pypdf_logger.propagate = False
 
 
 class PdfExtractor:

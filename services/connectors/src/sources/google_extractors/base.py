@@ -45,10 +45,14 @@ def execute(request):
     """
     from googleapiclient.errors import HttpError
 
-    from src.sources.base import SourceForbidden, SourceNotFound, SourceUnavailable
+    from src.sources.base import SourceError, SourceForbidden, SourceNotFound, SourceUnavailable
 
     try:
         return request.execute()
+    except SourceError:
+        # The bounded media transport already classified this failure (e.g.
+        # a file exceeding MAX_FILE_BYTES is unsupported, not an upstream 502).
+        raise
     except HttpError as e:
         status = getattr(getattr(e, "resp", None), "status", None)
         if status == 403:

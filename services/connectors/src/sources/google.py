@@ -255,10 +255,15 @@ class GoogleSource:
         import httplib2
         from googleapiclient.discovery import build
 
+        from src.sources.google_http import BoundedDriveHttp
+
         def _client(name: str, version: str):
-            authed = google_auth_httplib2.AuthorizedHttp(
-                credentials, http=httplib2.Http(timeout=self._request_timeout_s)
-            )
+            http = httplib2.Http(timeout=self._request_timeout_s)
+            if name == "drive":
+                http = BoundedDriveHttp(
+                    http, max_file_bytes=self._max_file_bytes, timeout=self._request_timeout_s
+                )
+            authed = google_auth_httplib2.AuthorizedHttp(credentials, http=http)
             return build(name, version, http=authed, cache_discovery=False)
 
         clients = {}
