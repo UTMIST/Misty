@@ -116,8 +116,9 @@ class StorageAdapter(Protocol):
         self, meeting_id: UUID, google_document_ids: list[str], *, actor: str
     ) -> MeetingRecord:
         """For an already marked removal, atomically fence the supplied Google
-        identities plus the canonical ID and purge ALL matching catalog aliases
-        and the linked doc_id. Serialize with ordinary Google insertion so an
+        identities plus the canonical ID and every google_deletions identity
+        (pending or confirmed), and purge ALL matching catalog aliases and the
+        linked doc_id. Serialize with ordinary Google insertion so an
         earlier insert is purged and a later insert refuses the tombstone.
         Persist the union of identities for future ingestion and late cleanup.
         Raise ValueError for an unknown or unmarked meeting. Return latest record.

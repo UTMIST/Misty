@@ -745,6 +745,9 @@ days in failed state, the pending transcript is cleared; the Discord PDF is the
 fallback if no Google Doc was adopted. Expiry and explicit removal purge the
 catalog even if Google cleanup still needs retries.
 
+Historical confirmed and pending `google_deletions` IDs are also purged from the
+catalog when removal runs; old tombstones are repaired by recurring reconciliation.
+
 Saved records with `index_pending=true` retry indexing on the next due run, with
 a five-minute retry delay, without another Google write.
 

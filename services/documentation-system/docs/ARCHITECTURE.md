@@ -837,7 +837,8 @@ Migration 016 adds per-file `google_deletions` intent and confirmation state.
 The coordinator commits intent before issuing a Google delete, and never adopts
 an identity carrying that intent, even after a timeout or restart. Explicit
 retry creates a new Doc from the retained payload when only fenced files remain.
-Confirmed deletions are skipped on subsequent cleanup passes. Successful
+Confirmed deletions are skipped on subsequent cleanup passes, but their identities
+remain in the atomic removal purge and registration fence. Successful
 reconciliation clears its own transient error while retaining unrelated errors.
 
 The removal marker retries version conflicts before proceeding.

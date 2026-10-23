@@ -86,6 +86,13 @@ meeting cases exercise real retry and runner endpoints against both adapters;
 runner tests reject incomplete or inconsistent counts. API, architecture and
 deployment docs describe the response and rollout order.
 
+The historical-duplicate removal fix updates the storage Protocol and both
+adapters so atomic removal purges include all per-file deletion identities,
+including previously confirmed duplicates absent from owner search. Shared meeting
+cases cover ordinary ingestion, authenticated search, prior reconciliation and
+removal against both adapters. API, architecture and deployment docs explain the
+expanded identity set and recovery contract. No schema change is needed.
+
 | File | Why it changes |
 |---|---|
 | [Makefile](../Makefile) | Fix shell quoting so the Node version precheck runs instead of passing literal line continuations to JavaScript. |

@@ -41,6 +41,12 @@ def payload():
 
 
 class Directory:
+    def get_active_team_ids(self, person_id):
+        return frozenset({TEAM})
+
+    def get_source_access_team_ids(self, person_id):
+        return frozenset({TEAM})
+
     def get_team_label(self, team_id):
         return "Team" if team_id == TEAM else None
 
@@ -145,7 +151,7 @@ class MeetingRecordCases:
     @pytest.fixture
     def meeting_api(self, flow):
         from src.api.app import create_app
-        from src.api.deps import get_directory, get_fetchers, get_storage
+        from src.api.deps import get_directory, get_embeddings, get_fetchers, get_storage
         from src.api.routers.meeting_records import get_records
         from src.google_identity import google_file_id
 
@@ -154,6 +160,11 @@ class MeetingRecordCases:
         app.dependency_overrides[get_storage] = lambda: records.storage
         app.dependency_overrides[get_directory] = lambda: records.directory
         app.dependency_overrides[get_records] = lambda: records
+        app.dependency_overrides[get_embeddings] = lambda: SimpleNamespace(
+            embed_query=lambda query: QueryEmbedding(
+                model=records.embedder.model, vector=fake_vector(query)
+            )
+        )
         app.dependency_overrides[get_fetchers] = lambda: SimpleNamespace(
             meeting_writer=writer, fetch_for=lambda source, url: writer.fetch(google_file_id(url))
         )
@@ -328,6 +339,61 @@ class MeetingRecordCases:
         assert not records.storage.get_doc_content(doc_id)
         assert not records.storage.list_grants(doc_id)
         assert not records.storage.list_doc_chunks(doc_id)
+
+    @pytest.mark.parametrize("deletion_state", ["pending", "confirmed"])
+    def test_removal_purges_previously_reconciled_duplicate_identities(
+        self, flow, meeting_api, deletion_state
+    ):
+        from src.api.hashing import generate_key
+
+        records, writer, clock, original = flow
+        client, headers = meeting_api
+        records.advance(original.meeting_id)
+        writer.docs["duplicate"] = TaggedDoc(
+            document_id="duplicate", attempt_id=uuid4(), created_at=NOW, trashed=False
+        )
+        url = "https://docs.google.com/document/d/duplicate/edit"
+        response = client.post("/docs", headers=headers, json={"url": url})
+        assert response.status_code == 201, response.text
+        doc_id = UUID(response.json()["doc"]["id"])
+        token, prefix, key_hash = generate_key()
+        records.storage.create_api_key(
+            name="meeting-reader",
+            prefix=prefix,
+            key_hash=key_hash,
+            scopes=["docs:read", "act-as-user"],
+            actor="test",
+        )
+        reader = {"X-API-Key": token, "X-On-Behalf-Of": str(PERSON)}
+        response = client.post("/search", headers=reader, json={"query": "Google body"})
+        assert response.status_code == 200, response.text
+        assert str(doc_id) in {hit["doc_id"] for hit in response.json()["results"]}
+        writer.delete_fails = deletion_state == "pending"
+        clock[0] += timedelta(hours=1)
+        records.reconcile(original.meeting_id)
+        assert (
+            records.storage.get_meeting(original.meeting_id).google_deletions["duplicate"]
+            == deletion_state
+        )
+        # A pending delete may complete without acknowledgement; neither state
+        # is guaranteed to remain visible to a later owner search.
+        writer.docs.pop("duplicate", None)
+        writer.delete_fails = False
+        response = client.post(f"/meeting-records/{original.meeting_id}/remove", headers=headers)
+        assert response.status_code == 200, response.text
+        removed = records.storage.get_meeting(original.meeting_id)
+        assert "duplicate" in removed.removed_google_document_ids
+        doc = records.storage.get_doc(doc_id)
+        assert doc.purged_at and not doc.active and doc.content_snapshot is None
+        assert not records.storage.get_doc_content(doc_id)
+        assert not records.storage.list_grants(doc_id)
+        assert not records.storage.list_doc_chunks(doc_id)
+        response = client.post("/search", headers=reader, json={"query": "Google body"})
+        assert response.status_code == 200 and response.json()["results"] == []
+        assert client.post("/docs", headers=headers, json={"url": url}).status_code == 400
+        # Google URL aliases must observe the same permanent identity fence.
+        alias = "https://docs.google.com/document/u/0/d/duplicate/edit"
+        assert client.post("/docs", headers=headers, json={"url": alias}).status_code == 400
 
     def test_removal_retries_marker_when_background_finalization_wins_cas(
         self, flow, meeting_api, monkeypatch

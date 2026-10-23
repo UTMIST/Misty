@@ -281,7 +281,11 @@ class PostgresStorageAdapter:
             current = self.get_meeting(meeting_id)
             if current is None or not current.removed_at:
                 raise ValueError("meeting removal marker required")
-            identities = set(current.removed_google_document_ids) | set(google_document_ids)
+            identities = (
+                set(current.removed_google_document_ids)
+                | set(google_document_ids)
+                | set(current.google_deletions)
+            )
             if current.google_document_id:
                 identities.add(current.google_document_id)
             for file_id in sorted(identities):
