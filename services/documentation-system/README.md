@@ -405,6 +405,11 @@ the API's production boot check does not read these runner-only settings.
 | `DISCOVERY_MAX_SECONDS` | `900` | Budget for starting requests; finite and positive |
 | `DISCOVERY_TIMEOUT_SECONDS` | `120` | HTTP phase timeout; finite and positive |
 | `DISCOVERY_EXCLUDED_IDS` | `[]` | JSON array of file/folder ids excluded from discovery |
+| `DISCOVERY_MONITOR_URL` | empty | Secret HTTPS heartbeat URL for invocation failures, missing runs and stuck runs |
+| `DISCOVERY_COMPLETION_MONITOR_URL` | empty | Separate secret HTTPS check, reset only by a clean full scan |
+
+The staging command uses `--require-monitor`, which requires both checks before
+API work. Each URL belongs to discovery only; do not reuse the refresh check.
 
 See the [operator runbook](docs/DISCOVERY.md) for scheduling, bounds, recovery,
 limitations and the staging acceptance gate. Production activation is separate.

@@ -526,7 +526,11 @@ by an existing admin running `/seed` from Discord.
 The optional dedicated `doc-discover` cron service uses
 `services/documentation-system/railway.discovery.json` and the documentation-system
 image. It requires a persistent checkpoint volume, an environment/connector identity
-label, a catalog `docs:write` key and a connectors `discover` key. It has no migrations,
+label, a catalog `docs:write` key and a connectors `discover` key. The staging command
+adds `--require-monitor`: provision `DISCOVERY_MONITOR_URL` and the separate
+`DISCOVERY_COMPLETION_MONITOR_URL` as secrets using the
+[monitoring runbook](../services/documentation-system/docs/DISCOVERY.md#failure-stuck-run-and-completion-alerts).
+It has no migrations,
 HTTP healthcheck or automatic failure restart. Keep `DISCOVERY_ENABLED=false` until
 operators configure and approve staging acceptance. Do not enable PR-preview cron
 copies. Follow the [service runbook](../services/documentation-system/docs/DISCOVERY.md)
