@@ -299,3 +299,44 @@ def test_clear_doc_index_removes_chunks(storage, embedder):
     index_doc(doc.id, storage=storage, embedder=embedder)
     assert clear_doc_index(doc.id, storage=storage).status == "cleared"
     assert storage.list_doc_chunks(doc.id) == []
+
+
+# --- Re-embedding after a model change (#209) ---
+
+LARGE_MODEL = "text-embedding-3-large"
+
+
+def _models(storage, doc_id):
+    return sorted(storage.get_doc_index_states(doc_id))
+
+
+def test_failing_target_never_holds_back_the_served_set(storage, embedder):
+    doc = _doc(storage)
+    target = FakeEmbedder(model=LARGE_MODEL, fail_on_call=1)
+
+    outcome = index_doc(doc.id, storage=storage, embedder=embedder, target=target)
+
+    assert outcome.status == "failed"
+    assert LARGE_MODEL in outcome.detail
+    assert _models(storage, doc.id) == [FAKE_MODEL]
+    assert doc.id in storage.list_docs_for_indexing(models=[FAKE_MODEL, LARGE_MODEL])
+
+
+def test_interrupted_reembed_resumes_without_repeating_finished_docs(storage, embedder):
+    docs = [_doc(storage, f"Doc {i}: UTMIST sponsors fund CPSIF.") for i in range(3)]
+    for doc in docs:
+        index_doc(doc.id, storage=storage, embedder=embedder)
+    target = FakeEmbedder(model=LARGE_MODEL, fail_on_call=2)
+    models = [FAKE_MODEL, LARGE_MODEL]
+
+    def run():
+        # What an operator's POST /docs/index loop does, one listing page.
+        due = storage.list_docs_for_indexing(models=models)
+        return [index_doc(d, storage=storage, embedder=embedder, target=target).status for d in due]
+
+    assert run() == ["indexed", "failed", "indexed"]
+    assert run() == ["indexed"]  # only the doc that failed
+    assert run() == []
+    assert len(target.calls) == 4  # three docs plus the one failed attempt
+    assert len(embedder.calls) == 3  # served sets were never re-embedded
+    assert all(_models(storage, d.id) == [LARGE_MODEL, FAKE_MODEL] for d in docs)

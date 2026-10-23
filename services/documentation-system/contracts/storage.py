@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
@@ -10,6 +11,7 @@ from contracts.types import (
     DocContentMeta,
     DocGrant,
     DocIndexState,
+    IndexCoverage,
     Source,
     SourceGrant,
 )
@@ -304,7 +306,8 @@ class StorageAdapter(Protocol):
         ...
 
     def replace_doc_chunks(self, doc_id: UUID, chunks: list[DocChunk]) -> bool:
-        """Atomically replace a doc's entire chunk set; [] clears it.
+        """Atomically replace all of a doc's chunks, every model's set, with
+        one set; [] clears them.
 
         Validate before accessing storage: ordinals must be exactly 0..n-1
         (input order does not matter), with one body/title hash and embedding model
@@ -322,7 +325,8 @@ class StorageAdapter(Protocol):
     def list_doc_chunks(
         self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL
     ) -> list[DocChunk]:
-        """Chunks ordered by ordinal, using get_doc's visibility predicate.
+        """Chunks of every model's set, ordered by model then ordinal, using
+        get_doc's visibility predicate.
 
         Missing/invisible docs and docs without chunks all return []. Returned
         values are immutable, with tuple embeddings, and the returned list is
@@ -339,7 +343,9 @@ class StorageAdapter(Protocol):
         *,
         expected_title_hash: str,
     ) -> bool:
-        """replace_doc_chunks, but only while the chunks still describe the
+        """Replace the doc's set for the chunks' embedding model, leaving other
+        models' sets in place ([] clears every set: there is nothing to embed).
+        Only while the chunks still describe the
         doc's current content: the doc exists and is active, and its stored
         doc_content hash equals `expected_content_hash`, and SHA-256 of its
         title (None treated as empty) equals `expected_title_hash`. Checked
@@ -372,23 +378,48 @@ class StorageAdapter(Protocol):
         the doc does not exist; idempotent when expected is None."""
         ...
 
-    def get_doc_index_state(self, doc_id: UUID) -> DocIndexState | None:
-        """The current chunk set's body/title hashes, model, and size; None when the
-        doc has no chunks (or does not exist). Internal indexing state: no
-        visibility predicate, never returned to API callers."""
+    def get_doc_index_states(self, doc_id: UUID) -> dict[str, DocIndexState]:
+        """Each stored chunk set's body/title hashes, model, and size, keyed by
+        embedding model; {} when the doc has no chunks (or does not exist).
+        Internal indexing state: no visibility predicate, never returned to API
+        callers."""
+        ...
+
+    def delete_doc_chunks_except(self, doc_id: UUID, keep_models: Sequence[str]) -> bool:
+        """Delete the doc's chunk sets for every model not in `keep_models`
+        (sets left behind by a finished or abandoned re-embed). Serialized with
+        the other chunk writers. True when anything was deleted."""
         ...
 
     def list_docs_for_indexing(
-        self, *, stale_only: bool = True, after: UUID | None = None, limit: int = 100
+        self,
+        *,
+        models: Sequence[str],
+        stale_only: bool = True,
+        after: UUID | None = None,
+        limit: int = 100,
     ) -> list[UUID]:
         """Doc ids whose index may need work, ascending by id, ids > `after`.
 
+        `models` are the resolved ids indexing maintains: the one search
+        serves, plus a re-embed target while one is configured.
         Always includes docs that have chunks but should not (inactive, or no
         stored content), so a failed cleanup is retryable. With stale_only,
-        adds active docs with content whose chunks are missing or were built
-        from a different body/title hash (or unknown title hash); without it,
-        adds every active doc with content (a forced full pass, e.g. after an embedding-model change).
+        adds active docs with content that lack a set for one of `models`,
+        hold one built from a different body/title hash (or unknown title
+        hash), or hold a set for a model outside `models`, so re-running the
+        listing resumes an interrupted re-embed. A doc whose text is
+        whitespace only (empty after str.strip()) is listed only while it has
+        chunks: indexing it clears them and records nothing, so it would
+        otherwise stay pending forever. Without stale_only, adds
+        every active doc with content (a forced full pass).
         """
+        ...
+
+    def get_index_coverage(self, models: Sequence[str]) -> IndexCoverage:
+        """Per-model chunk coverage across the catalog, for every stored model
+        plus each of `models` (reported even with no chunks). Counts sets of
+        any doc; `missing_docs` counts only active docs with content."""
         ...
 
     # Sources

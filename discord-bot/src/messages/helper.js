@@ -16,6 +16,7 @@ export function renderHelperAnswer(content, citations = []) {
     const href = url.href
       .replaceAll('(', '%28')
       .replaceAll(')', '%29')
+      .replaceAll('`', '%60')
       .replace(/[<>\s]/gu, encodeURIComponent);
     // Budget the complete encoded link before splitting it into Discord messages.
     const titleBudget = 2000 - `• [](<${href}>)`.length;

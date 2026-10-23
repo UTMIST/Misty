@@ -9,14 +9,27 @@ from contracts.directory import DirectoryClient, DirectoryUnavailable
 from contracts.embedder import Embedder
 from contracts.fetcher import FetchError, SourceGone
 from contracts.storage import StorageAdapter
-from contracts.types import Doc, DocGrantInput, DocIngest, DocUpdate, IngestResult
+from contracts.types import (
+    Doc,
+    DocGrantInput,
+    DocIngest,
+    DocUpdate,
+    IndexModelCoverage,
+    IngestResult,
+)
 from contracts.visibility import ActorContext
 from src.api.auth import AuthedKey, get_actor, require_scope
 from src.api.authz import get_visible_doc_or_404, read_context, write_context
-from src.api.deps import get_directory, get_embedder, get_fetchers, get_storage
+from src.api.deps import (
+    get_directory,
+    get_embedder,
+    get_fetchers,
+    get_storage,
+    get_target_embedder,
+)
 from src.content import clamp_content, content_hash
 from src.fetch.registry import FetcherRegistry
-from src.indexing import IndexStatus, index_doc, index_warning
+from src.indexing import IndexStatus, index_doc, index_embedders, index_warning
 from src.ingest import BadReference, ingest_doc
 from src.config import get_settings
 from src.meeting_fetch import fetch_catalog_content
@@ -99,6 +112,18 @@ def _source_access_due(doc: Doc, due_before: datetime) -> bool:
     return last_attempt is None or last_attempt <= due_before
 
 
+class IndexStatusResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Resolved model ids: the set search reads, and the re-embed target if any.
+    serving_model: str
+    target_model: str | None
+    # Active docs with stored content.
+    indexable_docs: int
+    # Docs a stale-only POST /docs/index run would list right now.
+    pending_docs: int
+    models: list[IndexModelCoverage]
+
+
 @router.post("", response_model=IngestResult)
 def create_doc(
     payload: DocIngest,
@@ -107,6 +132,7 @@ def create_doc(
     fetchers: FetcherRegistry = Depends(get_fetchers),
     directory: DirectoryClient = Depends(get_directory),
     embedder: Embedder = Depends(get_embedder),
+    target: Embedder | None = Depends(get_target_embedder),
     actor: str = Depends(get_actor),
     _: AuthedKey = Depends(require_scope("docs:write")),
 ) -> IngestResult:
@@ -125,7 +151,9 @@ def create_doc(
     # warning and the doc stays catalogued. Runs on the dedup path too (a
     # repeated Google ingest may have stored new text); unchanged content is
     # a no-op without a provider call.
-    warning = index_warning(index_doc(result.doc.id, storage=storage, embedder=embedder))
+    warning = index_warning(
+        index_doc(result.doc.id, storage=storage, embedder=embedder, target=target)
+    )
     if warning is not None:
         result.warnings.append(warning)
     response.status_code = status.HTTP_201_CREATED if result.created else status.HTTP_200_OK
@@ -137,6 +165,7 @@ def index_docs(
     payload: IndexRequest,
     storage: StorageAdapter = Depends(get_storage),
     embedder: Embedder = Depends(get_embedder),
+    target: Embedder | None = Depends(get_target_embedder),
     _: AuthedKey = Depends(require_scope("docs:index")),
 ) -> IndexRunResult:
     """Admin (re-)indexing of stored content: the retry path for indexing
@@ -154,13 +183,18 @@ def index_docs(
             )
     else:
         doc_ids = storage.list_docs_for_indexing(
-            stale_only=payload.stale_only, after=payload.after, limit=payload.limit
+            models=[e.model for e in index_embedders(embedder, target)],
+            stale_only=payload.stale_only,
+            after=payload.after,
+            limit=payload.limit,
         )
         if len(doc_ids) == payload.limit:
             next_after = doc_ids[-1]
     results = []
     for doc_id in doc_ids:
-        outcome = index_doc(doc_id, storage=storage, embedder=embedder, force=payload.force)
+        outcome = index_doc(
+            doc_id, storage=storage, embedder=embedder, target=target, force=payload.force
+        )
         results.append(
             IndexDocResult(
                 doc_id=doc_id,
@@ -171,6 +205,31 @@ def index_docs(
         )
     counts = {name: sum(r.status == name for r in results) for name in get_args(IndexStatus)}
     return IndexRunResult(attempted=len(results), results=results, next_after=next_after, **counts)
+
+
+@router.get("/index/status", response_model=IndexStatusResult)
+def index_status(
+    storage: StorageAdapter = Depends(get_storage),
+    embedder: Embedder = Depends(get_embedder),
+    target: Embedder | None = Depends(get_target_embedder),
+    _: AuthedKey = Depends(require_scope("docs:index")),
+) -> IndexStatusResult:
+    """Chunk coverage per embedding model and the docs POST /docs/index would
+    still list: a re-embed (#209) is ready to cut over at zero pending."""
+    models = [e.model for e in index_embedders(embedder, target)]
+    coverage = storage.get_index_coverage(models)
+    pending = 0
+    after = None
+    while page := storage.list_docs_for_indexing(models=models, after=after, limit=500):
+        pending += len(page)
+        after = page[-1]
+    return IndexStatusResult(
+        serving_model=embedder.model,
+        target_model=models[1] if len(models) > 1 else None,
+        indexable_docs=coverage.indexable_docs,
+        pending_docs=pending,
+        models=coverage.models,
+    )
 
 
 @router.get("", response_model=list[Doc])
@@ -225,6 +284,7 @@ def refresh_due_source_access(
     fetchers: FetcherRegistry = Depends(get_fetchers),
     directory: DirectoryClient = Depends(get_directory),
     embedder: Embedder = Depends(get_embedder),
+    target: Embedder | None = Depends(get_target_embedder),
     actor: str = Depends(get_actor),
     _: AuthedKey = Depends(require_scope("docs:write")),
 ) -> SourceAccessRefreshResult:
@@ -259,7 +319,7 @@ def refresh_due_source_access(
             failed += 1
         else:
             refreshed += 1
-            outcome = index_doc(doc.id, storage=storage, embedder=embedder)
+            outcome = index_doc(doc.id, storage=storage, embedder=embedder, target=target)
             index_failed += outcome.status == "failed"
     return SourceAccessRefreshResult(
         attempted=len(due), refreshed=refreshed, failed=failed, index_failed=index_failed
@@ -286,6 +346,7 @@ def update_doc(
     storage: StorageAdapter = Depends(get_storage),
     directory: DirectoryClient = Depends(get_directory),
     embedder: Embedder = Depends(get_embedder),
+    target: Embedder | None = Depends(get_target_embedder),
     actor: str = Depends(get_actor),
     wctx: ActorContext = Depends(write_context),
     _: AuthedKey = Depends(require_scope("docs:write")),
@@ -312,7 +373,7 @@ def update_doc(
         # failure is logged and left for POST /docs/index (a retired doc that
         # still has chunks is listed as needing work). Title-only updates
         # also refresh the context embedded alongside the unchanged body.
-        index_doc(doc_id, storage=storage, embedder=embedder)
+        index_doc(doc_id, storage=storage, embedder=embedder, target=target)
     return updated
 
 
@@ -381,6 +442,7 @@ def refetch(
     fetchers: FetcherRegistry = Depends(get_fetchers),
     directory: DirectoryClient = Depends(get_directory),
     embedder: Embedder = Depends(get_embedder),
+    target: Embedder | None = Depends(get_target_embedder),
     actor: str = Depends(get_actor),
     wctx: ActorContext = Depends(write_context),
     _: AuthedKey = Depends(require_scope("docs:write")),
@@ -403,7 +465,7 @@ def refetch(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
     # A failure is logged and left for POST /docs/index: the doc's chunks no
     # longer match its content hash, so it is listed as stale.
-    index_doc(doc_id, storage=storage, embedder=embedder)
+    index_doc(doc_id, storage=storage, embedder=embedder, target=target)
     # Reconciliation may have revoked the caller's cached source grant.
     return get_visible_doc_or_404(doc_id, wctx, storage)
 

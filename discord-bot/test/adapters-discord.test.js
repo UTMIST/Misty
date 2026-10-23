@@ -366,6 +366,37 @@ function fakeRecordInteraction({ subcommand, voiceChannel = null, calls, guildId
 // subcommand auth (start='linked', status/stop='public') straight from metadata.
 const recordCommands = new Map([['record', record]]);
 
+for (const save of [null, false, true]) {
+  test(`/record start preserves the save option (${save})`, async () => {
+    let started;
+    const client = fakeClient();
+    wireDiscordClient(client, {
+      commands: recordCommands,
+      appContext: {
+        directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) },
+        meetingSurface: {
+          start: async (args) => {
+            started = args;
+            return { status: 'recording' };
+          },
+        },
+      },
+    });
+    const interaction = fakeRecordInteraction({
+      subcommand: 'start',
+      voiceChannel: { id: 'vc1' },
+      calls: [],
+    });
+    interaction.options.getBoolean = (name) => {
+      assert.equal(name, 'save');
+      return save;
+    };
+    await client.emit(interaction);
+    assert.equal(started.save, save ?? true);
+    assert.equal(started.requesterId, 'u1');
+  });
+}
+
 test('/record start is denied for an UNLINKED caller and never starts recording', async () => {
   const calls = [];
   let startCalled = false;

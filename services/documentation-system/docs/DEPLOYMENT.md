@@ -48,7 +48,7 @@ All configuration is env-driven (`src/config.py`, loaded from the process enviro
 | `LLM_API_KEY` | `llm_api_key` | empty | Secret `embed`-scoped LLM key; missing key keeps catalog operations available but search returns 503. |
 | `SEARCH_EMBED_MODEL` | `search_embed_model` | `openai-embed-3-small` | Query model alias; also supports `openai-embed-3-large`, both at 1536 dimensions. |
 | `SEARCH_MIN_COSINE` | `search_min_cosine` | `0.3` | Absolute vector floor in `(0,1]`; complete keyword matches qualify independently. |
-| `EMBED_MODEL` | `embed_model` | unset | Optional indexing model alias; unset uses `SEARCH_EMBED_MODEL`. An override must match the search model before its chunks can be retrieved. Changing models requires re-embedding (#209). |
+| `EMBED_MODEL` | `embed_model` | unset | Re-embed target alias. Unset (or equal to `SEARCH_EMBED_MODEL`) in normal operation. While it names another model, indexing also builds that model's chunk set beside the served one; see [Re-embedding after a model change](#re-embedding-after-a-model-change-209). |
 | `EMBED_MAX_REQUEST_CHARS` | `embed_max_request_chars` | `400000` | Characters per indexing `/embed` request. Keep at or below the llm service's own limit. |
 | `SOURCE_ACCESS_REFRESH_AFTER_HOURS` | `source_access_refresh_after_hours` | `24` | A Google doc becomes due for ACL/content refresh after this interval. |
 | `SOURCE_ACCESS_MAX_AGE_HOURS` | `source_access_max_age_hours` | `48` | Source-derived grants expire and stop authorizing reads after this interval without a complete successful sync. Must exceed the refresh interval. |
@@ -97,7 +97,9 @@ Seed/index chunks with the resolved model matching `SEARCH_EMBED_MODEL`:
 `openai-embed-3-small` -> `text-embedding-3-small`, or
 `openai-embed-3-large` -> `text-embedding-3-large`. Both use 1536 dimensions.
 Switching the query model hides incompatible old chunks from both branches
-until reindexing; it never compares them or silently falls back. The absolute
+until reindexing; it never compares them or silently falls back. Change models
+only through the [re-embed runbook](#re-embedding-after-a-model-change-209), which
+builds the new sets before the switch. The absolute
 relevance floor starts at 0.3: against that harness's fixture the
 cosine distributions of correct and incorrect documents overlap across their whole
 range, so no threshold separates them and moving this value trades recall against
@@ -173,14 +175,22 @@ Migration history:
 - **`011_source_refresh_run`** — adds the singleton refresh-runner guard. Apply before
   starting the new runner; stop runners before downgrading. See the
   [refresh recovery procedure](#recovery-credential-rotation-and-disablerollback).
-- **`017_google_source_urls`** — replaces existing Drive file display URLs with native
+- **`012`–`016`** — meeting records and recovery state; see the
+  [meeting persistence migrations](#meeting-record-persistence).
+- **`017_chunk_sets_per_model`** — widens the chunk key to retain complete sets
+  per model. Apply after `016` and before starting the model-aware application.
+  Existing chunks, catalog data, refresh guards, and meeting recovery state survive.
+  Downgrading to `016` refuses if any document has multiple models: first finish
+  the [model cleanup](#re-embedding-after-a-model-change-209), stop indexing writers,
+  and verify that every doc has at most one model. The downgrade preserves that set.
+- **`018_google_source_urls`** — replaces existing Drive file display URLs with native
   Docs/Sheets/Slides editor links, or `/view` links for `gdrive`. Only recognized Drive
   URLs matching the file identity in `url_normalized` qualify, including retired rows.
-  Editor/manual links and non-Google sources stay intact. Normalized keys, grants,
-  content, chunks and audit fields are unchanged; no provider calls or re-indexing
+  Editor/manual links, URLs carrying a `resourcekey` query parameter, and non-Google
+  sources stay intact. Normalized keys, grants, content, chunks and audit fields are unchanged; no provider calls or re-indexing
   are needed. The transaction briefly locks catalog writes while snapshotting and
   updating links. `doc_source_url_backfill` retains exact originals for rollback.
-  Downgrading to `016` restores only rows still carrying the replacement URL and drops
+  Downgrading to `017` restores only rows still carrying the replacement URL and drops
   that rollback table; later URL edits and newly inserted documents survive.
 
 Downgrading `008` removes the chunk table/index, preserving catalog records and full
@@ -433,7 +443,7 @@ dependency everywhere:
   every doc whose chunks are missing, stale, or orphaned; repeat with `after: next_after`
   until `next_after` is null. Nothing schedules this — run it after an llm outage or from
   the same scheduler as refresh-due if failures are routine. Re-embedding after a model
-  change uses `{"stale_only": false, "force": true}`.
+  change uses the same loop; see the runbook below.
 
 During an indexing outage, retrieval can still return the previous complete chunk
 set under **current** authorization. Its citations retain the old content hash;
@@ -451,6 +461,91 @@ calls after title provenance is recorded. Ingest, title edits, and refetch get s
 documentation-system. documentation-system deploys independently either way — see
 "Configuring / enabling fetchers" above for what degrades (not breaks) if the order
 is reversed.
+
+## Re-embedding after a model change (#209)
+
+Vectors from different embedding models are never ranked together: search reads only
+the chunk set for `SEARCH_EMBED_MODEL` (policy and design in
+[ARCHITECTURE.md](ARCHITECTURE.md#model-changes-209)). A model change therefore builds
+the new model's sets **beside** the served ones and switches only when they are
+complete, so search never loses a doc mid-change. Nothing re-embeds on deploy; each
+step below is an operator action, and step 2 spends provider budget. Widths other
+than 1536 need a schema migration first and are out of scope here.
+
+You need a `docs:index` key (`doc-keys issue --scopes docs:index`, see
+[Issuing API keys](#issuing-api-keys-doc-keys-cli)) and the target alias, which must be
+one the llm service's `/embed` allows.
+
+1. **Set the target.** Set `EMBED_MODEL` to the new alias, keep `SEARCH_EMBED_MODEL`
+   unchanged, and redeploy. `GET /docs/index/status` now shows `target_model` and
+   `pending_docs`. From here on, ingest, refetch, and title edits embed changed docs
+   under both models.
+2. **Build the target sets.** Loop until `next_after` is null:
+
+   ```bash
+   AFTER=null
+   while :; do
+     R=$(curl -sf -X POST "$DOCS_URL/docs/index" -H "X-API-Key: $DOCS_INDEX_KEY" \
+       -H 'Content-Type: application/json' \
+       -d "{\"stale_only\": true, \"limit\": 25, \"after\": $AFTER}") || break
+     echo "$R" | jq -c '{attempted, indexed, failed}'
+     AFTER=$(echo "$R" | jq '.next_after')
+     [ "$AFTER" = null ] && break
+   done
+   ```
+
+   **Resuming:** if the loop is interrupted, or reports `failed` docs (the `detail`
+   names the model), run it again. It lists only docs still missing a current set,
+   so finished docs are never re-embedded. No `force` is needed.
+3. **Check readiness.** `GET /docs/index/status` must show `pending_docs: 0` and
+   `missing_docs: 0` for the target model. If a doc keeps failing, fix or retire it
+   first: switching early would drop it from search.
+4. **Cut over, keeping the old sets.** Swap the two values: set `SEARCH_EMBED_MODEL` to
+   the new alias and `EMBED_MODEL` to the **old** one, and redeploy. Search now reads
+   the new sets, and indexing keeps the old ones current. Do not unset `EMBED_MODEL`
+   here: indexing deletes sets for any model it is not configured with, including on
+   inline ingest or refetch of an unchanged doc, and a request or an overlapping
+   instance still on the old model would then lose docs from its results.
+5. **Wait for old readers to drain.** Once the rollout has finished and no instance or
+   in-flight search is still on the old model, unset `EMBED_MODEL` and redeploy.
+6. **Clean up.** Run the step 2 loop once more. It deletes the old model's sets
+   without embedding calls (`unchanged` results); afterwards the status lists only the
+   new model. Inline indexing may already have deleted some.
+
+**Rollback.** Before step 5, swapping the two values back restores search on the old
+sets, which step 4 kept current. To abandon a re-embed before step 4, unset
+`EMBED_MODEL` and run the loop: it deletes the partial target sets. After step 5 the old
+sets start being deleted, and going back is another re-embed.
+
+**Detecting a premature switch.** If `SEARCH_EMBED_MODEL` is switched before step 3
+passes, search logs `N docs are indexed only under other embedding models and are
+excluded from search` (at most once a minute per process), and the status shows nonzero
+`missing_docs` for the served model. Switch back, or finish step 2.
+
+### Cost and duration of a full re-embed
+
+A re-embed sends every chunk of every indexable doc to `/embed` once, plus the title and
+heading context (at most 1,000 characters per chunk, usually far less). Estimate it before
+authorizing a run, using the served model's row in `GET /docs/index/status`:
+
+- **Input size:** `chunk_chars` plus that context. At roughly 4 characters per token for
+  English text, tokens ≈ `chunk_chars / 4`, plus a margin for context.
+- **Cost:** tokens × the provider's current per-token price for the target model.
+  Prices change, so look them up at run time rather than copying a figure from here.
+- **Duration:** one `/embed` request per 96 chunks or `EMBED_MAX_REQUEST_CHARS`
+  characters, whichever comes first, run one doc at a time, plus one database write per
+  doc.
+
+**Measured run: not yet performed.** Measuring cost is a deliberate paid run, not a test
+(#209). An authorized run should record the following here:
+
+| Field | Value |
+|-------|-------|
+| Date, environment | — |
+| Source → target model, dimensions | — |
+| Corpus: indexable docs, chunks, `chunk_chars` | — |
+| Wall time for step 2 | — |
+| Provider-reported tokens and cost | — |
 
 ## Source-access refresh schedule
 

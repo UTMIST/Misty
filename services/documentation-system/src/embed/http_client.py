@@ -1,6 +1,11 @@
 import httpx
 
-from contracts.embedder import EmbedBatch, EmbedderRejected, EmbedderUnavailable
+from contracts.embedder import (
+    RESOLVED_EMBED_MODELS,
+    EmbedBatch,
+    EmbedderRejected,
+    EmbedderUnavailable,
+)
 
 # Mirrors services/llm/contracts/embed.py (batch and per-input limits) and the llm
 # service's EMBED_MAX_REQUEST_CHARS default. Copied, not imported: services
@@ -25,13 +30,15 @@ class HttpEmbedder:
         base_url: str,
         api_key: str,
         *,
-        model: str | None = None,
+        model: str = "openai-embed-3-small",
         max_request_chars: int = 400_000,
         client: httpx.Client | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
-        self._model = model
+        self._alias = model
+        # KeyError for an unknown alias: Settings only admits mapped aliases.
+        self.model = RESOLVED_EMBED_MODELS[model]
         self._max_request_chars = max_request_chars
         # One reused client so connections pool across requests; tests inject
         # a MockTransport client (same pattern as HttpDirectoryClient).
@@ -42,20 +49,9 @@ class HttpEmbedder:
         # not waste paid embeddings from earlier batches that we cannot save.
         self._validate_inputs(inputs)
         vectors: list[tuple[float, ...]] = []
-        model: str | None = None
         for batch in self._batches(inputs):
-            batch_model, batch_vectors = self._embed_batch(batch)
-            # Every chunk of one doc must share one model (validate_doc_chunks);
-            # a deploy flipping the llm model mid-doc is a retryable race.
-            if model is not None and batch_model != model:
-                raise EmbedderUnavailable(
-                    f"embedding model changed mid-document ({model} -> {batch_model})"
-                )
-            model = batch_model
-            vectors.extend(batch_vectors)
-        if model is None:
-            raise EmbedderRejected("no inputs to embed")
-        return EmbedBatch(vectors=tuple(vectors), model=model, dimensions=EMBEDDING_DIMENSIONS)
+            vectors.extend(self._embed_batch(batch))
+        return EmbedBatch(vectors=tuple(vectors), model=self.model, dimensions=EMBEDDING_DIMENSIONS)
 
     def _validate_inputs(self, inputs: list[str]) -> None:
         if not inputs:
@@ -89,13 +85,12 @@ class HttpEmbedder:
             batches.append(current)
         return batches
 
-    def _embed_batch(self, batch: list[str]) -> tuple[str, list[tuple[float, ...]]]:
-        body: dict = {"inputs": batch}
-        if self._model is not None:
-            body["model"] = self._model
+    def _embed_batch(self, batch: list[str]) -> list[tuple[float, ...]]:
         try:
             resp = self._client.post(
-                f"{self._base_url}/embed", json=body, headers={"X-API-Key": self._api_key}
+                f"{self._base_url}/embed",
+                json={"inputs": batch, "model": self._alias},
+                headers={"X-API-Key": self._api_key},
             )
         except httpx.HTTPError as e:
             raise EmbedderUnavailable(f"llm service unreachable: {type(e).__name__}") from e
@@ -114,6 +109,10 @@ class HttpEmbedder:
             raise EmbedderRejected(f"malformed /embed response: {type(e).__name__}") from e
         if not isinstance(model, str) or not model.strip():
             raise EmbedderRejected("malformed /embed response: missing model")
+        # Every batch must carry the requested model, so one doc's chunks never
+        # mix models and a changed llm-side mapping cannot pass as this set.
+        if model != self.model:
+            raise EmbedderRejected(f"/embed returned model {model}; requested {self.model}")
         if dimensions != EMBEDDING_DIMENSIONS or any(
             len(v) != EMBEDDING_DIMENSIONS for v in vectors
         ):
@@ -123,4 +122,4 @@ class HttpEmbedder:
             )
         if indexes != list(range(len(batch))):
             raise EmbedderRejected("/embed returned a different number of vectors than inputs")
-        return model, vectors
+        return vectors

@@ -1,7 +1,7 @@
 """Backfill Google source links while retaining exact URLs for rollback.
 
-Revision ID: 017
-Revises: 016
+Revision ID: 018
+Revises: 017
 Create Date: 2026-10-22
 """
 
@@ -9,8 +9,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision = "017"
-down_revision = "016"
+revision = "018"
+down_revision = "017"
 branch_labels = None
 depends_on = None
 
@@ -29,6 +29,7 @@ def upgrade() -> None:
     )
     # Keep the snapshot and rewrite consistent with concurrent catalog writes.
     op.execute(sa.text("LOCK TABLE docs IN SHARE ROW EXCLUSIVE MODE"))
+    # Resource keys can be required for access; retain those display URLs verbatim.
     op.execute(
         sa.text(
             """
@@ -49,6 +50,7 @@ def upgrade() -> None:
                 WHERE source_id IN ('gdocs', 'gsheets', 'gslides', 'gdrive')
             ) AS candidates
             WHERE file_id IS NOT NULL
+                AND url !~* '[?&]resourcekey='
                 AND substring(url FROM
                     '^https?://drive[.]google[.]com/file/d/([A-Za-z0-9_-]+)(?:[/?#]|$)') = file_id
             """

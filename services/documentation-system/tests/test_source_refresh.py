@@ -10,6 +10,8 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
+from tests.fake_embedder import FAKE_MODEL
+
 from src import source_refresh
 from src.source_refresh import DocsApiClient, RefreshError, RunMonitor, main, run_refresh
 
@@ -275,11 +277,11 @@ def test_runner_advances_past_failed_documents_through_real_api(monkeypatch, fak
 
         # A refresh is now fresh even if indexing failed. Only the separate
         # docs:index recovery path repairs those chunks, without re-fetching.
-        assert store.list_docs_for_indexing() == [doc_ids["successful"]]
+        assert store.list_docs_for_indexing(models=[FAKE_MODEL]) == [doc_ids["successful"]]
         recovered = http.post("/docs/index", headers=_key(store, "docs:index"), json={})
         assert recovered.status_code == 200
         assert recovered.json()["indexed"] == 1
-        assert store.list_docs_for_indexing() == []
+        assert store.list_docs_for_indexing(models=[FAKE_MODEL]) == []
         assert len(fetchers.calls) == 3
 
         # Failed refresh attempts wait for the next eligibility window.

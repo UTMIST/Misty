@@ -1,3 +1,4 @@
+from tests.reembed_integration_cases import ReembedIntegrationCases
 from tests.doc_identity_cases import DocIdentityCases
 from tests.google_identity_cases import GoogleIdentityCases
 import os
@@ -21,6 +22,7 @@ from src.storage.postgres import PostgresStorageAdapter
 from tests.chunk_storage_cases import ChunkStorageCases, make_chunk, make_doc
 from tests.ingestion_retrieval_cases import IngestionRetrievalCases
 from tests.retrieval_cases import RetrievalCases
+from tests.fake_embedder import FAKE_MODEL
 from tests.meeting_record_cases import MeetingRecordCases
 
 pytestmark = pytest.mark.skipif(
@@ -357,7 +359,7 @@ def test_old_title_writer_rechecks_after_new_title_and_index_commit(adapter):
         event.remove(engine, "before_cursor_execute", before_execute)
 
     assert adapter.list_doc_chunks(doc.id) == [newer]
-    assert doc.id not in adapter.list_docs_for_indexing()
+    assert doc.id not in adapter.list_docs_for_indexing(models=[FAKE_MODEL])
 
 
 @pytest.fixture
@@ -960,4 +962,8 @@ class TestGoogleIdentity(GoogleIdentityCases):
 
 
 class TestDocIdentity(DocIdentityCases):
+    pass
+
+
+class TestReembedIntegration(ReembedIntegrationCases):
     pass

@@ -184,6 +184,9 @@ doc_chunks = Table(
     Column(
         "doc_id", UUID(as_uuid=True), ForeignKey("docs.id", ondelete="CASCADE"), primary_key=True
     ),
+    # One complete set per (doc, model): during a re-embed (#209) the target
+    # model's set is built beside the one search serves (migration 017).
+    Column("embedding_model", Text, primary_key=True),
     Column("ordinal", Integer, primary_key=True),
     Column("chunk_text", Text, nullable=False),
     Column("start_offset", Integer, nullable=False),
@@ -192,7 +195,6 @@ doc_chunks = Table(
     # NULL on pre-fingerprint chunks: keep them available but queue a refresh.
     Column("source_title_hash", Text, nullable=True),
     Column("embedding", VECTOR(1536), nullable=False),
-    Column("embedding_model", Text, nullable=False),
     Column("dimensions", Integer, nullable=False),
     Column(
         "search_vector",

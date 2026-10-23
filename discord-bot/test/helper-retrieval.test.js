@@ -215,6 +215,10 @@ test('oversized citations preserve complete links through channel and DM deliver
     return [url, url];
   });
   urls.push(
+    ...[1953, 1959, 1970].map((size) => [
+      'https://example.test/' + 'a'.repeat(size) + '?q=```',
+      'https://example.test/' + 'a'.repeat(size) + '?q=%60%60%60',
+    ]),
     ['https://example.test/' + ')'.repeat(640), 'https://example.test/' + '%29'.repeat(640)],
     ['https://example.test/' + ')'.repeat(700), 'https://example.test/' + '%29'.repeat(700)],
   );
@@ -389,6 +393,8 @@ test('production context wiring enforces the guard through the HTTP clients', as
     }
     if (url.startsWith('http://directory/teams') || url.startsWith('http://directory/memberships'))
       return Response.json([]);
+    if (url === 'http://directory/people/by-identifier/discord/requester')
+      return Response.json(principal.person);
     assert.fail(`unexpected offline HTTP call: ${url}`);
   });
   const ctx = createAppContext({
@@ -402,7 +408,9 @@ test('production context wiring enforces the guard through the HTTP clients', as
     verificationApiKey: 'test',
     helperToolsEnabled: true,
   });
-  const result = await answerHelperTurns(ctx, [user('Read')], principal, channel);
+  const result = await answerHelperTurns(ctx, [user('Read')], principal, channel, {
+    discordUserId: 'requester',
+  });
   assert.equal(result, WITHHELD_ANSWER);
   assert.equal(calls, 2);
   assert.equal(searches, 3);

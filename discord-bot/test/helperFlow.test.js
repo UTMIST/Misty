@@ -2,15 +2,59 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   answerHelperTurns,
+  prepareHelperReply,
   EMPTY_ANSWER,
   WITHHELD_ANSWER,
   COULDNT_COMPLETE,
   LLM_UNAVAILABLE,
 } from '../src/helperFlow.js';
 import { OUTCOME } from '../src/toolExecutor.js';
+import { createAppContext } from '../src/context.js';
 
 const principal = { person: { id: 'person-1', display_name: 'Pat' } };
 const turns = [{ role: 'user', text: 'hi', authorId: 'u1', authorName: 'Pat' }];
+
+test('production tool wiring withholds destination-only callers before any provider request', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () =>
+    assert.fail('No provider request without identity'),
+  );
+  const ctx = createAppContext({ helperToolsEnabled: true });
+  ctx.directory.listTeams = async () => [];
+  ctx.directory.listMemberships = async () => [];
+  let modelCalls = 0;
+  ctx.llmClient.chat = async (args) => {
+    modelCalls++;
+    assert.equal(args.tools, undefined);
+    return { content: 'Text-only playground answer' };
+  };
+  for (const destination of [
+    { kind: 'person' },
+    { kind: 'channel', guildId: '100', channelId: '200' },
+  ]) {
+    const result = await prepareHelperReply(ctx, turns, principal, destination);
+    assert.equal(result.content, WITHHELD_ANSWER);
+    assert.equal(result.action, undefined);
+  }
+  assert.equal(modelCalls, 0);
+  assert.equal(await answerHelperTurns(ctx, turns, principal), 'Text-only playground answer');
+  assert.equal(modelCalls, 1);
+});
+
+test('the flow passes trusted request metadata and preserves a terminal action for private delivery', async () => {
+  const request = { discordUserId: 'real-user', sourceChannelId: 'thread' };
+  const action = { userId: 'real-user' };
+  let seen;
+  const ctx = appContext({
+    enabled: true,
+    run: async (args) => {
+      seen = args.request;
+      return { outcome: 'action', action };
+    },
+  });
+  const result = await prepareHelperReply(ctx, turns, principal, { kind: 'person' }, request);
+  assert.equal(seen, request);
+  assert.equal(result.action, action);
+});
 
 function appContext({ enabled = false, answer, run } = {}) {
   return {

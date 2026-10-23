@@ -38,8 +38,8 @@ Defines every persistence operation with identical semantics across implementati
 `add_tag`, `remove_tag`, grant operations, `upsert_doc_content`, `get_doc_content`,
 `get_doc_content_meta`, `delete_doc_content`, `replace_doc_chunks`,
 `replace_doc_chunks_if_current`, `clear_doc_chunks_if_unindexable`, `list_doc_chunks`,
-`get_doc_index_state`,
-`list_docs_for_indexing`, `search_chunks`, the two source reads,
+`get_doc_index_states`, `delete_doc_chunks_except`,
+`list_docs_for_indexing`, `get_index_coverage`, `search_chunks`, the two source reads,
 API-key operations, and the readiness query. See `contracts/storage.py` for the
 complete signatures.
 
@@ -159,7 +159,7 @@ soft-deleted doc's URL be catalogued again.
 `url_normalized` is its deduplication identity. Discovery chooses native Google editor
 links from the source type without an extra provider call (see [discovery lifecycle](DISCOVERY.md#recovery-and-lifecycle)).
 The migration-owned `doc_source_url_backfill` table retains original and replacement
-URLs for exact rollback of migration `017`; application adapters do not use it.
+URLs for exact rollback of migration `018`; application adapters do not use it.
 
 ### `doc_grants`
 
@@ -265,6 +265,10 @@ The document FK cascades on hard deletion. Each row stores `chunk_text`, half-op
 Migration `010` adds nullable `source_title_hash`: SHA-256 of the title (None treated
 as empty). It records embedding context separately from the body hash used by citations.
 Existing chunks retain NULL provenance until the normal stale-index pass rebuilds them.
+Migration `018` widens the key to `(doc_id, embedding_model, ordinal)`, so a doc can
+hold one complete set per model while a re-embed runs (see
+[Model changes](#model-changes-209)). Its downgrade refuses while any doc still holds
+two models' sets rather than guess which to discard.
 The source hash uses `src/content.py`'s SHA-256 convention; it identifies the text
 version whose offsets were embedded, even if `doc_content` is later replaced.
 
@@ -277,18 +281,18 @@ but conservative enough to keep generated `tsvector` metadata below Postgres's
 size limit, including multibyte text. Oversized chunks raise `ValueError` before
 either adapter accesses storage. Both adapters round vectors to float32 and return
 immutable, hashable chunk values with tuple embeddings; JSON still uses arrays.
-A dimension change needs a schema migration;
-model compatibility across documents and re-embedding remain #209's responsibility.
+A dimension change needs a schema migration; a model change at the same width
+re-embeds through [Model changes](#model-changes-209).
 
 `replace_doc_chunks(doc_id, chunks)` validates a complete set before storage access:
 ordinals are exactly `0..n-1`, with one model and source hash per set. Input order
-does not matter. Replacement is atomic and idempotent; `[]` clears the set and an
-unknown doc returns `False`. Postgres locks the parent doc before deleting/inserting,
+does not matter. Replacement is atomic and idempotent: it replaces every model's set
+with the one given, `[]` clears them all, and an unknown doc returns `False`. Postgres locks the parent doc before deleting/inserting,
 including the first write, so concurrent replacements cannot interleave chunk sets.
 The in-memory adapter validates before replacing its dict entry. Both reject invalid
 sets with `ValueError` and preserve the previous set on failure.
 
-`list_doc_chunks` returns detached values in ordinal order and applies the same
+`list_doc_chunks` returns detached values ordered by model, then ordinal, and applies the same
 visibility predicate as `get_doc_content`. Missing, invisible, and unindexed docs
 all return `[]`. Like content reads, it does not filter the document's `active` flag.
 `replace_doc_chunks` records supplied provenance without comparing it to current
@@ -597,16 +601,17 @@ cases (connector shapes, Unicode, repeated text, boundaries) and 200 seeded rand
 
 ### Indexing (#175): `src/indexing.py`
 
-`index_doc(doc_id, storage=, embedder=, force=False, settings=ChunkSettings())` makes one
-doc's chunk set match its
-stored `doc_content` and title. It is keyed on catalog identity and stored text, never on a URL or a
+`index_doc(doc_id, storage=, embedder=, target=None, force=False, settings=ChunkSettings())` makes one doc's chunk
+sets match its stored `doc_content` and title: the set for `embedder`'s model (the one
+search serves) and, during a re-embed, the set for `target`'s
+([Model changes](#model-changes-209)). It is keyed on catalog identity and stored text, never on a URL or a
 fetch, so anything catalogued with stored text (future meetings, #211) indexes the same way.
 
 1. A missing or retired doc, or one with no content, has its chunks cleared (`cleared`).
    `clear_doc_chunks_if_unindexable` rechecks under the chunk writers' lock; if a newer
    fetch or reactivation made it indexable, cleanup writes nothing (`skipped`).
-2. The body and title hashes are compared with `get_doc_index_state`. Matching hashes,
-   existing chunks, and no `force` → `unchanged`: no embedding call or write. NULL title
+2. Each model's body and title hashes are compared with `get_doc_index_states`. Matching
+   hashes, existing chunks, and no `force` → `unchanged`: no embedding call or write. NULL title
    provenance from an older chunk set is stale, even for a doc with no title.
 3. `chunk_text` splits the text. Each chunk is embedded as `title \n heading > path \n\n
    text` — the context prefix the chunker section calls for — while `chunk_text` stores only
@@ -616,7 +621,8 @@ fetch, so anything catalogued with stored text (future meetings, #211) indexes t
 4. The whole set is built in memory, then written with
    `replace_doc_chunks_if_current(doc_id, hash, chunks, expected_title_hash=...)`. In one
    transaction it locks the doc and content rows, checks the doc is active and both
-   body/title hashes still match the embedding inputs, and replaces the set. Shorter text therefore never leaves tail chunks.
+   body/title hashes still match the embedding inputs, and replaces that model's set
+   (other models' sets stay; whitespace-only text clears every set). Shorter text therefore never leaves tail chunks.
 
 **Failure and retry.** Embedding errors (`EmbedderUnavailable`: connection, 429, 5xx;
 `EmbedderRejected`: 4xx, malformed or wrong-width vectors) and storage errors return
@@ -642,18 +648,22 @@ in all cases.
 | `PATCH title` | `index_doc` refreshes title context, including title removal; an identical title makes no embedding call |
 | Connectors `404 file not found for this url` (`SourceGone`) | `delete_doc_content`: text and chunks go together, so nothing rebuilds them. A later successful fetch stores and indexes again |
 | Any other fetch failure (timeout, 5xx, 403, an unrecognized 404) | Nothing: a transient failure is not a deletion |
-| `POST /docs/index` (`docs:index`) | Admin retry and #209's re-embed entry point (`stale_only=false, force=true`) |
+| `POST /docs/index` (`docs:index`) | Admin retry and the re-embed driver ([Model changes](#model-changes-209)) |
 
-`list_docs_for_indexing` finds work for the admin route: active docs whose chunks are
-missing, built from older body/title hashes, or missing title provenance, plus docs
-that still have chunks but should not
-(retired, or no content). It pages by doc id so a doc that keeps failing cannot block the
-rest. A changed embedding model is not "stale" to it: the stored model is the provider's
-resolved id, not the configured alias, so #209 forces a pass instead.
+`list_docs_for_indexing(models=...)` finds work for the admin route: active docs that lack
+a set for one of `models`, hold one built from older body/title hashes or missing title
+provenance, or hold a set for a model outside `models`, plus docs that still have chunks
+but should not (retired, or no content). A doc whose text is whitespace only has nothing
+to embed and is listed only while it still has chunks to clear, so it never stays
+pending. It pages by doc id so a doc that keeps failing cannot block the rest.
 
 `HttpEmbedder` (`src/embed/http_client.py`) splits inputs into `/embed` requests of at most
 96 inputs and `EMBED_MAX_REQUEST_CHARS` characters (mirrors of the llm service's limits),
 orders vectors by their `index`, and rejects any width other than the 1536-dimension column.
+It always sends its configured alias and rejects (`EmbedderRejected`) a response naming
+any model but that alias's resolved id (`RESOLVED_EMBED_MODELS` in
+`contracts/embedder.py`), so an llm-side mapping change cannot store vectors under the
+wrong set.
 Before the first request, it validates **every** input: nonblank UTF-8 text, at most
 32,000 characters, and no single input larger than `EMBED_MAX_REQUEST_CHARS`. A known
 invalid input in a later batch therefore cannot waste paid work on earlier batches.
@@ -661,9 +671,40 @@ These are character guards, not an exact provider token count.
 Revoking a doc's source access (zero mapped grants) keeps its chunks, as it keeps its
 content; retrieval (#176) applies visibility.
 
-Indexing uses `SEARCH_EMBED_MODEL` unless `EMBED_MODEL` explicitly overrides it. Keep
-the two aligned: retrieval excludes chunks produced by another model, even at the same
-vector width. An override supports a planned re-embedding pass, not mixed-model search.
+### Model changes (#209)
+
+Vectors from different models are not comparable, even at the same width. **Policy:
+retrieval excludes chunks whose model differs from the query's; it never ranks them
+alongside, or instead of, compatible ones.** Re-embedding is designed so that exclusion
+never removes a doc from search:
+
+- **One set per model.** Indexing always maintains the `SEARCH_EMBED_MODEL` set. While
+  `EMBED_MODEL` names a different model (the re-embed *target*), it also builds that
+  model's set beside it, in the same `index_doc` call, so inline triggers keep both
+  current. Search keeps reading only the served set until an operator switches
+  `SEARCH_EMBED_MODEL`; a partly built target set is never searched. The served set
+  is embedded first, so a failing target never holds it back.
+- **Resumable.** A set that is current for its model is never re-embedded, and
+  `list_docs_for_indexing` lists exactly the docs still missing a current target set.
+  Rerunning the stale-only `POST /docs/index` loop resumes an interrupted re-embed with
+  no cursor and no `force`. Each set is written atomically, so an interruption leaves
+  whole sets only.
+- **Cutover and cleanup.** The switch swaps the two settings, so the old model becomes
+  the target and its sets stay complete while old readers drain. Only once `EMBED_MODEL`
+  is unset are sets for any model other than the served one orphans: the same loop
+  deletes them (`delete_doc_chunks_except`) without an embedding call. Any indexing
+  call deletes them too, one touched doc at a time, which is why the runbook keeps the
+  old model configured until nothing reads it.
+- **Surfacing.** `GET /docs/index/status` reports per-model coverage from
+  `get_index_coverage`, including `missing_docs`: active docs indexed under some other
+  model but not this one. Search checks that count for the served model at most once a
+  minute per process and logs a warning when it is nonzero. That happens only after a
+  premature switch, not during a correct re-embed; the search response itself is
+  unchanged.
+
+Choosing the replacement model and running the paid re-embed are operator decisions;
+nothing re-embeds automatically on deploy. The runbook is in
+[DEPLOYMENT.md](DEPLOYMENT.md#re-embedding-after-a-model-change-209).
 
 ### Evaluation (#178): `src/eval/`
 

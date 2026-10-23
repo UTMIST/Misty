@@ -11,7 +11,13 @@ from contracts.embedder import Embedder
 from contracts.storage import StorageAdapter
 from contracts.types import Doc, DocIngest
 from src.api.auth import AuthedKey, get_actor, require_scope
-from src.api.deps import get_directory, get_embedder, get_fetchers, get_storage
+from src.api.deps import (
+    get_directory,
+    get_embedder,
+    get_fetchers,
+    get_storage,
+    get_target_embedder,
+)
 from src.config import get_settings
 from src.content import content_hash
 from src.fetch.registry import FetcherRegistry
@@ -38,7 +44,7 @@ class DiscoveryResult(BaseModel):
 
 
 def _existing_result(
-    doc: Doc, storage: StorageAdapter, *, source_id: str, actor: str
+    doc: Doc, storage: StorageAdapter, *, source_id: str, actor: str, model: str
 ) -> DiscoveryResult:
     if not doc.active:
         return DiscoveryResult(status="retired", doc_id=doc.id)
@@ -55,7 +61,7 @@ def _existing_result(
         doc.source_id in GOOGLE_SOURCE_IDS and doc.source_access_synced_at is None
     ):
         return DiscoveryResult(status="registered", doc_id=doc.id)
-    index = storage.get_doc_index_state(doc.id)
+    index = storage.get_doc_index_states(doc.id).get(model)
     current = (
         index is not None
         and index.source_content_hash == content.content_hash
@@ -71,6 +77,7 @@ def import_discovered(
     fetchers: FetcherRegistry = Depends(get_fetchers),
     directory: DirectoryClient = Depends(get_directory),
     embedder: Embedder = Depends(get_embedder),
+    target: Embedder | None = Depends(get_target_embedder),
     actor: str = Depends(get_actor),
     _: AuthedKey = Depends(require_scope("docs:write")),
 ) -> DiscoveryResult:
@@ -79,7 +86,9 @@ def import_discovered(
         return DiscoveryResult(status="disabled")
     existing = storage.get_doc_by_google_file_id(payload.file_id)
     if existing is not None:
-        return _existing_result(existing, storage, source_id=payload.source_id, actor=actor)
+        return _existing_result(
+            existing, storage, source_id=payload.source_id, actor=actor, model=embedder.model
+        )
     result = ingest_doc(
         DocIngest(
             url=(
@@ -98,8 +107,10 @@ def import_discovered(
         refresh_existing=False,
     )
     if not result.created:
-        return _existing_result(result.doc, storage, source_id=payload.source_id, actor=actor)
-    outcome = index_doc(result.doc.id, storage=storage, embedder=embedder)
+        return _existing_result(
+            result.doc, storage, source_id=payload.source_id, actor=actor, model=embedder.model
+        )
+    outcome = index_doc(result.doc.id, storage=storage, embedder=embedder, target=target)
     status = (
         "indexed"
         if outcome.status in {"indexed", "unchanged"}

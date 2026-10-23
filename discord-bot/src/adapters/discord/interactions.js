@@ -80,6 +80,7 @@ export function payloadToDiscordReply(payload) {
   if (payload.content !== undefined) out.content = payload.content;
   if (payload.embeds) out.embeds = payload.embeds;
   if (payload.allowedMentions) out.allowedMentions = payload.allowedMentions;
+  if (payload.components) out.components = payload.components;
   if (payload.ephemeral) out.flags = MessageFlags.Ephemeral;
   return out;
 }
@@ -93,7 +94,8 @@ export function resolveEphemeral(command, subcommandName) {
   return sub?.ephemeral ?? command.ephemeral ?? true;
 }
 
-export async function safeReply(interaction, payload) {
+/** Return true only when every payload part was sent; check access per part. */
+export async function safeReply(interaction, payload, { beforeSend } = {}) {
   const dpayload = payloadToDiscordReply(payload);
   if (!dpayload) {
     // Nothing to say. If we deferred, clear the "thinking…" state so the user
@@ -109,6 +111,7 @@ export async function safeReply(interaction, payload) {
   const flags = privateReply ? MessageFlags.Ephemeral : undefined;
   let first = true;
   const send = async (part) => {
+    await beforeSend?.();
     const { flags: _flags, ...editable } = part;
     if (first && interaction.deferred && !interaction.replied) {
       await interaction.editReply(editable);
@@ -120,6 +123,7 @@ export async function safeReply(interaction, payload) {
   };
   try {
     for (const part of discordMessageParts(dpayload)) await send(part);
+    return true;
   } catch {
     // Discord errors can contain the rejected payload. Never log reply content.
     console.error('Could not deliver Discord reply');
@@ -131,5 +135,6 @@ export async function safeReply(interaction, payload) {
         await interaction.deleteReply?.().catch(() => {});
       }
     }
+    return false;
   }
 }

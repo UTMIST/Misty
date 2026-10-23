@@ -126,6 +126,7 @@ class GoogleIdentityCases:
     @pytest.mark.parametrize("retired", [False, True])
     def test_discovery_repairs_legacy_web_source_without_replacing_record(self, adapter, retired):
         from src.api.routers.discovery import _existing_result
+        from tests.fake_embedder import FAKE_MODEL
 
         doc = self.make(adapter, "https://docs.google.com/forms/u/0/d/identity/edit")
         adapter.add_tag(doc.id, "legacy")
@@ -133,7 +134,9 @@ class GoogleIdentityCases:
         if retired:
             adapter.update_doc(doc.id, {"active": False}, actor="operator")
         doc = adapter.get_doc(doc.id)
-        result = _existing_result(doc, adapter, source_id="gdrive", actor="discovery")
+        result = _existing_result(
+            doc, adapter, source_id="gdrive", actor="discovery", model=FAKE_MODEL
+        )
         repaired = adapter.get_doc(doc.id)
         assert result.doc_id == doc.id
         assert result.status == ("retired" if retired else "registered")
