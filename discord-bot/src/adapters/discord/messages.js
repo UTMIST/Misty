@@ -9,6 +9,12 @@ function preferredBoundary(text, limit, markers, fence) {
     );
     // Oversized lines must still make progress through the normal splitter.
     if (!source || source[0].length > MESSAGE_LIMIT) return boundary;
+    const end = source.index + source[0].length;
+    const heading = headings.findLast((item) => item.index + item[0].length === source.index);
+    if (heading && end - heading.index <= MESSAGE_LIMIT) {
+      if (heading.index > 0) return heading.index;
+      if (end <= limit) return end;
+    }
     if (source.index > 0) return source.index;
     return source[0].length <= limit ? source[0].length : boundary;
   }

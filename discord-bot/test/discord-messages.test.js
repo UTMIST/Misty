@@ -29,6 +29,18 @@ test('long helper answers keep titled source links intact across message boundar
   }
 });
 
+test('a heading stays with its following source line when splitting at title punctuation', () => {
+  const source = '• [A plan. With spaces](<https://example.test/plan>)';
+  for (const intro of ['', 'Intro\n\n']) {
+    for (const gap of ['\n', '\n\n']) {
+      const section = `## Sources${gap}${source}`;
+      const chunks = chunkForDiscord(intro + section + '\n' + 'x'.repeat(3000));
+      assert.ok(chunks.some((part) => part.includes(section)));
+      assert.ok(chunks.every((part) => part.length <= 2000));
+    }
+  }
+});
+
 test('a source exactly at the limit stays intact and oversized sources still terminate', () => {
   const prefix = '• [Title with spaces. More](<https://example.test/';
   const line = prefix + 'a'.repeat(2000 - prefix.length - 2) + '>)';

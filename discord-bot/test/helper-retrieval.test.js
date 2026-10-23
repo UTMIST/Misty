@@ -249,6 +249,13 @@ test('source titles cannot escape masked links or trigger mentions', () => {
   assert.equal(rendered, `Answer\n\nSources:\n• [${escaped}](<${hit.url}>)`);
 });
 
+test('bracketed source titles retain the existing Markdown escaping', () => {
+  assert.equal(
+    renderHelperAnswer('Answer', [{ ...hit, title: '[WIP] Plan' }]),
+    `Answer\n\nSources:\n• [\\[WIP\\] Plan](<${hit.url}>)`,
+  );
+});
+
 test('source hrefs encode masked-link delimiters and whitespace', () => {
   const url = 'https://example.test/a(b) c<d>?q=hello world)#fragment)';
   assert.equal(
