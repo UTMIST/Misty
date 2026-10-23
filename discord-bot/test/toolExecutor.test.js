@@ -94,6 +94,132 @@ test('a command action ends the turn without sending its private result back to 
   assert.equal(llm.calls.length, 1);
 });
 
+test('all actions in one model response are prepared and confirmed together', async () => {
+  const executed = [];
+  const llm = scriptedLlm([
+    {
+      stop_reason: 'tool_use',
+      content_blocks: [
+        toolUse('a', 'team_remove', { user: 'Alex' }),
+        toolUse('b', 'team_remove', { user: 'Sam' }),
+      ],
+    },
+  ]);
+  const executor = createToolExecutor({
+    llmClient: llm,
+    registry: registryWith(
+      async ({ user }) => ({
+        action: {
+          userId: 'requester',
+          confirm: true,
+          summary: `Remove ${user}`,
+          check: async () => {},
+          execute: async () => {
+            executed.push(user);
+            return { content: `Removed ${user}` };
+          },
+        },
+      }),
+      'team_remove',
+    ),
+  });
+  const result = await executor.run(base);
+  assert.match(result.action.summary, /Alex/);
+  assert.match(result.action.summary, /Sam/);
+  assert.deepEqual(executed, []);
+  await result.action.execute();
+  assert.deepEqual(executed, ['Alex', 'Sam']);
+  assert.equal(llm.calls.length, 1);
+});
+
+test('a failed call in an action batch withholds the whole proposal', async () => {
+  for (const invalidFirst of [true, false]) {
+    const calls = [toolUse('a', 'command', {}), toolUse('b', 'missing', {})];
+    const executor = createToolExecutor({
+      llmClient: scriptedLlm([
+        { stop_reason: 'tool_use', content_blocks: invalidFirst ? calls.reverse() : calls },
+      ]),
+      registry: registryWith(
+        async () => ({ action: { userId: 'u', check: async () => {} } }),
+        'command',
+      ),
+    });
+    const result = await executor.run(base);
+    assert.equal(result.outcome, OUTCOME.WITHHELD);
+    assert.equal(result.action, undefined);
+  }
+});
+
+test('a batched confirmation rechecks every action before the first write', async () => {
+  let allowed = true;
+  const executed = [];
+  const executor = createToolExecutor({
+    llmClient: scriptedLlm([
+      {
+        stop_reason: 'tool_use',
+        content_blocks: [toolUse('a', 'command', { id: 1 }), toolUse('b', 'command', { id: 2 })],
+      },
+    ]),
+    registry: registryWith(
+      async ({ id }) => ({
+        action: {
+          userId: 'u',
+          confirm: true,
+          summary: `Action ${id}`,
+          check: async () => {
+            if (id === 2 && !allowed) throw new Error('Permission revoked');
+          },
+          execute: async () => {
+            executed.push(id);
+            return { content: 'Done' };
+          },
+        },
+      }),
+      'command',
+    ),
+  });
+  const { action } = await executor.run(base);
+  allowed = false;
+  await assert.rejects(action.execute(), /Permission revoked/);
+  assert.deepEqual(executed, []);
+});
+
+test('a batch reports a completed action and stops after an uncertain execution failure', async () => {
+  const executed = [];
+  const executor = createToolExecutor({
+    llmClient: scriptedLlm([
+      {
+        stop_reason: 'tool_use',
+        content_blocks: [1, 2, 3].map((id) => toolUse(String(id), 'command', { id })),
+      },
+    ]),
+    registry: registryWith(
+      async ({ id }) => ({
+        action: {
+          userId: 'u',
+          confirm: true,
+          summary: `Action ${id}`,
+          check: async () => {},
+          execute: async () => {
+            executed.push(id);
+            if (id === 2) throw new Error('Ambiguous backend failure');
+            return { content: 'First completed', embeds: [{ title: 'Result' }] };
+          },
+        },
+      }),
+      'command',
+    ),
+  });
+  const { action } = await executor.run(base);
+  const result = await action.execute();
+  assert.deepEqual(executed, [1, 2]);
+  assert.deepEqual(result.replies[0], {
+    content: 'First completed',
+    embeds: [{ title: 'Result' }],
+  });
+  assert.match(result.replies[1].content, /Action 2.*remaining actions were not run/);
+});
+
 test('fresh caller authorization runs before each tool and prevents execution after revocation', async () => {
   let allowed = true;
   let executed = 0;

@@ -1,5 +1,6 @@
 import { MessageFlags } from 'discord.js';
 import { authMessages } from '../../messages/auth.js';
+import { renderRecordingAnnouncement } from '../../messages/helperActions.js';
 import { resolvePrincipal } from '../../auth/principal.js';
 import { authorize } from '../../auth/policy.js';
 import { DirectoryUnavailable } from '../../clients/directoryClient.js';
@@ -130,8 +131,12 @@ export async function handleRecordInteraction(interaction, appContext, recordCom
 export async function runRecordAction(request, appContext, recordCommand, botId) {
   const subcommand = request.subcommand;
   let payload;
-  const reply = (content) => {
-    payload = { content, ephemeral: true };
+  const reply = (content, publicContent) => {
+    payload = {
+      content,
+      ephemeral: true,
+      ...(request.allowPublicReply && publicContent && { publicContent }),
+    };
   };
 
   if (!request.guildId) {
@@ -222,6 +227,7 @@ export async function runRecordAction(request, appContext, recordCommand, botId)
         activeRecording(appContext.meetingSurface, request.guildId)?.voiceChannel ?? voiceChannel;
       await reply(
         `🔴 Misty is now recording in ${describeVoiceChannel(recordingChannel)}. ${autoStopMessage(recordingChannel)}`,
+        renderRecordingAnnouncement('start'),
       );
     } else await reply("Couldn't start recording — the recording state is unavailable.");
     return payload;
@@ -232,7 +238,13 @@ export async function runRecordAction(request, appContext, recordCommand, botId)
     if (result.status === 'not-recording') await reply(noRecordingMessage(request));
     else {
       const active = activeRecording(appContext.meetingSurface, request.guildId);
-      if (active) await reply(activeStatusMessage(request, result, active, resolvedBotId));
+      if (active)
+        await reply(
+          activeStatusMessage(request, result, active, resolvedBotId),
+          active.textChannelId === request.textChannel?.id
+            ? renderRecordingAnnouncement('status', result.elapsedMs ?? 0)
+            : null,
+        );
       else {
         await reply(
           `🔴 Misty is recording (${Math.round((result.elapsedMs ?? 0) / 1000)}s elapsed), but its voice channel location is unavailable.`,
@@ -282,6 +294,9 @@ export async function runRecordAction(request, appContext, recordCommand, botId)
     } else if (result.status === 'stopped') {
       await reply(
         `⏳ Misty stopped recording in ${describeVoiceChannel(active?.voiceChannel)}. Processing — minutes will post shortly.`,
+        active?.textChannelId === request.textChannel?.id
+          ? renderRecordingAnnouncement('stop')
+          : null,
       );
     } else await reply("Couldn't determine whether the recording stopped.");
     return payload;

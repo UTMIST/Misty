@@ -1,5 +1,6 @@
 import { commands } from './commands/index.js';
 import { authorizeCommand, dispatch } from './router.js';
+import { renderActionSummary } from './messages/helperActions.js';
 
 export const llmSafe = true;
 
@@ -33,6 +34,9 @@ const OPERATIONS = [
   ['record', 'stop', true],
   ['qna'],
 ];
+
+// Reply visibility is independent of slash-command authentication/ephemerality.
+const PUBLIC_READS = new Set(['team_list', 'team_roster', 'help', 'bug']);
 
 function optionSchema(option) {
   if (option.type === 'boolean') return { type: 'boolean', description: option.description };
@@ -90,10 +94,15 @@ export function createCommandTools({ appContext }) {
     const command = commands.get(commandName);
     const operation = subcommand ? command.subcommands.find((s) => s.name === subcommand) : command;
     const name = [commandName, subcommand].filter(Boolean).join('_').replaceAll('-', '_');
+    const delivery = PUBLIC_READS.has(name)
+      ? 'Replies publicly in server conversations'
+      : commandName === 'record'
+        ? 'Recording status and successful changes may be announced only in the meeting origin channel; other results are private'
+        : 'Delivers a private result';
     return {
       definition: {
         name,
-        description: `${operation.description}. Authenticates the requesting user. Delivers a private result${confirm ? ' after user confirmation' : ''}. Request one action at a time; this ends the assistant turn.`,
+        description: `${operation.description}. Authenticates the requesting user. ${delivery}${confirm ? ' after private user confirmation' : ''}. Include all requested actions in the same tool-call response (one call per member for team changes, at most four calls total including lookups). The whole batch ends the assistant turn; results are not returned to the model.`,
         input_schema: {
           type: 'object',
           additionalProperties: false,
@@ -147,36 +156,48 @@ export function createCommandTools({ appContext }) {
         }
         // No model data can override the author, guild, channel or meeting target.
         const runMeeting = request.runMeeting;
+        const publicRead = Boolean(
+          request.discordGuildId &&
+          (PUBLIC_READS.has(name) ||
+            (name === 'record_status' &&
+              request.recordingTextChannelId &&
+              request.recordingTextChannelId === request.sourceChannelId)),
+        );
+        // Resolve display labels only after authorization, without performing a write.
+        // The preview and execution both use the frozen, validated options.
+        const people = {};
+        for (const option of operation.options) {
+          if (option.type === 'user' && options[option.name]) {
+            const id = options[option.name].id;
+            people[id] = await withDeadline(() => appContext.directory.getPersonByDiscordId(id));
+          }
+        }
+        const teamSlug = options.team ?? (commandName === 'team' ? options.slug : null);
+        const team =
+          teamSlug && !(commandName === 'team' && subcommand === 'create')
+            ? await withDeadline(() => appContext.directory.getTeamBySlug(teamSlug))
+            : null;
         return {
-          content: { status: confirm ? 'confirmation_required' : 'private_result' },
+          content: {
+            status: confirm
+              ? 'confirmation_required'
+              : publicRead
+                ? 'public_result'
+                : 'private_result',
+          },
           action: {
             userId: intent.discordUserId,
             confirm,
-            summary: [
-              operation.description,
-              intent.discordGuildId
-                ? `Server: ${request.guildLabel ?? ''} (${intent.discordGuildId})`
-                : 'Direct message',
-              intent.discordGuildId
-                ? `Channel${intent.channelUsedParent ? ' (parent)' : ''}: ${intent.discordChannelId}`
-                : null,
-              intent.channelUsedParent ? `Request thread: ${request.sourceChannelId}` : null,
-              commandName === 'record' && subcommand === 'start'
-                ? `Recording location: your voice channel at confirmation. Minutes channel: ${request.sourceChannelId}`
-                : null,
-              commandName === 'record' && subcommand === 'start'
-                ? `Save transcript and minutes as a Google Doc: ${(options.save ?? true) ? 'yes' : 'no'}`
-                : null,
-              commandName === 'record' && subcommand === 'stop'
-                ? `Recording voice channel: ${request.recordingVoiceChannelId ?? 'no active recording'}. Applies only to the recording active when you asked.`
-                : null,
-              ...Object.entries(input).map(
-                ([key, value]) => `${key.replaceAll('_', ' ')}: ${JSON.stringify(value)}`,
-              ),
-            ]
-              .filter(Boolean)
-              .join('\n')
-              .replaceAll('`', '\\u0060'),
+            publicRead,
+            summary: renderActionSummary({
+              commandName,
+              subcommand,
+              operation,
+              options,
+              request,
+              people,
+              team,
+            }),
             check,
             setExpiresAt(value) {
               expiresAt = value;
@@ -187,7 +208,8 @@ export function createCommandTools({ appContext }) {
                 if (!runMeeting) return { content: 'Use this action in a server channel.' };
                 return runMeeting({ commandName, subcommand, options });
               }
-              return dispatch(intent, { commands, appContext });
+              const payload = await dispatch(intent, { commands, appContext });
+              return publicRead ? { ...payload, publicReply: { payload } } : payload;
             },
           },
         };

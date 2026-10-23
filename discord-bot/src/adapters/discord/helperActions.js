@@ -6,13 +6,13 @@ import { PendingActionsFull } from '../../helperActions.js';
 const ACTION_FAILED =
   'I could not complete or deliver this action. I have not retried it. Check the current state before requesting it again.';
 
-function buttons(token, confirm) {
+function buttons(token, confirm, needsConfirmation = false) {
   const choices = confirm
     ? [
         ['confirm', 'Confirm', 3],
         ['cancel', 'Cancel', 2],
       ]
-    : [['review', 'View privately', 2]];
+    : [['review', needsConfirmation ? 'Review privately' : 'View privately', 2]];
   return [
     {
       type: 1,
@@ -34,7 +34,7 @@ async function preview(action, token, send) {
   await action.check();
   // Send the complete preview before the buttons, even when it spans messages.
   await send({
-    content: `Review this action:\n\`\`\`\n${action.summary}\n\`\`\``,
+    content: `Review your request:\n\n${action.summary}`,
     allowedMentions: { parse: [] },
   });
   await send({
@@ -43,6 +43,14 @@ async function preview(action, token, send) {
     components: buttons(token, true),
     allowedMentions: { parse: [] },
   });
+}
+
+async function deliverResult(payload, sendPrivate, sendPublic) {
+  for (const reply of payload?.replies ?? [payload]) {
+    const { publicReply, ...privateReply } = reply;
+    if (publicReply && sendPublic) await sendPublic(publicReply);
+    else await sendPrivate(privateReply);
+  }
 }
 
 /** Deliver command output directly; private data never goes through the model. */
@@ -54,11 +62,35 @@ export async function presentHelperAction(message, send, action, appContext) {
     // Admission must precede checks that may read documents, delivery and work.
     token = appContext.helperActions.add(action);
     await action.check();
+    // Retain the trusted destination for later button clicks and mixed batches.
+    // Only an explicit public projection may leave the private result path.
+    if (message.guild || message.guildId) {
+      action.sendPublic = ({ payload, send: destinationSend = send }) =>
+        sendDiscordMessage(async (part) => {
+          await action.check();
+          const { ephemeral: _ephemeral, ...body } = part;
+          return destinationSend({ ...body, allowedMentions: { parse: [] } });
+        }, payload);
+      if (action.publicRead && !action.confirm) {
+        if (!appContext.helperActions.take(token, action.userId)) throw new Error('Expired');
+        executionStarted = true;
+        await deliverResult(
+          await action.execute(),
+          async () => {
+            throw new Error('Public result is no longer available');
+          },
+          action.sendPublic,
+        );
+        return;
+      }
+    }
     let dm;
-    try {
-      dm = await message.author.createDM();
-    } catch {
-      /* Offer a private button below. */
+    if (!message.guild && !message.guildId) {
+      try {
+        dm = await message.author.createDM();
+      } catch {
+        /* Offer a private button below. */
+      }
     }
     if (dm) {
       const sendPrivate = (payload) =>
@@ -77,7 +109,7 @@ export async function presentHelperAction(message, send, action, appContext) {
           await sendPrivate({ content: 'Preparing your private result…' });
           if (!appContext.helperActions.take(token, action.userId)) throw new Error('Expired');
           executionStarted = true;
-          await sendPrivate(await action.execute());
+          await deliverResult(await action.execute(), sendPrivate);
         }
         // A failed source-channel acknowledgement must not invalidate buttons
         // already delivered privately, or cause a successful read to run again.
@@ -94,8 +126,10 @@ export async function presentHelperAction(message, send, action, appContext) {
       }
     }
     await send({
-      content: 'Open this private response to continue.',
-      components: buttons(token, false),
+      content: action.confirm
+        ? 'Review and confirm your request privately here. Only you can open it; nothing has changed yet.'
+        : 'Open your private response here. Only you can view it.',
+      components: buttons(token, false, action.confirm),
       allowedMentions: { parse: [] },
     });
     if (!action.confirm) appContext.helperActions.presented(token, action.userId);
@@ -156,7 +190,10 @@ export async function handleHelperActionInteraction(interaction, appContext) {
   try {
     const payload = await action.execute();
     await action.check();
-    await sendPrivate(payload);
+    await deliverResult(payload, sendPrivate, action.sendPublic);
+    // Discord deferred an ephemeral reply even when every result was public.
+    if ((payload?.replies ?? [payload]).every((result) => result.publicReply) && action.sendPublic)
+      await sendPrivate({ content: 'Posted the result in the channel.' });
   } catch {
     await reply({
       content: ACTION_FAILED,

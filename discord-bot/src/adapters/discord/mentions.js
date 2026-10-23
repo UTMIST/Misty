@@ -41,6 +41,7 @@ export function createHelperRequest(message, appContext, botId) {
     channelUsedParent: Boolean(parent),
     guildLabel: message.guild?.name,
     recordingVoiceChannelId: recording?.voiceChannel?.id,
+    recordingTextChannelId: recording?.textChannelId,
     checkSurface: sourceAccess,
     async runMeeting({ commandName, subcommand, options }) {
       if (!guildId) return { content: 'Use this action in a server channel.' };
@@ -62,7 +63,8 @@ export function createHelperRequest(message, appContext, botId) {
           appContext,
         );
       }
-      return runRecordAction(
+      const before = appContext.meetingSurface?.activeSession?.(guildId);
+      const { publicContent, ...payload } = await runRecordAction(
         {
           guildId,
           requesterId: userId,
@@ -71,11 +73,33 @@ export function createHelperRequest(message, appContext, botId) {
           subcommand,
           name: options.name ?? null,
           save: options.save ?? true,
+          allowPublicReply: true,
         },
         appContext,
         recordCommand,
         botId,
       );
+      const announced =
+        subcommand === 'start' ? appContext.meetingSurface?.activeSession?.(guildId) : before;
+      if (!publicContent || announced?.textChannelId !== sourceChannel.id) return payload;
+      return {
+        ...payload,
+        publicReply: {
+          payload: { content: publicContent },
+          async send(part) {
+            const { channel: destination } = await sourceAccess();
+            if (
+              subcommand !== 'stop' &&
+              appContext.meetingSurface?.activeSession?.(guildId)?.sessionId !== announced.sessionId
+            ) {
+              throw new Error('Recording changed before publication.');
+            }
+            // An auto-created helper thread is not the meeting's audience.
+            // Publish only in the exact origin channel, never its parent.
+            return destination.send(part);
+          },
+        },
+      };
     },
   });
 }

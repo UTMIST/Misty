@@ -3,6 +3,43 @@ import { randomBytes } from 'node:crypto';
 const ACTION_TTL_MS = 120000;
 export class PendingActionsFull extends Error {}
 
+/** One review and single-use claim for every command proposed in a tool batch. */
+export function combineHelperActions(actions) {
+  if (actions.length === 1) return actions[0];
+  if (actions.some((action) => action.userId !== actions[0].userId)) {
+    throw new Error('Actions must belong to the same requester.');
+  }
+  return {
+    userId: actions[0].userId,
+    confirm: actions.some((action) => action.confirm),
+    publicRead: actions.every((action) => action.publicRead && !action.confirm),
+    summary: actions.map((action, i) => `${i + 1}. ${action.summary}`).join('\n\n'),
+    async check() {
+      for (const action of actions) await action.check();
+    },
+    setExpiresAt(expiresAt) {
+      for (const action of actions) action.setExpiresAt?.(expiresAt);
+    },
+    async execute() {
+      // Preflight the entire proposal before any command can change state.
+      await this.check();
+      const replies = [];
+      for (const [index, action] of actions.entries()) {
+        await action.check();
+        try {
+          replies.push(await action.execute());
+        } catch {
+          replies.push({
+            content: `Action ${index + 1} could not be completed. Earlier actions may have completed; remaining actions were not run. Check the current state before asking again.`,
+          });
+          break;
+        }
+      }
+      return { replies };
+    },
+  };
+}
+
 /** Short-lived, user-bound actions. Claim synchronously before any awaited work. */
 export function createHelperActions() {
   const pending = new Map();

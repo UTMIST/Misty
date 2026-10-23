@@ -6,6 +6,7 @@ import { commands } from '../src/commands/index.js';
 import { sendHelperReply } from '../src/adapters/discord/mentions.js';
 import * as mentions from '../src/adapters/discord/mentions.js';
 import { createTeamService } from '../src/services/teamService.js';
+import { combineHelperActions } from '../src/helperActions.js';
 
 function fixture() {
   const ctx = createAppContext({ helperToolsEnabled: true });
@@ -85,6 +86,117 @@ function buttonId(messages, label) {
     .find((b) => b.label === label)?.custom_id;
 }
 
+test('two removals share a descriptive private thread confirmation and execute once', async () => {
+  const f = fixture();
+  f.message.guildId = 'guild';
+  f.message.author.createDM = async () => assert.fail('Thread actions must not open a DM');
+  const admin = { id: 'admin', active: true, access_level: 'admin' };
+  const people = {
+    101: { id: 'p1', display_name: 'Alex' },
+    202: { id: 'p2', display_name: 'Sam' },
+  };
+  const active = new Set(['p1', 'p2']);
+  const ended = [];
+  f.ctx.directory = {
+    getPersonByDiscordId: async (id) => (id === 'owner' ? admin : people[id]),
+    getTeamBySlug: async () => ({ id: 'team', slug: 'infra', label: 'Infrastructure' }),
+    listMemberships: async ({ personId }) => (active.has(personId) ? [{ id: personId }] : []),
+    endMembership: async (id) => {
+      ended.push(id);
+      assert.ok(active.delete(id), 'each membership is ended only once');
+    },
+  };
+  f.ctx.teamService = createTeamService({ directory: f.ctx.directory });
+  let modelCalls = 0;
+  f.ctx.llmClient.chat = async () => {
+    assert.equal(++modelCalls, 1, 'private action results must not be replayed');
+    return {
+      stop_reason: 'tool_use',
+      content_blocks: ['101', '202'].map((user) => ({
+        type: 'tool_use',
+        id: user,
+        name: 'team_remove',
+        input: { user, team: 'infra' },
+      })),
+    };
+  };
+  const result = await f.ctx.toolExecutor.run({
+    messages: [{ role: 'user', content: 'Remove <@101> and <@202> from infra' }],
+    principal: { person: admin },
+    request: { discordUserId: 'owner', discordGuildId: 'guild', sourceChannelId: 'thread' },
+  });
+  assert.match(result.action.summary, /Alex/);
+  assert.match(result.action.summary, /Sam/);
+  assert.match(result.action.summary, /Infrastructure/);
+  await sendHelperReply(f.send, result, { message: f.message, appContext: f.ctx });
+  assert.equal(active.size, 2);
+  assert.equal(f.privateMessages.length, 0);
+  assert.doesNotMatch(JSON.stringify(f.publicMessages), /Alex|Sam|Infrastructure/);
+  const reviewId = buttonId(f.publicMessages, 'Review privately');
+  assert.ok(reviewId);
+  const intruder = button(reviewId, 'intruder');
+  await f.handlers.interactionCreate(intruder);
+  assert.doesNotMatch(JSON.stringify(intruder.replies), /Alex|Sam/);
+  const review = button(reviewId);
+  review.deferReply = async (payload) => {
+    assert.equal(payload.flags, 64);
+    review.deferred = true;
+  };
+  await f.handlers.interactionCreate(review);
+  assert.match(JSON.stringify(review.replies), /Alex/);
+  assert.match(JSON.stringify(review.replies), /Sam/);
+  assert.equal(active.size, 2);
+  const confirmId = buttonId(review.replies, 'Confirm');
+  assert.ok(confirmId);
+  const confirmed = button(confirmId);
+  await Promise.all([
+    f.handlers.interactionCreate(confirmed),
+    f.handlers.interactionCreate(button(confirmId)),
+  ]);
+  assert.equal(active.size, 0);
+  assert.deepEqual(ended, ['p1', 'p2']);
+  assert.match(JSON.stringify(confirmed.replies), /Removed.*Alex/);
+  assert.match(JSON.stringify(confirmed.replies), /Removed.*Sam/);
+  assert.equal(confirmed.replies[1].flags, 64, 'later results stay ephemeral');
+});
+
+test('cancelling a private batch consumes every proposed action without executing any', async () => {
+  const f = fixture();
+  f.message.guildId = 'guild';
+  const action = combineHelperActions([{ ...f.action }, { ...f.action }]);
+  await sendHelperReply(f.send, { action }, { message: f.message, appContext: f.ctx });
+  const review = button(buttonId(f.publicMessages, 'Review privately'));
+  await f.handlers.interactionCreate(review);
+  const cancel = button(buttonId(review.replies, 'Cancel'));
+  await f.handlers.interactionCreate(cancel);
+  const confirm = button(buttonId(review.replies, 'Confirm'));
+  await f.handlers.interactionCreate(confirm);
+  assert.equal(f.executed(), 0);
+  assert.match(JSON.stringify(cancel.replies), /Cancelled/);
+  assert.match(JSON.stringify(confirm.replies), /expired|already used/);
+});
+
+test('server reads wait for a requester-only ephemeral interaction without opening DMs', async () => {
+  const f = fixture();
+  f.message.guildId = 'guild';
+  f.action.confirm = false;
+  let dmAttempts = 0;
+  f.message.author.createDM = async () => {
+    dmAttempts++;
+    return { send: async (p) => f.privateMessages.push(p) };
+  };
+  await sendHelperReply(f.send, { action: f.action }, { message: f.message, appContext: f.ctx });
+  assert.equal(dmAttempts, 0);
+  assert.equal(f.executed(), 0);
+  const id = buttonId(f.publicMessages, 'View privately');
+  assert.ok(id);
+  const interaction = button(id);
+  await f.handlers.interactionCreate(interaction);
+  assert.equal(f.executed(), 1);
+  assert.match(JSON.stringify(interaction.replies), /Private result/);
+  assert.doesNotMatch(JSON.stringify(f.publicMessages), /Private result/);
+});
+
 for (const save of [undefined, false, true]) {
   test(`record helper preview and confirmation preserve the save option (${save})`, async () => {
     const f = fixture();
@@ -112,7 +224,9 @@ for (const save of [undefined, false, true]) {
     );
     await sendHelperReply(f.send, { action }, { message: f.message, appContext: f.ctx });
     assert.equal(starts.length, 0);
-    const confirmation = button(buttonId(f.privateMessages, 'Confirm'));
+    const review = button(buttonId(f.publicMessages, 'Review privately'));
+    await f.handlers.interactionCreate(review);
+    const confirmation = button(buttonId(review.replies, 'Confirm'));
     await f.handlers.interactionCreate(confirmation);
     assert.equal(starts.length, 1);
     assert.equal(starts[0].save, save ?? true);
@@ -120,7 +234,7 @@ for (const save of [undefined, false, true]) {
     assert.equal(starts[0].name, 'Review');
     assert.equal(starts[0].textChannel.id, 'text');
     assert.match(
-      JSON.stringify(f.privateMessages),
+      JSON.stringify(review.replies),
       save === false ? /Google Doc: no/ : /Google Doc: yes/,
     );
   });
@@ -282,7 +396,7 @@ test('closed-DM confirmation gets one full window after private review; reviewin
     },
   });
   await sendHelperReply(f.send, { action: f.action }, { message: f.message, appContext: f.ctx });
-  const reviewId = buttonId(f.publicMessages, 'View privately');
+  const reviewId = buttonId(f.publicMessages, 'Review privately');
   clock = 110000;
   const i = button(reviewId);
   await f.handlers.interactionCreate(i);
@@ -566,7 +680,7 @@ test('meeting tools bind the exact source thread and re-fetch the requester voic
   );
 });
 
-test('a Discord mention reaches the wired tool, authenticates its author, and privately delivers the real command result', async (t) => {
+test('a Discord mention authenticates its author and publicly delivers the real team list without a button', async (t) => {
   const privateMessages = [],
     publicMessages = [],
     identities = [];
@@ -644,6 +758,196 @@ test('a Discord mention reaches the wired tool, authenticates its author, and pr
   assert.equal(modelCalls, 1);
   assert.ok(identities.length >= 3);
   assert.ok(identities.every((id) => id === '111111111111111111'));
-  assert.match(JSON.stringify(privateMessages), /Infrastructure/);
-  assert.equal(JSON.stringify(publicMessages).includes('Infrastructure'), false);
+  assert.equal(privateMessages.length, 0, 'mentions never open a DM');
+  assert.equal(buttonId(publicMessages, 'View privately'), undefined);
+  assert.match(JSON.stringify(publicMessages), /Infrastructure/);
+  assert.deepEqual(publicMessages[0].allowedMentions, { parse: [] });
+});
+
+test('mixed batches publish only explicitly public results after the private interaction', async () => {
+  const f = fixture();
+  f.message.guildId = 'guild';
+  const publicAction = {
+    ...f.action,
+    confirm: false,
+    publicRead: true,
+    execute: async () => ({
+      content: 'Shared directory',
+      publicReply: { payload: { content: 'Shared directory' } },
+    }),
+  };
+  const privateAction = { ...f.action, confirm: false };
+  const action = combineHelperActions([publicAction, privateAction]);
+  await sendHelperReply(f.send, { action }, { message: f.message, appContext: f.ctx });
+  assert.doesNotMatch(JSON.stringify(f.publicMessages), /Shared directory|Private result/);
+  const interaction = button(buttonId(f.publicMessages, 'View privately'));
+  await f.handlers.interactionCreate(interaction);
+  assert.match(JSON.stringify(f.publicMessages), /Shared directory/);
+  assert.doesNotMatch(JSON.stringify(f.publicMessages), /Private result/);
+  assert.match(JSON.stringify(interaction.replies), /Private result/);
+  assert.equal(f.executed(), 1);
+});
+
+test('public reads recheck access between message parts and never offer a retry', async () => {
+  const f = fixture();
+  f.message.guildId = 'guild';
+  f.action.confirm = false;
+  f.action.publicRead = true;
+  let executions = 0;
+  f.action.execute = async () => {
+    executions++;
+    return { publicReply: { payload: { content: 'a'.repeat(2100) + 'PRIVATE_TAIL' } } };
+  };
+  await sendHelperReply(
+    async (part) => {
+      f.publicMessages.push(part);
+      f.revoke();
+    },
+    { action: f.action },
+    { message: f.message, appContext: f.ctx },
+  );
+  assert.equal(executions, 1);
+  assert.doesNotMatch(JSON.stringify(f.publicMessages), /PRIVATE_TAIL/);
+  assert.equal(buttonId(f.publicMessages, 'View privately'), undefined);
+});
+
+function recordingFixture(subcommand, { origin = 'source-thread', outcome } = {}) {
+  const f = fixture();
+  const person = { id: 'p1', active: true, access_level: 'member' };
+  const originMessages = [];
+  const voiceChannel = { id: 'private-voice' };
+  let session =
+    subcommand === 'start'
+      ? null
+      : {
+          sessionId: 'meeting',
+          voiceChannel,
+          textChannelId: origin,
+        };
+  let executions = 0;
+  f.ctx.directory.getPersonByDiscordId = async () => person;
+  f.ctx.meetingSurface = {
+    activeSession: () => session,
+    status: () => ({ status: 'recording', elapsedMs: 15000 }),
+    start: async ({ textChannel }) => {
+      executions++;
+      if (outcome) return { status: outcome };
+      session = { sessionId: 'meeting', voiceChannel, textChannelId: textChannel.id };
+      return { status: 'recording' };
+    },
+    stop: async () => {
+      executions++;
+      if (outcome) return { status: outcome };
+      session = null;
+      return { status: 'stopped' };
+    },
+  };
+  f.message.channel = {
+    id: 'source-thread',
+    parentId: 'parent',
+    isThread: () => true,
+    permissionsFor: () => ({ has: () => true }),
+    send: async (part) => originMessages.push(part),
+  };
+  f.message.guild = {
+    id: 'guild',
+    members: { fetch: async () => ({ voice: { channel: voiceChannel } }) },
+    channels: { fetch: async () => f.message.channel },
+  };
+  const request = mentions.createHelperRequest(f.message, f.ctx, 'bot');
+  return {
+    ...f,
+    originMessages,
+    person,
+    request,
+    executions: () => executions,
+    replaceSession: () => {
+      session = { ...session, sessionId: 'replacement' };
+    },
+  };
+}
+
+for (const subcommand of ['status', 'start', 'stop']) {
+  test(`record ${subcommand} posts a safe result only in the exact meeting channel`, async () => {
+    const f = recordingFixture(subcommand);
+    const { action } = await f.ctx.toolRegistry.handlers.get(`record_${subcommand}`)(
+      {},
+      { request: f.request, principal: { person: f.person } },
+    );
+    await sendHelperReply(f.send, { action }, { message: f.message, appContext: f.ctx });
+    if (subcommand !== 'status') {
+      assert.equal(f.executions(), 0);
+      assert.equal(f.originMessages.length, 0);
+      const review = button(buttonId(f.publicMessages, 'Review privately'));
+      await f.handlers.interactionCreate(review);
+      assert.equal(f.executions(), 0);
+      const id = buttonId(review.replies, 'Confirm');
+      const confirm = button(id);
+      await f.handlers.interactionCreate(confirm);
+      await f.handlers.interactionCreate(button(id));
+      assert.equal(f.executions(), 1);
+      assert.match(JSON.stringify(confirm.replies), /Posted the result/);
+    }
+    assert.equal(f.originMessages.length, 1);
+    assert.match(f.originMessages[0].content, /this meeting/);
+    assert.doesNotMatch(
+      JSON.stringify(f.originMessages),
+      /private-voice|You are|source-thread|parent/,
+    );
+    assert.doesNotMatch(JSON.stringify(f.publicMessages), /this meeting|private-voice/);
+  });
+}
+
+for (const subcommand of ['status', 'stop']) {
+  test(`record ${subcommand} outside the meeting origin stays private, including in a child thread`, async () => {
+    const f = recordingFixture(subcommand, { origin: 'parent' });
+    const { action } = await f.ctx.toolRegistry.handlers.get(`record_${subcommand}`)(
+      {},
+      { request: f.request, principal: { person: f.person } },
+    );
+    assert.equal(action.publicRead, false);
+    await sendHelperReply(f.send, { action }, { message: f.message, appContext: f.ctx });
+    const review = button(
+      buttonId(f.publicMessages, action.confirm ? 'Review privately' : 'View privately'),
+    );
+    await f.handlers.interactionCreate(review);
+    let response = review;
+    if (action.confirm) {
+      response = button(buttonId(review.replies, 'Confirm'));
+      await f.handlers.interactionCreate(response);
+    }
+    assert.match(JSON.stringify(response.replies), /private-voice/);
+    assert.equal(f.originMessages.length, 0);
+    assert.doesNotMatch(JSON.stringify(f.publicMessages), /private-voice/);
+  });
+}
+
+test('failed recording starts stay private and do not announce success', async () => {
+  const f = recordingFixture('start', { outcome: 'error' });
+  const { action } = await f.ctx.toolRegistry.handlers.get('record_start')(
+    {},
+    { request: f.request, principal: { person: f.person } },
+  );
+  await sendHelperReply(f.send, { action }, { message: f.message, appContext: f.ctx });
+  const review = button(buttonId(f.publicMessages, 'Review privately'));
+  await f.handlers.interactionCreate(review);
+  const confirm = button(buttonId(review.replies, 'Confirm'));
+  await f.handlers.interactionCreate(confirm);
+  assert.match(JSON.stringify(confirm.replies), /couldn't join/);
+  assert.equal(f.originMessages.length, 0);
+});
+
+test('recording status is withheld if the session changes before publication', async () => {
+  const f = recordingFixture('status');
+  const payload = await f.request.runMeeting({
+    commandName: 'record',
+    subcommand: 'status',
+    options: {},
+  });
+  f.replaceSession();
+  await assert.rejects(
+    payload.publicReply.send(payload.publicReply.payload),
+    /changed before publication/,
+  );
+  assert.equal(f.originMessages.length, 0);
 });

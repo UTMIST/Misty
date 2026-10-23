@@ -21,6 +21,8 @@
 // call and before publication; the surface checks again at each send boundary.
 // Callback errors fail closed. These callbacks are never sent to the model.
 
+import { combineHelperActions } from './helperActions.js';
+
 export const DEFAULT_MAX_TOOL_ROUNDS = 4;
 export const DEFAULT_MAX_OUTPUT_TOKENS = 8000;
 export const DEFAULT_PER_CALL_MAX_TOKENS = 1024;
@@ -224,6 +226,7 @@ export function createToolExecutor({
         // Execute each call in order; one tool_result per call id, all before any
         // text, as the /chat history contract requires.
         const results = [];
+        const actions = [];
         for (const call of calls) {
           if (isExhausted()) return { outcome: OUTCOME.EXHAUSTED };
           const handler = registry.handlers.get(call.name);
@@ -242,25 +245,8 @@ export function createToolExecutor({
               withDeadline,
             });
             if (out?.action) {
-              if (!(await canPublish())) return failedCheck();
-              // Stop before another model call or another action. No command
-              // has executed yet. Keep any retrieved evidence authorized while
-              // a user reviews the proposal, too.
-              const check = out.action.check;
-              const setExpiresAt = out.action.setExpiresAt;
-              out.action.setExpiresAt = (expiresAt) => {
-                // A terminal action gets the pending UI's deadline. Generation
-                // is over; retain evidence, spent read capacity and failures.
-                deadline = performance.now() + Math.max(0, expiresAt - Date.now());
-                setExpiresAt?.(expiresAt);
-              };
-              if (check)
-                out.action.check = async () => {
-                  if (!(await canPublish()))
-                    throw new Error('This request expired or access changed. Ask again.');
-                  return check();
-                };
-              return { outcome: OUTCOME.ACTION, action: out.action, canPublish };
+              actions.push(out.action);
+              continue;
             }
             if (typeof out?.revalidate === 'function') checks.push(out.revalidate);
             collect(out?.citations);
@@ -274,6 +260,25 @@ export function createToolExecutor({
             if (isExhausted()) return { outcome: OUTCOME.EXHAUSTED };
             results.push(errorResult(call.id, 'tool failed'));
           }
+        }
+        if (actions.length) {
+          // Never silently omit a failed proposal or replay private command data.
+          if (results.some((result) => result.is_error)) return { outcome: OUTCOME.WITHHELD };
+          if (!(await canPublish())) return failedCheck();
+          const action = combineHelperActions(actions);
+          const check = action.check;
+          const setExpiresAt = action.setExpiresAt;
+          action.setExpiresAt = (expiresAt) => {
+            deadline = performance.now() + Math.max(0, expiresAt - Date.now());
+            setExpiresAt?.(expiresAt);
+          };
+          if (check)
+            action.check = async () => {
+              if (!(await canPublish()))
+                throw new Error('This request expired or access changed. Ask again.');
+              return check();
+            };
+          return { outcome: OUTCOME.ACTION, action, canPublish };
         }
         history.push({ role: 'user', content: results });
       }

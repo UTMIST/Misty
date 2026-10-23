@@ -165,8 +165,9 @@ CI's `node-test` job runs `npm ci`, `npm test`, `npm run lint`, and
 When `HELPER_TOOLS_ENABLED=true`, a helper answer runs through a client-executed
 tool loop (`src/toolExecutor.js`) instead of a single `/chat` call. The model can
 call document tools (`src/helperTools.js`) or prepare a command action
-(`src/commandTools.js`). Command actions end the model turn and deliver the
-existing command's output privately. The rules the loop enforces:
+(`src/commandTools.js`). All command actions in one model response are prepared
+as one terminal proposal and deliver each command's output with explicit
+visibility. The rules the loop enforces:
 
 - **Only `llmSafe` tools are reachable.** `src/toolRegistry.js` includes a
   provider's tools only when it exports `llmSafe === true` (a literal `true`, not
@@ -254,18 +255,30 @@ existing command's output privately. The rules the loop enforces:
   missing/unknown stop reasons produce no answer. Partial responses are never
   replayed, retried automatically, or used to execute tool calls. A valid
   `tool_use` response may instead return a terminal `ACTION`: the bot handles
-  it directly without another model call or any later actions in that batch.
+  it directly without another model call. Every action in the batch is prepared
+  before handoff, within the existing tool-call budget. Any failed call withholds
+  the entire proposal. No command executes during preparation.
 - **Writes require private confirmation.** A prepared command has not executed.
   The Discord adapter sends the full argument/destination preview before its
   buttons; failed preview delivery cannot expose a working confirmation UI.
-  Every write requires the same Discord author to confirm. Reads deliver the
-  existing command renderer's output privately. Neither result enters model
-  history. Closed DMs use an ephemeral interaction, never a public result.
+  Every write requires the same Discord author to confirm the complete list.
+  The batch rechecks every action before the first execution, then each command
+  checks its authorization again. Commands execute sequentially with separate
+  results, not transactionally; an unexpected execution exception stops later
+  commands without retrying earlier ones. No command result enters model history.
+  `team_list`, `team_roster`, `help` and `bug` explicitly project public replies;
+  all other ordinary commands remain private, regardless of a renderer's
+  `ephemeral` flag. A batch of public reads executes immediately. Mixed batches
+  wait for the private interaction and keep each result's own visibility.
+  Private server results use a requester-only button followed by ephemeral
+  replies in the source conversation; server requests never open a DM. DM requests
+  retain direct private delivery, with a button fallback if delivery fails.
   `createDM()` alone does not prove delivery: non-confirm actions first send a
   content-free DM acknowledgement. If it fails, the requester-only fallback
   button runs the action. Once execution starts, no failure can offer a retry
   button, including a failed second result part or failed source acknowledgement.
-  `src/helperActions.js` holds bounded, expiring actions in memory and consumes
+  `src/helperActions.js` groups a batch into one pending slot, holds bounded,
+  expiring actions in memory and consumes
   them synchronously before awaited execution. It reserves capacity before
   delivery checks or execution and reports a full queue explicitly. Duplicate
   clicks and failed actions are never retried automatically. Restart invalidates
@@ -273,8 +286,8 @@ existing command's output privately. The rules the loop enforces:
 - **Recheck pending actions.** The action retains the original person's ID and
   trusted Discord context. Fresh directory authorization and Discord member,
   channel, and private-thread membership checks run before execution and each
-  private message part. Earlier document evidence still passes through the
-  executor's revalidation/deadline gate. Admission gives delivery two minutes;
+  public or private message part. Earlier document evidence still passes through
+  the executor's revalidation/deadline gate. Admission gives delivery two minutes;
   the first successful private confirmation starts a fresh two-minute window
   shared by storage, command authorization and executor checks. A non-confirm
   fallback starts its window when its button is delivered. Reopening a preview
@@ -283,6 +296,13 @@ existing command's output privately. The rules the loop enforces:
   Start recording resolves current voice state at
   confirmation; stop and Q&A bind the original active session. Meeting Q&A uses
   the exact recording text channel, while channel settings use a thread's parent.
+  Recording status and successful start/stop results have a separate public
+  projection without voice-channel or requester details, restricted to requests
+  in the exact meeting origin. Writes still require private confirmation; errors
+  and results requested elsewhere stay private. The adapter retains the origin
+  destination through confirmation and rechecks access before publication; an
+  auto-created helper thread or parent channel never replaces it. Status/start
+  publication also checks that the recorded session is still current.
   Existing slash-command authentication behavior remains unchanged.
 - **Sources are rendered by the bot.** URL backticks are percent-encoded before
   budgeting citation length so the Discord splitter cannot treat them as code fences.
@@ -339,7 +359,7 @@ are required. The affected files have these responsibilities:
 | `src/context.js` | Wire command tools, pending actions, and fresh requester authentication into the production executor. |
 | `src/toolExecutor.js`, `src/helperFlow.js` | Carry trusted request metadata, recheck identity, and return terminal actions without model replay; adopt the pending deadline while retaining evidence and read budgets. |
 | `src/helperActions.js` | Reserve bounded capacity before delivery/work and manage one presentation window for requester-bound, single-use actions. |
-| `src/adapters/discord/helperActions.js` | Verify private delivery before reads/Q&A, prohibit retries after execution, handle confirmation/cancellation, and distinguish admission failures. |
+| `src/adapters/discord/helperActions.js` | Route explicit public projections, verify private delivery before private reads/Q&A, prohibit retries after execution, and handle confirmation/cancellation and admission failures. |
 | `src/adapters/discord/index.js`, `src/adapters/discord/interactions.js` | Route action buttons and preserve private visibility and access checks across split replies. |
 | `src/adapters/discord/mentions.js` | Bind real Discord context, recheck source access, bound history at the request, and hand actions to private delivery. |
 | `src/adapters/discord/recording.js`, `src/adapters/discord/qna.js` | Share existing meeting behavior with helper actions while preserving slash behavior, including the meeting-persistence `save` option from #306. |
@@ -348,6 +368,33 @@ are required. The affected files have these responsibilities:
 | `test/helperActions.test.js` | Cover failed DM sends, partial results, both capacity limits, concurrent admission/clicks, presentation clocks, source access, meeting identity, and mention integration. |
 | `test/toolExecutor.test.js`, `test/helperFlow.test.js`, `test/helper-retrieval.test.js` | Verify terminal handoff, retained evidence/read limits, destination-only rejection, requester revocation, and retrieval under production authentication wiring. |
 | `README.md`, `.env.example`, `src/config.js`, `docs/CONTRIBUTING.md` | Describe the expanded existing flag, user flow, authorization contract, and implementation rationale. |
+
+The multi-action/private-thread fix changes only the bot zone:
+
+| Files | Why changed |
+| --- | --- |
+| `src/toolExecutor.js` | Prepare every action in a model response and reject incomplete proposals before handing off. |
+| `src/helperActions.js` | Group actions under one confirmation, shared expiry and single-use claim; preserve individual execution results. |
+| `src/commandTools.js` | Instruct the model to include every requested action and resolve authorized display labels for the preview. |
+| `src/messages/helperActions.js` | Render readable member/team names, exact arguments and destination mentions without allowing labels to inject Markdown or pings. |
+| `src/adapters/discord/helperActions.js` | Keep server confirmations/results ephemeral in the source conversation and deliver all batch results. |
+| `test/toolExecutor.test.js` | Cover complete batches, failed preparation, revocation before writes and partial execution failure. |
+| `test/commandTools.test.js` | Verify readable, escaped previews without putting private labels in model results. |
+| `test/helperActions.test.js` | Exercise two removals through the real executor/router/service/confirmation path, duplicate clicks, requester privacy and server delivery. |
+| `README.md`, `docs/CONTRIBUTING.md` | Document the changed batch, preview and thread-delivery contracts. |
+
+The public tool-result policy changes only the bot zone:
+
+| Files | Why changed |
+| --- | --- |
+| `src/commandTools.js` | Explicitly allow public directory/help reads and bind recording-status visibility to trusted origin metadata. |
+| `src/helperActions.js` | Recognize batches that can run publicly without opening a private interaction. |
+| `src/adapters/discord/helperActions.js` | Deliver each public projection separately from private results, retaining access checks and single-use execution. |
+| `src/adapters/discord/mentions.js`, `src/adapters/discord/recording.js` | Build safe recording announcements and retain their exact origin destination through confirmation. |
+| `src/messages/helperActions.js` | Render public recording updates without voice-channel locations or requester details. |
+| `src/meeting/meetingSurface.js` | Expose the active session's origin text-channel ID for publication checks. |
+| `test/commandTools.test.js`, `test/helperActions.test.js`, `test/meetingSurface.test.js` | Cover approved visibility, mixed batches, revoked access, recording failures, origin/session binding and private confirmations. |
+| `README.md`, `docs/CONTRIBUTING.md` | Document public defaults, private exceptions and the delivery contract. |
 
 Offline tests use fake directory, document, model, meeting, and Discord services.
 Staging acceptance must still exercise real mentions/DMs, closed DMs, a member
