@@ -66,6 +66,40 @@ GoogleSource.fetch(url)
   → SourceResult(title, content[:max], warnings)
 ```
 
+Google Docs requests set `includeTabsContent=true` and traverse top-level and
+nested tabs in document order. [Google's tabs API](https://developers.google.com/workspace/docs/api/how-tos/tabs)
+returns tab content with an empty legacy `body`; omitting the parameter returns
+only the first tab in `body`. The body fallback supports legacy response shapes
+and test fakes only: it cannot recover omitted tabs, does not run when tabs are
+present but empty, and never retries a failed API call without the flag.
+
+In multi-tab documents, each tab with rendered content gets an H1 label such as
+`# Tab: "Operations" / "Recovery"`. Each title is JSON-quoted so literal slashes,
+quotes, backslashes and line breaks cannot masquerade as path separators or
+headings. Blank titles become `Untitled tab`. Empty tabs emit no label, but their
+names remain in their children's paths. Document headings move down one level,
+capped at H6 (H5 and H6 therefore share that level), so TITLE/HEADING_1 cannot
+close the tab's section in the catalog chunker. A single tab keeps its existing
+rendered bytes and content hash. Chunks spanning multiple short tabs still have
+no common `heading_path`; their text retains the labels under the catalog's
+existing packing policy.
+
+After deployment, existing snapshots need a successful fetch before later-tab
+text can reach retrieval. Use the catalog's existing
+[source-refresh schedule](../../documentation-system/docs/DEPLOYMENT.md#source-access-refresh-schedule)
+for eligible Google records, or `POST /docs/{id}/refetch` for affected documents
+that need immediate repair. Normal content hashes trigger re-indexing when the
+extracted text changes; the chunker itself is unchanged, so no chunker-version
+bump or schema migration is needed. There is no extractor-version inventory:
+an old partial snapshot can look current until it is refetched.
+[Discovery](../../documentation-system/docs/DISCOVERY.md#recovery-and-lifecycle)
+does not refetch existing records, and `doc-backfill` only finds records missing
+content, not partially extracted ones. For rollout acceptance, record affected
+catalog IDs and deployment/refetch outcomes, then verify indexed later-tab
+passages and their tab context with an authorized search. Track fetch and index
+failures separately using the existing recovery runbook; deployment alone is
+not evidence that existing documents were repaired.
+
 The non-obvious part is that **extractors declare their own requirements**. Each one carries `scopes` and `services` tuples, and `required_scopes()` / `required_services()` union across the registered set. Adding a native extractor therefore does not mean editing a hard-coded scope constant somewhere else — the union picks it up. `_build_services` raises `SourceNotConfigured` for any service name missing from `_API_VERSIONS`, so a forgotten version mapping fails loudly at the first fetch rather than producing a confusing Google error.
 
 A consequence worth internalizing: **a new supported file type does not imply a new OAuth scope.** Uploaded PDFs and `.docx` files are downloaded as raw bytes through the Drive media path that `drive.readonly` already covers, then parsed locally with `pypdf` / `python-docx`. Only a genuinely new *Google API* adds a scope.
@@ -113,3 +147,14 @@ folder's immediate children. Format classification uses the same `EXTRACTORS` an
 a member. The external catalog runner owns traversal, checkpoints and scheduling;
 connectors remains stateless. See [API](API.md#post-discovergoogle) and the
 [discovery runbook](../../documentation-system/docs/DISCOVERY.md).
+
+## Meeting writes
+
+`contracts/meeting.py` is the injected writer boundary; only
+`src/sources/meeting_google.py` imports Google OAuth/upload clients.
+`src/api/deps.py` wires it separately from read-only source fetching. Each call
+uses a fresh HTTP transport, with retries disabled for creation. Content is an
+in-memory HTML upload converted in the same Drive create operation; no empty Doc
+is published and retries never replace a human-edited body. See the
+[durable record design](../../../docs/MEETING-RECORDING.md#durable-records-design-212)
+and [writer API](API.md#meeting-writer-googledocs).

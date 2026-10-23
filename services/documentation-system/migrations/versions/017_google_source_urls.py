@@ -1,7 +1,7 @@
 """Backfill Google source links while retaining exact URLs for rollback.
 
-Revision ID: 012
-Revises: 011
+Revision ID: 017
+Revises: 016
 Create Date: 2026-10-22
 """
 
@@ -9,8 +9,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision = "012"
-down_revision = "011"
+revision = "017"
+down_revision = "016"
 branch_labels = None
 depends_on = None
 

@@ -131,8 +131,8 @@ export function wireDiscordClient(client, { commands, appContext }) {
   });
   client.on('voiceStateUpdate', (oldState, newState) => {
     try {
-      // Track bot moves before auto-stop counts occupants. The voice connection
-      // follows Discord's move, so the session must follow it too.
+      // Handle moves before auto-stop counts occupants. Saved recordings end
+      // for their original audience; PDF-only recordings follow the move.
       const botId = client.user?.id;
       if (
         botId &&

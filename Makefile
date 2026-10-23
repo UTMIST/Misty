@@ -61,16 +61,16 @@ check-node:
 	  echo ''; \
 	  echo '  node not found. See docs/DEVELOPMENT.md -> Prerequisites.'; \
 	  echo ''; exit 1; }
-	@node -e 'var need=require("./$(BOT_DIR)/package.json").engines.node; \
-	var m=need.replace(/[^0-9.]/g,"").split(".").map(Number); \
-	var c=process.versions.node.split(".").map(Number); \
+	@node -e "var need=require('./$(BOT_DIR)/package.json').engines.node; \
+	var m=need.replace(/[^0-9.]/g,'').split('.').map(Number); \
+	var c=process.versions.node.split('.').map(Number); \
 	var ok=c[0]>m[0]||(c[0]===m[0]&&(c[1]||0)>=(m[1]||0)); \
 	if(!ok){ \
-	  console.error("\n  The bot needs Node "+need+" (from $(BOT_DIR)/package.json engines)."); \
-	  console.error("  You are on v"+process.versions.node+", so its tests and lint will fail"); \
-	  console.error("  in ways that do not mention Node at all.\n"); \
-	  console.error("  Fix: nvm install "+m[0]+" && nvm use "+m[0]+"\n"); \
-	  process.exit(1); }'
+	  console.error('\n  The bot needs Node '+need+' (from $(BOT_DIR)/package.json engines).'); \
+	  console.error('  You are on v'+process.versions.node+', so its tests and lint will fail'); \
+	  console.error('  in ways that do not mention Node at all.\n'); \
+	  console.error('  Fix: nvm install '+m[0]+' && nvm use '+m[0]+'\n'); \
+	  process.exit(1); }"
 
 install: ## Install every dependency (uv workspace + bot)
 	uv sync --extra dev

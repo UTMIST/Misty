@@ -230,6 +230,45 @@ test('a generated reply is checked again at the send boundary and between parts'
   assert.deepEqual(later, [WITHHELD_ANSWER]);
 });
 
+test('channel evidence beyond 6 KiB reaches the model and is rechecked before delivery', async () => {
+  const prefix = 'Background context. '.repeat(400);
+  const detail = 'The restore target is four hours.';
+  let text = prefix + detail;
+  let calls = 0;
+  const ctx = app(
+    {
+      chat: async ({ messages }) => {
+        if (calls++ === 0) return use();
+        const result = messages.at(-1).content[0].content.results[0];
+        assert.equal(result.snippet, text);
+        return answer(detail);
+      },
+    },
+    {
+      searchDocs: async (args) => {
+        assert.deepEqual(args, {
+          query: 'test document',
+          k: 10,
+          guildId: '100',
+          channelId: '200',
+        });
+        return [{ ...hit, text }];
+      },
+      getDoc: async () => assert.fail('channel passages need no direct-document read'),
+    },
+  );
+  const reply = await prepareHelperReply(ctx, [user('Restore target?')], principal, channel);
+  const sent = [];
+  await sendHelperReply(async (part) => sent.push(part), reply);
+  assert.ok(sent.join('\n').includes(detail));
+  assert.ok(sent.join('\n').includes(hit.url));
+  // A later send must check again, including the detail past the old cutoff.
+  text = prefix + 'The restore target is eight hours.';
+  const later = [];
+  await sendHelperReply(async (part) => later.push(part), reply);
+  assert.deepEqual(later, [WITHHELD_ANSWER]);
+});
+
 test('source rendering deduplicates links and rejects unsafe URL schemes', () => {
   const rendered = renderHelperAnswer('Answer', [
     hit,

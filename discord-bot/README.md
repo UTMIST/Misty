@@ -410,6 +410,19 @@ appends source links, and withholds an answer if those checks fail. Previous use
 questions remain available for follow-ups; earlier bot answers are not replayed,
 even after the flag is disabled. The web playground remains text-only.
 
+Search tools supply the returned source passages, rather than cutting each to a
+400-character preview. Each passage is capped at 48 KiB of UTF-8 text and marked
+when truncated. JSON escaping and metadata can reduce that text allowance so a
+single hit fits the 60 KiB serialized result budget. Hits are admitted in rank
+order; one that exceeds the remaining budget is skipped, allowing later smaller
+hits to fit. Only retained hits are cited and revalidated. DM document bodies
+use the same raw-text and serialized-result limits.
+
+Channel answers can use these authorized passages, while opening a full document
+by id remains available only in DMs. The channel grant authorizes returned text
+under the [retrieval contract](../services/documentation-system/docs/API.md#authorized-retrieval-post-search),
+not just links. Publication revalidation covers the text supplied to the model.
+
 See the [helper tool contract](docs/CONTRIBUTING.md#the-authorized-helper-tool-loop-71)
 for replay, cost limits, revalidation tradeoffs, and offline coverage.
 
@@ -692,3 +705,18 @@ Discord role sync, `/unlink`, and any bot-side persistence. (Email verification 
 now implemented — `/link` + `/verify-code` via the verification service.)
 
 Team archive/unarchive, `/team info`, editing role/team-admin on existing memberships, team-admin delegation authority, dynamic role_kinds fetch for slash choices, LLM adapter.
+
+## Durable meeting records
+
+`/record start` saves the finalized transcript and minutes to one Google Doc by
+default, through meeting → documentation-system → connectors. A consent/visibility
+notice is posted before capture. `save:false` keeps the existing PDF-only flow.
+Explicit stop, automatic empty-channel stop and disconnect salvage all send the
+same record context. Failed hand-off still posts the PDF and a delayed-save
+notice; keep that PDF and contact an admin with the meeting ID for recovery.
+Google Docs remain admin-only when complete voice-channel team coverage is
+unavailable. Doc-link delivery is the separate #223 change.
+Moving the bot to another voice channel ends a saved recording immediately;
+start a new recording there to use its audience. `save:false` recordings continue
+to follow moves.
+See [setup and recovery](../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).

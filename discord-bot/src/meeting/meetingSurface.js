@@ -21,7 +21,7 @@ export function createMeetingSurface({
   // stored on the session (not read off the stopping interaction) so the
   // minutes always @-mention the person who asked for them -- including when
   // the recording ends via auto-stop, where there's no interaction at all.
-  async function start({ guildId, voiceChannel, textChannel, requesterId, name }) {
+  async function start({ guildId, voiceChannel, textChannel, requesterId, name, save = true }) {
     if (sessions.has(guildId)) {
       return { status: 'already-recording' };
     }
@@ -138,8 +138,23 @@ export function createMeetingSurface({
       await Promise.resolve(stream?.close()).catch(() => {});
       return { status: 'error' };
     }
+    const participants = new Map();
+    let captureAllowed = true;
     recorder = makeRecorder({
-      sink: stream,
+      sink: {
+        ...stream,
+        sendControl(control) {
+          if (!captureAllowed) return;
+          participants.set(control.speakerId, {
+            discord_id: control.speakerId,
+            display_name: control.displayName,
+          });
+          stream.sendControl(control);
+        },
+        sendFrame(...args) {
+          if (captureAllowed) stream.sendFrame(...args);
+        },
+      },
       // The voice connection is gone for good (a 4014 park, or retries
       // exhausted). Audio already sent is fine -- the service has it -- so
       // FINALIZE rather than tear down: stop() posts minutes for what was
@@ -171,6 +186,12 @@ export function createMeetingSurface({
       voiceChannel,
       requesterId,
       name,
+      save,
+      participants,
+      recordVoiceChannelId: voiceChannel.id,
+      stopCapture: () => {
+        captureAllowed = false;
+      },
       startedAt: now(),
     });
     registered = true;
@@ -179,6 +200,13 @@ export function createMeetingSurface({
     // means a missing Connect permission, a full channel, or a 20s timeout is
     // reported to the user as success, and they only find out at /record stop.
     try {
+      if (save) {
+        await notify({
+          channel: textChannel,
+          content:
+            '🔴 Recording is starting. The full transcript and minutes will be saved as a Google Doc for the configured voice channel teams, or admins only if team access is unavailable. Everyone present should consent; ask the requester to stop or contact a Misty admin to remove a record.',
+        });
+      }
       await recorder.start(voiceChannel);
     } catch (err) {
       console.error(`meetingSurface: recorder failed to start for guild ${guildId}:`, err);
@@ -212,11 +240,22 @@ export function createMeetingSurface({
     return { sessionId: session.sessionId, voiceChannel: session.voiceChannel };
   }
 
-  // Discord can move the bot while recording. The adapter supplies the new
-  // opaque channel so status, stop permissions, and auto-stop share its location.
+  // A saved recording belongs to one channel audience. Close its forwarding
+  // gate synchronously on a move, before recorder.stop() drains receive streams.
+  // This prevents destination-channel audio entering the original team's Doc.
   function updateVoiceChannel(guildId, voiceChannel) {
     const session = sessions.get(guildId);
-    if (session) session.voiceChannel = voiceChannel;
+    if (!session || session.voiceChannel.id === voiceChannel.id) return;
+    session.voiceChannel = voiceChannel;
+    if (!session.save) return;
+    session.stopCapture();
+    const stopping = stop(guildId);
+    notify({
+      channel: session.textChannel,
+      content:
+        '⚠️ The recording ended because I moved voice channels. Start a new recording in the destination channel to save it for that channel’s teams.',
+    }).catch((err) => console.error('meetingSurface: channel-move notify failed:', err));
+    return stopping;
   }
 
   async function stop(guildId) {
@@ -246,8 +285,36 @@ export function createMeetingSurface({
       } catch (err) {
         console.error(`meetingSurface: end-of-audio signal failed for guild ${guildId}:`, err);
       }
-      const report = await meetingClient.stop(sessionId, { title: name });
+      const record = session.save
+        ? {
+            guild_id: guildId,
+            text_channel_id: textChannel.id,
+            voice_channel_id: session.recordVoiceChannelId,
+            requester_discord_id: requesterId,
+            started_at: new Date(startedAt).toISOString(),
+            participants: [...session.participants.values()],
+          }
+        : undefined;
+      const report = await meetingClient.stop(sessionId, {
+        title: name,
+        ...(record ? { record } : {}),
+      });
       await poster({ channel: textChannel, report, requesterId, name, startedAt });
+      if (report.record?.status === 'handoff_pending') {
+        await notify({
+          channel: textChannel,
+          content:
+            '⚠️ The Google Doc save is delayed. Misty will retry for up to 30 minutes; keep the PDF and contact a Misty admin with meeting ID ' +
+            sessionId +
+            ' if it remains unavailable.',
+        });
+      } else if (report.record?.admin_only) {
+        await notify({
+          channel: textChannel,
+          content:
+            'The Google Doc record is admin-only because no complete team audience was available.',
+        });
+      }
       return { status: 'stopped' };
     } catch (err) {
       console.error(`meetingSurface: error stopping meeting for guild ${guildId}:`, err);

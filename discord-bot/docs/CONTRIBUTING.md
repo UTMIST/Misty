@@ -141,9 +141,12 @@ Cover both halves of a change:
 
 ## Linting
 
-There's no ESLint config in this service. Match the surrounding style: ES modules, 2-space indent, semicolons, JSDoc blocks on exported functions.
+Use the pinned ESLint and Prettier versions installed by `npm ci`. Match the
+surrounding style: ES modules, 2-space indent, semicolons, JSDoc blocks on exported
+functions. See the configuration notes in the checklist below.
 
-CI runs `node-test` (`npm ci` + `npm test`) plus a Docker build with a boot smoke test.
+CI's `node-test` job runs `npm ci`, `npm test`, `npm run lint`, and
+`npm run format:check`. The separate Docker build job includes a parse smoke test.
 
 ## Gotchas
 
@@ -173,8 +176,10 @@ answers. The rules the loop enforces:
   define parent-channel selection, lossless snowflake strings, and rollout ownership.
 - **Fail closed.** `docClient.searchDocs` throws before sending a request if the
   context is missing, empty, or ambiguous. There is no unfiltered search to fall
-  back to. `get_document` is person-scoped only; in a channel the model cites the
-  source link from `search_documents` instead.
+  back to. `get_document` is person-scoped only; in a channel the model uses the
+  authorized passages and source links from `search_documents` instead. Passage
+  text retains the `snippet` field name for compatibility; this is not a
+  link-only grant or a separate channel direct-document endpoint.
 - **Revalidate evidence.** Each document tool result supplies a `revalidate`
   callback. It repeats the authorized lookup with the same destination context
   and checks that all original text, source links, and chunk descriptors remain
@@ -187,7 +192,9 @@ answers. The rules the loop enforces:
   must supply this callback for every result containing protected content.
   Identical lookups share a single fresh response within one revalidation pass;
   every callback still compares its own original evidence. Nothing is reused
-  across passes or answers.
+  across passes or answers. A null/missing response cannot revalidate previously
+  returned evidence. An initially empty search supplies no protected evidence
+  and needs no evidence callback lookup.
 - **History contains user questions only.** Old bot answers have no trusted
   source provenance, including after a restart or disabling the flag. The flow
   removes them on both tool and text-only paths. Follow-ups re-retrieve using the
@@ -209,6 +216,14 @@ answers. The rules the loop enforces:
   before more tool work. The default round limit makes the effective output
   maximum 5,120 tokens. These are output-token limits, not a dollar-spend cap:
   input tokens and the bounded search embeddings for access checks also cost.
+  With the [result byte limits](../README.md#helper-document-tools), four searches
+  add at most 240 KiB of serialized result content to the final transcript.
+  One search per round across five model calls replays at most
+  `(1 + 2 + 3 + 4) × 60 KiB = 600 KiB` cumulatively. This excludes prompts,
+  tool definitions, user history, assistant blocks, and message envelopes.
+  Bytes are not model tokens; there is no separate input-token or dollar budget.
+  A tighter input/spend policy needs an explicit trade-off against retained
+  evidence, rather than silently shortening every passage.
 - **Only completed answers are published.** `end_turn` is required for final
   text. `max_tokens` exhausts the turn; `incomplete`, `content_filtered`, and
   missing/unknown stop reasons produce no answer. Partial responses are never
@@ -222,19 +237,26 @@ answers. The rules the loop enforces:
   it fits within the message limit.
 - **Opaque replay within a turn.** Assistant `content_blocks` are replayed
   verbatim only within the current authorized loop, preserving provider state.
-- **Retrieved content is untrusted.** Snippets and document bodies come back as
+- **Retrieved content is untrusted.** Passages and document bodies come back as
   tool results, so an authorized document can carry instructions the model may
   follow (prompt injection). Scope binding contains it: injected text cannot
   widen the context or reach a document outside it, so the worst case is a
   steered answer within the asker's own scope, never disclosure of anything they
-  could not already see. There is no content-level sanitization; `get_document`
-  bodies are length-capped (`MAX_DOC_CONTENT_LEN`) only to keep a large doc under
-  the service's tool-payload limit, not to neutralize their content.
+  could not already see. There is no content-level sanitization. Search passages
+  (`MAX_SEARCH_CHUNK_BYTES`) and DM document bodies (`MAX_DOC_CONTENT_BYTES`)
+  obey raw UTF-8 and serialized JSON limits to fit the service's tool-payload
+  limit, not to neutralize their content. See the
+  [packing rules and limits](../README.md#helper-document-tools).
 
 The document service remains the authorization boundary. Revalidation observes
 its current grants and source snapshot, subject to the upstream ACL refresh
 window in the [retrieval contract](../../services/documentation-system/docs/API.md#authorized-retrieval-post-search).
 Search ranking changes can conservatively withhold a still-authorized answer.
+Any edit to retained passage text can also withhold an answer, even an unrelated
+typo. Chunk descriptors include the source-content hash, so a new indexed source
+revision can withhold it even when the retained text is unchanged. This deliberate
+trade-off preserves exact evidence and revision checks; dropped hits are not used
+or revalidated.
 The final lookup and Discord send are separate requests, not an atomic operation;
 checks cannot retract a message part that was already delivered.
 

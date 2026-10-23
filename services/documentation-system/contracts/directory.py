@@ -8,6 +8,14 @@ class DirectoryUnavailable(Exception):
 
 
 class DirectoryClient(Protocol):
+    def get_meeting_audience(self, guild_id: str, channel_id: str) -> dict[UUID, str]:
+        """All channel teams mapped to healthy Google Groups, or {} if any
+        mapping is missing/unsynced. Outage raises DirectoryUnavailable.
+        """
+        ...
+
+    def get_person_id_by_discord(self, discord_id: str) -> UUID | None: ...
+
     def get_channel_source_team_ids(self, guild_id: str, channel_id: str) -> frozenset[UUID]:
         """Resolve active configured teams with healthy managed Google Groups.
 

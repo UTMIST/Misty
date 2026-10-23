@@ -1,4 +1,5 @@
 import random
+from pathlib import Path
 
 import pytest
 
@@ -243,6 +244,35 @@ def test_heading_path_and_sections_follow_nesting():
     usage = next(c for c in result.chunks if "Run." in c.text)
     assert usage.heading_path == ("Guide", "Usage")
     assert usage.section_end == len(text)
+
+
+def test_google_doc_tabs_keep_context_and_section_offsets():
+    # Connectors' test_catalog_chunking_fixture_matches_extractor_output checks
+    # this fixture against the actual extractor, without cross-service imports.
+    fixture = Path(__file__).resolve().parents[2] / "connectors/tests/fixtures/google_doc_tabs.md"
+    text = fixture.read_text().rstrip("\n")
+    result = chunk_text(text, ChunkSettings(target_tokens=40, overlap_tokens=5))
+    _check(text, result)
+    labels = ['Tab: "Operations"', 'Tab: "Operations" / "Recovery"', 'Tab: "Archive" / "History"']
+    for label, body in zip(labels, ["Operate safely.", "Restore safely.", "Read history."]):
+        tab_start = text.index(f"# {label}\n")
+        section_start = text.index("## Runbook\n", tab_start)
+        body_start = text.index(body, section_start)
+        next_tab = text.find("\n# Tab:", body_start)
+        section_end = next_tab + 1 if next_tab != -1 else len(text)
+        body_chunks = [c for c in result.chunks if body_start <= c.start < section_end]
+        assert len(body_chunks) > 1  # continuation chunks, not just the label line
+        for chunk in body_chunks:
+            assert chunk.heading_path == (label, "Runbook")
+            assert (chunk.section_start, chunk.section_end) == (section_start, section_end)
+            assert chunk.end <= section_end
+        assert text[section_start:section_end].startswith("## Runbook\n" + body)
+
+    # Packing several small tabs reports their common parent (none). The tab
+    # labels remain in the chunk text; the extractor must not change this policy.
+    (packed,) = chunk_text(text).chunks
+    assert packed.heading_path == ()
+    assert all(f"# {label}\n" in packed.text for label in labels)
 
 
 def test_small_sections_pack_into_one_chunk():

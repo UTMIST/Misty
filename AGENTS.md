@@ -59,7 +59,7 @@ Violating any of these is a bug even if tests pass.
 - **`down_revision` points at the current head**, and `downgrade()` must actually reverse `upgrade()` except for the explicit retirement exceptions below. Verify the round trip: `upgrade head` → `downgrade -1` → `upgrade head`.
 - **Retirement exceptions:** documentation-system [009](services/documentation-system/docs/DEPLOYMENT.md#registry-cleanup-migration-009) and team-tracking [011](services/team-tracking/docs/DEPLOYMENT.md#registry-cleanup-migration-011) intentionally preserve their data cleanup on downgrade; only the registry entries are restored. Follow the linked backup/recovery guidance and verify the round trip with existing rows, checking that unrelated data survives. These exceptions do not waive reversibility for other migrations.
 - **New columns on existing tables are nullable or have a `server_default`**, mirrored in the Pydantic model and both adapters.
-- Current heads: team-tracking **011**, documentation-system **011**, verification **001**, gateway **001**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
+- Current heads: team-tracking **011**, documentation-system **017**, verification **001**, gateway **001**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
 
 ### Configuration
 
@@ -123,6 +123,7 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 - **Source refresh guards do not expire.** A crashed or incomplete runner can retain its database guard. Confirm its process and API work have stopped before releasing the recorded run ID; see the [recovery runbook](services/documentation-system/docs/DEPLOYMENT.md#recovery-credential-rotation-and-disablerollback). A new container must not bypass the guard or reuse the old ID.
 - **`npm run dev:web` occupies port 8001 and 5433**, and needs Docker. Stop documentation-system first.
 - **Q&A workers must stay isolated (`meeting`).** Use the injected `qna_runner`, not `asyncio.to_thread`: audio ingestion and `/stop` share the default executor, so slow Q&A can otherwise starve them and lose the audio tail. Admission capacity stays occupied until the actual worker finishes, including after request cancellation.
+- **Completed meeting persistence is text-only.** `meeting` hands off before cleanup; documentation-system owns `meeting_records` and immutable canonical Google IDs. Use the connector OAuth writer for meeting content/ACL fetches. Never retry an ambiguous create blindly or rewrite an existing Doc body. Removal fences every known Google identity and purges all catalog aliases under the ingestion locks; ordinary ingest can leave `record.doc_id` unset. See [the persistence runbook](services/documentation-system/docs/DEPLOYMENT.md#meeting-record-persistence).
 - **`meeting` is stateful.** One process must own a session end-to-end. Its sessions live in memory and a restart drops every in-flight meeting.
 - **Discord PR testing uses one persistent `dev` slot.** Automatic Railway
   PR copies must skip gateway login and command registration. The selected PR

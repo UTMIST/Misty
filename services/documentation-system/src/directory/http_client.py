@@ -51,6 +51,39 @@ class HttpDirectoryClient:
     def get_team_label(self, team_id: UUID) -> str | None:
         return self._get_label(f"/teams/{team_id}", "label")
 
+    def get_person_id_by_discord(self, discord_id: str) -> UUID | None:
+        return self._get_id(f"/people/by-identifier/discord/{quote(discord_id, safe='')}")
+
+    def get_meeting_audience(self, guild_id: str, channel_id: str) -> dict[UUID, str]:
+        try:
+            response = self._client.get(
+                f"{self._base_url}/channels/{guild_id}/{channel_id}/teams",
+                headers={"X-API-Key": self._api_key},
+            )
+            if response.status_code != 200:
+                raise ValueError("channel unavailable")
+            channel = _ChannelTeams.model_validate(response.json())
+            if channel.guild_id != guild_id or channel.channel_id != channel_id:
+                raise ValueError("wrong channel")
+            if not channel.team_ids:
+                return {}
+            response = self._client.get(
+                f"{self._base_url}/teams/google-groups", headers={"X-API-Key": self._api_key}
+            )
+            if response.status_code != 200:
+                raise ValueError("groups unavailable")
+            groups = TypeAdapter(list[_GroupState]).validate_python(response.json())
+            if len({g.team_id for g in groups}) != len(groups):
+                raise ValueError("duplicate group")
+            audience = {
+                g.team_id: g.group_email.lower()
+                for g in groups
+                if g.team_id in channel.team_ids and g.status == "synced" and g.group_name
+            }
+            return audience if set(audience) == set(channel.team_ids) else {}
+        except (httpx.HTTPError, ValueError, TypeError, KeyError):
+            raise DirectoryUnavailable("meeting audience unavailable") from None
+
     def get_person_label(self, person_id: UUID) -> str | None:
         return self._get_label(f"/people/{person_id}", "display_name")
 

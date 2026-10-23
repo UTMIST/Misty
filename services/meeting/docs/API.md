@@ -274,6 +274,38 @@ bot                                  meeting
 ## Constraints worth designing around
 
 - **One process owns a session end-to-end.** No sticky routing means misrouted `/transcript` and `/stop`. Do not scale to multiple replicas without it.
-- **A restart loses every in-flight meeting.** Nothing is persisted.
+- **A restart loses live sessions and unaccepted hand-offs.** Completed records accepted by documentation-system survive in its database and Google Docs.
 - **`MAX_MEETING_MS`** (default 14,400,000 = 4 h) is a backstop: a session stops accepting audio past it. 4 h is also Amazon Transcribe's per-stream cap.
 - **One open Transcribe stream per active speaker**, for the whole meeting. Large meetings can hit the account's concurrent-stream quota.
+
+## Durable record context
+
+`POST /meetings/{session_id}/stop` accepts optional `record` alongside `title`:
+
+```json
+{
+  "title": "Planning",
+  "record": {
+    "guild_id": "123", "text_channel_id": "456", "voice_channel_id": "789",
+    "requester_discord_id": "1234", "started_at": "2026-10-22T14:00:00-04:00",
+    "participants": [{"discord_id": "1234", "display_name": "Angela"}]
+  }
+}
+```
+
+Record context requires a UUID session ID and a guild matching the live session.
+Context and participant models forbid extra fields. Legacy calls without it
+retain the PDF flow. The service adds end time and the existing transcript and
+`Minutes` fields, then PUTs documentation-system before finalization cleanup.
+No second LLM call, PDF parsing, audio persistence, or disk write is involved.
+Concurrent stops share one shielded finalization task, so request cancellation
+does not interrupt the hand-off.
+
+`StopResponse` additionally contains `record: null` for legacy/PDF-only calls,
+or `{status, doc_url, admin_only}`. `status` is the catalog persistence state
+(often `pending`, since acceptance is durable before Google work), or
+`handoff_pending` if acceptance failed. In that case the normal PDF still
+returns; the finalized text is held in memory and retried with backoff for
+`RECORD_HANDOFF_HOLD_S`. Expiry logs `meeting.record_handoff_failed` with only
+the meeting ID. A process crash before acceptance can lose this in-memory
+payload; the Discord PDF and explicit delayed-save notice are the fallback.

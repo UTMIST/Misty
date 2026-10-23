@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     aws_region: str = ""
     llm_base_url: str = ""
     llm_api_key: SecretStr = SecretStr("")
+    docs_base_url: str = ""
+    docs_api_key: SecretStr = SecretStr("")
+    record_handoff_hold_s: float = Field(default=1800, gt=0)
     request_timeout_s: float = Field(default=60.0, gt=0)
     # Level for this service's own loggers (see logging_setup.configure_logging).
     # INFO by default: the volume is a startup note plus per-meeting summaries,
@@ -83,6 +86,11 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
         insecure.append("LLM_BASE_URL")
     if not settings.llm_api_key.get_secret_value():
         insecure.append("LLM_API_KEY")
+    if settings.docs_base_url and settings.docs_api_key.get_secret_value() in {
+        "",
+        DEFAULT_DEV_API_KEY,
+    }:
+        insecure.append("DOCS_API_KEY")
     if insecure:
         raise RuntimeError(
             f"Refusing to start in meeting_env={settings.meeting_env!r}: "
