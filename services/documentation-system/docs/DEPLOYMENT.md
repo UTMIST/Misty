@@ -860,6 +860,8 @@ a five-minute retry delay, without another Google write.
 deletion during remaining cleanup. If the process or database fails before that receipt commits,
 the existing ambiguous-404 investigation procedure still applies.
 
-Removal/unsafe-ACL notices and the existing PDF attachment are the admin's
-responsibility until the link-delivery cleanup in #223 ships. Never log record
+Removal/unsafe-ACL notices and deletion of existing Discord links/PDF attachments
+remain the admin's responsibility; automatic Discord cleanup is outside #223.
+The bot's [link delivery runbook](../../../discord-bot/docs/meeting-delivery.md)
+describes saved-message receipts and recovery. Never log record
 payloads or credentials. See the [platform rollout](../../../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).

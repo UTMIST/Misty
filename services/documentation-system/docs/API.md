@@ -912,5 +912,7 @@ fetch cannot confirm deletion; retained snapshots/content/chunks and existing
 grant expiry remain intact. Only independently confirmed trash/deletion or an
 explicit removal triggers purge. A security removal records
 `removed_by=security:unexpected_acl`; admins notify the requester and retain the
-Discord PDF unless its removal is separately requested. The bot's link delivery
-and Discord cleanup are implemented separately in #223.
+Discord PDF unless its removal is separately requested. The bot implements
+[link delivery and recovery](../../../discord-bot/docs/meeting-delivery.md) in
+#223. Removal notices and deletion of already posted Discord links/PDFs remain
+admin operations; automatic Discord cleanup is outside #223.

@@ -19,6 +19,8 @@ import { createHelperActions } from './helperActions.js';
 import { createMeetingClient } from './meeting/meetingClient.js';
 import { createMeetingSurface } from './meeting/meetingSurface.js';
 import { createRecorder } from './meeting/recorder.js';
+import { createMeetingRecordClient } from './clients/meetingRecordClient.js';
+import { createMeetingDelivery } from './meeting/meetingDelivery.js';
 
 /**
  * Wire application services and deployment metadata once at startup.
@@ -33,9 +35,10 @@ import { createRecorder } from './meeting/recorder.js';
  * @param {object} config Validated bot configuration.
  * @param {object} [deps] Optional injected collaborators.
  * @param {Function} [deps.poster] Posts a decoded meeting report to a channel.
+ * @param {Function} [deps.postMeetingLink] Posts/edits an existing saved record's link.
  * @returns {object} Shared application context passed through the router.
  */
-export function createAppContext(config, { poster, notify } = {}) {
+export function createAppContext(config, { poster, notify, postMeetingLink } = {}) {
   const directory = createDirectoryClient({
     baseUrl: config.directoryBaseUrl,
     apiKey: config.directoryApiKey,
@@ -44,6 +47,15 @@ export function createAppContext(config, { poster, notify } = {}) {
     baseUrl: config.docBaseUrl,
     apiKey: config.docApiKey,
   });
+  const meetingDelivery = postMeetingLink
+    ? createMeetingDelivery({
+        records: createMeetingRecordClient({
+          baseUrl: config.docBaseUrl,
+          apiKey: config.docApiKey,
+        }),
+        post: postMeetingLink,
+      })
+    : null;
   const verification = createVerificationClient({
     baseUrl: config.verificationBaseUrl,
     apiKey: config.verificationApiKey,
@@ -76,6 +88,7 @@ export function createAppContext(config, { poster, notify } = {}) {
       makeRecorder: (o) => createRecorder(o),
       poster: poster ?? (async () => {}),
       notify: notify ?? (async () => {}),
+      deliverRecord: meetingDelivery?.deliver,
       now: Date.now,
     });
   } else {
@@ -105,6 +118,7 @@ export function createAppContext(config, { poster, notify } = {}) {
     helperActions: createHelperActions(),
     helperToolsEnabled: Boolean(config.helperToolsEnabled),
     meetingSurface,
+    meetingDelivery,
     discordGuildId: config.discordGuildId ?? null,
     infrastructureDiscordUsername: config.infrastructureDiscordUsername,
   };

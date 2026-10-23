@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dispatch } from '../router.js';
 import { answerHelperTurns, resolveHelperCaller } from '../helperFlow.js';
+import { meetingDeliveryScenarios, previewMeetingDelivery } from './meetingDeliveryPreview.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -33,6 +34,22 @@ export async function buildServer({ commands, appContext, onReset }) {
     root: path.join(__dirname, 'public'),
     prefix: '/',
   });
+
+  // Synthetic scenarios only: never send to Discord or call a backend service.
+  server.post(
+    '/api/meeting-delivery/preview',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['scenario'],
+          properties: { scenario: { type: 'string', enum: meetingDeliveryScenarios } },
+        },
+      },
+    },
+    async (req) => previewMeetingDelivery(req.body.scenario),
+  );
 
   server.get('/api/commands', async () => {
     return Array.from(commands.values()).map((c) => ({
