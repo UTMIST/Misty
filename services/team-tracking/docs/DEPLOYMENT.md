@@ -229,9 +229,28 @@ GOOGLE_OAUTH_CLIENT_ID=... GOOGLE_OAUTH_CLIENT_SECRET=... GOOGLE_OAUTH_REFRESH_T
   uv --project services/team-tracking run team-tracking-groups sync   # or: sync --team <slug>
 ```
 
-It prints one line per team (`slug  status  group_email  last_error`) and exits 1 if any team didn't reach `synced`. Retired teams that never had a group are skipped. `--project` is required for the same reason as with `team-tracking-keys`: both DB services ship a top-level `src` package.
+It prints one line per team (`slug  status  group_email  last_error`) followed by
+a structured `groups_sync_finish` summary. Recorded provider failures do not
+stop other membership changes or teams: the command completes the pass and
+exits 0, with a warning if any team did not reach `synced`.
+Retired teams that never had a group are skipped. `--project` is required for
+the same reason as with `team-tracking-keys`: both DB services ship a top-level
+`src` package.
 
-Then run the same command **daily** as a Railway cron service on the team-tracking image (start command `team-tracking-groups sync`, the same variables as the service). API writes sync immediately, but nothing triggers on a date passing, so a membership with a future `started_at` or `ended_at` only takes effect in Google at the next scheduled run. The scheduled run also retries any team left `failed`.
+Run `team-tracking-groups sync` **daily** as a Railway cron
+service on the team-tracking image, with the same variables as the service.
+One rejected member does not mark the scheduled process as crashed. The
+summary has `level: warning`, `outcome: incomplete`, and an `incomplete_teams`
+count when any mapping remains unsynced. Inspect those warnings and
+`/team google-status` or `GET /teams/google-groups`; Railway process completion
+alone is not proof that Google membership converged. Failed mappings keep
+their error, pending changes and previous `last_synced_at`, and remain excluded
+from synced-group access lookups. Missing configuration, invalid CLI arguments,
+database errors and unexpected exceptions still fail the process.
+
+API writes sync immediately, but nothing triggers on a date passing, so a
+membership with a future `started_at` or `ended_at` only takes effect in Google
+at the next scheduled run. The scheduled run also retries any team left `failed`.
 
 ### Pending membership changes
 

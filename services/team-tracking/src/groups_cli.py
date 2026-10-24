@@ -8,10 +8,12 @@ a schedule (see docs/DEPLOYMENT.md).
 USAGE:
   team-tracking-groups sync [--team <slug>]
 
-Exits 1 if any team is not `synced`.
+Recorded team failures do not stop the pass or fail the process. A completed
+pass exits 0 and emits a warning summary if any team is not `synced`.
 """
 
 import argparse
+import json
 import sys
 
 from sqlalchemy import create_engine
@@ -46,15 +48,32 @@ def main(argv: list[str] | None = None) -> int:
     else:
         teams = storage.list_teams()
 
-    ok = True
+    synced = incomplete = skipped = 0
     for team in teams:
         state = sync_team(storage, groups, team.id, actor=args.actor)
         if state is None:
             print(f"{team.slug:<25} skipped (retired, no group)")
+            skipped += 1
             continue
         print(f"{team.slug:<25} {state.status:<24} {state.group_email} {state.last_error or ''}")
-        ok = ok and state.status == "synced"
-    return 0 if ok else 1
+        if state.status == "synced":
+            synced += 1
+        else:
+            incomplete += 1
+    print(
+        json.dumps(
+            {
+                "event": "groups_sync_finish",
+                "level": "warning" if incomplete else "info",
+                "outcome": "incomplete" if incomplete else "synced",
+                "synced_teams": synced,
+                "incomplete_teams": incomplete,
+                "skipped_teams": skipped,
+                "exit_code": 0,
+            }
+        )
+    )
+    return 0
 
 
 if __name__ == "__main__":
