@@ -15,7 +15,9 @@ from tests.fake_embedder import FakeEmbedder, fake_vector
 from contracts.retrieval import QueryEmbedding
 from contracts.visibility import Actor
 
-NOW = datetime(2026, 10, 22, tzinfo=timezone.utc)
+# Storage checks source-grant expiry against the real clock, including in SQL.
+# Keep the baseline fresh while individual tests advance their injected clock.
+NOW = datetime.now(timezone.utc)
 TEAM = uuid4()
 PERSON = uuid4()
 
