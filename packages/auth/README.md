@@ -17,7 +17,7 @@ Shared API-key auth (keys, scopes, audit) for UTMIST platform services. A pure l
 | `ApiKeyStore` | `models.py` | Protocol a service's key store must satisfy (`get_api_key_hash`, `get_api_key_by_prefix`, `touch_api_key_last_used`). A DB-backed `StorageAdapter` satisfies this structurally; so does `InMemoryKeyStore` below. |
 | `AuthedKey` | `models.py` | Resolved caller identity: `name` (the audit actor), `scopes`, `is_bootstrap`. |
 | `ADMIN_SCOPE` | `models.py` | The wildcard scope (`"admin"`) that satisfies any `require_scope` check. |
-| `DEV_SPOOF_SCOPE` | `models.py` | The `"dev:spoof"` scope, rejected outside dev/local by `_enforce_dev_scope_environment`. |
+| `DEV_SPOOF_SCOPE` | `models.py` | The `"dev:spoof"` scope; its [production guard](#development-scope-guard) is opt-in and uses the service's `is_prod` predicate. |
 | `ConsumerKeyRow` | `memory_store.py` | Frozen dataclass row shape backing `InMemoryKeyStore` — `id`, `name`, `scopes`, `active`, `revoked_at`. |
 | `InMemoryKeyStore` | `memory_store.py` | DB-free `ApiKeyStore` implementation. Used by services with no `api_keys` table (`llm`, `meeting`, `connectors`) — keys are seeded from config at boot rather than persisted. |
 | `key_store_from_config` | `memory_store.py` | Parses a `CONSUMER_KEYS` JSON array (`[{"name","prefix","key_hash","scopes"}]`) into a populated `InMemoryKeyStore`. Raises `RuntimeError` on a malformed value so a bad env var fails a service's boot, not its first request. |
@@ -52,10 +52,21 @@ At the two call sites inside this package, `secret_guard.reject_secret_wrapper` 
 
 New service? Write the credentials as `SecretStr` from the start, and give the test suite an autouse fixture neutralizing `env_file` (`services/connectors/tests/conftest.py` is the model) so no test ever reads a developer's real `.env`.
 
-## Two key-store shapes
+## Key-store wiring
 
-- **DB-backed** (`team-tracking`, `documentation-system`, `verification`): the service's own `StorageAdapter` already satisfies `ApiKeyStore` structurally — no adapter class from this package needed.
-- **DB-free** (`llm`, `meeting`, `connectors`): `key_store_from_config(settings.consumer_keys)` builds an `InMemoryKeyStore` at boot from the `CONSUMER_KEYS` env var. There is no revoke call — revocation is dropping the entry from `CONSUMER_KEYS` and redeploying.
+- **DB-backed** (`team-tracking`, `documentation-system`, `gateway`): the service's own `StorageAdapter` satisfies `ApiKeyStore` structurally. Gateway accepts only issued `gw_` keys and disables bootstrap authentication with `get_env_key=lambda: None`.
+- **Config-backed** (`llm`, `meeting`, `connectors`): `key_store_from_config(settings.consumer_keys.get_secret_value())` builds an `InMemoryKeyStore` at boot from `CONSUMER_KEYS`. There is no revoke call — revocation is dropping the entry from `CONSUMER_KEYS` and redeploying.
+- **Env-key-only** (`verification`): its `NullApiKeyStore` rejects all stored-key lookups; only the bootstrap `API_KEY` authenticates. See its [auth model](../../services/verification/README.md#auth-model).
+
+## Development scope guard
+
+`_enforce_dev_scope_environment` rejects a key containing literal `dev:spoof`
+only when `enable_dev_spoof=True` and the injected `is_prod()` returns true.
+It is not a library-wide dev/local allowlist. Team-tracking enables the guard
+with `TT_ENV == "production"`, so that check does not reject staging; other
+current shims leave it disabled. Keep spoof credentials out of production and
+check the service's policy when wiring the guard; see
+[team-tracking environment tiers](../../services/team-tracking/README.md#environment-tiers-tt_env).
 
 ## Testing
 

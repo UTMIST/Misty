@@ -1,8 +1,12 @@
+import threading
 from datetime import date, datetime, timezone
 from uuid import UUID, uuid4
 
 from contracts.types import (
     ApiKey,
+    ChannelTeams,
+    GoogleGroupStatus,
+    PendingGroupChange,
     Person,
     PersonCreate,
     PersonIdentifier,
@@ -13,6 +17,7 @@ from contracts.types import (
     RoleKind,
     Team,
     TeamCreate,
+    TeamGoogleGroup,
     TeamMembership,
     TeamMembershipCreate,
     TeamMembershipUpdate,
@@ -48,9 +53,13 @@ def _ranges_overlap(start1: date, end1: date | None, start2: date, end2: date | 
 class InMemoryStorageAdapter:
     """In-process storage adapter used in tests and for quick prototyping.
 
-    Not thread-safe. Not persistent. Enforces the same semantic invariants as
-    the Postgres adapter (email uniqueness, slug uniqueness, no schema surprises).
+    Not generally thread-safe; channel writes and Google Group claims are
+    serialized. Not persistent. Enforces the same semantic invariants as the
+    Postgres adapter (email uniqueness, slug uniqueness, no schema surprises).
     """
+
+    def is_ready(self) -> bool:
+        return True
 
     def __init__(
         self,
@@ -65,6 +74,12 @@ class InMemoryStorageAdapter:
         self._api_key_hashes: dict[UUID, str] = {}
         self._providers: dict[str, Provider] = {pr.id: pr for pr in (seed_providers or [])}
         self._identifiers: dict[UUID, PersonIdentifier] = {}
+        # (guild_id, channel_id) -> (team_ids, created_by)
+        self._channel_teams: dict[tuple[str, str], tuple[list[UUID], str]] = {}
+        # Append holds this across read/merge/replace; replace re-enters it.
+        self._channel_teams_lock = threading.RLock()
+        self._google_groups: dict[UUID, TeamGoogleGroup] = {}
+        self._google_group_lock = threading.Lock()
 
     # --- People ---
 
@@ -505,3 +520,95 @@ class InMemoryStorageAdapter:
         )
         self._identifiers[pi.id] = pi
         return pi
+
+    # --- Channel team access ---
+
+    def get_channel_teams(self, guild_id: str, channel_id: str) -> ChannelTeams:
+        entry = self._channel_teams.get((guild_id, channel_id))
+        if entry is None:
+            return ChannelTeams(guild_id=guild_id, channel_id=channel_id, team_ids=[])
+        team_ids, created_by = entry
+        return ChannelTeams(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            team_ids=sorted(t for t in team_ids if self._teams[t].active),
+            updated_by=created_by,
+        )
+
+    def replace_channel_teams(
+        self, guild_id: str, channel_id: str, team_ids: list[UUID], *, actor: str
+    ) -> ChannelTeams:
+        with self._channel_teams_lock:
+            for t in team_ids:
+                team = self._teams.get(t)
+                if team is None or not team.active:
+                    raise ValueError("unknown_or_inactive_team")
+            if team_ids:
+                self._channel_teams[(guild_id, channel_id)] = (list(team_ids), actor)
+            else:
+                self._channel_teams.pop((guild_id, channel_id), None)
+            return self.get_channel_teams(guild_id, channel_id)
+
+    def append_channel_teams(
+        self, guild_id: str, channel_id: str, team_ids: list[UUID], *, actor: str
+    ) -> ChannelTeams:
+        with self._channel_teams_lock:
+            current = self.get_channel_teams(guild_id, channel_id)
+            # Empty input must not rewrite: a replace would stamp updated_by and
+            # drop stored ids for retired teams that still belong to the configuration.
+            if not team_ids:
+                return current
+            for t in team_ids:
+                team = self._teams.get(t)
+                if team is None or not team.active:
+                    raise ValueError("unknown_or_inactive_team")
+            merged = list(dict.fromkeys([*current.team_ids, *team_ids]))
+            return self.replace_channel_teams(guild_id, channel_id, merged, actor=actor)
+
+    def clear_channel_teams(self, guild_id: str, channel_id: str) -> None:
+        with self._channel_teams_lock:
+            self._channel_teams.pop((guild_id, channel_id), None)
+
+    # --- Team Google Groups ---
+
+    def get_team_google_group(self, team_id: UUID) -> TeamGoogleGroup | None:
+        return self._google_groups.get(team_id)
+
+    def list_team_google_groups(self) -> list[TeamGoogleGroup]:
+        return list(self._google_groups.values())
+
+    def put_team_google_group(
+        self,
+        team_id: UUID,
+        *,
+        group_email: str,
+        group_name: str | None,
+        status: GoogleGroupStatus,
+        last_error: str | None,
+        last_synced_at: datetime | None,
+        actor: str,
+        pending_changes: list[PendingGroupChange] | None = None,
+    ) -> TeamGoogleGroup:
+        if team_id not in self._teams:
+            raise ValueError("team_id not found")
+        now = _now()
+        existing = self._google_groups.get(team_id)
+        row = TeamGoogleGroup(
+            team_id=team_id,
+            group_email=group_email,
+            group_name=group_name,
+            status=status,
+            last_error=last_error,
+            last_synced_at=last_synced_at,
+            pending_changes=[p.model_copy(deep=True) for p in pending_changes or []],
+            created_at=existing.created_at if existing else now,
+            created_by=existing.created_by if existing else actor,
+            updated_at=now,
+            updated_by=actor,
+        )
+        self._google_groups[team_id] = row
+        return row
+
+    def lock_team_google_group(self, team_id: UUID) -> threading.Lock:
+        # One process is all that can share this storage, so one lock suffices.
+        return self._google_group_lock

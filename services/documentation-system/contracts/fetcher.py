@@ -1,6 +1,21 @@
-from typing import Protocol
+from datetime import datetime
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
+
+
+class SourcePermission(BaseModel):
+    """Source ACL evidence returned alongside fetched content."""
+
+    model_config = ConfigDict(extra="forbid")
+    permission_id: str
+    principal_type: Literal["user", "group", "domain", "anyone"]
+    principal: str | None = None
+    role: str
+    inherited: bool = False
+    inherited_from: list[str] = []
+    allow_file_discovery: bool | None = None
+    expiration_time: datetime | None = None
 
 
 class FetchResult(BaseModel):
@@ -22,11 +37,23 @@ class FetchResult(BaseModel):
     # Non-fatal information loss reported by the fetcher (e.g. a spreadsheet
     # whose extra tabs were not read). Folded into the ingest warnings.
     warnings: list[str] = []
+    # None means this fetcher has no source-ACL contract. Google fetches must
+    # return a complete list, including [] when the file has no permissions.
+    permissions: list[SourcePermission] | None = None
 
 
 class FetchError(Exception):
     """Raised when a fetcher cannot retrieve or parse a URL. Non-fatal at the
     ingest layer — becomes a warning, never blocks the doc."""
+
+
+class SourceGone(FetchError):
+    """The source confirmed the file no longer exists for us (connectors
+    answered "file not found"). Unlike a plain FetchError — a timeout, a 5xx,
+    a denied request — this is evidence of deletion, so the doc's index is
+    cleared together with stored content, unless a newer fetch succeeded
+    meanwhile. The catalog row stays: a doc is retired by a person, not by a
+    fetch."""
 
 
 class Fetcher(Protocol):

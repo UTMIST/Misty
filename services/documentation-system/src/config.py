@@ -2,7 +2,7 @@ import logging
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+psycopg://docs:dev_password@localhost:5434/docs"
-    # The three credentials below are SecretStr, not str: a plain str field
+    # Credentials below are SecretStr, not str: a plain str field
     # prints in full on any repr/diff/traceback. That is not hypothetical —
     # an identically-shaped plain-str credential in services/connectors leaked
     # a real Google service-account private key into a terminal and a session
@@ -34,14 +34,43 @@ class Settings(BaseSettings):
     # "simplify" these back to str. Only the boundaries that hand the raw
     # value to something that needs a str should call .get_secret_value():
     # src/api/auth.py (env-bootstrap key comparison), src/api/deps.py (the
-    # directory HTTP client), src/fetch/registry.py (the connectors fetchers),
-    # and verify_production_secrets below.
+    # directory and llm HTTP clients), src/fetch/registry.py (the connectors
+    # fetchers), and verify_production_secrets below.
     api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
     directory_base_url: str = "http://localhost:8000"
     directory_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
     connectors_base_url: str = "http://localhost:8005"
     connectors_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
+    llm_base_url: str = "http://localhost:8002"
+    llm_api_key: SecretStr = SecretStr("")
+    search_embed_model: Literal["openai-embed-3-small", "openai-embed-3-large"] = (
+        "openai-embed-3-small"
+    )
+    search_min_cosine: float = Field(default=0.3, gt=0, le=1, allow_inf_nan=False)
+    # A re-embed target (#209). Indexing always maintains the SEARCH_EMBED_MODEL
+    # set; while this names another model, it also builds that model's set
+    # beside it, ready for SEARCH_EMBED_MODEL to switch to. After the switch it
+    # names the old model until old readers drain (docs/DEPLOYMENT.md).
+    embed_model: Literal["openai-embed-3-small", "openai-embed-3-large"] | None = None
+    # Keep at or below the llm service's EMBED_MAX_REQUEST_CHARS.
+    embed_max_request_chars: int = Field(default=400_000, gt=0)
     docs_env: Literal["local", "staging", "production"] = "local"
+    # A scheduler should call the source-access refresh endpoint after the
+    # first interval. Source-derived grants expire at the second interval so
+    # a failed/stopped scheduler eventually fails closed.
+    source_access_refresh_after_hours: int = Field(default=24, gt=0)
+    source_access_max_age_hours: int = Field(default=48, gt=0)
+    meeting_doc_create_lease_s: int = Field(default=600, ge=60)
+    meeting_record_max_attempts: int = Field(default=8, ge=1)
+    meeting_record_retention_days: int = Field(default=365, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_source_access_windows(self) -> "Settings":
+        if self.source_access_max_age_hours <= self.source_access_refresh_after_hours:
+            raise ValueError(
+                "SOURCE_ACCESS_MAX_AGE_HOURS must exceed SOURCE_ACCESS_REFRESH_AFTER_HOURS"
+            )
+        return self
 
 
 @lru_cache(maxsize=1)
@@ -60,11 +89,11 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
     and must block startup.
 
     `connectors_api_key` is different in kind, not just degree: connectors is
-    a soft dependency. It only backs the four Google-backed sources (`gdocs`,
-    `gsheets`, `gslides`, `gdrive`) — `web` and `github` fetch in-process and
-    never touch it — and `ingest_doc` is designed to turn a connectors
+    a soft dependency. It only backs `github` and the four Google-backed
+    sources (`gdocs`, `gsheets`, `gslides`, `gdrive`) — `web` fetches
+    in-process and never touches it — and `ingest_doc` is designed to turn a connectors
     `FetchError` into a per-doc warning while still cataloguing the doc (see
-    src/ingest.py). Losing connectors means "no Google content," not "broken
+    src/ingest.py). Losing connectors means "no GitHub or Google content," not "broken
     catalog," so a default `connectors_api_key` gets a startup warning
     instead of a boot refusal (see below). This mirrors connectors' own
     `verify_production_secrets` (services/connectors/src/config.py), which
@@ -94,6 +123,10 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
             f"{', '.join(insecure)} still set to the built-in dev default. "
             "Set a strong, unique value via environment variables."
         )
+    # Retrieval is a separate capability: keep catalog reads/writes available
+    # during rollout, but fail search closed when its embedding key is absent.
+    if not settings.llm_api_key.get_secret_value():
+        logger.warning("LLM_API_KEY is unset; authorized search will return 503")
     if settings.connectors_api_key.get_secret_value() == DEFAULT_DEV_API_KEY:
         logger.warning(
             "CONNECTORS_API_KEY is still set to the built-in dev default in "
@@ -102,5 +135,15 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
             "real connectors service and be recorded as per-doc ingest "
             "warnings rather than content. Set a strong, unique value via "
             "environment variables to enable Google-source content.",
+            settings.docs_env,
+        )
+    if settings.llm_api_key.get_secret_value() == DEFAULT_DEV_API_KEY:
+        # Soft dependency, like connectors: without the llm service the
+        # catalog still works, and content is stored but not indexed. Ingest
+        # and refetch report that as a warning; POST /docs/index retries.
+        logger.warning(
+            "LLM_API_KEY is still set to the built-in dev default in docs_env=%r. "
+            "This service will still start, but stored content will not be "
+            "indexed for retrieval until a valid llm `embed`-scoped key is set.",
             settings.docs_env,
         )

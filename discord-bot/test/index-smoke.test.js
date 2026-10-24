@@ -16,7 +16,13 @@ test('every factory index.js calls is imported or declared', () => {
 
   const available = new Set();
   for (const m of src.matchAll(/import\s*\{([^}]+)\}/g)) {
-    for (const name of m[1].split(',')) available.add(name.trim().split(/\s+as\s+/).pop());
+    for (const name of m[1].split(','))
+      available.add(
+        name
+          .trim()
+          .split(/\s+as\s+/)
+          .pop(),
+      );
   }
   for (const m of src.matchAll(/\b(?:function|const|let|var|class)\s+(\w+)/g)) available.add(m[1]);
 
@@ -26,4 +32,20 @@ test('every factory index.js calls is imported or declared', () => {
 
   const missing = [...called].filter((name) => !available.has(name));
   assert.deepEqual(missing, [], `index.js calls undeclared: ${missing.join(', ')}`);
+});
+
+test('Discord client requests Message Content for full helper-thread history', () => {
+  const src = readFileSync(fileURLToPath(new URL('../src/index.js', import.meta.url)), 'utf8');
+
+  assert.match(
+    src,
+    /GatewayIntentBits\.MessageContent/,
+    'unmentioned history arrives with empty content without this privileged intent',
+  );
+});
+
+test('Discord client enables uncached direct messages', () => {
+  const src = readFileSync(fileURLToPath(new URL('../src/index.js', import.meta.url)), 'utf8');
+  assert.match(src, /GatewayIntentBits\.DirectMessages/);
+  assert.match(src, /Partials\.Channel/);
 });

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadConfig } from '../src/config.js';
+import { createAppContext } from '../src/context.js';
 
 const FULL = {
   DISCORD_TOKEN: 't',
@@ -22,10 +23,32 @@ test('loadConfig returns typed config and strips trailing slash', () => {
   assert.equal(cfg.discordToken, 't');
   assert.equal(cfg.directoryApiKey, 'k');
   assert.equal(cfg.discordGuildId, 'g');
+  assert.equal(cfg.infrastructureDiscordUsername, undefined);
 });
 
 test('loadConfig throws listing missing vars', () => {
   assert.throws(() => loadConfig({ DISCORD_TOKEN: 't' }), /DIRECTORY_API_KEY/);
+});
+
+test('helperToolsEnabled defaults off and is true only for the literal "true"', () => {
+  assert.equal(loadConfig(FULL).helperToolsEnabled, false);
+  assert.equal(loadConfig({ ...FULL, HELPER_TOOLS_ENABLED: 'true' }).helperToolsEnabled, true);
+  for (const v of ['1', 'yes', 'TRUE', 'false', '']) {
+    assert.equal(
+      loadConfig({ ...FULL, HELPER_TOOLS_ENABLED: v }).helperToolsEnabled,
+      false,
+      `HELPER_TOOLS_ENABLED=${JSON.stringify(v)} must stay off`,
+    );
+  }
+});
+
+test('context exposes the tool registry/executor and the helperToolsEnabled flag', () => {
+  const ctx = createAppContext(loadConfig({ ...FULL, HELPER_TOOLS_ENABLED: 'true' }));
+  assert.equal(ctx.helperToolsEnabled, true);
+  assert.ok(ctx.toolExecutor && typeof ctx.toolExecutor.run === 'function');
+  // the document tools are registered (llmSafe gate lets them through)
+  assert.equal(ctx.toolRegistry.has('search_documents'), true);
+  assert.equal(ctx.toolRegistry.has('get_document'), true);
 });
 
 test('DISCORD_GUILD_ID is optional (global registration) and not reported missing', () => {
@@ -59,21 +82,30 @@ test('loadConfig throws when DOC_BASE_URL missing', () => {
 
 test('loadConfig requires LLM_BASE_URL and LLM_API_KEY', () => {
   const base = {
-    DISCORD_TOKEN: 't', DISCORD_CLIENT_ID: 'c',
-    DIRECTORY_BASE_URL: 'http://d', DIRECTORY_API_KEY: 'dk',
-    DOC_BASE_URL: 'http://doc', DOC_API_KEY: 'dock',
-    VERIFICATION_BASE_URL: 'http://v', VERIFICATION_API_KEY: 'vk',
+    DISCORD_TOKEN: 't',
+    DISCORD_CLIENT_ID: 'c',
+    DIRECTORY_BASE_URL: 'http://d',
+    DIRECTORY_API_KEY: 'dk',
+    DOC_BASE_URL: 'http://doc',
+    DOC_API_KEY: 'dock',
+    VERIFICATION_BASE_URL: 'http://v',
+    VERIFICATION_API_KEY: 'vk',
   };
   assert.throws(() => loadConfig(base), /LLM_BASE_URL/);
 });
 
 test('loadConfig exposes llmBaseUrl (trailing slash stripped) and llmApiKey', () => {
   const cfg = loadConfig({
-    DISCORD_TOKEN: 't', DISCORD_CLIENT_ID: 'c',
-    DIRECTORY_BASE_URL: 'http://d', DIRECTORY_API_KEY: 'dk',
-    DOC_BASE_URL: 'http://doc', DOC_API_KEY: 'dock',
-    LLM_BASE_URL: 'http://llm.railway.internal:8000/', LLM_API_KEY: 'llmkey',
-    VERIFICATION_BASE_URL: 'http://v', VERIFICATION_API_KEY: 'vk',
+    DISCORD_TOKEN: 't',
+    DISCORD_CLIENT_ID: 'c',
+    DIRECTORY_BASE_URL: 'http://d',
+    DIRECTORY_API_KEY: 'dk',
+    DOC_BASE_URL: 'http://doc',
+    DOC_API_KEY: 'dock',
+    LLM_BASE_URL: 'http://llm.railway.internal:8000/',
+    LLM_API_KEY: 'llmkey',
+    VERIFICATION_BASE_URL: 'http://v',
+    VERIFICATION_API_KEY: 'vk',
   });
   assert.equal(cfg.llmBaseUrl, 'http://llm.railway.internal:8000');
   assert.equal(cfg.llmApiKey, 'llmkey');
@@ -81,22 +113,100 @@ test('loadConfig exposes llmBaseUrl (trailing slash stripped) and llmApiKey', ()
 
 test('loadConfig requires VERIFICATION_BASE_URL and VERIFICATION_API_KEY', () => {
   const base = {
-    DISCORD_TOKEN: 't', DISCORD_CLIENT_ID: 'c',
-    DIRECTORY_BASE_URL: 'http://d', DIRECTORY_API_KEY: 'dk',
-    DOC_BASE_URL: 'http://doc', DOC_API_KEY: 'dock',
-    LLM_BASE_URL: 'http://llm', LLM_API_KEY: 'lk',
+    DISCORD_TOKEN: 't',
+    DISCORD_CLIENT_ID: 'c',
+    DIRECTORY_BASE_URL: 'http://d',
+    DIRECTORY_API_KEY: 'dk',
+    DOC_BASE_URL: 'http://doc',
+    DOC_API_KEY: 'dock',
+    LLM_BASE_URL: 'http://llm',
+    LLM_API_KEY: 'lk',
   };
   assert.throws(() => loadConfig(base), /VERIFICATION_BASE_URL/);
 });
 
 test('loadConfig exposes verificationBaseUrl (trailing slash stripped) and verificationApiKey', () => {
   const cfg = loadConfig({
-    DISCORD_TOKEN: 't', DISCORD_CLIENT_ID: 'c',
-    DIRECTORY_BASE_URL: 'http://d', DIRECTORY_API_KEY: 'dk',
-    DOC_BASE_URL: 'http://doc', DOC_API_KEY: 'dock',
-    LLM_BASE_URL: 'http://llm', LLM_API_KEY: 'lk',
-    VERIFICATION_BASE_URL: 'http://verify.railway.internal:8000/', VERIFICATION_API_KEY: 'verifykey',
+    DISCORD_TOKEN: 't',
+    DISCORD_CLIENT_ID: 'c',
+    DIRECTORY_BASE_URL: 'http://d',
+    DIRECTORY_API_KEY: 'dk',
+    DOC_BASE_URL: 'http://doc',
+    DOC_API_KEY: 'dock',
+    LLM_BASE_URL: 'http://llm',
+    LLM_API_KEY: 'lk',
+    VERIFICATION_BASE_URL: 'http://verify.railway.internal:8000/',
+    VERIFICATION_API_KEY: 'verifykey',
   });
   assert.equal(cfg.verificationBaseUrl, 'http://verify.railway.internal:8000');
   assert.equal(cfg.verificationApiKey, 'verifykey');
+});
+
+test('helper user limits default safely and accept explicit overrides', () => {
+  const defaults = loadConfig(FULL);
+  assert.equal(defaults.helperUserMaxRequests, 10);
+  assert.equal(defaults.helperUserWindowSeconds, 3600);
+  const overrides = loadConfig({
+    ...FULL,
+    HELPER_USER_MAX_REQUESTS: '3',
+    HELPER_USER_WINDOW_SECONDS: '60',
+  });
+  assert.equal(overrides.helperUserMaxRequests, 3);
+  assert.equal(overrides.helperUserWindowSeconds, 60);
+});
+
+test('invalid helper user limits reject startup instead of disabling the guard', () => {
+  for (const name of ['HELPER_USER_MAX_REQUESTS', 'HELPER_USER_WINDOW_SECONDS']) {
+    for (const value of [
+      '',
+      ' ',
+      '0',
+      '-1',
+      '1.5',
+      'NaN',
+      'Infinity',
+      'no-limit',
+      '9007199254740992',
+    ]) {
+      assert.throws(() => loadConfig({ ...FULL, [name]: value }), new RegExp(name));
+    }
+  }
+  assert.throws(
+    () => loadConfig({ ...FULL, HELPER_USER_WINDOW_SECONDS: '9007199254740991' }),
+    /HELPER_USER_WINDOW_SECONDS/,
+  );
+});
+
+test('application context wires the configured allowance once for all mentions', () => {
+  const config = loadConfig({
+    ...FULL,
+    HELPER_USER_MAX_REQUESTS: '1',
+    HELPER_USER_WINDOW_SECONDS: '30',
+  });
+  const app = createAppContext(config);
+  assert.equal(app.helperRequestLimiter.tryConsume('a').allowed, true);
+  const denied = app.helperRequestLimiter.tryConsume('a');
+  assert.equal(denied.allowed, false);
+  assert.ok(denied.retryAfterSeconds > 0 && denied.retryAfterSeconds <= 30);
+  assert.equal(app.helperRequestLimiter.tryConsume('b').allowed, true);
+});
+
+test('loadConfig allows optional infrastructure Discord username', () => {
+  const withoutUsername = loadConfig(FULL);
+  assert.equal(withoutUsername.infrastructureDiscordUsername, undefined);
+
+  const withUsername = loadConfig({
+    ...FULL,
+    INFRASTRUCTURE_DISCORD_USERNAME: 'infra-user',
+  });
+  assert.equal(withUsername.infrastructureDiscordUsername, 'infra-user');
+});
+
+test('missing-var error does not list the optional INFRASTRUCTURE_DISCORD_USERNAME', () => {
+  try {
+    loadConfig({ DISCORD_TOKEN: 't' });
+    assert.fail('expected loadConfig to throw');
+  } catch (err) {
+    assert.doesNotMatch(err.message, /INFRASTRUCTURE_DISCORD_USERNAME/);
+  }
 });

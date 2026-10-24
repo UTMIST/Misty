@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { loadEnvFile } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { snapshotDb } from './lib/snapshotDb.js';
@@ -11,6 +12,11 @@ import { ensureDevSpoofScope } from '../src/startupGuard.js';
 import { startWebServer } from '../src/web/server.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+try {
+  loadEnvFile(path.resolve(process.cwd(), '.env'));
+} catch (error) {
+  if (error.code !== 'ENOENT') throw error;
+}
 const teamTrackingDir = path.resolve(__dirname, '../../services/team-tracking');
 const SCRATCH_DB = 'team_tracking_playground';
 const MAIN_DB = 'team_tracking';
@@ -31,7 +37,9 @@ async function ensurePostgresUp() {
       cwd: teamTrackingDir,
       stdio: 'inherit',
     });
-    child.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`docker compose up failed: ${code}`)));
+    child.on('exit', (code) =>
+      code === 0 ? resolve() : reject(new Error(`docker compose up failed: ${code}`)),
+    );
   });
 }
 
@@ -42,9 +50,20 @@ async function terminateScratchConnections() {
   return new Promise((resolve) => {
     const child = spawn(
       'docker',
-      ['compose', 'exec', '-T', 'postgres', 'psql', '-U', DB_USER, '-d', 'postgres', '-c',
+      [
+        'compose',
+        'exec',
+        '-T',
+        'postgres',
+        'psql',
+        '-U',
+        DB_USER,
+        '-d',
+        'postgres',
+        '-c',
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity ` +
-        `WHERE datname = '${SCRATCH_DB}' AND pid <> pg_backend_pid();`],
+          `WHERE datname = '${SCRATCH_DB}' AND pid <> pg_backend_pid();`,
+      ],
       { cwd: teamTrackingDir, stdio: 'inherit' },
     );
     child.on('exit', () => resolve()); // best-effort — fine if the DB doesn't exist yet
@@ -55,12 +74,27 @@ async function countPeople() {
   return new Promise((resolve) => {
     const child = spawn(
       'docker',
-      ['compose', 'exec', '-T', 'postgres', 'psql', '-U', DB_USER, '-d', SCRATCH_DB,
-        '-t', '-A', '-c', 'SELECT count(*) FROM people;'],
+      [
+        'compose',
+        'exec',
+        '-T',
+        'postgres',
+        'psql',
+        '-U',
+        DB_USER,
+        '-d',
+        SCRATCH_DB,
+        '-t',
+        '-A',
+        '-c',
+        'SELECT count(*) FROM people;',
+      ],
       { cwd: teamTrackingDir, stdio: ['ignore', 'pipe', 'pipe'] },
     );
     let out = '';
-    child.stdout.on('data', (d) => { out += d.toString(); });
+    child.stdout.on('data', (d) => {
+      out += d.toString();
+    });
     child.on('exit', () => resolve(parseInt(out.trim(), 10) || 0));
   });
 }
@@ -69,8 +103,19 @@ async function dropScratchDb() {
   return new Promise((resolve) => {
     const child = spawn(
       'docker',
-      ['compose', 'exec', '-T', 'postgres', 'psql', '-U', DB_USER, '-d', 'postgres', '-c',
-        `DROP DATABASE IF EXISTS ${SCRATCH_DB};`],
+      [
+        'compose',
+        'exec',
+        '-T',
+        'postgres',
+        'psql',
+        '-U',
+        DB_USER,
+        '-d',
+        'postgres',
+        '-c',
+        `DROP DATABASE IF EXISTS ${SCRATCH_DB};`,
+      ],
       { cwd: teamTrackingDir, stdio: 'inherit' },
     );
     child.on('exit', () => resolve()); // best-effort
@@ -94,12 +139,24 @@ async function shutdown(sig) {
   }, 5000);
   watchdog.unref();
   if (webServer) {
-    try { await webServer.close(); } catch (e) { console.error(e); }
+    try {
+      await webServer.close();
+    } catch (e) {
+      console.error(e);
+    }
   }
   if (scratch) {
-    try { await scratch.close(); } catch (e) { console.error(e); }
+    try {
+      await scratch.close();
+    } catch (e) {
+      console.error(e);
+    }
   }
-  try { await dropScratchDb(); } catch (e) { console.error(e); }
+  try {
+    await dropScratchDb();
+  } catch (e) {
+    console.error(e);
+  }
   clearTimeout(watchdog);
   process.exit(0);
 }
@@ -133,10 +190,17 @@ async function main() {
   const config = {
     directoryBaseUrl: scratch.url,
     directoryApiKey: key,
+    docBaseUrl: process.env.DOC_BASE_URL || 'http://localhost:8001',
+    docApiKey: process.env.DOC_API_KEY || 'dev-api-key-change-me',
+    llmBaseUrl: requiredEnv('LLM_BASE_URL'),
+    llmApiKey: requiredEnv('LLM_API_KEY'),
+    verificationBaseUrl: process.env.VERIFICATION_BASE_URL || 'http://localhost:8003',
+    verificationApiKey: process.env.VERIFICATION_API_KEY || 'dev-api-key-change-me',
     // Discord fields not used in web-only mode; safe placeholders.
     discordToken: null,
     discordClientId: null,
     discordGuildId: undefined,
+    infrastructureDiscordUsername: 'infrastructure-team',
   };
   const appContext = createAppContext(config);
 
@@ -167,6 +231,15 @@ async function main() {
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+}
+
+function requiredEnv(name) {
+  if (!process.env[name]) {
+    throw new Error(
+      `${name} is required for the playground. Set it in discord-bot/.env or run the LLM service locally.`,
+    );
+  }
+  return process.env[name].replace(/\/+$/, '');
 }
 
 main().catch(async (err) => {

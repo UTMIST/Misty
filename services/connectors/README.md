@@ -1,17 +1,17 @@
 # connectors
 
-Thin, stateless HTTP API that fetches document content from external sources on behalf of UTMIST's internal consumers: one `POST /fetch` endpoint, scoped API-key auth, no database.
+HTTP adapter for UTMIST's internal consumers: document fetching, Google metadata discovery, and an optional Google meeting-Doc writer, with scoped API-key auth and no local database.
 
 ## What this service does
 
-Consumers like documentation-system want the text of a Google Doc (or, later, other source types) without holding source credentials themselves. connectors is an **outbound adapter**: it owns the Google service-account key and the source-specific fetch/export logic, and returns plain text.
+Consumers like documentation-system fetch Google documents and GitHub text without holding source credentials themselves. connectors owns the source-specific read logic and credentials, exposes bounded Google metadata discovery, and uses a separate OAuth identity for [meeting-Doc operations](docs/API.md#meeting-writer-googledocs), including creation, sharing, owner reads, and deletion.
 
 Two things this service deliberately is **not**:
 
 - **Not a gateway.** It does not sit in front of other UTMIST services or route traffic to them.
-- **Not an authorization boundary.** It authenticates the *caller* (via a scoped API key) but never learns *who the caller is fetching on behalf of* — there is no per-end-user identity in the request. Access control for the underlying document is whatever the source system enforces (for Google, Drive's own sharing settings on the service account's email). A consumer that needs to enforce "can this particular user see this doc" must do that itself before calling `/fetch`.
+- **Not the final authorization boundary.** It authenticates the *calling service*, not an end user. For Google sources it returns the complete effective Drive ACL with the text; documentation-system resolves that evidence to verified people and membership-synced team groups before storing or disclosing content. The ACL is read before export/download, and an ACL-read failure blocks the content fetch.
 
-Like `llm`, it is stateless — no database, no migrations, no persisted key store. API keys are seeded from a config env var at boot.
+There is no local database, migration, or persisted key store. API keys are seeded from a config env var at boot. The meeting writer changes durable Google state; interrupted writes need [catalog reconciliation](docs/DEPLOYMENT.md#rollback).
 
 ## Quick start
 
@@ -35,7 +35,7 @@ uv run uvicorn src.api.app:app --reload --port 8005
 
 The API is now at `http://localhost:8005`. Interactive Swagger UI is at `http://localhost:8005/docs`; the machine-readable schema is at `http://localhost:8005/openapi.json`.
 
-The default dev bootstrap key is `dev-api-key-change-me` (set in `.env`, carries the `admin` wildcard scope). Pass it as `X-API-Key` on every request:
+The default dev bootstrap key is `dev-api-key-change-me` (set in `.env`, carries the `admin` wildcard scope). Pass it as `X-API-Key` on business requests:
 
 ```bash
 curl -sS http://localhost:8005/fetch \
@@ -50,7 +50,7 @@ curl -sS http://localhost:8005/fetch \
 
 `CONNECTORS_ENV` declares which environment this instance represents: `local` (default), `staging`, or `production`. Outside `local`, `create_app()` calls `verify_production_secrets()` and **refuses to start** unless `API_KEY` is overridden from the dev default — a misconfigured deploy dies at boot, not on first request. `CONSUMER_KEYS` is also validated at boot (`get_key_store()` is called eagerly in `create_app()`), so a malformed value fails the container immediately rather than on the first `/fetch` call.
 
-Google credentials are deliberately **not** part of that boot check: `GOOGLE_CREDENTIALS_JSON` may be empty in any tier. A connectors deploy with no Google account yet still starts, serves `/health`, and returns 503 for Google source fetches.
+The read account is deliberately **not** part of that boot check: `GOOGLE_CREDENTIALS_JSON` may be empty in any tier. The optional meeting writer may be entirely disabled; partial writer configuration fails boot outside local. A connectors deploy with no Google account yet still starts, serves `/health`, and returns 503 for Google source fetches.
 
 ### Configuration
 
@@ -62,14 +62,19 @@ All settings load from the environment (`src/config.py`, `.env` in dev):
 | `API_KEY` | `dev-api-key-change-me` | Env-bootstrap key; carries `admin` scope. Must be overridden outside `local`. |
 | `CONSUMER_KEYS` | `""` | JSON array of per-consumer keys (see auth model). |
 | `GOOGLE_CREDENTIALS_JSON` | `""` | Base64 of the Google service-account JSON key file. Empty is a valid running state — see the runbook below. |
+| `GITHUB_TOKEN` | `""` | Optional fine-grained, read-only GitHub PAT (Contents: read). Empty fetches public repositories only; private ones then return 404. Never part of the boot check. |
 | `MAX_CONTENT_CHARS` | `1200000` | Transport guard: truncates fetched content above this length. Deliberately set above documentation-system's own `MAX_CONTENT_CHARS` (1,000,000) so that clamp — not this one — is the one that actually trips and reports a truncation warning. |
+| `MAX_FILE_BYTES` | `26214400` | Metadata precheck and streamed byte cap for uploaded PDFs, `.docx` files, `text/*` media, and GitHub files (25 MiB). Native Google editor API responses/exports are exempt. |
 | `REQUEST_TIMEOUT_S` | `30` | Per-request timeout to upstream sources (seconds). |
+| `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` | `""` | Optional Workspace user OAuth writer credentials (`drive.file`), separate from the read account. |
+| `GOOGLE_MEETING_ROOT_FOLDER_ID` | `""` | Admin-only root folder accessible to the writer OAuth app. |
+| `GOOGLE_MEETING_ADMIN_EMAILS` | `[]` | JSON array of explicitly trusted infra user/group emails, including inherited Drive admins. |
 
 ## Auth model
 
 Auth is scoped API keys via the shared `platform_auth` package, matching `llm`, team-tracking, and documentation-system — but **DB-free**. There is no `api_keys` table.
 
-- Every request needs `X-API-Key`. A key is either the shared bootstrap env key (`API_KEY`, scope: `admin`) or a per-consumer key seeded from the `CONSUMER_KEYS` env var.
+- Business endpoints need `X-API-Key`; health and the API documentation/schema routes are unauthenticated. A key is either the shared bootstrap env key (`API_KEY`, scope: `admin`) or a per-consumer key seeded from the `CONSUMER_KEYS` env var.
 - **`CONSUMER_KEYS` is a JSON array**, each entry `{"name", "prefix", "key_hash", "scopes"}`. At boot, the key store is built from it into an in-memory store that satisfies `platform_auth`'s `ApiKeyStore` protocol. Keys are stored only as Argon2 hashes; a malformed `CONSUMER_KEYS` fails fast at startup.
 - Keys use the **`connectors_` envelope** (`connectors_<prefix>_<secret>`). There is no `X-Actor` header — this is a service-to-service API, so the audit actor is always the authenticated key's own name (attested actor).
 
@@ -87,11 +92,13 @@ Append the printed JSON object to the service's `CONSUMER_KEYS` array and redepl
 
 ## API at a glance
 
-Every endpoint except `/health` requires `X-API-Key`.
+Business endpoints require `X-API-Key`. `/health` and the API documentation/schema routes (`/docs`, `/redoc`, `/openapi.json`) are unauthenticated within the service's network exposure.
 
 | Method | Path | Scope | Description |
 |--------|------|-------|-------------|
 | POST | `/fetch` | `fetch` | Fetch a document's text content from a source. |
+| POST | `/discover/google` | `discover` | List a bounded metadata page; see the [discovery contract](docs/API.md#post-discovergoogle). |
+| POST / PUT / GET / DELETE | `/google/docs` route group | `meeting-write` / `meeting-fetch` | Create, find, share, read, check, or delete meeting Docs; see [per-route scopes](docs/API.md#meeting-writer-googledocs). |
 | GET | `/health` | none | Liveness probe → `{"status": "ok"}`. |
 
 `POST /fetch` requires the `fetch` scope (`require_scope("fetch")`); the `admin` wildcard satisfies it, so the bootstrap key and any admin key also work.
@@ -101,9 +108,9 @@ Every endpoint except `/health` requires `X-API-Key`.
 | Field | Type | Notes |
 |-------|------|-------|
 | `url` | string | Required, non-empty. The document URL. |
-| `source_id` | string | Required, non-empty. Which source to use (e.g. `gdocs`, `gsheets`, `gslides`, `gdrive`). Supplied by the caller — the caller (e.g. documentation-system) already resolves this during ingest, so it is not re-derived here. |
+| `source_id` | string | Required, non-empty. Which source to use (`gdocs`, `gsheets`, `gslides`, `gdrive`, or `github`). Supplied by the caller — the caller (e.g. documentation-system) already resolves this during ingest, so it is not re-derived here. |
 
-`gdrive` covers everything that isn't a native Google Doc/Slides/Sheet: uploaded `text/*` files (via Drive export), and — per the extractor registered for the file's MIME type — uploaded PDFs, uploaded `.docx` files, and Google Forms.
+`gdrive` covers everything that isn't a native Google Doc/Slides/Sheet: uploaded `text/*` files (via Drive media download), and — per the extractor registered for the file's MIME type — uploaded PDFs, uploaded `.docx` files, and Google Forms.
 
 | MIME type | Extractor | Output |
 |-----------|-----------|--------|
@@ -113,11 +120,25 @@ Every endpoint except `/health` requires `X-API-Key`.
 | `application/pdf` (uploaded PDF) | PDF (`pypdf`, local parse) | One `## Page N` section per page |
 | `.docx` (uploaded, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`) | Docx (`python-docx`, local parse) | Markdown mirroring the Docs extractor: headings, list bullets, tables |
 | `application/vnd.google-apps.form` (Google Form) | Forms (native API) | Markdown: title, description, section headings, and each question with its multiple-choice options where present. **Responses are never fetched** — they duplicate the linked responses spreadsheet and are applicant personal data. |
-| `text/*` (uploaded) | Drive export fallback | Raw text |
+| `text/*` (uploaded) | Drive media download fallback | Raw text |
+
+`github` accepts two URL shapes, fetched with plain REST calls against `api.github.com`:
+
+| URL | Fetches | Title |
+|-----|---------|-------|
+| `github.com/{owner}/{repo}` (or `/tree/{ref}`) | The README GitHub resolves for that ref (default branch if none) — any README name/extension | `owner/repo` |
+| `github.com/{owner}/{repo}/blob/{ref}/{path}` | That file at that ref; any UTF-8 text file, not only Markdown | `owner/repo/path` |
+
+A repository with no README omits `content` and returns a `repository has no README` warning. Binary or non-UTF-8 files are 422. GitHub returns 404 for a private repository the token cannot see, so that surfaces as 404, not 403. A ref may contain `/` (`feature/docs`): it is matched against the repository's branches and tags, longest match first, or taken as a commit SHA once GitHub confirms that commit exists; an unknown ref or commit (or an empty repository) is 404, not a README-less repository. Percent-encoded paths (`setup%20guide.md`) are decoded once. A renamed or transferred repository's redirect is followed.
 
 Legacy `.doc` (`application/msword`, the pre-2007 binary Word format) is a different format from `.docx` and stays unsupported — `python-docx` cannot read it.
 
-**Response** (`FetchResponse`): `{ "title", "content", "warnings": [] }`.
+**Response** (`FetchResponse`): `{ "title", "content", "warnings": [], "permissions": [...] }`.
+Fields whose internal value is `None` are omitted, including unavailable `title` or `content`.
+Each Google permission includes its opaque permission id, principal type and email/domain,
+role, inherited parent/shared-drive ids, source expiration, and link-discovery flag. Non-Google sources may
+omit `permissions`; an omitted Google ACL is an authorization failure to consumers, never
+evidence that the file is public.
 
 ### Error → status table
 
@@ -125,7 +146,7 @@ Legacy `.doc` (`application/msword`, the pre-2007 binary Word format) is a diffe
 |-----------|--------|
 | `source_id` not registered | 422 |
 | Source not configured (e.g. `GOOGLE_CREDENTIALS_JSON` empty, or malformed) | 503 |
-| Source denied access to the file (not shared with the service account) | 403 |
+| Source denied access (Google 403; file sharing is one possible cause) | 403 |
 | File not found for the given URL | 404 |
 | File's MIME type has no text form the service can extract | 422 |
 | Upstream source error (Drive/Docs API failure) | 502 |
@@ -139,14 +160,14 @@ connectors reads Google Docs/Sheets/Slides/Forms/Drive files as a **service acco
 
 1. **Create (or reuse) a Google Cloud project** for UTMIST connectors.
 2. **Enable all five required APIs** on that project:
-   - **Google Drive API** — always required. Used for file metadata (name, MIME type) on every fetch; as the export fallback for uploaded `text/*` files; and as the byte-download path for uploaded PDFs and `.docx` files, which are parsed locally rather than via a native Google API.
+   - **Google Drive API** — always required. Used for file metadata (name, MIME type) on every fetch and media downloads of uploaded `text/*`, PDF, and `.docx` files, which are parsed locally rather than via a native Google API.
    - **Google Docs API** — required for the native Docs extractor.
    - **Google Slides API** — required for the native Slides extractor.
    - **Google Sheets API** — required for the native Sheets extractor.
    - **Google Forms API** — required for the native Forms extractor.
 3. **Create a service account** in that project (IAM & Admin → Service Accounts).
 4. **Create a JSON key** for the service account and download it. Treat this file as a secret — do not commit it.
-5. **Share each Drive folder/file connectors needs to read** with the service account's email address (looks like `name@project-id.iam.gserviceaccount.com`), granting **Viewer** access. Nothing is readable until it's explicitly shared.
+5. **Share each Drive folder/file connectors needs to read** with the service account's email address (looks like `name@project-id.iam.gserviceaccount.com`), granting sufficient access to inspect the complete ACL (the verified setup uses **Editor**). Nothing is readable until it's explicitly shared.
 6. **Base64-encode the key file** and set it as `GOOGLE_CREDENTIALS_JSON`:
    ```bash
    base64 -i service-account.json | tr -d '\n'
@@ -157,7 +178,7 @@ connectors reads Google Docs/Sheets/Slides/Forms/Drive files as a **service acco
 
 The service account's credentials are built with these OAuth scopes:
 
-- `https://www.googleapis.com/auth/drive.readonly` — always required (file metadata on every fetch; the Drive-export fallback for uploaded `text/*` files; and the byte-download path for uploaded PDFs and `.docx` files — see below).
+- `https://www.googleapis.com/auth/drive.readonly` — always required (file metadata on every fetch and Drive media downloads of uploaded `text/*`, PDF, and `.docx` files — see below).
 - `https://www.googleapis.com/auth/documents.readonly` — required for the native Docs extractor.
 - `https://www.googleapis.com/auth/presentations.readonly` — required for the native Slides extractor.
 - `https://www.googleapis.com/auth/spreadsheets.readonly` — required for the native Sheets extractor.
@@ -176,6 +197,14 @@ Two cases are lossy by design:
 - **A spreadsheet tab larger than `MAX_ROWS_PER_TAB` (2000 rows).** Every tab of a spreadsheet is read (there is no first-tab-only limitation), but a tab over the cap is truncated to the first 2000 rows and a warning naming the tab and its real row count is added to the response's `warnings` list. Slides and Docs have no equivalent size cap.
 - **A scanned PDF with no text layer.** `pypdf` extracts embedded text; it does not run OCR. If every page of a PDF yields no text (the telltale sign of a scanned-image-only document), the extractor emits the `## Page N` headers but no page content, plus a warning that no text layer was found. OCR is out of scope.
 
+Uploaded PDFs, `.docx` files, `text/*` files, and GitHub files larger than
+`MAX_FILE_BYTES` return `422`. Known oversized files are rejected before download;
+the streamed body is also capped before parsing, covering missing or stale Drive
+`size` metadata and files that grow after the metadata read. GitHub requires a
+size from its raw-file `HEAD` request. Native Google editor API responses and
+exports are exempt. See [download bounds](docs/ARCHITECTURE.md#where-the-truncation-actually-happens)
+for the transport and parser-memory limits.
+
 ### Running without Google access
 
 `GOOGLE_CREDENTIALS_JSON` empty is a valid, supported running state: `/fetch` returns **503** for any Google source, and every other part of the service (health check, auth, non-Google sources if added later) works normally. This means connectors can be deployed and wired up to consumers **before** the Google Cloud project and service account exist — flip on Google support later by setting the variable and redeploying, no code change required.
@@ -185,23 +214,29 @@ Two cases are lossy by design:
 ```
 connectors/
 ├── contracts/
-│   └── fetch.py            Pydantic request/response models (FetchRequest, FetchResponse)
+│   ├── fetch.py            Pydantic fetch request/response models
+│   ├── discovery.py        Discovery models and Protocol
+│   └── meeting.py          Meeting writer models, Protocol, and errors
 │
 ├── src/
 │   ├── api/               FastAPI application
-│   │   ├── app.py         App factory (create_app); mounts /fetch + /health, audit middleware
+│   │   ├── app.py         App factory; mounts fetch, discovery, meeting routes + /health, audit middleware
 │   │   ├── auth.py        Builds require_scope / get_actor from platform_auth (envelope="connectors_")
-│   │   ├── deps.py        get_key_store / get_source_registry — the single wiring point
+│   │   ├── deps.py        Key store, source registry, discovery source, meeting writer — the single wiring point
 │   │   ├── hashing.py     Thin shim over platform_auth: connectors_-envelope key generation
 │   │   └── routers/
-│   │       └── fetch.py    POST /fetch — require_scope("fetch"), maps source errors → HTTP status
+│   │       ├── fetch.py    POST /fetch — fetch scope, maps source errors → HTTP status
+│   │       ├── discovery.py POST /discover/google — discover scope
+│   │       └── meeting.py  /google/docs routes — meeting-write / meeting-fetch scopes
 │   │
 │   ├── sources/            Source-agnostic fetch layer (no FastAPI)
 │   │   ├── base.py             SourceFetcher Protocol + normalized error hierarchy
 │   │   ├── registry.py         Config-driven source_id → SourceFetcher wiring
 │   │   ├── google.py           GoogleSource: URL → file id → Drive metadata → extractor
+│   │   ├── github.py           GithubSource: repo README or /blob/ file via the GitHub REST API (httpx)
+│   │   ├── meeting_google.py   Separate OAuth meeting writer
 │   │   └── google_extractors/  Per-MIME-type extraction strategies (native Docs/Slides/Sheets/Forms APIs,
-│   │                            Drive export, local PDF/.docx parsing)
+│   │                            Drive media download, local PDF/.docx parsing)
 │   │
 │   ├── mint_key.py        connectors-keys CLI — prints a key + its CONSUMER_KEYS entry, no store writes
 │   └── config.py          Settings (CONNECTORS_ENV, API_KEY, CONSUMER_KEYS, GOOGLE_CREDENTIALS_JSON, ...) + boot check
@@ -222,7 +257,7 @@ The suite is single-mode — no Docker, no database, no network:
 uv run pytest
 ```
 
-Runs with Google API clients injected as fakes via `app.dependency_overrides` / constructor injection, covering the `/fetch` happy path, URL parsing, the Docs/Slides/Sheets/Forms extractors, the local PDF/`.docx` parsers, the Drive-export fallback for uploaded `text/*` files, the auth paths, config/boot checks, and the source-error → HTTP-status mapping.
+Runs with Google API clients injected as fakes via `app.dependency_overrides` / constructor injection, covering the `/fetch` happy path, URL parsing, the Docs/Slides/Sheets/Forms extractors, the local PDF/`.docx` parsers, the Drive media download fallback for uploaded `text/*` files, the auth paths, config/boot checks, and the source-error → HTTP-status mapping.
 
 Lint and format with ruff:
 
@@ -235,13 +270,13 @@ uv run ruff format .
 
 ## Status
 
-v0.1: a stateless `POST /fetch` adapter over a Google Drive/Docs/Slides/Sheets/Forms service account (plus local parsing of uploaded PDF and `.docx` files), config-seeded scoped API keys (`fetch` / `admin`) with an attested-actor audit trail, and a fast 132-test suite with no external dependencies.
+The service fetches Google and GitHub text, enumerates Google metadata, and optionally manages meeting Docs through a separate OAuth writer. Config-seeded keys use `fetch`, `discover`, `meeting-write`, and `meeting-fetch` scopes (`admin` satisfies all), with an attested-actor audit trail and offline tests.
 
 **Not implemented (by design):**
 
-- **Persistence** — no database. Consumers that need to cache fetched content own that cache themselves.
+- **Local persistence** — no database. Consumers own fetched-content caches and reconciliation of external Google writes.
 - **Per-end-user authorization** — connectors authenticates the calling service, not the end user on whose behalf a fetch happens; that check belongs in the consumer.
-- **Non-Google sources** — the source registry is designed to grow (`SourceFetcher` protocol), but only Google Drive/Docs/Sheets/Slides/Forms (plus PDF/`.docx` parsed via Drive bytes) is wired up today.
+- **GitHub harvesting** — `github` fetches one explicitly supplied README or file; it does not enumerate repositories, sync, or read issues/PRs/wikis.
 - **OCR** — a scanned PDF with no embedded text layer captures nothing; see "Known limitations" above.
 - **Forms responses** — only form structure (title, questions, options) is read; responses are deliberately never fetched (see the Supported types table above).
 
@@ -251,3 +286,6 @@ v0.1: a stateless `POST /fetch` adapter over a Google Drive/Docs/Slides/Sheets/F
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — contributor orientation: why the service is shaped this way, boundaries, trade-offs
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — task walkthroughs and the pre-push checklist
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — deploy shape, variables, key provisioning, troubleshooting
+
+Automatic sharing discovery also exposes [`POST /discover/google`](docs/API.md#post-discovergoogle)
+with a separate `discover` scope. See the [operator/member runbook](../documentation-system/docs/DISCOVERY.md).

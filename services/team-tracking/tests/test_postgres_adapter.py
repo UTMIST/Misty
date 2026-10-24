@@ -1,10 +1,14 @@
+import contextlib
+import threading
 from datetime import date
+from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from contracts.types import (
+    PendingGroupChange,
     PersonCreate,
     PersonIdentifierCreate,
     PersonIdentifierUpdate,
@@ -12,6 +16,7 @@ from contracts.types import (
     TeamCreate,
     TeamMembershipCreate,
     TeamMembershipUpdate,
+    TeamUpdate,
 )
 from src.storage.errors import UnknownParentTeamError
 from src.storage.postgres import PostgresStorageAdapter
@@ -20,6 +25,10 @@ from src.storage.postgres import PostgresStorageAdapter
 @pytest.fixture
 def adapter(clean_db: Engine) -> PostgresStorageAdapter:
     return PostgresStorageAdapter(clean_db)
+
+
+def test_readiness_query(adapter):
+    assert adapter.is_ready() is True
 
 
 def test_create_and_get_person(adapter):
@@ -391,7 +400,7 @@ def test_revoke_and_touch_pg(adapter):
 
 
 def test_pg_provider_seed_present(adapter):
-    assert {p.id for p in adapter.list_providers()} >= {"discord", "github", "notion", "uoft_email"}
+    assert {p.id for p in adapter.list_providers()} == {"discord", "github", "uoft_email", "email"}
     assert adapter.get_provider("discord").label == "Discord"
 
 
@@ -535,3 +544,247 @@ def test_pg_generic_identifier_ops_reject_email_provider(adapter):
         )
     with pytest.raises(ValueError, match="email_not_addressable_by_provider"):
         adapter.delete_person_identifier(p.id, "email")
+
+
+def test_pg_channel_teams_replace_retire_clear(adapter):
+    a = adapter.create_team(TeamCreate(slug="a", label="A"), actor="t")
+    b = adapter.create_team(TeamCreate(slug="b", label="B"), actor="t")
+    assert adapter.get_channel_teams("1", "2").team_ids == []
+
+    set_ = adapter.replace_channel_teams("1", "2", [a.id, b.id], actor="bot")
+    assert set_.team_ids == sorted([a.id, b.id])
+    assert set_.updated_by == "bot"
+
+    adapter.update_team(a.id, TeamUpdate(active=False), actor="t")
+    after = adapter.get_channel_teams("1", "2")
+    assert after.team_ids == [b.id]
+    assert after.version != set_.version
+
+    adapter.clear_channel_teams("1", "2")
+    assert adapter.get_channel_teams("1", "2").team_ids == []
+    adapter.clear_channel_teams("1", "2")
+
+
+def _race(n, fn):
+    """Run fn(i) on n threads released together; re-raise the first error."""
+    barrier = threading.Barrier(n)
+    errors = []
+
+    def run(i):
+        barrier.wait()
+        try:
+            fn(i)
+        except Exception as e:  # noqa: BLE001 — surfaced below
+            errors.append(e)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if errors:
+        raise errors[0]
+
+
+@pytest.mark.parametrize("attempt", range(5))
+def test_pg_concurrent_disjoint_replaces_never_union(adapter, attempt):
+    ts = [adapter.create_team(TeamCreate(slug=f"t{i}", label="T"), actor="t") for i in range(8)]
+    _race(8, lambda i: adapter.replace_channel_teams("1", "2", [ts[i].id], actor="bot"))
+    assert len(adapter.get_channel_teams("1", "2").team_ids) == 1
+
+
+@pytest.mark.parametrize("attempt", range(5))
+def test_pg_concurrent_overlapping_replaces_and_clears(adapter, attempt):
+    a, b, c = (adapter.create_team(TeamCreate(slug=s, label="T"), actor="t") for s in "abc")
+    sets = [[a.id, b.id], [b.id, c.id]]
+
+    def op(i):
+        if i % 3 == 2:
+            adapter.clear_channel_teams("1", "2")
+        else:
+            adapter.replace_channel_teams("1", "2", sets[i % 2], actor="bot")
+
+    _race(9, op)
+    final = adapter.get_channel_teams("1", "2").team_ids
+    assert final in ([], sorted(sets[0]), sorted(sets[1]))
+
+
+@pytest.mark.parametrize("attempt", range(5))
+def test_pg_concurrent_appends_accumulate(adapter, attempt):
+    """Serialized appends under the channel lock must keep every addition."""
+    a, b, c = (adapter.create_team(TeamCreate(slug=s, label="T"), actor="t") for s in "abc")
+    adapter.replace_channel_teams("1", "2", [a.id], actor="bot")
+    _race(
+        8,
+        lambda i: adapter.append_channel_teams("1", "2", [[b.id], [c.id]][i % 2], actor="bot"),
+    )
+    assert adapter.get_channel_teams("1", "2").team_ids == sorted([a.id, b.id, c.id])
+
+
+@pytest.mark.parametrize("attempt", range(5))
+def test_pg_concurrent_append_and_clear_never_restores_stale(adapter, attempt):
+    """Append must not resurrect teams that a concurrent clear removed."""
+    a, b = (adapter.create_team(TeamCreate(slug=s, label="T"), actor="t") for s in "ab")
+    adapter.replace_channel_teams("1", "2", [a.id], actor="bot")
+
+    def op(i):
+        if i % 2 == 0:
+            adapter.append_channel_teams("1", "2", [b.id], actor="bot")
+        else:
+            adapter.clear_channel_teams("1", "2")
+
+    _race(8, op)
+    final = adapter.get_channel_teams("1", "2").team_ids
+    # clear-last → []; append-after-clear → [b]; append-then-more-appends → [a,b]
+    assert final in ([], [b.id], sorted([a.id, b.id]))
+
+
+def test_pg_channel_teams_rejects_inactive_and_keeps_config(adapter):
+    a = adapter.create_team(TeamCreate(slug="a", label="A"), actor="t")
+    b = adapter.create_team(TeamCreate(slug="b", label="B"), actor="t")
+    adapter.replace_channel_teams("1", "2", [a.id], actor="bot")
+    adapter.update_team(b.id, TeamUpdate(active=False), actor="t")
+    for bad in (b.id, uuid4()):
+        with pytest.raises(ValueError, match="unknown_or_inactive_team"):
+            adapter.replace_channel_teams("1", "2", [a.id, bad], actor="bot")
+    assert adapter.get_channel_teams("1", "2").team_ids == [a.id]
+
+
+def test_pg_team_google_group_upsert(adapter):
+    team = adapter.create_team(TeamCreate(slug="a", label="A"), actor="t")
+    assert adapter.get_team_google_group(team.id) is None
+    first = adapter.put_team_google_group(
+        team.id,
+        group_email="a@x.ca",
+        group_name=None,
+        status="failed",
+        last_error="boom",
+        last_synced_at=None,
+        actor="first",
+        pending_changes=[
+            PendingGroupChange(action="add", email="ada@x.ca", operation_name="operations/add")
+        ],
+    )
+    assert adapter.get_team_google_group(team.id).pending_changes == first.pending_changes
+    assert adapter.list_team_google_groups()[0].pending_changes == first.pending_changes
+    second = adapter.put_team_google_group(
+        team.id,
+        group_email="a@x.ca",
+        group_name="groups/1",
+        status="synced",
+        last_error=None,
+        last_synced_at=first.updated_at,
+        actor="second",
+    )
+    assert (second.created_by, second.updated_by) == ("first", "second")
+    assert second.group_name == "groups/1" and second.last_error is None
+    assert second.pending_changes == []
+    assert adapter.list_team_google_groups() == [second]
+    with pytest.raises(ValueError, match="team_id not found"):
+        adapter.put_team_google_group(
+            uuid4(),
+            group_email="b@x.ca",
+            group_name=None,
+            status="failed",
+            last_error=None,
+            last_synced_at=None,
+            actor="t",
+        )
+
+
+def test_pg_pending_add_survives_a_new_adapter_and_provider(clean_db):
+    from test_google_groups import FakeResponse, _provider
+
+    from src.google_groups import sync_team, synced_groups_containing, synced_team_for_group
+
+    storage = PostgresStorageAdapter(clean_db)
+    team = storage.create_team(TeamCreate(slug="ml", label="ML"), actor="t")
+    person = storage.create_person(
+        PersonCreate(display_name="Ada", primary_email="ada@x"), actor="t"
+    )
+    membership = storage.create_membership(
+        TeamMembershipCreate(person_id=person.id, team_id=team.id), actor="t"
+    )
+    provider, _ = _provider(
+        FakeResponse(200, {"done": True, "response": {"name": "groups/abc"}}),
+        FakeResponse(200, {}),
+        FakeResponse(200, {"name": "operations/add-ada", "done": False}),
+    )
+    pending = sync_team(storage, provider, team.id, actor="cli")
+
+    # No Python object from the old sync carries the pending write forward.
+    engine = create_engine(clean_db.url, future=True)
+    try:
+        fresh = PostgresStorageAdapter(engine)
+        fresh.end_membership(membership.id, date.today(), actor="api")
+        provider, _ = _provider(FakeResponse(200, {}))
+        waiting = sync_team(fresh, provider, team.id, actor="api")
+        assert waiting.status == "failed" and waiting.pending_changes == pending.pending_changes
+        assert synced_team_for_group(fresh, waiting.group_email) is None
+        assert synced_groups_containing(fresh, provider, person) == []
+
+        member = {
+            "name": "groups/abc/memberships/ada",
+            "preferredMemberKey": {"id": "ada@x"},
+            "roles": [{"name": "MEMBER"}],
+        }
+        provider, session = _provider(
+            FakeResponse(200, {"memberships": [member]}),
+            FakeResponse(200, {"done": True}),
+        )
+        result = sync_team(fresh, provider, team.id, actor="api")
+        assert result.status == "synced" and result.pending_changes == []
+        assert session.calls[-1][0] == "DELETE"
+        assert storage.get_team_google_group(team.id) == result
+    finally:
+        engine.dispose()
+
+
+def test_pg_stale_sync_in_another_process_cannot_readd_a_revoked_member(clean_db, monkeypatch):
+    """A CLI run pauses before adding Ada; meanwhile the API ends her membership
+    and syncs. Two engines and no in-process lock stand in for two processes,
+    so only the Postgres advisory lock can keep the API sync waiting."""
+    from test_google_groups import FakeGroups
+
+    from src import google_groups
+
+    monkeypatch.setattr(google_groups, "_lock", contextlib.nullcontext())
+
+    class PausingGroups(FakeGroups):
+        def __init__(self):
+            super().__init__()
+            self.paused, self.resume = threading.Event(), threading.Event()
+
+        def add_member(self, group_name, email):
+            if not self.resume.is_set():
+                self.paused.set()
+                assert self.resume.wait(10)
+            super().add_member(group_name, email)
+
+    cli = PostgresStorageAdapter(clean_db)
+    api = PostgresStorageAdapter(create_engine(clean_db.url, future=True))
+    groups = PausingGroups()
+    team = api.create_team(TeamCreate(slug="ml", label="ML"), actor="t")
+    google_groups.sync_team(api, groups, team.id, actor="api")  # create the group
+    ada = api.create_person(PersonCreate(display_name="Ada", primary_email="ada@x.ca"), actor="t")
+    m = api.create_membership(TeamMembershipCreate(person_id=ada.id, team_id=team.id), actor="t")
+
+    stale = threading.Thread(
+        target=google_groups.sync_team, args=(cli, groups, team.id), kwargs={"actor": "cli"}
+    )
+    stale.start()
+    assert groups.paused.wait(10)
+    api.end_membership(m.id, date.today(), actor="t")
+    fresh = threading.Thread(
+        target=google_groups.sync_team, args=(api, groups, team.id), kwargs={"actor": "api"}
+    )
+    fresh.start()
+    fresh.join(0.5)
+    assert fresh.is_alive(), "API sync must wait for the in-flight CLI sync"
+
+    groups.resume.set()
+    stale.join(10)
+    fresh.join(10)
+    state = api.get_team_google_group(team.id)
+    assert groups.members[state.group_name] == {}
+    assert (state.status, state.updated_by) == ("synced", "api")

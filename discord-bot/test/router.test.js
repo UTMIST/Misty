@@ -1,6 +1,10 @@
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { dispatch, dispatchAutocomplete, PRINCIPAL_AUTOCOMPLETE_TIMEOUT_MS } from '../src/router.js';
+import {
+  dispatch,
+  dispatchAutocomplete,
+  PRINCIPAL_AUTOCOMPLETE_TIMEOUT_MS,
+} from '../src/router.js';
 import { defineCommand } from '../src/defineCommand.js';
 
 const publicCmd = defineCommand({
@@ -14,7 +18,10 @@ const linkedCmd = defineCommand({
   name: 'me',
   description: 'm',
   auth: 'linked',
-  handler: async ({ principal }) => ({ content: `hi ${principal.person.display_name}`, ephemeral: true }),
+  handler: async ({ principal }) => ({
+    content: `hi ${principal.person.display_name}`,
+    ephemeral: true,
+  }),
 });
 
 test('dispatch: unknown command → null', async () => {
@@ -33,6 +40,17 @@ test('dispatch: public command runs without a principal', async () => {
   assert.equal(out.content, 'pong');
 });
 
+test('dispatch: helper authorization failure cannot become a public command result', async () => {
+  const dependencies = {
+    commands: new Map([['ping', publicCmd]]),
+    appContext: { directory: { getPersonByDiscordId: async () => null } },
+  };
+  await assert.rejects(
+    dispatch({ commandName: 'ping', discordUserId: '1', requireLinked: true }, dependencies),
+    /Helper command is no longer authorized/,
+  );
+});
+
 test('dispatch: public command can identify its caller and receives the registry in ctx', async () => {
   const cmd = defineCommand({
     name: 'help',
@@ -46,7 +64,9 @@ test('dispatch: public command can identify its caller and receives the registry
   });
   const commands = new Map([['help', cmd]]);
   const directory = {
-    async getPersonByDiscordId() { return { id: 'p1', display_name: 'Alex' }; },
+    async getPersonByDiscordId() {
+      return { id: 'p1', display_name: 'Alex' };
+    },
   };
   const out = await dispatch(
     { commandName: 'help', options: {}, discordUserId: '1' },
@@ -72,7 +92,10 @@ test('dispatch: Discord handler context includes beta commands only in the testi
     beta: true,
     handler: async () => ({ content: 'doc', ephemeral: true }),
   });
-  const commands = new Map([['help', help], ['doc', doc]]);
+  const commands = new Map([
+    ['help', help],
+    ['doc', doc],
+  ]);
   const appContext = { discordGuildId: 'testing' };
 
   const production = await dispatch(
@@ -87,24 +110,26 @@ test('dispatch: Discord handler context includes beta commands only in the testi
   );
   assert.equal(testing.content, 'doc,help');
 
-  const web = await dispatch(
-    { surface: 'web', commandName: 'help' },
-    { commands, appContext },
-  );
+  const web = await dispatch({ surface: 'web', commandName: 'help' }, { commands, appContext });
   assert.equal(web.content, 'doc,help');
 });
 
 test('dispatch: optional identification degrades to anonymous when directory is unavailable', async () => {
-  const { DirectoryUnavailable } = await import('../src/directoryClient.js');
+  const { DirectoryUnavailable } = await import('../src/clients/directoryClient.js');
   const cmd = defineCommand({
     name: 'help',
     description: 'help',
     auth: 'public',
     identifyCaller: true,
-    handler: async ({ principal }) => ({ content: principal ? 'linked' : 'anonymous', ephemeral: true }),
+    handler: async ({ principal }) => ({
+      content: principal ? 'linked' : 'anonymous',
+      ephemeral: true,
+    }),
   });
   const directory = {
-    async getPersonByDiscordId() { throw new DirectoryUnavailable('down'); },
+    async getPersonByDiscordId() {
+      throw new DirectoryUnavailable('down');
+    },
   };
   const out = await dispatch(
     { commandName: 'help', options: {}, discordUserId: '1' },
@@ -115,7 +140,9 @@ test('dispatch: optional identification degrades to anonymous when directory is 
 
 test('dispatch: unlinked user hitting a linked command → denied payload', async () => {
   const directory = {
-    async getPersonByDiscordId() { return null; },
+    async getPersonByDiscordId() {
+      return null;
+    },
   };
   const out = await dispatch(
     { commandName: 'me', options: {}, discordUserId: '1' },
@@ -126,7 +153,9 @@ test('dispatch: unlinked user hitting a linked command → denied payload', asyn
 
 test('dispatch: linked user gets handler payload', async () => {
   const directory = {
-    async getPersonByDiscordId() { return { id: 'p1', display_name: 'Alex' }; },
+    async getPersonByDiscordId() {
+      return { id: 'p1', display_name: 'Alex' };
+    },
   };
   const out = await dispatch(
     { commandName: 'me', options: {}, discordUserId: '1' },
@@ -136,9 +165,11 @@ test('dispatch: linked user gets handler payload', async () => {
 });
 
 test('dispatch: DirectoryUnavailable → fail-closed payload', async () => {
-  const { DirectoryUnavailable } = await import('../src/directoryClient.js');
+  const { DirectoryUnavailable } = await import('../src/clients/directoryClient.js');
   const directory = {
-    async getPersonByDiscordId() { throw new DirectoryUnavailable('down'); },
+    async getPersonByDiscordId() {
+      throw new DirectoryUnavailable('down');
+    },
   };
   const out = await dispatch(
     { commandName: 'me', options: {}, discordUserId: '1' },
@@ -153,14 +184,22 @@ test('dispatch: subcommand routes to the right handler', async () => {
     description: 't',
     subcommands: [
       { name: 'list', handler: async () => ({ content: 'list', ephemeral: true }) },
-      { name: 'create', auth: 'admin', handler: async () => ({ content: 'create', ephemeral: true }) },
+      {
+        name: 'create',
+        auth: 'admin',
+        handler: async () => ({ content: 'create', ephemeral: true }),
+      },
     ],
     handler: async function (intent) {
       const sub = this.subcommands.find((s) => s.name === intent.subcommand);
       return sub.handler(intent);
     },
   });
-  const directory = { async getPersonByDiscordId() { return { id: 'p1', display_name: 'A' }; } };
+  const directory = {
+    async getPersonByDiscordId() {
+      return { id: 'p1', display_name: 'A' };
+    },
+  };
   const out = await dispatch(
     { commandName: 'team', options: {}, subcommand: 'list', discordUserId: '1' },
     { commands: new Map([['team', cmd]]), appContext: { directory } },
@@ -170,13 +209,16 @@ test('dispatch: subcommand routes to the right handler', async () => {
 
 test('dispatch: unknown/undefined non-DirectoryUnavailable authN error propagates', async () => {
   const directory = {
-    async getPersonByDiscordId() { throw new Error('boom'); },
+    async getPersonByDiscordId() {
+      throw new Error('boom');
+    },
   };
   await assert.rejects(
-    () => dispatch(
-      { commandName: 'me', options: {}, discordUserId: '1' },
-      { commands: new Map([['me', linkedCmd]]), appContext: { directory } },
-    ),
+    () =>
+      dispatch(
+        { commandName: 'me', options: {}, discordUserId: '1' },
+        { commands: new Map([['me', linkedCmd]]), appContext: { directory } },
+      ),
     (e) => e instanceof Error && e.message === 'boom',
   );
 });
@@ -186,7 +228,9 @@ test('dispatch: handler error is caught centrally with a generic reply', async (
     name: 'boom',
     description: 'b',
     auth: 'public',
-    handler: async () => { throw new Error('boom'); },
+    handler: async () => {
+      throw new Error('boom');
+    },
   });
   const out = await dispatch(
     { commandName: 'boom', options: {}, discordUserId: '1' },
@@ -200,7 +244,11 @@ test('dispatch: admin subcommand denies a member', async () => {
     name: 'team',
     description: 't',
     subcommands: [
-      { name: 'create', auth: 'admin', handler: async () => ({ content: 'create', ephemeral: true }) },
+      {
+        name: 'create',
+        auth: 'admin',
+        handler: async () => ({ content: 'create', ephemeral: true }),
+      },
     ],
     handler: async function (intent) {
       const sub = this.subcommands.find((s) => s.name === intent.subcommand);
@@ -208,7 +256,9 @@ test('dispatch: admin subcommand denies a member', async () => {
     },
   });
   const directory = {
-    async getPersonByDiscordId() { return { id: 'p1', display_name: 'A', access_level: 'member' }; },
+    async getPersonByDiscordId() {
+      return { id: 'p1', display_name: 'A', access_level: 'member' };
+    },
   };
   const out = await dispatch(
     { commandName: 'team', options: {}, subcommand: 'create', discordUserId: '1' },
@@ -222,7 +272,10 @@ test('dispatch: auth-as-function is called with the intent and its return is the
   const cmd = defineCommand({
     name: 'team',
     description: 't',
-    auth: (intent) => { seenIntent = intent; return 'public'; },
+    auth: (intent) => {
+      seenIntent = intent;
+      return 'public';
+    },
     handler: async () => ({ content: 'ran', ephemeral: true }),
   });
   const intent = { commandName: 'team', options: {}, discordUserId: '1' };
@@ -238,7 +291,11 @@ test('dispatch: auth-as-function returning nullish falls back to linked (fail-se
     auth: () => null,
     handler: async () => ({ content: 'ran', ephemeral: true }),
   });
-  const directory = { async getPersonByDiscordId() { return null; } };
+  const directory = {
+    async getPersonByDiscordId() {
+      return null;
+    },
+  };
   const out = await dispatch(
     { commandName: 'team', options: {}, discordUserId: '1' },
     { commands: new Map([['team', cmd]]), appContext: { directory } },
@@ -248,11 +305,16 @@ test('dispatch: auth-as-function returning nullish falls back to linked (fail-se
 
 function cmdWithTeamAutocomplete(resolver) {
   return new Map([
-    ['doc', {
-      name: 'doc',
-      subcommands: [{ name: 'list', options: [{ name: 'team', type: 'string', autocomplete: resolver }] }],
-      options: [],
-    }],
+    [
+      'doc',
+      {
+        name: 'doc',
+        subcommands: [
+          { name: 'list', options: [{ name: 'team', type: 'string', autocomplete: resolver }] },
+        ],
+        options: [],
+      },
+    ],
   ]);
 }
 
@@ -265,17 +327,31 @@ test('dispatchAutocomplete calls the focused option resolver with principal', as
   const commands = cmdWithTeamAutocomplete(resolver);
   const appContext = { directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) } };
   const out = await dispatchAutocomplete(
-    { commandName: 'doc', subcommand: 'list', focusedOption: 'team', typed: 'm', discordUserId: 'u1' },
+    {
+      commandName: 'doc',
+      subcommand: 'list',
+      focusedOption: 'team',
+      typed: 'm',
+      discordUserId: 'u1',
+    },
     { commands, appContext },
   );
   assert.deepEqual(out, [{ name: 'ML', value: 'ml' }]);
 });
 
 test('dispatchAutocomplete returns [] when resolver throws', async () => {
-  const commands = cmdWithTeamAutocomplete(async () => { throw new Error('boom'); });
+  const commands = cmdWithTeamAutocomplete(async () => {
+    throw new Error('boom');
+  });
   const appContext = { directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) } };
   const out = await dispatchAutocomplete(
-    { commandName: 'doc', subcommand: 'list', focusedOption: 'team', typed: '', discordUserId: 'u1' },
+    {
+      commandName: 'doc',
+      subcommand: 'list',
+      focusedOption: 'team',
+      typed: '',
+      discordUserId: 'u1',
+    },
     { commands, appContext },
   );
   assert.deepEqual(out, []);
@@ -293,7 +369,13 @@ test('dispatchAutocomplete falls back to a null principal when the lookup exceed
     // A hung directory call: never settles. The timeout must let the resolver run anyway.
     const appContext = { directory: { getPersonByDiscordId: () => new Promise(() => {}) } };
     const pending = dispatchAutocomplete(
-      { commandName: 'doc', subcommand: 'list', focusedOption: 'team', typed: '', discordUserId: 'u1' },
+      {
+        commandName: 'doc',
+        subcommand: 'list',
+        focusedOption: 'team',
+        typed: '',
+        discordUserId: 'u1',
+      },
       { commands, appContext },
     );
     // Tick past the principal budget (whatever it currently is) so the timeout fires.
@@ -310,7 +392,13 @@ test('dispatchAutocomplete returns [] for unknown option', async () => {
   const commands = cmdWithTeamAutocomplete(async () => [{ name: 'ML', value: 'ml' }]);
   const appContext = { directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) } };
   const out = await dispatchAutocomplete(
-    { commandName: 'doc', subcommand: 'list', focusedOption: 'nope', typed: '', discordUserId: 'u1' },
+    {
+      commandName: 'doc',
+      subcommand: 'list',
+      focusedOption: 'nope',
+      typed: '',
+      discordUserId: 'u1',
+    },
     { commands, appContext },
   );
   assert.deepEqual(out, []);
@@ -321,7 +409,13 @@ test('dispatchAutocomplete caps at 25', async () => {
   const commands = cmdWithTeamAutocomplete(async () => many);
   const appContext = { directory: { getPersonByDiscordId: async () => ({ id: 'p1' }) } };
   const out = await dispatchAutocomplete(
-    { commandName: 'doc', subcommand: 'list', focusedOption: 'team', typed: '', discordUserId: 'u1' },
+    {
+      commandName: 'doc',
+      subcommand: 'list',
+      focusedOption: 'team',
+      typed: '',
+      discordUserId: 'u1',
+    },
     { commands, appContext },
   );
   assert.equal(out.length, 25);

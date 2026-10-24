@@ -27,7 +27,10 @@ const echoCmd = defineCommand({
   }),
 });
 
-const commands = new Map([[linkCmd.name, linkCmd], [echoCmd.name, echoCmd]]);
+const commands = new Map([
+  [linkCmd.name, linkCmd],
+  [echoCmd.name, echoCmd],
+]);
 const appContext = { directory: {} };
 
 describe('web server', () => {
@@ -119,11 +122,141 @@ describe('web server', () => {
   });
 });
 
+test('helper reply playground replays user questions without unverified bot answers', async () => {
+  const seen = [];
+  const directory = {
+    getPersonByDiscordId: async (id) => ({ id: `p-${id}`, display_name: `Person ${id}` }),
+  };
+  const helperService = {
+    answer: async ({ turns }) => {
+      seen.push(turns.map((turn) => ({ ...turn })));
+      return { content: `answer ${seen.length}` };
+    },
+  };
+  const server = await buildServer({
+    commands: new Map(),
+    appContext: { directory, helperService },
+  });
+  await server.ready();
+  try {
+    const first = await server.inject({
+      method: 'POST',
+      url: '/api/helper/reply',
+      payload: { content: 'first question', actingAs: '1', replyPing: true },
+    });
+    assert.equal(first.statusCode, 200);
+    assert.equal(first.json().content, 'answer 1');
+
+    const second = await server.inject({
+      method: 'POST',
+      url: '/api/helper/reply',
+      payload: { content: 'follow up', actingAs: '2', replyPing: true },
+    });
+    assert.equal(second.statusCode, 200);
+    assert.deepEqual(seen[1], [
+      {
+        role: 'user',
+        text: 'first question',
+        authorId: '1',
+        authorName: 'Person 1',
+      },
+      { role: 'user', text: 'follow up', authorId: '2', authorName: 'Person 2' },
+    ]);
+
+    const reset = await server.inject({ method: 'DELETE', url: '/api/helper/thread' });
+    assert.equal(reset.statusCode, 200);
+    await server.inject({
+      method: 'POST',
+      url: '/api/helper/reply',
+      payload: { content: 'fresh thread', actingAs: '1', replyPing: true },
+    });
+    assert.deepEqual(
+      seen[2].map((turn) => turn.text),
+      ['fresh thread'],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test('helper reply playground keeps ping-off replies as context without answering', async () => {
+  const seen = [];
+  const server = await buildServer({
+    commands: new Map(),
+    appContext: {
+      directory: {
+        getPersonByDiscordId: async (id) => ({ id: `p-${id}`, display_name: `Person ${id}` }),
+      },
+      helperService: {
+        answer: async ({ turns }) => {
+          seen.push(turns.map((turn) => ({ ...turn })));
+          return { content: 'answer' };
+        },
+      },
+    },
+  });
+  await server.ready();
+  try {
+    const pingOff = await server.inject({
+      method: 'POST',
+      url: '/api/helper/reply',
+      payload: { content: 'silent context', actingAs: '2', replyPing: false },
+    });
+    assert.equal(pingOff.statusCode, 200);
+    assert.deepEqual(pingOff.json(), { triggered: false });
+    assert.equal(seen.length, 0);
+
+    const pingOn = await server.inject({
+      method: 'POST',
+      url: '/api/helper/reply',
+      payload: { content: 'answer this', actingAs: '1', replyPing: true },
+    });
+    assert.equal(pingOn.statusCode, 200);
+    assert.equal(pingOn.json().content, 'answer');
+    assert.deepEqual(
+      seen[0].map((turn) => turn.text),
+      ['silent context', 'answer this'],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test('helper reply playground requires a linked caller before invoking the helper', async () => {
+  let calls = 0;
+  const server = await buildServer({
+    commands: new Map(),
+    appContext: {
+      directory: { getPersonByDiscordId: async () => null },
+      helperService: { answer: async () => (calls += 1) },
+    },
+  });
+  await server.ready();
+  try {
+    const response = await server.inject({
+      method: 'POST',
+      url: '/api/helper/reply',
+      payload: { content: 'hello', actingAs: '404', replyPing: true },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.match(response.json().content, /link/i);
+    assert.equal(calls, 0);
+  } finally {
+    await server.close();
+  }
+});
+
 test('GET /api/people returns array with discord_id resolved', async () => {
   const directory = {
     listPeople: async () => [
-      { id: 'p1', display_name: 'Alex', primary_email: 'a@x', access_level: 'member', active: true },
-      { id: 'p2', display_name: 'Bea',  primary_email: 'b@x', access_level: 'admin',  active: true },
+      {
+        id: 'p1',
+        display_name: 'Alex',
+        primary_email: 'a@x',
+        access_level: 'member',
+        active: true,
+      },
+      { id: 'p2', display_name: 'Bea', primary_email: 'b@x', access_level: 'admin', active: true },
     ],
     listIdentifiers: async (personId) => {
       if (personId === 'p1') return [{ provider: 'discord', external_id: '111', handle: 'alex' }];
@@ -150,8 +283,14 @@ test('GET /api/people returns array with discord_id resolved', async () => {
 test('GET /api/people tolerates a per-person listIdentifiers failure', async () => {
   const directory = {
     listPeople: async () => [
-      { id: 'p1', display_name: 'Alex', primary_email: 'a@x', access_level: 'member', active: true },
-      { id: 'p2', display_name: 'Bea',  primary_email: 'b@x', access_level: 'admin',  active: true },
+      {
+        id: 'p1',
+        display_name: 'Alex',
+        primary_email: 'a@x',
+        access_level: 'member',
+        active: true,
+      },
+      { id: 'p2', display_name: 'Bea', primary_email: 'b@x', access_level: 'admin', active: true },
     ],
     listIdentifiers: async (personId) => {
       if (personId === 'p1') throw new Error('boom');
@@ -180,7 +319,9 @@ test('POST /api/reset with onReset callback returns { ok: true }', async () => {
   const server = await buildServer({
     commands: new Map(),
     appContext: {},
-    onReset: async () => { called++; },
+    onReset: async () => {
+      called++;
+    },
   });
   await server.ready();
   try {
@@ -205,11 +346,152 @@ test('POST /api/reset without onReset returns 501', async () => {
   }
 });
 
+test('POST /api/helper/dm keeps history isolated by acting Discord ID', async () => {
+  const seen = [];
+  const server = await buildServer({
+    commands: new Map(),
+    appContext: {
+      directory: {
+        getPersonByDiscordId: async (id) => ({ id: `person-${id}`, display_name: id }),
+      },
+      helperService: {
+        answer: async ({ turns }) => {
+          seen.push(turns.map((turn) => turn.text));
+          return { content: `answer ${seen.length}` };
+        },
+      },
+    },
+  });
+
+  await server.ready();
+  try {
+    const first = await server.inject({
+      method: 'POST',
+      url: '/api/helper/dm',
+      payload: { actingAs: 'alice', content: 'hello' },
+    });
+    const second = await server.inject({
+      method: 'POST',
+      url: '/api/helper/dm',
+      payload: { actingAs: 'bob', content: 'hello' },
+    });
+    const followUp = await server.inject({
+      method: 'POST',
+      url: '/api/helper/dm',
+      payload: { actingAs: 'alice', content: 'follow up' },
+    });
+    assert.equal(first.statusCode, 200);
+    assert.equal(second.statusCode, 200);
+    assert.equal(followUp.statusCode, 200);
+    assert.deepEqual(seen, [['hello'], ['hello'], ['hello', 'follow up']]);
+  } finally {
+    await server.close();
+  }
+});
+
+test('POST /api/helper/dm serializes overlapping requests for one Discord ID', async () => {
+  const seen = [];
+  let releaseFirst;
+  const firstAnswerStarted = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+
+  test('POST /api/reset invalidates an in-flight DM history write', async () => {
+    const seen = [];
+    let release;
+    const blocked = new Promise((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const server = await buildServer({
+      commands: new Map(),
+      appContext: {
+        directory: {
+          getPersonByDiscordId: async (id) => ({ id: `person-${id}`, display_name: id }),
+        },
+        helperService: {
+          answer: async ({ turns }) => {
+            seen.push(turns.map((turn) => turn.text));
+            calls += 1;
+            if (calls === 1) await blocked;
+            return { content: `answer ${calls}` };
+          },
+        },
+      },
+      onReset: async () => {},
+    });
+    await server.ready();
+    try {
+      const pending = server.inject({
+        method: 'POST',
+        url: '/api/helper/dm',
+        payload: { actingAs: 'alice', content: 'before reset' },
+      });
+      while (calls !== 1) await new Promise((resolve) => setImmediate(resolve));
+      const reset = await server.inject({ method: 'POST', url: '/api/reset' });
+      assert.equal(reset.statusCode, 200);
+      release();
+      await pending;
+      const fresh = await server.inject({
+        method: 'POST',
+        url: '/api/helper/dm',
+        payload: { actingAs: 'alice', content: 'after reset' },
+      });
+      assert.equal(fresh.statusCode, 200);
+      assert.deepEqual(seen, [['before reset'], ['after reset']]);
+    } finally {
+      release();
+      await server.close();
+    }
+  });
+  let answerCount = 0;
+  const server = await buildServer({
+    commands: new Map(),
+    appContext: {
+      directory: {
+        getPersonByDiscordId: async (id) => ({ id: `person-${id}`, display_name: id }),
+      },
+      helperService: {
+        answer: async ({ turns }) => {
+          seen.push(turns.map((turn) => turn.text));
+          answerCount += 1;
+          if (answerCount === 1) await firstAnswerStarted;
+          return { content: `answer ${answerCount}` };
+        },
+      },
+    },
+  });
+  await server.ready();
+  try {
+    const first = server.inject({
+      method: 'POST',
+      url: '/api/helper/dm',
+      payload: { actingAs: 'alice', content: 'first' },
+    });
+    while (answerCount !== 1) await new Promise((resolve) => setImmediate(resolve));
+    const second = server.inject({
+      method: 'POST',
+      url: '/api/helper/dm',
+      payload: { actingAs: 'alice', content: 'second' },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(seen, [['first']]);
+    releaseFirst();
+    await Promise.all([first, second]);
+    assert.deepEqual(seen, [['first'], ['first', 'second']]);
+  } finally {
+    releaseFirst();
+    await server.close();
+  }
+});
+
 test('POST /api/reset propagates errors from onReset as 500', async () => {
   const server = await buildServer({
     commands: new Map(),
     appContext: {},
-    onReset: async () => { throw new Error('pg_dump failed'); },
+    onReset: async () => {
+      throw new Error('pg_dump failed');
+    },
   });
   await server.ready();
   try {

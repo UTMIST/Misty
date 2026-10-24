@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
 from contracts.directory import DirectoryUnavailable
-from contracts.fetcher import FetchError, FetchResult
+from contracts.fetcher import FetchError, FetchResult, SourcePermission
 from contracts.types import DocIngest, Source
 from src.ingest import BadReference, ingest_doc
 from src.storage.in_memory import InMemoryStorageAdapter
@@ -44,9 +44,24 @@ class FakeFetchers:
         return self._result
 
 
+class CountingFetchers:
+    """Records how many fetches were attempted, so a test can assert that the
+    dedup path performs none."""
+
+    def __init__(self, result=None):
+        self._result = result
+        self.calls = 0
+
+    def fetch_for(self, source_id, url):
+        self.calls += 1
+        return self._result
+
+
 class FakeDirectory:
-    def __init__(self, team=None, person=None, unavailable=False):
+    def __init__(self, team=None, person=None, unavailable=False, people=None, groups=None):
         self._team, self._person, self._down = team, person, unavailable
+        self._people = people or {}
+        self._groups = groups or {}
 
     def get_team_label(self, team_id):
         if self._down:
@@ -57,6 +72,16 @@ class FakeDirectory:
         if self._down:
             raise DirectoryUnavailable("down")
         return self._person
+
+    def get_person_id_by_verified_email(self, email):
+        if self._down:
+            raise DirectoryUnavailable("down")
+        return self._people.get(email)
+
+    def get_team_id_by_synced_google_group(self, email):
+        if self._down:
+            raise DirectoryUnavailable("down")
+        return self._groups.get(email)
 
 
 @pytest.fixture
@@ -98,6 +123,53 @@ def test_ingest_dedup_returns_existing_and_merges_tags(store):
     assert second.created is False
     assert second.doc.id == first.doc.id
     assert set(second.doc.tags) == {"one", "two"}
+
+
+def test_duplicate_ingest_does_not_fetch(store):
+    """#159's settled decision: dedup is a cheap, network-free merge. A second
+    ingest of the same URL must not re-run the fetch, even though this doc has
+    no stored content and a fetch is exactly what would repair it. Repair is
+    POST /docs/{id}/refetch's job, driven in bulk by doc-backfill."""
+    f = CountingFetchers(result=FetchResult(title="X"))  # title only, no content
+    args = dict(storage=store, fetchers=f, directory=FakeDirectory(), actor="bot")
+    ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    assert f.calls == 1
+    ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    assert f.calls == 1  # unchanged: the dedup path made no fetch
+
+
+def test_duplicate_ingest_warns_when_content_is_missing(store):
+    """The gap is reported rather than hidden, so a caller holding this exact
+    doc learns it is contentless."""
+    f = CountingFetchers(result=FetchResult(title="X"))
+    args = dict(storage=store, fetchers=f, directory=FakeDirectory(), actor="bot")
+    ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    second = ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    assert second.created is False
+    assert any("no content is stored" in w for w in second.warnings)
+
+
+def test_duplicate_ingest_warning_names_the_fact_not_the_remedy(store):
+    """Warnings are part of the HTTP contract and consumers render them
+    verbatim, so the API must not advertise an operator CLI to an audience
+    that may not be able to run it."""
+    f = CountingFetchers(result=FetchResult(title="X"))
+    args = dict(storage=store, fetchers=f, directory=FakeDirectory(), actor="bot")
+    ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    second = ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    joined = " ".join(second.warnings)
+    assert "backfill" not in joined and "refetch" not in joined
+
+
+def test_duplicate_ingest_does_not_warn_when_content_exists(store):
+    """Only a genuine gap warrants the warning — a doc that already has text
+    must not be flagged as contentless."""
+    f = CountingFetchers(result=FetchResult(title="X", content="body", content_snapshot="body"))
+    args = dict(storage=store, fetchers=f, directory=FakeDirectory(), actor="bot")
+    first = ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    assert store.get_doc_content(first.doc.id) == "body"
+    second = ingest_doc(DocIngest(url="https://x.com/a"), **args)
+    assert not any("no content is stored" in w for w in second.warnings)
 
 
 def test_reingest_after_soft_remove_does_not_proliferate_active_docs(store):
@@ -153,6 +225,34 @@ def test_ingest_fetch_failure_warns_and_falls_back_to_url(store):
     assert any("fetch" in w for w in res.warnings)
 
 
+def test_ingest_github_connectors_failure_still_creates_doc(store):
+    import httpx
+
+    from src.fetch.connectors import ConnectorsFetcher
+    from src.fetch.registry import FetcherRegistry
+
+    def handler(request):
+        return httpx.Response(502, json={"detail": "source upstream error"})
+
+    fetcher = ConnectorsFetcher(
+        source_id="github",
+        base_url="http://connectors",
+        api_key="k",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    res = ingest_doc(
+        DocIngest(url="https://github.com/a/b"),
+        storage=store,
+        fetchers=FetcherRegistry({"github": fetcher}),
+        directory=FakeDirectory(),
+        actor="bot",
+    )
+    assert res.created is True
+    assert res.doc.source_id == "github"
+    assert res.doc.content_snapshot is None
+    assert any("502" in w for w in res.warnings)
+
+
 def test_ingest_auth_source_warns_no_snapshot(store):
     res = ingest_doc(
         DocIngest(url="https://drive.google.com/file/d/z"),
@@ -163,6 +263,154 @@ def test_ingest_auth_source_warns_no_snapshot(store):
     )
     assert res.doc.source_id == "gdrive"
     assert any("auth" in w for w in res.warnings)
+
+
+def _google_store():
+    sources = [
+        source.model_copy(update={"content_fetch_enabled": True})
+        if source.id == "gdrive"
+        else source
+        for source in _sources()
+    ]
+    return InMemoryStorageAdapter(seed_sources=sources)
+
+
+def test_google_ingest_stores_content_only_for_mapped_source_audience():
+    person_id = UUID("11111111-1111-1111-1111-111111111111")
+    store = _google_store()
+    result = ingest_doc(
+        DocIngest(url="https://drive.google.com/file/d/z"),
+        storage=store,
+        fetchers=FakeFetchers(
+            result=FetchResult(
+                title="Private",
+                content="secret",
+                content_snapshot="secret",
+                permissions=[
+                    SourcePermission(
+                        permission_id="p1",
+                        principal_type="user",
+                        principal="member@example.com",
+                        role="reader",
+                    )
+                ],
+            )
+        ),
+        directory=FakeDirectory(people={"member@example.com": person_id}),
+        actor="bot",
+    )
+
+    assert store.get_doc_content(result.doc.id) == "secret"
+    assert [(g.origin, g.grantee_id) for g in store.list_grants(result.doc.id)] == [
+        ("google_drive", person_id)
+    ]
+
+
+def test_google_reingest_revokes_source_grants_on_successful_empty_acl():
+    person_id = UUID("11111111-1111-1111-1111-111111111111")
+    store = _google_store()
+    payload = DocIngest(url="https://drive.google.com/file/d/z")
+    first = ingest_doc(
+        payload,
+        storage=store,
+        fetchers=FakeFetchers(
+            result=FetchResult(
+                title="Private",
+                content="secret",
+                permissions=[
+                    SourcePermission(
+                        permission_id="p1",
+                        principal_type="user",
+                        principal="member@example.com",
+                        role="reader",
+                    )
+                ],
+            )
+        ),
+        directory=FakeDirectory(people={"member@example.com": person_id}),
+        actor="bot",
+    )
+    second = ingest_doc(
+        payload,
+        storage=store,
+        fetchers=FakeFetchers(
+            result=FetchResult(title="Private", content="secret", permissions=[])
+        ),
+        directory=FakeDirectory(),
+        actor="bot",
+    )
+
+    assert second.doc.id == first.doc.id
+    assert store.list_grants(first.doc.id) == []
+    assert any("no mapped audience" in warning for warning in second.warnings)
+
+
+def test_google_ingest_unknown_email_creates_no_phantom_grant_or_content():
+    store = _google_store()
+    result = ingest_doc(
+        DocIngest(url="https://drive.google.com/file/d/z"),
+        storage=store,
+        fetchers=FakeFetchers(
+            result=FetchResult(
+                title="Private",
+                content="secret",
+                permissions=[
+                    SourcePermission(
+                        permission_id="p1",
+                        principal_type="user",
+                        principal="external@example.com",
+                        role="reader",
+                    ),
+                    SourcePermission(
+                        permission_id="g1",
+                        principal_type="group",
+                        principal="private-team@example.com",
+                        role="reader",
+                    ),
+                ],
+            )
+        ),
+        directory=FakeDirectory(),
+        actor="bot",
+    )
+
+    assert store.list_grants(result.doc.id) == []
+    assert store.get_doc_content(result.doc.id) is None
+    assert result.doc.title == result.doc.url
+    assert result.doc.content_snapshot is None
+    assert any("unmapped source user" in warning for warning in result.warnings)
+    assert any("unmapped or unsynchronized source group" in warning for warning in result.warnings)
+    assert any("no mapped audience" in warning for warning in result.warnings)
+    assert "external@example.com" not in result.model_dump_json()
+    assert "private-team@example.com" not in result.model_dump_json()
+
+
+def test_google_reingest_never_fetches_when_content_fetch_disabled(store):
+    class NeverFetch:
+        def fetch_for(self, source_id, url):
+            pytest.fail("disabled source must not be fetched")
+
+    payload = DocIngest(url="https://drive.google.com/file/d/disabled")
+    first = ingest_doc(
+        payload,
+        storage=store,
+        fetchers=NeverFetch(),
+        directory=FakeDirectory(),
+        actor="bot",
+    )
+    second = ingest_doc(
+        payload,
+        storage=store,
+        fetchers=NeverFetch(),
+        directory=FakeDirectory(),
+        actor="bot",
+    )
+    assert first.created is True
+    assert second.created is False
+    assert second.doc.id == first.doc.id
+    assert second.doc.content_snapshot is None
+    assert second.doc.source_access_attempted_at is None
+    assert store.get_doc_content(second.doc.id) is None
 
 
 def test_ingest_bad_team_id_when_directory_up_raises(store):

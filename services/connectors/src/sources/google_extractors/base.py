@@ -22,13 +22,15 @@ class Extractor(Protocol):
     # OAuth scopes this extractor needs. GoogleSource unions these across every
     # registered extractor, so adding a native API adds a scope here rather
     # than at a single hard-coded constant.
-    scopes: tuple[str, ...]
+    @property
+    def scopes(self) -> tuple[str, ...]: ...
 
     # Google API client names this extractor needs (e.g. "drive", "docs").
     # GoogleSource unions these across every registered extractor and builds
     # exactly that set of clients, so a new extractor declares its needs here
     # rather than having them hard-coded at the build site.
-    services: tuple[str, ...]
+    @property
+    def services(self) -> tuple[str, ...]: ...
 
     def extract(self, services: dict, file_id: str, mime: str) -> ExtractedText:
         """`services` maps API name ("drive", "docs") to a built client."""
@@ -43,10 +45,14 @@ def execute(request):
     """
     from googleapiclient.errors import HttpError
 
-    from src.sources.base import SourceForbidden, SourceNotFound, SourceUnavailable
+    from src.sources.base import SourceError, SourceForbidden, SourceNotFound, SourceUnavailable
 
     try:
         return request.execute()
+    except SourceError:
+        # The bounded media transport already classified this failure (e.g.
+        # a file exceeding MAX_FILE_BYTES is unsupported, not an upstream 502).
+        raise
     except HttpError as e:
         status = getattr(getattr(e, "resp", None), "status", None)
         if status == 403:
@@ -56,3 +62,13 @@ def execute(request):
         raise SourceUnavailable(f"google api error (status {status})") from e
     except Exception as e:
         raise SourceUnavailable(f"google transport failure: {type(e).__name__}") from e
+
+
+def execute_bytes(request) -> bytes:
+    """Require a download/export response before decoding or parsing a file."""
+    from src.sources.base import SourceUnavailable
+
+    payload = execute(request)
+    if not isinstance(payload, bytes):
+        raise SourceUnavailable("google returned a non-bytes file payload")
+    return payload

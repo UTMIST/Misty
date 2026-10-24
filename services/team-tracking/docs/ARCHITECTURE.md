@@ -6,7 +6,7 @@ For the consumer-facing endpoint reference, see [API.md](API.md).
 
 ## The big picture
 
-team-tracking is the **source of truth** for UTMIST's directory, and it is **API-only**: nothing runs inside it. Every consumer — the docs catalog, a future Discord bot, dashboards — talks to it over HTTP and treats its internals as a black box. That constraint is what lets the internals stay simple and swappable.
+team-tracking is the **source of truth** for UTMIST's directory. Every consumer — the docs catalog, Discord bot, dashboards — talks to it over HTTP and treats its internals as a black box. Optional [managed Google Groups reconciliation](#managed-google-groups) runs inside the service after directory writes; the consumer boundary still keeps the internals swappable.
 
 Internally the code is three layers with a strict dependency direction:
 
@@ -63,9 +63,9 @@ The Postgres adapter uses **SQLAlchemy Core** — `Table` objects and SQL expres
 - Point-in-time queries work off the main table with no separate audit log: `GET /memberships?...&as_of=2024-12-15` returns rows where `started_at <= as_of AND (ended_at IS NULL OR ended_at > as_of)`.
 - `POST /memberships/{id}/end` exists as a semantic helper over `PATCH` because *closing* a membership is a distinct intent from *editing* one.
 
-There is intentionally **no** unique constraint on `(person_id, team_id)`. Overlapping rows are valid during role transitions — a person can be a member through November and a lead from December, which is two rows with adjacent or overlapping date ranges.
+Multiple rows for `(person_id, team_id)` preserve role transitions, but their half-open ranges `[started_at, ended_at)` must not overlap, regardless of role. Adjacent ranges are allowed: a membership ending on December 1 can be followed by a lead membership starting that day. Both adapters reject overlaps; Postgres enforces this with an exclusion constraint. See the [temporal-integrity notes](../README.md#behavior-notes).
 
-The same "never hard-delete" rule applies to `people` and `teams` (soft-retire with `active = false`) and `api_keys` (revoke sets `revoked_at`). The one deliberate exception is `person_identifiers`: unlinking hard-deletes the row, because an identity mapping is *current state*, not history.
+The same "never hard-delete" rule applies to `people` and `teams` (soft-retire with `active = false`) and `api_keys` (revoke sets `revoked_at`). The deliberate exceptions are `person_identifiers` and `channel_team_access`: unlinking an identity or replacing/clearing a channel's teams hard-deletes rows, because both are *current state*, not history.
 
 ## Level-2 authentication
 
@@ -89,7 +89,64 @@ The auth machinery itself lives in the shared `platform_auth` package (`packages
 
 The result: a `dev:spoof` key cannot be created against a production directory, and if one leaks in via a copied backup or bug, every request it makes is refused at the door. Local dev (`TT_ENV=local` or unset) permits the scope freely.
 
-## The data model (7 tables)
+## Managed Google Groups
+
+Each team gets a Google Group so Drive documents and channel access can be granted to a team, not to individuals one by one. Team Tracking membership is the source of truth. Joining a Discord channel never changes Google membership.
+
+**Layering.** `contracts/groups.py` defines the `GroupProvider` Protocol. `src/providers/google_groups.py` implements it with the Cloud Identity Groups and Groups Settings APIs, and `src/google_groups.py` holds the reconciler (`sync_team`), which depends only on the two Protocols. Routers schedule syncs and never call Google. `src/api/deps.py` wires the provider, or `None` when the five `GOOGLE_*` settings are unset; with `None`, every sync trigger is a no-op.
+
+**Who is in a team's group.** Every *active* person whose membership is current today (`started_at <= today < ended_at`), with **all** of their addresses: `primary_email` plus every verified `email` identifier. People sign into Drive with whichever Google account they use, so adding every verified address is what makes a share to the group actually work for them. Parent teams do not inherit their sub-teams' members. A retired team keeps its group and existing Drive shares; reconciliation removes managed MEMBER-only memberships. Owners and managers remain, as described below, so retirement alone is not complete access revocation.
+
+**Reconcile, not replay.** A sync reads the group's current MEMBER-only memberships from Google, computes the desired set from the directory, and adds or removes the difference. Owners and managers are never touched, so the account that created the group, and anyone given Google-side management, stays. Anything else in the group that the directory doesn't list is removed, which is what "membership is the source of truth" means. Because every run converges from current state, a retry is just another run, and a missed event is fixed by the next one.
+
+**Triggers.**
+
+1. After a write that can change a group (team create/update, membership create/update/end, verified-email add, person `active`/`primary_email` change), the router schedules `sync_team` for the affected teams as a FastAPI background task. It runs after the response is sent, and failures are recorded, never raised.
+2. `POST /teams/{id}/google-group/sync` runs a sync immediately: the recovery path after fixing whatever the mapping's `last_error` describes.
+3. `team-tracking-groups sync` (CLI) syncs every team. It does the initial backfill, and run on a schedule it also applies changes no write triggers: a future `started_at` arriving or a future `ended_at` passing. See [DEPLOYMENT.md](DEPLOYMENT.md#managed-google-groups).
+
+**No duplicate groups.** The group's address is `<slug>@<domain>`. Each group is created with the description `Managed by Misty team-tracking (team <uuid>)`. If creation hits `409 already exists`, the provider looks the address up, adopts the group only if its description is exactly that marker (a previous attempt that succeeded but was never recorded), and otherwise fails with "already in use". So a retry never duplicates a group or takes over a stranger's. Until creation succeeds the address follows the current slug, so a taken address can be fixed by renaming the team. After that the address never changes, even if the slug does.
+
+**External members.** For every active managed group, the provider reads the
+[Groups Settings resource](https://developers.google.com/workspace/admin/groups-settings/v1/reference/groups),
+PATCHes only the required differences (`allowExternalMembers: "true"` and
+`whoCanAddExternalMembers: "END_USERS_CAN_ADD_EXTERNAL_MEMBERS"`), then verifies
+with a fresh read. Requests explicitly select JSON (`alt=json`); Google can return
+XML otherwise. Fresh groups can omit `whoCanAddExternalMembers` while
+`allowExternalMembers` is `"false"`; that initial omission is accepted, but both
+enabled values must be present on verification. This runs before additions,
+including for empty groups; retired groups skip settings changes. The persisted
+group address survives team renames.
+
+No other settings are sent. Live validation preserved active privacy, joining,
+posting, and moderation settings. Google normalized the deprecated
+`whoCanMarkFavoriteReplyOnOwnTopic` alias during the PATCH; its replacement
+`whoCanAssistContent` stayed unchanged. Do not compare every legacy response field
+as if it represented an independent active permission.
+
+Settings calls use a separate authorized session scoped to `apps.groups.settings`,
+with the same refresh token as Cloud Identity membership calls. This lets existing
+membership authorization continue to remove members when the Settings grant is
+missing. The reconciler persists the confirmed group identity and marks the mapping
+`failed` before settings calls; unsuccessful verification holds additions, still
+attempts removals, and cannot publish a `synced` mapping. Settings failures store
+sanitized diagnostics, never response bodies or credentials. If settings verify
+but Google still rejects an external address, the mapping records
+`needs_external_members` unless another error requires `failed`.
+
+A Settings PATCH is idempotent and does not use membership `pending_changes`.
+After a lost response, the next sync reads the effect before deciding to PATCH
+again. Unconfirmed membership writes keep their separate recovery rules below.
+UTMIST's own administrator handles authorization/policy recovery; the old external
+Workspace dependency is resolved. See the [credentials and rollout runbook](DEPLOYMENT.md#managed-google-groups).
+
+**Independent changes, confirmed completion.** A sync applies removals before additions and attempts every one even when another fails, so a persistently rejected newcomer can't keep a departed member in the group. Any failure makes the whole sync `failed` with every error in `last_error`. Membership create/delete return an Operation; the provider counts a change as made only when the Operation is `done` with no `error`, or an idempotent already-exists/already-gone result confirms it.
+
+**Unconfirmed writes survive retries.** Before each membership call, the sync stores its intent in `team_google_groups.pending_changes` and marks the mapping `failed`. A confirmed completion or rejection clears a new intent. An unfinished Operation, uncertain transport/server failure, or process crash leaves it persisted, including the operation name when available. Cloud Identity's [API surface](https://docs.cloud.google.com/identity/docs/reference/rest) has no operation-polling method, so the next sync checks for the write's effect: an added address appears, or the exact membership resource being removed disappears. Pending additions are never replayed: the original request could outlive a successful retry and a later revocation. A pending removal can retry against its exact resource while the person remains unwanted; a rejected retry preserves the original pending intent. If the person rejoins, sync waits for the removal's effect before adding them again. Unrelated changes continue, but the mapping cannot become `synced` while anything is pending. Once an effect is observed, sync reconciles against the latest directory membership; a delayed addition for a departed person is removed. Pending changes never expire automatically. See [recovery](DEPLOYMENT.md#pending-membership-changes) and the [review-fix audit](GOOGLE-GROUPS-REVIEW.md).
+
+**Concurrency.** `sync_team` holds a per-team lock from reading membership until it records the result, so a slow sync started before a membership ended can't finish after a newer sync and re-add the person. The lock is `StorageAdapter.lock_team_google_group`: in Postgres a session-level `pg_advisory_lock(hashtext('google-group:<team id>'))` on a dedicated connection, which covers every API worker *and* the separately running `team-tracking-groups sync` cron. A process-local lock in front of it keeps queued syncs in one process from each holding a pool connection while they wait. Both processes must use a direct database endpoint: [Neon's transaction pooler does not support session advisory locks](https://neon.com/docs/connect/connection-pooling#connection-pooling-in-transaction-mode). SQLAlchemy's application connection pool is compatible because the dedicated connection remains checked out for the whole sync.
+
+## The data model (9 tables)
 
 All tables carry the four audit columns (`created_at`, `updated_at` as `timestamptz`; `created_by`, `updated_by` as text). Only the distinguishing columns are shown below.
 
@@ -100,6 +157,7 @@ All tables carry the four audit columns (`created_at`, `updated_at` as `timestam
 | `display_name` | text NOT NULL | Free-form; handles all name conventions |
 | `primary_email` | citext NOT NULL UNIQUE | Case-insensitive; normalized to lowercase on write |
 | `active` | boolean NOT NULL | Default `true`; soft-retirement only |
+| `access_level` | text NOT NULL | `member` (default), `admin`, or `superuser`; [writes require `people:elevate` as documented](API.md#patch-peopleperson_id) |
 
 `citext` (a Postgres extension enabled by migration 001) makes email equality/uniqueness case-insensitive at the DB level; the Pydantic validator also lowercases on write, and the in-memory adapter normalizes manually — belt and suspenders.
 
@@ -150,7 +208,7 @@ Indexes: `(team_id, ended_at)`, `(person_id, ended_at)`, `(started_at, ended_at)
 ### `providers`
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | text PK | Slug, e.g. `discord`, `github`, `notion`, `uoft_email`, `email` |
+| `id` | text PK | Slug, e.g. `discord`, `github`, `uoft_email`, `email` |
 | `label` | text NOT NULL | Display label |
 | `active` | boolean NOT NULL | Default `true` |
 
@@ -170,20 +228,56 @@ Two unique constraints: a partial index named `uq_person_identifiers_person_prov
 
 **The `email` provider is multi-valued.** Every other provider keeps the "one link per person" invariant; `email` is the deliberate exception, because a person legitimately owns several verified addresses (personal, alumni, work) beyond their single `primary_email` on `people`. The partial index above is what makes this possible without weakening the invariant for any other provider: it is the *same constraint name* as the original table-wide unique constraint, just scoped with a `WHERE` clause, so no application code needs to know the shape changed. New `email` identifiers are created only through `add_person_email` / `POST /people/{id}/emails` (see [API.md](API.md)), which normalizes (lowercases) the address and checks it against both `primary_email` and existing `email` identifiers before insert; adding an already-linked address for the same person is idempotent (returns the existing row) rather than erroring. The generic `create_person_identifier` / `update_person_identifier` / `delete_person_identifier` methods — and their `POST`/`PATCH`/`DELETE /people/{id}/identifiers/{provider}` endpoints — explicitly reject `provider = 'email'`.
 
+### `channel_team_access`
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `guild_id` | text PK | Discord guild snowflake |
+| `channel_id` | text PK | Discord channel snowflake |
+| `team_id` | UUID PK FK → teams.id | |
+| `created_at` | timestamptz NOT NULL | |
+| `created_by` | text NOT NULL | Attested key name of whoever last configured the channel |
+
+The teams whose documents may inform answers in a channel (consumed by the bot and by retrieval). One row per `(guild, channel, team)`; the composite PK doubles as the lookup index. A replace deletes and reinserts the channel's rows in one transaction, so there is no `updated_*` pair. Retired teams stay referenced but are filtered out on read, which is what makes retirement take effect without touching this table. No row means no access.
+
+Two trade-offs worth knowing:
+
+- **Writers serialize on an advisory lock, not a row lock.** Replace, append, and clear take `pg_advisory_xact_lock(hashtext(guild_id || ':' || channel_id))` first. A row lock can't work here: an unconfigured channel has no rows, so two concurrent first-time PUTs would both delete nothing, both insert, and commit the union of two requests. Append holds that lock across its read-merge-write so a bot-side GET-then-PUT cannot resurrect teams a concurrent clear already removed. A hash collision between two channels only makes them wait on each other; it can never let two writers to one channel through together.
+- **The API's `version` is a content hash of the active `team_ids`, not a timestamp.** It's a `computed_field` on `ChannelTeams`, so both adapters get it without computing it. A timestamp-based version (e.g. the latest of the rows' and teams' `updated_at`) looks equivalent but isn't: `update_team` stamps its time before it commits, so a retirement that started first and committed last carries an older timestamp than an edit that has already been read, and the revocation goes unnoticed. A hash of what's actually granted can't be fooled by commit order.
+
+### `team_google_groups`
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `team_id` | UUID PK FK → teams.id | One managed group per team |
+| `group_email` | text NOT NULL | Fixed once `group_name` is set |
+| `group_name` | text NULL | Cloud Identity `groups/{id}`; null until creation succeeds |
+| `status` | text NOT NULL | `synced` / `needs_external_members` / `failed` (check constraint) |
+| `last_error` | text NULL | Why the last sync did not converge |
+| `last_synced_at` | timestamptz NULL | Last fully converged sync |
+| `pending_changes` | jsonb NOT NULL DEFAULT `[]` | Unconfirmed membership writes; shape is in [API.md](API.md#team-google-groups) |
+
+Written before settings and membership calls and after every sync attempt (upsert on `team_id`). It records the mapping, unconfirmed writes, and last outcome. Google's membership list remains the record of who is actually in the group. See [Managed Google Groups](#managed-google-groups).
+
 ### Convention: named exec seats
 
 UTMIST has titles like "President", "VP Partnerships", "Treasurer". The schema models these through `team_memberships`, not a `positions` table. A **team-scoped** seat (VP Partnerships) is a membership on that team with `role_kind_id = 'executive'`; an **org-wide** seat (President) is a membership on a top-level `leadership` team. The title is derived from the `(role_kind, team)` composite — the string is never stored — so adding a position is a data operation, not a migration.
 
 ## Migrations layout
 
-Alembic manages the Postgres schema; migrations are written by hand and kept in sync with `schema.py`. Six exist:
+Alembic manages the Postgres schema; migrations are written by hand and kept in sync with `schema.py`:
 
 - **`001_initial_schema.py`** — enables `citext`; creates `people`, `teams`, `role_kinds`, `team_memberships` and their indexes.
 - **`002_seed_role_kinds.py`** — inserts `executive`, `director`, `lead`, `member`.
 - **`003_api_keys.py`** — creates the `api_keys` table (Level-2 auth).
-- **`004_person_identifiers.py`** — creates `providers` and `person_identifiers`; seeds the four providers (`discord`, `github`, `notion`, `uoft_email`).
+- **`004_person_identifiers.py`** — creates `providers` and `person_identifiers`; seeds the initial providers; migration `011` removes the retired provider.
 - **`005_person_access_level.py`** — adds `people.access_level` (`member`/`admin`/`superuser`, default `member`) with a check constraint.
 - **`006_email_provider_multivalued.py`** — seeds the `email` provider (five seed providers total) and swaps the table-wide `UNIQUE(person_id, provider)` constraint for a same-named partial unique index (`WHERE provider <> 'email'`), so every provider except `email` still gets "one link per person" while `email` becomes multi-valued. Downgrade fails loud (raises `RuntimeError`) when any `provider='email'` identifiers exist, rather than silently deleting verified addresses to make room for the strict constraint.
+- **`007_membership_no_overlap.py`** — adds the `btree_gist` `EXCLUDE` constraint that stops a person holding overlapping memberships in the same team, after deduplicating existing overlaps.
+- **`008_channel_team_access.py`** — creates `channel_team_access`.
+- **`009_team_google_groups.py`** — creates `team_google_groups`.
+- **`010_pending_group_changes.py`** — persists unconfirmed membership changes. Downgrade refuses to discard pending changes; resolve them first.
+- **`011_remove_retired_provider.py`** — removes the retired provider and its identifiers. Downgrade restores only the provider vocabulary; see the [backup/recovery caveat](DEPLOYMENT.md#registry-cleanup-migration-011).
 
 Apply with `uv run alembic upgrade head`; roll back with `uv run alembic downgrade base`.
 
@@ -195,7 +289,7 @@ Concrete, step-by-step walkthroughs — add an endpoint, add a storage-adapter m
 
 Explicitly out of scope:
 
-- No Discord/Google/GitHub/Notion sync jobs — connectors are separate processes that speak the HTTP API.
+- No Discord/GitHub sync jobs — connectors are separate processes that speak the HTTP API. The one exception is pushing team membership *out* to managed Google Groups (above), because team-tracking owns that mapping; it never reads directory data back from Google.
 - No permission-enforcement engine — downstream systems derive access from membership data.
 - No login/UI for officers editing directory data — handled by whatever admin surface is chosen.
 - No content storage — the directory is identity and structure only.

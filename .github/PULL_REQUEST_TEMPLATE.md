@@ -18,9 +18,19 @@ Branching rules (enforced by CI):
 
 ## Zone
 
-<!-- Which area does this touch? Delete the rest. -->
+<!--
+Which zone does this touch? Delete the rest. `root` is the one to pick for the
+top-level files — README.md, AGENTS.md, Makefile, pyproject.toml, .claude/.
 
-`discord-bot` · `packages/auth` · `services/connectors` · `services/documentation-system` · `services/llm` · `services/meeting` · `services/team-tracking` · `services/verification` · `docs` · `scripts` · `.github`
+Adding a new service or package? Give it its own zone in this PR rather than
+leaving it in a catch-all bucket. The zone list lives in five files and
+label-consistency.yml fails the build if you miss one — docs/CODE-OWNERSHIP.md
+-> "Adding or renaming a zone" lists them, and `make labels` checks locally.
+
+Full list, and what each zone covers: docs/CODE-OWNERSHIP.md
+-->
+
+`discord-bot` · `packages/auth` · `services/connectors` · `services/documentation-system` · `services/gateway` · `services/llm` · `services/meeting` · `services/team-tracking` · `services/verification` · `docs` · `scripts` · `.github` · `root`
 
 <!-- If this spans more than one zone, explain why it can't be split: -->
 
@@ -54,7 +64,7 @@ do, because merging to staging deploys immediately.
 - [ ] **New env var** — name(s), which services, and the value's source. Must be set *before* this merges or the deploy fails at boot.
 - [ ] **New/rotated API key** — which service mints it, which consumer receives it, which `CONSUMER_KEYS` array it goes into.
 - [ ] **Deploy order** — this must ship before/after another service. Which, and why.
-- [ ] **Command registration** — a Discord command was added or changed; `npm run register:*` is a separate manual step.
+- [ ] **Command registration** — a Discord command was added or changed. The bot's `preDeployCommand` registers it on deploy; confirm the pre-deploy step succeeded (exit 0 — on staging both `Registered …` lines, not just the global one).
 - [ ] **Breaking change for a consumer** — what breaks, and what has to be updated alongside.
 
 ## Anything you're unsure about

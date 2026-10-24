@@ -3,9 +3,11 @@ import { myTeamsAutocomplete as teamAutocomplete } from './teamAutocomplete.js';
 import {
   renderDocAddResult,
   renderDocListResult,
-  renderDocShowResult,
   renderDocRemoveResult,
-} from '../messages.js';
+  renderDocSearchResult,
+} from '../messages/doc.js';
+import { ACCESS_RANK, rankOf } from '../auth/policy.js';
+import { SEARCH_MAX_QUERY_LENGTH } from '../services/docService.js';
 
 // Re-exported for callers/tests that reference /doc's autocomplete budget. The
 // implementation now lives in the shared teamAutocomplete module.
@@ -32,8 +34,19 @@ export default defineCommand({
       auth: 'linked',
       options: [
         { name: 'url', type: 'string', required: true, description: 'The link to catalog' },
-        { name: 'title', type: 'string', required: false, description: 'Optional title (auto-fetched if omitted)' },
-        { name: 'team', type: 'string', required: false, description: 'Owning team (slug)', autocomplete: teamAutocomplete },
+        {
+          name: 'title',
+          type: 'string',
+          required: false,
+          description: 'Optional title (auto-fetched if omitted)',
+        },
+        {
+          name: 'team',
+          type: 'string',
+          required: false,
+          description: 'Owning team (slug)',
+          autocomplete: teamAutocomplete,
+        },
         { name: 'tags', type: 'string', required: false, description: 'Comma-separated tags' },
       ],
       async handler({ options, ctx, principal }) {
@@ -54,9 +67,20 @@ export default defineCommand({
       auth: 'linked',
       ephemeral: false,
       options: [
-        { name: 'team', type: 'string', required: false, description: 'Filter by owning team (slug)', autocomplete: teamAutocomplete },
+        {
+          name: 'team',
+          type: 'string',
+          required: false,
+          description: 'Filter by owning team (slug)',
+          autocomplete: teamAutocomplete,
+        },
         { name: 'tag', type: 'string', required: false, description: 'Filter by tag' },
-        { name: 'source', type: 'string', required: false, description: 'Filter by source kind (e.g. gdocs, github)' },
+        {
+          name: 'source',
+          type: 'string',
+          required: false,
+          description: 'Filter by source kind (e.g. gdocs, github)',
+        },
       ],
       async handler({ options, ctx, principal }) {
         const args = {};
@@ -66,20 +90,33 @@ export default defineCommand({
         // Read as the linked caller so the doc service filters to what they can see.
         args.onBehalfOf = principal?.person?.id;
         const result = await ctx.docService.listDocs(args);
-        return renderDocListResult(result);
+        // Only admins can act on a doc id (/doc remove), so only they see it.
+        // rankOf(undefined) is 0, so an unlinked caller never gets ids.
+        const isAdmin = rankOf(principal?.person?.access_level) >= ACCESS_RANK.admin;
+        return renderDocListResult(result, { isAdmin });
       },
     },
     {
-      name: 'show',
-      description: 'Show full detail for one doc',
+      name: 'search',
+      description: 'Search the documents you can access',
       auth: 'linked',
-      ephemeral: false,
+      // Results include the caller's private shares, so never post them publicly.
+      ephemeral: true,
       options: [
-        { name: 'id', type: 'string', required: true, description: 'Doc id (from /doc list)' },
+        {
+          name: 'query',
+          type: 'string',
+          required: true,
+          maxLength: SEARCH_MAX_QUERY_LENGTH,
+          description: 'What to search for',
+        },
       ],
       async handler({ options, ctx, principal }) {
-        const result = await ctx.docService.showDoc({ id: options.id, onBehalfOf: principal?.person?.id });
-        return renderDocShowResult(result);
+        const result = await ctx.docService.searchDocs({
+          query: options.query,
+          onBehalfOf: principal?.person?.id,
+        });
+        return renderDocSearchResult(result);
       },
     },
     {

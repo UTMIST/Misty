@@ -1,7 +1,9 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 
 from platform_auth import AuditLogMiddleware
 
+from contracts.storage import StorageAdapter
+from src.api.deps import get_storage
 from src.config import verify_production_secrets
 
 
@@ -10,6 +12,7 @@ def create_app() -> FastAPI:
 
     from src.api.routers import (
         api_keys,
+        channels,
         identifiers,
         memberships,
         people,
@@ -29,12 +32,19 @@ def create_app() -> FastAPI:
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/health/ready")
+    def readiness(storage: StorageAdapter = Depends(get_storage)) -> dict[str, str]:
+        if not storage.is_ready():
+            raise HTTPException(status_code=503, detail="team-tracking database unavailable")
+        return {"status": "ok"}
+
     app.include_router(people.router)
     app.include_router(teams.router)
     app.include_router(role_kinds.router)
     app.include_router(memberships.router)
     app.include_router(providers.router)
     app.include_router(identifiers.router)
+    app.include_router(channels.router)
     app.include_router(api_keys.router)
     return app
 

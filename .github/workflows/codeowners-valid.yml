@@ -1,0 +1,76 @@
+name: CODEOWNERS valid
+
+# Asks GitHub's own parser whether CODEOWNERS is usable, and fails if it is not.
+#
+# Why this is worth a job: the failure mode it catches is SILENT. Name an owner
+# who is not a collaborator, or who has read-only access, and GitHub does not
+# warn anywhere in the PR UI — it just never requests them. The zone looks
+# owned, reviews quietly go to nobody, and you find out when something merges
+# unreviewed. check-labels.mjs cannot see this: it only knows the file lists a
+# line per zone, not whether the handle on that line can actually review.
+#
+# Also catches plain syntax errors, unknown handles, and typo'd teams.
+#
+# Complements, rather than duplicates, label-consistency.yml: that one is
+# offline and structural (does the zone list agree with itself), this one is a
+# live lookup against the org's membership.
+
+on:
+  pull_request:
+    branches: [staging, main]
+    paths:
+      - ".github/CODEOWNERS"
+      - ".github/workflows/codeowners-valid.yml"
+  push:
+    branches: [staging, main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      # Validate the version of the file on THIS ref, not the default branch
+      # (which is what the endpoint uses if you omit it).
+      REF: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Ask GitHub to parse CODEOWNERS
+        run: |
+          set -euo pipefail
+
+          if ! out=$(gh api "repos/$REPO/codeowners/errors?ref=$REF" 2>&1); then
+            echo "::error::Could not read the CODEOWNERS errors endpoint for $REF."
+            echo "$out"
+            exit 1
+          fi
+
+          count=$(echo "$out" | jq '.errors | length')
+          if [ "$count" -eq 0 ]; then
+            echo "CODEOWNERS parses cleanly — every owner resolves and can review."
+            exit 0
+          fi
+
+          # `.message` is multi-line: it already quotes the offending line and
+          # points a caret at the column. So it goes in a code block verbatim
+          # rather than a markdown list, and the annotation takes only its
+          # first line — a raw newline would truncate the annotation.
+          {
+            echo "### CODEOWNERS is invalid ($count error(s))"
+            echo ""
+            echo '```'
+            echo "$out" | jq -r '.errors[].message'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "$out" | jq -r '
+            .errors[]
+            | "::error file=.github/CODEOWNERS,line=\(.line),col=\(.column)::"
+              + (.message | split("\n")[0])'
+
+          echo "$count CODEOWNERS error(s). A named owner who is not a collaborator,"
+          echo "or who lacks write access, is never requested for review and GitHub"
+          echo "says nothing — see docs/CODE-OWNERSHIP.md."
+          exit 1

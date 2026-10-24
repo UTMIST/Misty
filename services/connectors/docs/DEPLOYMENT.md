@@ -12,9 +12,13 @@ Service-specific deploy notes. The full platform runbook — creating Railway se
 | **Healthcheck** | `/health` |
 | **Port** | Binds Railway's injected `${PORT}`; 8005 locally |
 | **Exposure** | Private. Reached as `connectors.railway.internal:${PORT}`. |
-| **State** | Stateless. Safe to scale horizontally and to restart at any time. |
+| **State** | No local database or session state. The optional writer persists changes in Google; interrupted calls need reconciliation. |
 
-Because there is no database and no state, a redeploy is a plain restart — nothing to migrate, nothing in flight to drain.
+There is no local schema to migrate. Before restarting a writer-enabled deploy,
+account for in-flight creates, sharing changes, and deletions: Google may commit a
+write even when the caller receives no success. Never blindly retry an ambiguous
+create; documentation-system owns recovery through the
+[meeting persistence runbook](../../documentation-system/docs/DEPLOYMENT.md#meeting-record-persistence).
 
 ## Variables
 
@@ -25,13 +29,15 @@ Because there is no database and no state, a redeploy is a plain restart — not
 | `CONSUMER_KEYS` | JSON array | See below. Malformed → boot failure. |
 | `GOOGLE_CREDENTIALS_JSON` | base64 of the service-account JSON | May be empty — see [Deploying before Google exists](#deploying-before-google-exists) |
 | `MAX_CONTENT_CHARS` | leave at default | Keep **above** documentation-system's (1,000,000) |
+| `GITHUB_TOKEN` | fine-grained read-only PAT, or empty | Optional. Empty fetches public repositories only; never blocks boot |
+| `MAX_FILE_BYTES` | leave at default (`26214400`) | Pre-download limit for uploaded PDF, `.docx`, and `text/*` files; oversized files return 422 before media download |
 | `REQUEST_TIMEOUT_S` | leave at default (30) | Per-request timeout to Google |
 
 ### What the boot check does and does not cover
 
 `verify_production_secrets()` runs in `create_app()` outside `local` and refuses to start unless `API_KEY` is overridden. `CONSUMER_KEYS` is separately validated eagerly — `get_key_store()` is called in `create_app()`, so a malformed array kills the container at startup rather than on the first `/fetch`.
 
-`GOOGLE_CREDENTIALS_JSON` is **deliberately excluded** from that check. See below.
+`GOOGLE_CREDENTIALS_JSON` and `GITHUB_TOKEN` are **deliberately excluded** from that check. See below.
 
 ## Consumer keys
 
@@ -73,20 +79,61 @@ The full runbook is in the [README](../README.md#google-service-account-setup-ru
 1. Create or reuse a Google Cloud project.
 2. Enable **Drive, Docs, Slides, Sheets, and Forms** APIs on it.
 3. Create a service account, then create and download a JSON key.
-4. Share every Drive folder/file connectors must read with the service account's `…@….iam.gserviceaccount.com` address, as **Viewer**. Nothing is readable until explicitly shared — there is no folder allowlist in the service because Drive's sharing *is* the access control.
+4. Share every Drive folder/file connectors must read with the service account's `…@….iam.gserviceaccount.com` address, with sufficient access to inspect the complete ACL (the verified setup uses **Editor**). Nothing is readable until explicitly shared — there is no folder allowlist in the service because Drive's sharing *is* the access control.
 5. `base64 -i service-account.json | tr -d '\n'` → set as `GOOGLE_CREDENTIALS_JSON`.
 
 If you add an extractor that needs a new Google API, both the API and its OAuth scope must be enabled/granted on that project — code alone won't do it. See [CONTRIBUTING.md](CONTRIBUTING.md#walkthrough-add-an-extractor-for-a-new-mime-type).
 
 ## Rollback
 
-`git revert` + push. There is no schema to reverse and no state to reconcile — a connectors rollback is genuinely just the previous image.
+`git revert` + push restores the previous image; there is no local schema to
+reverse. It does not undo Google writes or resolve interrupted operations.
+Preserve catalog reconciliation and pending cleanup, and never blindly retry an
+ambiguous create; follow the
+[meeting persistence runbook](../../documentation-system/docs/DEPLOYMENT.md#meeting-record-persistence).
 
 ## Troubleshooting
 
 - **All fetches 503.** `GOOGLE_CREDENTIALS_JSON` is empty or not valid base64 of a service-account JSON. `SourceNotConfigured` covers both; check the variable decodes to JSON with a `private_key` field.
-- **All fetches 403 for one file, fine for others.** That file isn't shared with the service account's address. This is Drive's sharing setting, not a connectors config.
-- **Fetch 502 with a status in the log.** Upstream Google failure. Check whether the required API is enabled on the Cloud project — a disabled API surfaces as an upstream error, not as 503.
+- **Google fetch returns 403.** Google HTTP 403 is normalized without inspecting its reason; file sharing is one possible cause. Check credential identity, OAuth scopes, required API enablement, and access to read the file's complete ACL. A caller lacking `fetch` also receives 403 before Google is contacted.
+- **Fetch returns 502.** An upstream or response-validation failure occurred. The audit log records the connector status, not Google's status or reason. Check required API enablement and source configuration; disabled APIs have no special classification here, so the result depends on Google's HTTP status. Never log credentials or document content to diagnose it; see the [read error mapping](API.md#errors).
 - **Container dies at boot with a `CONSUMER_KEYS` error.** It must be a JSON **array** (`[{...}]`), not a bare object or a comma-separated string. This is by design — fail at boot, not per request.
 - **Container dies at boot complaining about `API_KEY`.** `CONNECTORS_ENV` is non-`local` and `API_KEY` is still the dev default.
 - **`no discovery API version mapped for '<name>'`.** An extractor declared a service with no `_API_VERSIONS` entry. Code bug, not config — see CONTRIBUTING step 3.
+
+## Discovery consumer
+
+Automatic sharing discovery needs a separate consumer key with scope `discover`;
+`fetch` does not permit enumeration. Mint and install it using the consumer-key steps
+above, setting the plaintext only on the dedicated discovery runner. No new Google
+OAuth scope is introduced; Drive enumeration uses the existing `drive.readonly`.
+The catalog API keeps its own `fetch` key. See the
+[discovery runbook](../../documentation-system/docs/DISCOVERY.md#enable-inspect-and-disable)
+for deployment order, identity, supported topology and acceptance requirements.
+
+## Meeting writer setup
+
+Use the infrastructure **Workspace user**, with its own OAuth refresh token
+and `drive.file` grant. Set `GOOGLE_OAUTH_CLIENT_ID`,
+`GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN`,
+`GOOGLE_MEETING_ROOT_FOLDER_ID`, and JSON `GOOGLE_MEETING_ADMIN_EMAILS`.
+Credentials are `SecretStr`; never paste them into logs or issue comments.
+An entirely disabled writer leaves the read service available; writer requests
+fail with `writer_not_configured`. Partial writer configuration fails boot
+outside local, naming the missing fields.
+
+Create the root with this OAuth app, or explicitly grant that folder to this
+app through Drive Picker: user ownership alone does not grant a `drive.file`
+app access to an arbitrary pre-existing folder. Keep the root and its ancestors
+admin-only. Include the actual owning user and every inherited admin user/group
+in the explicit allowlist. In a Shared Drive, use an admin-only drive and a
+writer identity with Manager access for permanent deletion. A shared My Drive
+folder is not a Shared Drive.
+
+Mint a documentation-system consumer with `meeting-write,meeting-fetch` in
+addition to its existing `fetch` capability; retain `discover` for the separate
+read identity if already used. No writer scope is given to the Discord bot.
+See the [platform rollout](../../../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).
+Google's [upload/conversion guide](https://developers.google.com/workspace/drive/api/guides/manage-uploads)
+and [permission inheritance guide](https://developers.google.com/workspace/drive/api/guides/manage-sharing)
+explain the two boundaries enforced here.

@@ -24,9 +24,15 @@ uv run alembic upgrade head
 uv run pytest --ignore=tests/test_postgres_adapter.py   # fast run
 ```
 
-> ⚠️ **Port clash.** verification's dev Postgres binds host **5434**, the same port `documentation-system` uses. They cannot both run as configured. Remap one (`docker compose run -p 5435:5432 postgres`) and update that service's `DATABASE_URL`.
+> ⚠️ **Port clash.** verification's dev Postgres binds host **5434**, the same port `documentation-system` uses. They cannot both run as configured. Remap one to an unused port, such as `docker compose run -p 5436:5432 postgres`, and update that service's `DATABASE_URL`. Gateway uses **5435** by default.
 
-`EMAIL_BACKEND=fake` is the default, so no mail credentials are needed locally — the fake captures messages in memory, and you read the code out of the service logs.
+`EMAIL_BACKEND=fake` is the default, so no mail credentials are needed for tests.
+The fake captures messages only in memory; codes are never logged or returned by
+the API, and there is no inbox endpoint. Tests retain and inject one `FakeSender`
+and read its `last_code()` (see [`tests/conftest.py`](../tests/conftest.py) and
+[`tests/test_request_code.py`](../tests/test_request_code.py)). Normal wiring
+creates a new sender per request. Manual email confirmation needs a configured
+real backend; do not add code logging to work around this.
 
 ## Walkthrough: change a policy constant
 

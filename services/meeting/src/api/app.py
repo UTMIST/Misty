@@ -1,9 +1,11 @@
 import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from platform_auth import AuditLogMiddleware
 
 from src.api.routers.meetings import router as meetings_router
+from src.api.wiring import get_qna_runner, get_record_handoff, shutdown_qna_runner
 from src.config import get_settings, verify_production_secrets
 from src.logging_setup import configure_logging
 
@@ -19,6 +21,19 @@ _SINGLE_INSTANCE_NOTE = (
     "has already moved on, so any meeting in progress loses its /stop and its "
     "minutes. Redeploy between meetings until sessions live outside the process."
 )
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    runner = get_qna_runner()
+    logging.getLogger(__name__).info("dedicated Q&A capacity: %s workers", runner.max_workers)
+    try:
+        yield
+    finally:
+        if get_record_handoff.cache_info().currsize:
+            await get_record_handoff().close()
+        get_record_handoff.cache_clear()
+        shutdown_qna_runner()
 
 
 def create_app() -> FastAPI:
@@ -38,6 +53,7 @@ def create_app() -> FastAPI:
         title="UTMIST meeting",
         version="0.1.0",
         description="Meeting recording + transcription service.",
+        lifespan=_lifespan,
     )
     app.add_middleware(AuditLogMiddleware, logger_name="meeting.audit")
     app.include_router(meetings_router)

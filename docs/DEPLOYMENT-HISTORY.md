@@ -6,15 +6,19 @@ Why the UTMIST ops platform is deployed the way it is, and the non-obvious lesso
 
 ## The shape
 
+This topology is a historical snapshot of the August 2026 rollouts below, not
+a current inventory or live-health check. For the implemented service graph and
+current setup, use [architecture](ARCHITECTURE.md) and the
+[deployment runbook](RAILWAY-DEPLOYMENT.md).
+
 ```
                                 Railway staging environment        Railway production environment
 GitHub                          ├── team-tracking                   ├── team-tracking
 ├── staging branch  ──deploys──▶├── documentation-system            ├── documentation-system
 └── main branch     ──deploys──▶├── verification                    ├── verification
                                 ├── llm          (no DB)            ├── llm          (no DB)
-                                ├── meeting      (no DB, stateful)  └── discord-bot
-                                ├── connectors   (no DB)
-                                └── discord-bot
+                                ├── meeting      (no DB, stateful)  ├── meeting      (no DB, stateful)
+                                └── discord-bot                     └── discord-bot
                                         │                                   │
                                         ▼                                   ▼
                                   Neon: team-tracking, docs-system,   Neon: same three projects,
@@ -22,19 +26,21 @@ GitHub                          ├── team-tracking                   ├─
                                   of each
 ```
 
-Two environments (staging, production). Seven shared services (each is one Railway
-entity; variable *values* differ per environment). Three Neon projects — one per
-DB-owning service — each with two branches (one per environment). `llm`,
-`meeting`, and `connectors` own no database. One repo, two long-lived branches,
-feature → staging → main.
+Two environments (staging, production). Six Railway services — `team-tracking`,
+`documentation-system`, `verification`, `llm`, `meeting`, `discord-bot` — each
+one Railway entity exposed in both environments, with variable *values*
+differing per environment. (At that time the Python source inventory also included connectors, while
+this deployment snapshot includes the Node bot.) Three Neon projects — one per
+DB-owning service — each with two branches, one per environment. `llm` and
+`meeting` own no database. One repo, two long-lived branches, feature → staging
+→ main.
 
-**`meeting` and `connectors` are staging-only for now.** They are the two newest
-services and neither has been promoted to production. `/record` is registered
-globally but answers "not configured" in production until `meeting` is
-provisioned there and `MEETING_BASE_URL` is set on the production bot; and until
-`connectors` is provisioned, production documentation-system can catalog docs
-normally but cannot fetch Google source content — each attempt is recorded as a
-per-doc ingest warning.
+**`connectors` has no Railway service in either environment.** Its code ships
+with every promotion and its CI job runs, but nothing is deployed and no
+consumer key has been minted, so production *and* staging documentation-system
+can catalog docs normally but cannot fetch GitHub or Google source content — each attempt
+is recorded as a per-doc ingest warning. Standing it up is
+[`RAILWAY-DEPLOYMENT.md`](RAILWAY-DEPLOYMENT.md) steps 2, 3, and 4b.
 
 ---
 
@@ -58,20 +64,23 @@ Each service exists once at the Railway project level and is exposed in *both* e
 
 ### Three services deliberately have no database
 
-`llm` is a thin stateless proxy over Bedrock; `meeting` holds only ephemeral
-in-memory sessions; `connectors` is a stateless outbound adapter that returns
-what it fetches and keeps nothing. None owns a domain worth persisting, so none
-got a Neon project, an `api_keys` table, or Alembic. Their API keys are seeded
+`llm` is a stateless provider proxy; `meeting` owns live in-memory sessions and
+hands saved text to the catalog; `connectors` fetches content and performs
+Google writer operations. These services own no local database, `api_keys`
+table or Alembic schema. External writes and catalog retention still require
+reconciliation; no local database does not mean no lasting side effects. Their API keys are seeded
 from a `CONSUMER_KEYS` JSON env var parsed at boot.
 
 The trade: **key rotation is a redeploy**, not a CLI call, and there is no
 revoke command — you drop the entry and redeploy. That's acceptable for three
-services with exactly one internal consumer each, and it avoids provisioning a
+services with a small set of internal consumers, and it avoids provisioning a
 database purely to store one row apiece.
 
 ### `meeting` is the one stateful service
 
-Everything else is stateless and scales freely. `meeting` keeps each live
+Gateway is also constrained: its rate-limit counters are process-local, so it
+runs one replica/worker; see its [deployment guide](../services/gateway/docs/DEPLOYMENT.md).
+`meeting` keeps each live
 meeting's session in process memory, so it **must run as a single replica**
 unless sticky routing on `session_id` is added — a given meeting's WebSocket,
 `/transcript` polls, and `/stop` must all reach the same process. This was a
@@ -83,7 +92,7 @@ transcript, and the bot is deliberately processing-free), not an oversight. See
 
 - **`staging` is the default branch.** Feature PRs auto-target it. Merges auto-deploy to the Railway staging environment.
 - **`main` is the release branch.** Only PRs from `staging` can merge — enforced by the `main-source-guard` workflow. Merges auto-deploy to production.
-- Both branches require **all 10** CI jobs as status checks; `main` additionally requires the source-guard.
+- Keep branch protection aligned with the current CI jobs; `main` also needs the source-guard. Verify required-check settings in GitHub when changing the workflow inventory.
 
 This gives you the loop of `push to feature → PR → staging → real staging deploy → validate → promote to main → production deploy`, with no branch or environment able to skip validation.
 
@@ -93,23 +102,24 @@ The bot and docs-system authenticate to team-tracking with their **own** scoped 
 
 Keys are minted by `scripts/provision-directory-key.sh <env>`, which runs `team-tracking-keys issue` against that environment's Neon branch and writes each key onto its Railway consumer with `railway variables --set`. One command per environment.
 
-Scopes:
-- **discord-bot:** `people:read people:write people:elevate identifiers:read identifiers:write teams:read teams:write memberships:read memberships:write role_kinds:read` (needs identity + membership management; `people:elevate` lets `/seed` promote people to `admin`/`superuser`)
-- **documentation-system:** `people:read teams:read` (only needs to look up an owner's label)
+The current scope lists live in [the provisioning script](../scripts/provision-directory-key.sh):
+the bot needs channel reads/writes as well as directory management, and the
+catalog needs membership, identifier and channel reads for access resolution,
+not just owner labels. `/seed` creates a new person with an allowed access level;
+it does not promote an existing person.
 
-The DB-free services follow the same *principle* with a different mechanism —
-scoped, per-consumer, argon2-hashed keys, just seeded from `CONSUMER_KEYS`
-rather than a table, and so **not** covered by `provision-directory-key.sh`:
-- **`llm`** issues a `chat`-scoped key to `meeting` (its only consumer today).
-- **`meeting`** issues a `meetings`-scoped key to `discord-bot`.
-- **`connectors`** issues a `fetch`-scoped key to `documentation-system`.
+DB-free consumer keys are configured through `CONSUMER_KEYS`, outside that
+script. LLM chat consumers include meeting and the bot; catalog embedding uses
+an `embed` key. Meeting issues a `meetings` key to the bot. Connector keys are
+scoped separately for fetching, discovery and meeting writing; follow the
+current service runbooks rather than copying an old minimal scope list.
 
 Minting them is a manual per-environment step — see the runbook's
 [step 4b](RAILWAY-DEPLOYMENT.md).
 
 ### CI on every PR to `staging` or `main`
 
-`.github/workflows/ci.yml` runs **10 jobs**:
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) defines the current jobs:
 - **`python-test`** — team-tracking, Postgres 16 service container, applies migrations, runs the full pytest suite
 - **`python-lint`** — team-tracking ruff check + format
 - **`auth-lib-test`** — the shared `packages/auth` (`platform_auth`) pytest suite + ruff check/format
@@ -117,28 +127,29 @@ Minting them is a manual per-environment step — see the runbook's
 - **`llm-test`** — services/llm pytest suite + ruff check/format
 - **`meeting-test`** — services/meeting pytest suite + ruff check/format. No Postgres container and no AWS credentials: the service has no database, and its Transcribe/LLM clients are faked via `app.dependency_overrides`, so the suite runs fully offline
 - **`connectors-test`** — services/connectors pytest suite + ruff check/format. No container and no Google credentials: the Google API clients are faked, so the suite runs fully offline
-- **`documentation-system-test`** — Postgres 16 service container, runs `alembic upgrade head`, then `pytest` with `RUN_PG_TESTS=1` + ruff check/format
-- **`node-test`** — the bot's `node --test` suite
-- **`docker-build`** — builds *and boot-smoke-tests* every service image (`python -c "import src.api.app"` for the six APIs, `node --check src/index.js` for the bot)
+- **`documentation-system-test`** — Postgres 16 service container, runs `alembic upgrade head`, then `pytest` with `RUN_PG_TESTS=1` and `RUN_PG_MIGRATION_TESTS=1` + ruff check/format
+- **`gateway-test`** — isolated wheel install, migration round trip, opt-in Postgres tests, pytest, ruff check/format
+- **`node-test`** — the bot’s `node --test` suite, ESLint and Prettier `--check`, plus readiness-checker verification
+- **`docker-build`** — builds *and boot-smoke-tests* every service image (`python -c "import src.api.app"` for the seven APIs, `node --check src/index.js` for the bot), plus the directory/gateway HTTP smoke check
 
-**All ten are required status checks** in branch protection on both `staging`
-and `main`; `main` additionally requires `main-source-guard`. A red job on any
-of them blocks the merge — there is no "runs but doesn't gate" tier.
+The same jobs also run on pushes to `staging` and `main`, and on
+`merge_group` events targeting `staging`. Queue enforcement is configured
+separately in GitHub; see the [rollout guide](DEVELOPMENT.md#merge-queue-on-staging).
+
+Repository files define the jobs, not which checks GitHub currently requires.
+Verify branch-protection/merge-queue settings against that inventory; a job’s
+presence in YAML alone is not proof it gates merging.
 
 > `meeting-test` and the meeting `docker-build` steps were added late — the
 > service shipped to staging with **no CI coverage at all** for a couple of
 > weeks. If you add a service, add its CI job in the same PR.
 
-Three further workflows fire on PRs but gate nothing:
-- **`pr-zone-check`** — warns (non-blocking) when a PR spans more than one
-  CODEOWNERS zone. Flip its trailing `exit 0` to `exit 1` to enforce.
-- **`discord-pr-notify`** — posts to Discord when a PR needs attention; the
-  target channel is a repo secret (`DISCORD_STAGING_WEBHOOK` /
-  `DISCORD_PROD_WEBHOOK`), so changing it needs no code change. Unset secret =
-  no-op.
-- **`blocked-ready-automation`** — keeps `blocked`/`ready` issue labels in sync
-  from `Blocked by: #N` lines in issue bodies, and drops `ready` when an issue
-  is assigned.
+Other PR workflows cover ownership/labels, size, zone warnings and review
+notifications. [The zone guide](CODE-OWNERSHIP.md#what-consumes-the-list) explains
+which jobs fail and how to enable zone enforcement without rejecting valid PRs.
+The [blocked/ready workflow](../.github/workflows/blocked-ready-automation.yml)
+runs on issue events; its [current limits](ONBOARDING.md#getting-work) mean
+`ready` is not proof an issue is unassigned.
 
 ---
 
@@ -176,10 +187,51 @@ Set `PORT=8000` (or whatever you like) as an **explicit** Railway variable on an
 
 ## Release log
 
-### 2026-08-08 — meeting reliability + platform hardening (staging)
+### 2026-08-09 — staging → production promotion (PR #189)
 
-On `staging`, not yet promoted. The user-visible half is a `meeting` fix; the
-rest is platform hygiene with no runtime behavior change.
+Merge commit `f692b0b`, **96 commits** spanning Aug 1 → Aug 9, promoting
+`b445d1d7` → `f692b0b`. All six production services redeployed SUCCESS at 1
+replica. Merged with `gh pr merge 189 --merge --admin` — `main` requires a
+review that solo PRs can't satisfy, and a **merge commit, not a squash**, keeps
+`main` a strict content subset of `staging` so the next promotion diffs cleanly.
+
+- **Two migrations, both `documentation-system`**, applied by
+  `preDeployCommand`: `005_doc_content` (new 1:1 table) and
+  `006_enable_google_content_fetch` (4-row data update). `team-tracking` and
+  `verification` run the same pre-deploy but had no new revisions.
+- **No new required production variables.** The whole new config surface was
+  `CONNECTORS_BASE_URL`/`CONNECTORS_API_KEY` (soft, unset) and
+  `DISCONNECT_GRACE_S` (defaults to 60 s in code).
+- **The Dockerfile port fixes (#179) were inert on Railway, as designed.**
+  Production `documentation-system` came up on `8000`, not the Dockerfile's new
+  `8001`, because every `railway.json` `startCommand` binds `--port ${PORT}` and
+  that overrides the image `CMD`. The 8000–8005 numbers in the docs are the
+  *local* allocation. **Do not "fix" the Railway `PORT` variables to match the
+  Dockerfiles** — production runs `meeting` on 8003 and everything else on 8000,
+  and every consumer's `*_BASE_URL` is pinned to those. Changing one without the
+  others is the actual outage.
+- **Pre-flight worth repeating.** The failure mode this train could have hit is
+  a service whose `railwayConfigFile` is unset: it ignores `railway.json`, takes
+  the image `CMD` port, and deploys green while unreachable — and it would also
+  skip `preDeployCommand`, silently not migrating. Proof a service *is* reading
+  the file, without a dashboard visit: its deploy log shows
+  `Starting Healthcheck / Path: /health`, since `healthcheckPath` lives only in
+  `railway.json`. Both `meeting` and `documentation-system` were confirmed this
+  way before the merge.
+- **Known-accepted degradation:** `connectors` still has no Railway service, so
+  migration `006` enables Google fetching against a service that isn't there.
+  Production `documentation-system` logs the expected
+  `CONNECTORS_API_KEY is still set to the built-in dev default` warning at boot
+  and serves `/health` 200; Google-source fetches degrade to per-doc ingest
+  warnings.
+- **No `register:production` needed** — nothing under `discord-bot/src/commands/`,
+  `registerCommands.js`, or `router.js` changed in this train.
+
+### 2026-08-08 — meeting reliability + platform hardening
+
+**Promoted to production 2026-08-09** as part of the train below. The
+user-visible half is a `meeting` fix; the rest is platform hygiene with no
+runtime behavior change.
 
 - **A dropped WebSocket no longer loses a recording (#190).** Two fully
   transcribed production meetings were lost in one morning because the
@@ -211,8 +263,10 @@ rest is platform hygiene with no runtime behavior change.
   set, and `AGENTS.md` is the single source of agent instructions.
 - **No migrations.** Nothing in this train touches a schema.
 
-**Promoting this train does not deploy `meeting` or `connectors` to
-production** — see "Current state" above for what's still manual.
+**Promoting this train did not deploy `connectors` to production** — it has no
+Railway service anywhere; see "Current state" above for what's still manual.
+`meeting` has had a production service since 2026-07-27 and picked these
+changes up normally.
 
 ### 2026-08-01 — connectors (staging)
 
@@ -239,6 +293,12 @@ consumers, via a service account. No database, no Alembic — keys come from
   [step 4b](RAILWAY-DEPLOYMENT.md).
 
 **Not in production.** Provisioned on staging only.
+
+> **Correction (2026-08-09).** `connectors` has no Railway service in *either*
+> environment — `railway service list` shows six, and neither environment has
+> `CONNECTORS_BASE_URL`, `CONNECTORS_API_KEY`, or `GOOGLE_CREDENTIALS_JSON` set.
+> Whatever the intent on 2026-08-01, the staging service is not there now. Its
+> code, CI job, and `railway.json` all ship; nothing runs them.
 
 ### 2026-07-26 — meeting recording v2 (staging)
 
@@ -281,6 +341,15 @@ globally registered, so it is *visible* in production but answers "not
 configured" there until the service is deployed and `MEETING_BASE_URL` is set on
 the production bot.
 
+> **Correction (2026-08-09).** This stopped being true on 2026-07-27, when the
+> production `meeting` service was created and `MEETING_BASE_URL` +
+> `MEETING_API_KEY` were set on the production bot. `/record` has been
+> functional in production since then. Adding the service via the Railway
+> dashboard copied staging's variables over the pre-staged production values,
+> which caused a 401 on the first real production meeting — see
+> [`RAILWAY-DEPLOYMENT.md`](RAILWAY-DEPLOYMENT.md): re-assert every variable
+> after adding a service to an environment.
+
 **Keys:** two new manually-minted consumer keys per environment — `llm` issues a
 `chat`-scoped key to `meeting`, and `meeting` issues a `meetings`-scoped key to
 `discord-bot`. These are *not* handled by `provision-directory-key.sh`.
@@ -318,16 +387,20 @@ Railway's `preDeployCommand` (`alembic upgrade head`).
 
 ## Current state
 
-- Both environments deployed and healthy, with one gap: **the two newest services, `meeting` and `connectors`, are staging-only** (see the 2026-07-26 and 2026-08-01 release notes). Promoting `staging → main` ships their *code* to production; it does not create their Railway services, set their variables, or mint their production consumer keys. Those are manual steps — see [`RAILWAY-DEPLOYMENT.md`](RAILWAY-DEPLOYMENT.md) steps 2, 3, and 4b.
+The deployment observations below are the **2026-08-09 snapshot**. They do not
+assert today’s provisioned topology or health; check the current runbook and
+read back the target environment when operating it.
+
+- Both environments run the same **six** services and are deployed and healthy — production on `f692b0b` since 2026-08-09, all six SUCCESS at 1 replica. `meeting` has been in production since 2026-07-27; the 2026-07-26 and 2026-08-01 release notes below say otherwise and carry corrections.
+- **One gap: `connectors` has no Railway service in either environment.** Promoting `staging → main` ships its *code*; it does not create the Railway service, set its variables, or mint its consumer keys. Those are manual steps — see [`RAILWAY-DEPLOYMENT.md`](RAILWAY-DEPLOYMENT.md) steps 2, 3, and 4b.
 - APIs are **private-only** on Railway (no public domains). Only in-project services reach them, over Railway's internal network. Add a public domain later if an external caller ever needs one — every service already has API-key auth.
-- **Discord commands.** All stable commands (`/link`, `/whoami`, `/seed`, `/team`, `/my-teams`, `/doc`, `/record`, plus the email-verification set `/add-email`, `/verify-email`, `/verify-code`, and `/help`) are registered globally on the production bot; **0 beta commands** remain guild-scoped (every command in `discord-bot/src/commands/index.js` is `beta: false`). To ship a future beta command, add it with `beta: true`, validate it in the staging test guild, then flip `beta: false` in its module + re-run `registerCommands` to promote it globally.
-- **Migrations run automatically** as Railway's `preDeployCommand` on the three DB-backed services (team-tracking, documentation-system, verification) — `alembic upgrade head` against the environment's Neon branch before every deploy. Idempotent. `llm`, `meeting`, and `connectors` have no `preDeployCommand` because they own no schema.
+- **Discord commands.** All stable commands (`/link`, `/whoami`, `/seed`, `/team`, `/my-teams`, `/doc`, `/record`, plus the email-verification set `/add-email`, `/verify-email`, `/verify-code`, and `/help`) are registered globally on the production bot; **0 beta commands** remain guild-scoped (every command in `discord-bot/src/commands/index.js` is `beta: false`). Registration runs as the bot's Railway `preDeployCommand` (`node src/registerCommands.js`), so every deploy to an environment re-registers that environment's bot. To ship a future beta command, add it with `beta: true`, merge to `staging` (the deploy registers it to the test guild), validate it there, then flip `beta: false` and promote to `main` — the production deploy registers it globally.
+- **Migrations run automatically** as Railway's `preDeployCommand` on the three DB-backed services (team-tracking, documentation-system, verification) — `alembic upgrade head` against the environment's Neon branch before every deploy. Idempotent. The bot uses the same hook for slash-command registration. `llm`, `meeting`, and `connectors` have no `preDeployCommand` because they own no schema.
 - **Migration counts:** team-tracking **007**, documentation-system **006**, verification **001**.
 
 ### Known gaps
 
-- **`/record` is visible but non-functional in production** until `meeting` is provisioned there. Deliberate (the command degrades gracefully rather than erroring), but it *is* user-visible.
-- **Google source content can't be fetched in production** until `connectors` is provisioned there. Not user-visible as an error: documentation-system boots fine without `CONNECTORS_API_KEY` and records each failed Google fetch as a per-doc ingest warning, so the catalog keeps working with empty content snapshots for `gdocs`/`gsheets`/`gslides`/`gdrive` sources.
+- **Google source content can't be fetched in *either* environment** until `connectors` is provisioned. Not user-visible as an error: documentation-system boots fine without `CONNECTORS_API_KEY` — `verify_production_secrets()` only warns for that one credential — and records each failed Google fetch as a per-doc ingest warning, so the catalog keeps working with empty content snapshots for `gdocs`/`gsheets`/`gslides`/`gdrive` sources. Migration `006` enabled `content_fetch_enabled` for those four sources in production on 2026-08-09, so expect that warning on every Google-source ingest until the service exists. The production boot log carries the matching startup warning.
 - **`documentation-system` and `verification` dev Postgres both bind host 5434**, so they can't run locally at the same time as configured. Affects local dev only, not deployments — each has its own Neon project in Railway.
 - ~~**`ruff format` is not enforced** for `documentation-system` or `meeting`.~~ **Closed.** Both services were formatted and their deferrals removed; `packages/auth` gained the missing step at the same time. Every Python CI job now gates `ruff check` and `ruff format --check`.
 
@@ -353,7 +426,15 @@ If the bad change included a schema migration, downgrade it against the environm
 ```bash
 railway run --service team-tracking --environment <env> -- alembic downgrade -1
 ```
-Every migration ships with a working `downgrade()` — that's a review requirement.
+Review the migration’s recovery instructions **before** executing a downgrade.
+Team-tracking [011](../services/team-tracking/docs/DEPLOYMENT.md#registry-cleanup-migration-011)
+and catalog [009](../services/documentation-system/docs/DEPLOYMENT.md#registry-cleanup-migration-009)
+restore registry entries, not the cleaned-up data. Catalog migration `017`
+refuses downgrade while multiple model sets exist. Schema downgrade is not
+data restoration; use the linked backup/recovery procedures and preserve
+unrelated data. Also note that `railway run` executes the local Alembic command
+with Railway variables, so use the correct service directory and reachable
+database connection.
 
 Neon also offers point-in-time recovery: reset a branch to an earlier snapshot from the Neon dashboard. A lifeline if a bad migration *and* data corruption happen together.
 

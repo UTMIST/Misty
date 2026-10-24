@@ -1,30 +1,30 @@
 # llm
 
-Thin, stateless HTTP API that fronts Claude on Amazon Bedrock for UTMIST's internal consumers: one `POST /chat` endpoint, scoped API-key auth, no database.
+Thin, stateless HTTP API for UTMIST's internal consumers: `POST /chat` for OpenAI completions (optional Amazon Bedrock backends), `POST /embed` for batch text embeddings on OpenAI, scoped API-key auth, no database.
 
 ## What this service does
 
-UTMIST's internal tools — a docs helper bot, reviewer-summary jobs, dashboards — all want to call an LLM, but none of them should carry AWS credentials, pin a Bedrock model id, or reimplement auth. The llm service is the single choke point: consumers hold a scoped `llm_` API key and POST chat turns; the service owns the Bedrock credentials, the model catalog, and the provider quirks behind a neutral request/response shape.
+UTMIST's internal tools — a docs helper bot, reviewer-summary jobs, dashboards — all want model access, but none should carry provider credentials, pin vendor model ids, or reimplement auth. The llm service is the single choke point: consumers hold a scoped `llm_` API key and POST chat turns or embedding inputs; the service owns the credentials, model catalog, and provider quirks behind neutral request/response shapes.
 
 Two design choices shape everything:
 
-- **Stateless — no database, no migrations.** The service holds no persistent state. It maps an inbound `POST /chat` to a Bedrock call and returns the completion. There is no Postgres, no Alembic, no `docker compose` for a DB. API keys are not stored in a table; they are seeded from a config env var at boot (see the auth model below).
-- **Provider-agnostic core.** The API layer speaks a neutral `LLMRequest`/`LLMResult` (`src/providers/base.py`) and never imports a vendor SDK. A `Callable` registry (`src/providers/registry.py`) picks the concrete provider from config, so swapping Bedrock endpoints — or mocking the provider entirely in tests — needs no change to the router.
+- **Stateless — no database, no migrations.** The service holds no persistent state. It maps an inbound `/chat` or `/embed` request to a provider call and returns the result. There is no Postgres, no Alembic, no `docker compose` for a DB. API keys are not stored in a table; they are seeded from a config env var at boot (see the auth model below).
+- **Provider-agnostic core.** The API layer speaks neutral chat and embedding dataclasses (`src/providers/base.py`) and never imports a vendor SDK. `src/providers/registry.py` selects the chat provider from config and builds the OpenAI embedder; tests inject fakes without changing the routers.
 
 ## The choke-point principle
 
-**Nothing runs inside llm except the chat proxy.** It is an HTTP API and nothing else — no queues, no scheduled jobs, no UI, no persistence. Every consumer talks to it over HTTP:
+**Nothing runs inside llm except the chat and embedding proxy.** It is an HTTP API and nothing else — no job queues, no scheduled jobs, no UI, no persistence. Every consumer talks to it over HTTP:
 
-- Bedrock credentials and the model catalog live in exactly one place, not scattered across every bot and job.
+- AWS/OpenAI credentials and the model catalog live in exactly one place, not scattered across every bot and job.
 - Consumers can be written in any language, deployed anywhere, and revoked individually by rotating their key out of config.
-- The service can be redeployed or re-pointed at a different Bedrock endpoint without touching its consumers.
+- The chat backend can be redeployed or re-pointed at a different provider without touching its consumers.
 
 ## Quick start
 
-Prerequisites: Python 3.11+, [uv](https://github.com/astral-sh/uv). (No Docker or database needed for local dev — the fake provider covers the tests, and you only need AWS credentials to make real Bedrock calls.)
+Prerequisites: Python 3.11+, [uv](https://github.com/astral-sh/uv). No Docker or database needed for local dev. Tests use fakes; the default chat and embeddings both use `OPENAI_API_KEY`. Bedrock chat needs AWS credentials only when selected.
 
 ```bash
-# 0. From the repo root, enter the service directory (all commands below run here)
+# 0. From the repo root, enter the service directory (setup commands below run here)
 cd services/llm
 
 # 1. Copy environment config
@@ -41,7 +41,7 @@ uv run uvicorn src.api.app:app --reload --port 8002
 
 The API is now at `http://localhost:8002`. Interactive Swagger UI is at `http://localhost:8002/docs`; the machine-readable schema is at `http://localhost:8002/openapi.json`.
 
-The default dev bootstrap key is `dev-api-key-change-me` (set in `.env`, carries the `admin` wildcard scope). Pass it as `X-API-Key` on every request:
+The default dev bootstrap key is `dev-api-key-change-me` (set in `.env`, carries the `admin` wildcard scope). Pass it as `X-API-Key` on chat and embedding requests:
 
 ```bash
 curl -sS http://localhost:8002/chat \
@@ -54,7 +54,7 @@ curl -sS http://localhost:8002/chat \
 
 ### Environment tiers (`LLM_ENV`)
 
-`LLM_ENV` declares which environment this instance represents: `local` (default), `staging`, or `production`. Outside `local`, `create_app()` calls `verify_production_secrets()` and **refuses to start** unless `API_KEY` is overridden from the dev default and `AWS_REGION` is set — a misconfigured deploy dies at boot, not on first request.
+`LLM_ENV` declares which environment this instance represents: `local` (default), `staging`, or `production`. Outside `local`, `create_app()` calls `verify_production_secrets()` and **refuses to start** unless `API_KEY` is overridden from the dev default and `OPENAI_API_KEY` is set. `AWS_REGION` is required only for Bedrock. Invalid chat provider/model pairs fail at boot in every environment. Configure these before merging to an auto-deploy branch; see [DEPLOYMENT.md](docs/DEPLOYMENT.md#embeddings-post-embed).
 
 ### Configuration
 
@@ -65,83 +65,104 @@ All settings load from the environment (`src/config.py`, `.env` in dev):
 | `LLM_ENV` | `local` | Environment tier (`local` / `staging` / `production`). |
 | `API_KEY` | `dev-api-key-change-me` | Env-bootstrap key; carries `admin` scope. Must be overridden outside `local`. |
 | `CONSUMER_KEYS` | `""` | JSON array of per-consumer keys (see auth model). |
-| `LLM_PROVIDER` | `bedrock-converse` | Provider backend (`bedrock-converse` or `bedrock`). |
-| `LLM_MODEL` | `claude-sonnet-4-6` | Default model when a request omits `model`. |
-| `REQUEST_TIMEOUT_S` | `60` | Per-request timeout to the provider (seconds). |
-| `THINKING_DEFAULT` | `true` | Whether extended thinking is on when a request omits `thinking`. |
+| `LLM_PROVIDER` | `openai` | Chat backend (`openai`, `bedrock-converse`, or `bedrock`). |
+| `LLM_MODEL` | `gpt-6.1-sol` | Default chat model when a request omits `model`. |
+| `EMBED_MODEL` | `openai-embed-3-small` | Embedding default at **1536 dimensions**; see [models and initial choice](docs/ARCHITECTURE.md#initial-embedding-model). |
+| `OPENAI_API_KEY` | `""` | OpenAI credential (`SecretStr`), required outside `local`. Shared by OpenAI chat and embeddings; missing locally → those routes return 503. |
+| `REQUEST_TIMEOUT_S` | `60` | SDK timeout setting (seconds); see [embedding timeout caveats](docs/API.md#batching-and-timeouts). |
+| `EMBED_MAX_REQUEST_CHARS` | `400000` | Aggregate character cap; see [input limits](docs/API.md#post-embed). |
+| `THINKING_DEFAULT` | `true` | OpenAI: medium reasoning when true, low when false; Bedrock: thinking on/off. |
 | `AWS_REGION` | `""` | Bedrock region. Standard AWS credential chain also reads `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_BEARER_TOKEN_BEDROCK`. |
 
-Usage bills as **standard Amazon Bedrock** (AWS credits apply) — deliberately *not* Claude Platform on AWS / Marketplace.
+Default chat and embeddings bill through **OpenAI**. Selecting a Bedrock chat backend bills chat through standard Amazon Bedrock instead; embeddings remain on OpenAI.
 
 ## Auth model
 
 Auth is scoped API keys via the shared `platform_auth` package, matching team-tracking and documentation-system — but **DB-free**. There is no `api_keys` table.
 
-- Every request needs `X-API-Key`. A key is either the shared bootstrap env key (`API_KEY`, scope: `admin`) or a per-consumer key seeded from the `CONSUMER_KEYS` env var.
+- `POST /chat` and `POST /embed` need `X-API-Key`; health and the API documentation/schema routes are unauthenticated. A key is either the shared bootstrap env key (`API_KEY`, scope: `admin`) or a per-consumer key seeded from the `CONSUMER_KEYS` env var.
 - **`CONSUMER_KEYS` is a JSON array**, each entry `{"name", "prefix", "key_hash", "scopes"}`. At boot, `key_store_from_config()` (`packages/auth/platform_auth/memory_store.py`) parses it into an in-memory store that satisfies `platform_auth`'s `ApiKeyStore` protocol — the stateless equivalent of team-tracking's Postgres key table, swappable for a persistent store later. Keys are stored only as Argon2 hashes; a malformed `CONSUMER_KEYS` fails fast at startup.
 - Keys use the **`llm_` envelope** (`llm_<prefix>_<secret>`). There is **no `X-Actor` header** and no `dev:spoof` scope — this is a service-to-service API, so the audit actor is always the authenticated key's own name (attested actor).
 
 ### Minting consumer keys
 
-Use the `llm-keys` CLI. It prints the plaintext key **once** to stdout and the `CONSUMER_KEYS` JSON entry to stderr — it does not (and cannot) write to any store:
+Use the `llm-keys` CLI **from the repo root**. It prints the plaintext key **once** to stdout and the `CONSUMER_KEYS` JSON entry to stderr — it does not (and cannot) write to any store:
 
 ```bash
-uv run llm-keys --name reviewer-summaries --scopes chat
+uv --project services/llm run llm-keys --name reviewer-summaries --scopes chat
 # stdout: llm_<prefix>_<secret>   (the key — give it to the consumer, shown ONCE)
 # stderr: {"name": "reviewer-summaries", "prefix": "...", "key_hash": "$argon2id$...", "scopes": ["chat"]}
+# For an approved embedding-only caller:
+uv --project services/llm run llm-keys --name embedding-caller --scopes embed
+# Use --scopes chat embed only when a caller needs both.
 ```
 
 Append the printed JSON object to the service's `CONSUMER_KEYS` array and redeploy. To **revoke** a key, drop its entry from `CONSUMER_KEYS` and redeploy — there is no revoke command because there is no database.
 
 ## API at a glance
 
-Every endpoint except `/health` requires `X-API-Key`.
+`POST /chat` and `POST /embed` require `X-API-Key`. `/health` and the API documentation/schema routes (`/docs`, `/redoc`, `/openapi.json`) are unauthenticated within the service's network exposure.
 
 | Method | Path | Scope | Description |
 |--------|------|-------|-------------|
-| POST | `/chat` | `chat` | Send chat turns to Claude, get a completion back. |
+| POST | `/chat` | `chat` | Send chat turns to the configured model, get a completion back. |
+| POST | `/embed` | `embed` | Turn a batch of strings into vectors. |
 | GET | `/health` | none | Liveness probe → `{"status": "ok"}`. |
 
-`POST /chat` requires the `chat` scope (`require_scope("chat")`); the `admin` wildcard satisfies it, so the bootstrap key and any admin key also work. A valid key **without** `chat` is rejected with **403** before the provider is ever called (no budget spent).
+`POST /chat` requires `chat`; `POST /embed` requires `embed`. These scopes are independent, and `admin` satisfies both. A valid key missing the required scope receives **403** before any provider call.
 
 **Request body** (`ChatRequest`, `contracts/chat.py`):
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `messages` | `[{role, content}]` | Required, non-empty. `role` is `user` or `assistant`; `content` non-empty. |
+| `messages` | `[{role, content}]` | Required, non-empty. `role` is `user` or `assistant`; `content` is non-empty text or structured blocks. |
 | `system` | string \| null | Optional system prompt. |
-| `model` | string \| null | Optional. Must be one of `claude-sonnet-4-6`, `claude-opus-4-6`; defaults to `LLM_MODEL`. |
-| `max_tokens` | int | Default `16000`, range `1`–`64000`. |
-| `thinking` | bool \| null | Extended thinking; defaults to `THINKING_DEFAULT` when omitted. |
+| `model` | string \| null | Optional. Defaults to `LLM_MODEL`; must belong to the selected provider’s [catalog](docs/API.md#post-chat). |
+| `max_tokens` | int | Default `16000`; OpenAI `16`–`64000`, Bedrock `1`–`64000`. |
+| `thinking` | bool \| null | Defaults to `THINKING_DEFAULT`; GPT-6.1 Sol maps true/false to medium/low. |
+| `tools` | list \| null | Optional client-executed tool definitions; see the [tool-use contract](docs/API.md#client-executed-tools). |
 
-**Response** (`ChatResponse`): `{ "content", "model", "stop_reason", "usage": { "input_tokens", "output_tokens" } }`.
+**Response** (`ChatResponse`): `{ "content", "model", "stop_reason", "usage": { "input_tokens", "output_tokens" } }` for legacy text-only requests. Tool or structured-message requests additionally return ordered `content_blocks` for stateless continuation.
 
-**Provider errors** are normalized to HTTP status: rate limit → **429**, timeout → **504**, other upstream/5xx/config faults → **502**. Validation failures (empty `messages`, unknown `model`) → **422**.
+Tool use is transport, not execution: consumers authorize and run tools, then send their results in the next request. OpenAI preserves encrypted `reasoning_state` blocks; Bedrock preserves signed reasoning and redacted continuation blocks. Keep those blocks out of visible answers and logs; see [API.md](docs/API.md#client-executed-tools) for validation, limits, and replay rules.
+
+**Chat provider errors** are normalized to HTTP status: rate limit → **429**, timeout → **504**, other upstream faults → **502**, missing local OpenAI key → **503**. Validation failures (empty `messages`, unknown or provider-incompatible `model`, unsupported continuation) → **422**.
+
+For the embedding contract, limits, and errors, see [`POST /embed`](docs/API.md#post-embed).
 
 ## Repo layout
+
+Tool transport additionally uses `contracts/tools.py` and `contracts/tool_validation.py`
+for wire validation, and `src/providers/tool_blocks.py` and `src/providers/raw_responses.py`
+for shared provider checks. See the [architecture](docs/ARCHITECTURE.md#stateless-tool-use-transport)
+for their boundaries and the [audit record](docs/TOOL-USE-AUDIT.md) for file-specific rationale.
 
 ```
 llm/
 ├── contracts/
-│   └── chat.py            Pydantic request/response models (ChatRequest, ChatResponse, Usage)
+│   ├── chat.py            Pydantic chat request/response models
+│   └── embed.py           Pydantic embedding request/response models
 │
 ├── src/
 │   ├── api/               FastAPI application
-│   │   ├── app.py         App factory (create_app); mounts /chat + /health, audit middleware
+│   │   ├── app.py         App factory (create_app); mounts /chat + /embed + /health, audit middleware
 │   │   ├── auth.py        Builds require_scope / get_actor from platform_auth (envelope="llm_")
-│   │   ├── deps.py        get_key_store / get_llm — the single wiring point (both lru_cached)
+│   │   ├── deps.py        Dependency wiring via cached private builders
 │   │   ├── hashing.py     Thin shim over platform_auth: llm_-envelope key generation
 │   │   └── routers/
-│   │       └── chat.py    POST /chat — require_scope("chat"), maps body → provider → response
+│   │       ├── chat.py    POST /chat — require_scope("chat"), maps body → provider → response
+│   │       └── embed.py   POST /embed — require_scope("embed"), batch text → vectors
 │   │
-│   ├── providers/         Provider-agnostic LLM layer (no FastAPI)
-│   │   ├── base.py            LLMRequest/LLMResult/LLMProvider Protocol + normalized error hierarchy
-│   │   ├── bedrock_converse.py  Default: Claude via bedrock-runtime Converse API (US-regional profiles)
-│   │   ├── bedrock.py           Alt: Claude via AnthropicBedrockMantle (Messages endpoint)
-│   │   └── registry.py          Config-driven provider selection (LLM_PROVIDER → builder)
+│   ├── providers/         Provider-agnostic model layer (no FastAPI)
+│   │   ├── base.py            Chat/embedding dataclasses, Protocols + normalized error hierarchy
+│   │   ├── openai_chat.py       Default chat: GPT-6.1 Sol via OpenAI Responses
+│   │   ├── bedrock_converse.py  Optional chat: Claude via bedrock-runtime Converse API (US-regional profiles)
+│   │   ├── bedrock.py           Alt chat: Claude via AnthropicBedrockMantle (Messages endpoint)
+│   │   ├── openai_embed.py      Embeddings via the OpenAI API
+│   │   └── registry.py          Chat provider selection and OpenAI embedding builder
 │   │
 │   ├── mint_key.py        llm-keys CLI — prints a key + its CONSUMER_KEYS entry, no store writes
-│   └── config.py          Settings (LLM_ENV, API_KEY, CONSUMER_KEYS, LLM_*, AWS_REGION) + boot check
+│   └── config.py          Chat/embedding settings and credential boot checks
 │
 ├── tests/                 Fast tests — no Docker, no network (fake provider)
 ├── Dockerfile             Production image (built + import-smoke-tested by CI; used by Railway).
@@ -151,16 +172,22 @@ llm/
                            (stateless — nothing to migrate).
 ```
 
-**Dependency direction:** `contracts/` imports nothing from `src/`. `src/api/` depends only on `contracts/`, `src/config`, and the provider Protocol. `src/providers/` implements the `LLMProvider` Protocol and knows nothing about FastAPI. `src/api/deps.py` is the only place the concrete provider and key store get wired in — so tests override `get_llm` / `get_key_store` via `app.dependency_overrides`.
+**Dependency direction:** `contracts/` imports nothing from `src/`. `src/api/` depends on `contracts/`, `src/config`, and provider-neutral types and validation helpers, never vendor SDKs. `src/providers/` implements the `LLMProvider` and `EmbeddingProvider` Protocols and knows nothing about FastAPI. `src/api/deps.py` is the only place the concrete providers and key store get wired in — so tests override `get_llm` / `get_embedder` / `get_key_store` via `app.dependency_overrides`.
 
-### The two Bedrock providers
+### Chat providers
+
+`openai` (default) uses GPT-6.1 Sol through the Responses API. It reuses the existing
+OpenAI key and SDK. No consumer endpoint or auth changes are needed. See the
+[migration record](docs/OPENAI-MIGRATION.md) and [deployment steps](docs/DEPLOYMENT.md#switching-chat-to-openai).
+
+The two optional Bedrock chat providers remain available for rollback.
 
 Both bill as standard Amazon Bedrock; they differ only in the Bedrock endpoint and how model ids are formed:
 
-- **`bedrock-converse`** (default) — `BedrockConverseProvider` calls the `bedrock-runtime` **Converse** API. Used because this account's model access is US-regional cross-region inference profiles (`us.anthropic.claude-sonnet-4-6`), which the Messages endpoint can't target. Maps neutral model names to inference-profile ids via an explicit table.
+- **`bedrock-converse`** — `BedrockConverseProvider` calls the `bedrock-runtime` **Converse** API. Used because this account's model access is US-regional cross-region inference profiles (`us.anthropic.claude-sonnet-4-6`), which the Messages endpoint can't target. Maps neutral model names to inference-profile ids via an explicit table.
 - **`bedrock`** — `BedrockClaudeProvider` calls the **Mantle Messages** endpoint via `AnthropicBedrockMantle`. Needs global/Messages model access.
 
-In tests, neither is used: a `_FakeProvider` implementing the `LLMProvider` protocol is injected via `dependency_overrides`, so the suite runs with no AWS credentials and no network.
+API tests inject a `_FakeProvider` through `dependency_overrides`. Existing provider tests exercise the ordinary chat path with stubbed SDK clients. No tests call live AWS, Anthropic, or OpenAI endpoints.
 
 ## Testing
 
@@ -170,7 +197,13 @@ The suite is single-mode — no Docker, no database, no network:
 uv run pytest
 ```
 
-Runs against a fake provider injected via `app.dependency_overrides`. Covers the `/chat` happy path and neutral-type mapping, the auth paths (missing key → 401, key without `chat` → 403, `chat` scope → 200, `admin` wildcard → 200), request validation (empty messages, unknown model → 422), provider-error → HTTP-status mapping, the key store, the `llm-keys` CLI, config/boot checks, both Bedrock adapters (with stubbed clients), the audit log, and the OpenAPI schema.
+Route tests inject fake chat and embedding providers via `app.dependency_overrides`. Adapter tests use stubbed clients or mock transports, never real provider calls. Coverage includes auth/scopes, request limits, ordered fixed-width embeddings, normalized failures, key provisioning, config/boot checks, audit metadata, and OpenAPI.
+
+The broad tool-use suite was removed after the initial audit. Focused regressions
+in `tests/test_tool_stop_reasons.py` now cover empty completions and truncated tool
+responses through both SDKs, plus metadata, router, and validation controls. They do
+not replace the removed protocol-wide coverage. Historical verification and the
+cleanup rationale are recorded in [docs/TOOL-USE-AUDIT.md](docs/TOOL-USE-AUDIT.md#test-cleanup).
 
 Lint and format with ruff:
 
@@ -183,13 +216,14 @@ uv run ruff format .
 
 ## Status
 
-v0.1: a stateless `POST /chat` proxy over Amazon Bedrock, config-seeded scoped API keys (`chat` / `admin`) with an attested-actor audit trail, two swappable Bedrock providers behind a neutral Protocol, normalized provider-error mapping, and a fast 65-test suite with no external dependencies.
+Stateless inference with scoped API keys, an attested-actor audit trail,
+neutral provider Protocols, normalized failures, and offline tests.
 
 **Not implemented (by design):**
 
 - **Streaming** — `/chat` returns the full completion; no SSE/token streaming.
 - **Persistence** — no conversation storage, no DB. Consumers keep their own history and send it on each call.
-- **RAG / retrieval** — this service does not embed or search documents; that lives in the consumers (e.g. the helper bot).
+- **Retrieval pipelines** — `/embed` returns vectors, but chunking, indexing, vector storage, and document search belong to consumers.
 - **Persistent key store** — keys come from `CONSUMER_KEYS` config; a DB-backed store (with a `revoke` command) can drop in later behind the same `ApiKeyStore` protocol.
 
 ## Documentation

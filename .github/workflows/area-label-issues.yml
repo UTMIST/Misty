@@ -1,0 +1,94 @@
+name: Label issue area
+
+# Applies `area/<name>` labels from the Area dropdown in the issue forms.
+#
+# Areas are the ISSUE axis: which parts of the system a piece of work involves,
+# and so what someone picking it up needs to know. They are multi-valued on
+# purpose — most issues here carry two or three.
+#
+# Zones are the PR axis and are deliberately not asked for on an issue. One
+# `area/service` issue can span six zones; see docs/CODE-OWNERSHIP.md.
+#
+# The `areas` array below is one of the copies of the area list that
+# scripts/check-labels.mjs keeps honest — it fails CI if this drifts from the
+# dropdowns in .github/ISSUE_TEMPLATE/.
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+
+jobs:
+  label-area:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply area labels from the form dropdown
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const areas = [
+              "bot", "deployment", "docs-system", "integration",
+              "observability", "service", "tooling",
+            ];
+
+            const body = context.payload.issue.body || "";
+
+            // Issue forms render a multi-select dropdown as one comma-separated
+            // line under its heading. Read the block between the heading and
+            // the next one, so a blanked value cannot overshoot into it. Done
+            // by line scan rather than one regex: JS has no \Z, and the naive
+            // `$` alternative silently truncates to a single line under `m`.
+            const sectionAfter = (src, headingRe) => {
+              const lines = src.split(/\r?\n/);
+              const start = lines.findIndex(
+                (l) => /^###\s/.test(l) && headingRe.test(l),
+              );
+              if (start === -1) return null;
+              const out = [];
+              for (let i = start + 1; i < lines.length; i++) {
+                if (/^###\s/.test(lines[i])) break;
+                out.push(lines[i]);
+              }
+              return out.join("\n");
+            };
+
+            const section = sectionAfter(body, /^###\s+Area\s*$/i);
+            const chosen = (section || "")
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+
+            const wanted = chosen.filter((a) => areas.includes(a));
+
+            if (wanted.length === 0) {
+              // Only touch labels when the body names at least one real area.
+              // Bail otherwise: no Area section (blank issue, or an `edited`
+              // event that stripped it), "not sure", "_No response_", or a
+              // value that is not an area. Removing labels in any of those
+              // cases would wipe manually-applied ones.
+              core.info("No recognised area in the body — leaving labels alone.");
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+            const current = context.payload.issue.labels.map((l) => l.name);
+
+            const wantedLabels = wanted.map((a) => `area/${a}`);
+            for (const a of areas) {
+              const label = `area/${a}`;
+              if (current.includes(label) && !wantedLabels.includes(label)) {
+                try {
+                  await github.rest.issues.removeLabel({ owner, repo, issue_number, name: label });
+                } catch (e) {
+                  if (e.status !== 404) core.warning(`remove '${label}' failed: ${e.message}`);
+                }
+              }
+            }
+            const toAdd = wantedLabels.filter((l) => !current.includes(l));
+            if (toAdd.length > 0) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number, labels: toAdd });
+            }
+            core.info(`#${issue_number}: areas -> ${wanted.join(", ")}`);

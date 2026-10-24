@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { meetingFilename } from './meetingFilename.js';
+import { meetingRecordNotice } from '../messages/meeting.js';
 
 // Per-guild live-meeting lifecycle. Pure orchestration: all collaborators
 // (transport client, recorder factory, poster) are injected. No discord.js
@@ -11,6 +13,7 @@ export function createMeetingSurface({
   // it a dropped connection is invisible: the session is gone, /record status
   // says nothing is recording, and nobody knows the meeting was lost.
   notify = async () => {},
+  deliverRecord,
   now = Date.now,
   genId = randomUUID,
 }) {
@@ -20,7 +23,7 @@ export function createMeetingSurface({
   // stored on the session (not read off the stopping interaction) so the
   // minutes always @-mention the person who asked for them -- including when
   // the recording ends via auto-stop, where there's no interaction at all.
-  async function start({ guildId, voiceChannel, textChannel, requesterId }) {
+  async function start({ guildId, voiceChannel, textChannel, requesterId, name, save = true }) {
     if (sessions.has(guildId)) {
       return { status: 'already-recording' };
     }
@@ -59,12 +62,18 @@ export function createMeetingSurface({
       try {
         if (recorder) await recorder.stop();
       } catch (err) {
-        console.error(`meetingSurface: error stopping recorder during teardown for guild ${guildId}:`, err);
+        console.error(
+          `meetingSurface: error stopping recorder during teardown for guild ${guildId}:`,
+          err,
+        );
       }
       try {
         if (stream) await stream.close();
       } catch (err) {
-        console.error(`meetingSurface: error closing stream during teardown for guild ${guildId}:`, err);
+        console.error(
+          `meetingSurface: error closing stream during teardown for guild ${guildId}:`,
+          err,
+        );
       }
       // Nothing to announce if the recording never started: start() returns
       // 'error' and the command reply already says so.
@@ -106,7 +115,10 @@ export function createMeetingSurface({
       try {
         if (recorder) await recorder.stop();
       } catch (err) {
-        console.error(`meetingSurface: error stopping recorder after failed salvage for guild ${guildId}:`, err);
+        console.error(
+          `meetingSurface: error stopping recorder after failed salvage for guild ${guildId}:`,
+          err,
+        );
       }
       await notify({
         channel: textChannel,
@@ -128,8 +140,23 @@ export function createMeetingSurface({
       await Promise.resolve(stream?.close()).catch(() => {});
       return { status: 'error' };
     }
+    const participants = new Map();
+    let captureAllowed = true;
     recorder = makeRecorder({
-      sink: stream,
+      sink: {
+        ...stream,
+        sendControl(control) {
+          if (!captureAllowed) return;
+          participants.set(control.speakerId, {
+            discord_id: control.speakerId,
+            display_name: control.displayName,
+          });
+          stream.sendControl(control);
+        },
+        sendFrame(...args) {
+          if (captureAllowed) stream.sendFrame(...args);
+        },
+      },
       // The voice connection is gone for good (a 4014 park, or retries
       // exhausted). Audio already sent is fine -- the service has it -- so
       // FINALIZE rather than tear down: stop() posts minutes for what was
@@ -139,10 +166,14 @@ export function createMeetingSurface({
         if (sessions.get(guildId)?.sessionId !== sessionId) return;
         notify({
           channel: textChannel,
-          content: '⚠️ I lost the voice connection. Wrapping up the recording — the minutes will cover everything up to that point.',
+          content:
+            '⚠️ I lost the voice connection. Wrapping up the recording — the minutes will cover everything up to that point.',
         }).catch((err) => console.error('meetingSurface: voice-lost notify failed:', err));
         stop(guildId).catch((err) => {
-          console.error(`meetingSurface: finalize after voice loss failed for guild ${guildId}:`, err);
+          console.error(
+            `meetingSurface: finalize after voice loss failed for guild ${guildId}:`,
+            err,
+          );
         });
       },
     });
@@ -156,6 +187,13 @@ export function createMeetingSurface({
       textChannel,
       voiceChannel,
       requesterId,
+      name,
+      save,
+      participants,
+      recordVoiceChannelId: voiceChannel.id,
+      stopCapture: () => {
+        captureAllowed = false;
+      },
       startedAt: now(),
     });
     registered = true;
@@ -164,6 +202,13 @@ export function createMeetingSurface({
     // means a missing Connect permission, a full channel, or a 20s timeout is
     // reported to the user as success, and they only find out at /record stop.
     try {
+      if (save) {
+        await notify({
+          channel: textChannel,
+          content:
+            '🔴 Recording is starting. The full transcript and minutes will be saved as a Google Doc for the configured voice channel teams, or admins only if team access is unavailable. Everyone present should consent; ask the requester to stop or contact a Misty admin to remove a record.',
+        });
+      }
       await recorder.start(voiceChannel);
     } catch (err) {
       console.error(`meetingSurface: recorder failed to start for guild ${guildId}:`, err);
@@ -184,17 +229,39 @@ export function createMeetingSurface({
     return { status: 'recording', elapsedMs: now() - session.startedAt };
   }
 
-  // A snapshot of the guild's active recording, or null: its `sessionId` and
-  // the (opaque) `voiceChannel` being recorded. The Discord adapter uses this to
-  // auto-stop when the channel empties. Both fields come from the single session
-  // source of truth so they can't drift; the channel is treated opaquely so this
-  // module stays free of any discord.js dependency. The `sessionId` lets the
-  // adapter bind a scheduled auto-stop to a SPECIFIC recording, so a timer from
-  // an already-ended session can never terminate a later one in the same guild.
+  // A snapshot of the guild's active recording, or null: its `sessionId`,
+  // opaque `voiceChannel`, and origin `textChannelId`. The Discord adapter uses
+  // these to auto-stop and bind public status to the meeting's audience.
+  // All fields come from the single session source of truth so they can't drift;
+  // treating the channel opaquely keeps this module free of discord.js.
+  // The `sessionId` binds a scheduled auto-stop to a SPECIFIC recording, so a
+  // timer from an already-ended session cannot stop a later one in the same guild.
   function activeSession(guildId) {
     const session = sessions.get(guildId);
     if (!session) return null;
-    return { sessionId: session.sessionId, voiceChannel: session.voiceChannel };
+    return {
+      sessionId: session.sessionId,
+      voiceChannel: session.voiceChannel,
+      textChannelId: session.textChannel?.id,
+    };
+  }
+
+  // A saved recording belongs to one channel audience. Close its forwarding
+  // gate synchronously on a move, before recorder.stop() drains receive streams.
+  // This prevents destination-channel audio entering the original team's Doc.
+  function updateVoiceChannel(guildId, voiceChannel) {
+    const session = sessions.get(guildId);
+    if (!session || session.voiceChannel.id === voiceChannel.id) return;
+    session.voiceChannel = voiceChannel;
+    if (!session.save) return;
+    session.stopCapture();
+    const stopping = stop(guildId);
+    notify({
+      channel: session.textChannel,
+      content:
+        '⚠️ The recording ended because I moved voice channels. Start a new recording in the destination channel to save it for that channel’s teams.',
+    }).catch((err) => console.error('meetingSurface: channel-move notify failed:', err));
+    return stopping;
   }
 
   async function stop(guildId) {
@@ -205,7 +272,7 @@ export function createMeetingSurface({
     // the same guild can't double-run the teardown below.
     sessions.delete(guildId);
 
-    const { sessionId, stream, recorder, textChannel, requesterId } = session;
+    const { sessionId, stream, recorder, textChannel, requesterId, name, startedAt } = session;
     try {
       // Order matters: finalize server-side (POST /stop) BEFORE closing the
       // WS. The service treats a WS disconnect with no prior /stop as an
@@ -224,8 +291,33 @@ export function createMeetingSurface({
       } catch (err) {
         console.error(`meetingSurface: end-of-audio signal failed for guild ${guildId}:`, err);
       }
-      const report = await meetingClient.stop(sessionId);
-      await poster({ channel: textChannel, report, requesterId });
+      const record = session.save
+        ? {
+            guild_id: guildId,
+            text_channel_id: textChannel.id,
+            voice_channel_id: session.recordVoiceChannelId,
+            requester_discord_id: requesterId,
+            started_at: new Date(startedAt).toISOString(),
+            participants: [...session.participants.values()],
+          }
+        : undefined;
+      const report = await meetingClient.stop(sessionId, {
+        title: name,
+        ...(record ? { record } : {}),
+      });
+      if (report.record) {
+        // Independent of the PDF: a failed attachment must not suppress the
+        // durable link, and a failed delivery must not fail finalization.
+        let delivery;
+        try {
+          delivery = await deliverRecord?.(sessionId);
+        } catch {
+          delivery = { status: 'failed' };
+        }
+        const content = meetingRecordNotice(report.record, sessionId, delivery);
+        if (content) await notify({ channel: textChannel, content });
+      }
+      await poster({ channel: textChannel, report, requesterId, name, startedAt });
       return { status: 'stopped' };
     } catch (err) {
       console.error(`meetingSurface: error stopping meeting for guild ${guildId}:`, err);
@@ -234,10 +326,27 @@ export function createMeetingSurface({
       // Close regardless of outcome so a failed recorder.stop()/finalize
       // never leaves the WS connected to the meeting service.
       await Promise.resolve(stream.close()).catch((closeErr) => {
-        console.error(`meetingSurface: error closing stream during stop for guild ${guildId}:`, closeErr);
+        console.error(
+          `meetingSurface: error closing stream during stop for guild ${guildId}:`,
+          closeErr,
+        );
       });
     }
   }
 
-  return { start, status, stop, activeSession };
+  async function qna({ guildId, channelId, question }) {
+    const session = sessions.get(guildId);
+    if (!session) return { status: 'not-recording' };
+    const recordingChannelId = session.textChannel?.id;
+    if (!recordingChannelId || recordingChannelId !== channelId) {
+      return { status: 'wrong-channel', channelId: recordingChannelId };
+    }
+    // Capture this session before awaiting: stopping/new recording must never
+    // redirect an accepted question to another meeting in the same guild.
+    const meetingName = meetingFilename(session.name, session.startedAt);
+    const response = await meetingClient.qna(session.sessionId, question);
+    return { status: 'answered', response, meetingName };
+  }
+
+  return { start, status, stop, activeSession, updateVoiceChannel, qna };
 }

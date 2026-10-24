@@ -13,6 +13,14 @@ from uuid import UUID
 class Actor:
     person_id: UUID
     team_ids: frozenset[UUID]
+    source_team_ids: frozenset[UUID] = frozenset()
+
+
+@dataclass(frozen=True)
+class Channel:
+    """Only the configured teams' confirmed source-group entitlement."""
+
+    source_team_ids: frozenset[UUID]
 
 
 class _Sentinel(Enum):
@@ -23,7 +31,8 @@ class _Sentinel(Enum):
 SEE_ALL = _Sentinel.SEE_ALL
 DENY = _Sentinel.DENY
 
-ActorContext = Actor | _Sentinel
+ActorContext = Actor | Channel | _Sentinel
+RetrievalContext = Actor | Channel
 
 
 def doc_visible(
@@ -31,22 +40,29 @@ def doc_visible(
     *,
     owning_person_id: UUID | None,
     owning_team_id: UUID | None,
-    grants: Iterable[tuple[str, UUID | None]],
+    grants: Iterable[tuple[str, UUID | None] | tuple[str, UUID | None, str]],
 ) -> bool:
     if ctx is SEE_ALL:
         return True
     if ctx is DENY:
         return False
-    # ctx is an Actor
-    if owning_person_id is not None and owning_person_id == ctx.person_id:
-        return True
-    if owning_team_id is not None and owning_team_id in ctx.team_ids:
-        return True
-    for grantee_type, grantee_id in grants:
+    # Ownership is attribution metadata; only independent grants authorize an Actor.
+    for grant in grants:
+        grantee_type, grantee_id = grant[:2]
+        origin = grant[2] if len(grant) == 3 else "manual"
+        if isinstance(ctx, Channel):
+            if (
+                origin == "google_drive"
+                and grantee_type == "team"
+                and grantee_id in ctx.source_team_ids
+            ):
+                return True
+            continue
         if grantee_type == "org":
             return True
         if grantee_type == "person" and grantee_id == ctx.person_id:
             return True
-        if grantee_type == "team" and grantee_id in ctx.team_ids:
+        allowed_team_ids = ctx.source_team_ids if origin != "manual" else ctx.team_ids
+        if grantee_type == "team" and grantee_id in allowed_team_ids:
             return True
     return False

@@ -9,7 +9,8 @@ Base URL (local): `http://localhost:8004` · Swagger UI: `/docs` · Schema: `/op
 | GET | `/health` | none | Liveness probe |
 | WS | `/meetings/{id}/stream` | `?key=` or first frame | Live audio ingest + control |
 | GET | `/meetings/{id}/transcript` | `X-API-Key` | Poll the rolling transcript |
-| POST | `/meetings/{id}/stop` | `X-API-Key` | Finalize: transcript + minutes + PDF |
+| POST | `/meetings/{id}/qna` | `X-API-Key` | Answer from a snapshot of the last 15 minutes |
+| POST | `/meetings/{id}/stop` | `X-API-Key` | Finalize: transcript + minutes + PDF; accepts an optional title |
 
 ## Authentication
 
@@ -23,7 +24,7 @@ A key is either the bootstrap env key (`API_KEY`, carries `admin`) or a per-cons
 
 Must match `^[A-Za-z0-9_-]{1,64}$`. The service writes nothing to disk, so this is input hygiene rather than path safety.
 
-A `session_id` unknown to the in-memory registry returns **404** on `/transcript` and `/stop`. "Unknown" covers three cases that are indistinguishable from outside: never started, already stopped, or **the process restarted**. Sessions live only in memory.
+A `session_id` unknown to the in-memory registry returns **404** on `/transcript`, `/qna`, and `/stop`. "Unknown" covers three cases that are indistinguishable from outside: never started, already stopped, or **the process restarted**. Sessions live only in memory.
 
 ---
 
@@ -52,7 +53,7 @@ Close code **1008** is also used for: an invalid `session_id` (before any sessio
 {"speaker_id": "<id>", "display_name": "<name>"}
 ```
 
-Registers or updates the display name for a speaker. Send whenever a speaker's identity becomes known. Until one arrives, the `speaker_id` itself is used as the display name.
+Registers or updates the display name for a speaker. Send string values for both fields whenever a speaker's identity becomes known. Until one arrives, the `speaker_id` itself is used as the display name.
 
 ```json
 {"end_of_audio": true}
@@ -60,9 +61,9 @@ Registers or updates the display name for a speaker. Send whenever a speaker's i
 
 Send **once**, after the recording stops and every captured frame has been forwarded. Because the socket delivers in order, this proves all audio has arrived, and `POST /stop` waits for it before finalizing.
 
-Without it — an older client, a crash, a dropped socket — `/stop` proceeds after a 5 s drain timeout and logs a warning. The transcript tail may then be short, which is exactly the failure this signal prevents. **Send it.**
+If neither this signal nor a disconnect has been observed, `/stop` proceeds after a 5 s drain timeout and logs a warning. The transcript tail may then be short, which is exactly the failure this signal prevents. **Send it.** An observed disconnect marks audio complete and skips the drain wait.
 
-Unknown or malformed text frames are ignored, not fatal.
+Invalid JSON and text matching neither control shape are ignored. **Current limitation:** control values are not fully validated. For example, `{"speaker_id": [], "display_name": "x"}` raises `TypeError`, exits the handler, and enters [disconnect recovery](#disconnect). Clients must not rely on malformed control values being nonfatal.
 
 **2. Audio — WebSocket binary frames**, one raw Opus packet each:
 
@@ -75,11 +76,18 @@ Unknown or malformed text frames are ignored, not fatal.
 
 A length-prefixed speaker id, an 8-byte millisecond timestamp, then the raw Opus payload with no further framing. Truncated or undersized frames are dropped and counted, not fatal.
 
+`ts_ms` is nonnegative elapsed milliseconds since recording start, including
+silence, on one shared monotonic clock for all speakers. Do not send Unix epoch
+milliseconds, a separate clock origin per speaker, or accumulated speaking time;
+the service uses this value directly to anchor speech on the meeting timeline.
+
 ### Disconnect
 
-Disconnecting (or erroring) **without** a preceding `POST /stop` **holds** the session for `DISCONNECT_GRACE_S` (default 60 s) rather than destroying it. The transcript is already assembled server-side, so within that window `POST /stop` still finalizes it into minutes and a PDF exactly as a normal stop would — which is how a client that lost its socket recovers a meeting. The disconnect also marks end-of-audio, since a closed socket can deliver no more frames.
+Disconnecting (or erroring) **without** a preceding `POST /stop` **holds** the session for `DISCONNECT_GRACE_S` (default 60 s). Call `/stop` promptly to attempt recovery into minutes and a PDF. The disconnect also marks end-of-audio, since a closed socket can deliver no more frames.
 
-Only when the grace period expires with no `/stop` is the session torn down via `discard()` — abort each speaker's Transcribe stream, deregister, done. That path deliberately skips the finalize pipeline, so **no minutes and no PDF are produced**: it involves a blocking `llm` call not worth paying for when nobody is waiting for the result. Set `DISCONNECT_GRACE_S=0` to discard immediately instead.
+**Starting `/stop` does not cancel the grace timer.** At expiry, the timer checks only whether the session is still registered. If so, `discard()` aborts each speaker's Transcribe stream and deregisters the session, even when finalization is in progress. An unfinished transcript flush can therefore be interrupted; merely starting stop before expiry does not guarantee complete recovery. If the transcript is already assembled, teardown can still deregister the session while report generation or hand-off continues.
+
+`discard()` itself skips the finalize pipeline and produces no minutes or PDF. Without a `/stop` request, no artifacts are generated. Set `DISCONNECT_GRACE_S=0` to discard immediately instead.
 
 The WebSocket close code is logged on every abrupt disconnect (`session <id>: WS closed without POST /stop (code=…)`).
 
@@ -112,9 +120,93 @@ It is a **cumulative view, not a diff**. Each response is the whole transcript s
 
 ---
 
+## `POST /meetings/{session_id}/qna`
+
+Answer a question from finalized speech available at request time. Uses the same
+`meetings` scope as the other endpoints; no user identity is required.
+
+**Request** (`QnaRequest`): `{"question": "What deadline did Alice suggest?"}`.
+The question must contain non-whitespace text and be at most 1,000 characters.
+
+**Response** (`QnaResponse`) — `200`:
+
+```json
+{
+  "answer": "Alice suggested Friday.",
+  "references": [{"speaker": "Alice", "start_ms": 1000000}],
+  "window_start_ms": 900000,
+  "window_end_ms": 1800000,
+  "shortened": false
+}
+```
+
+The window is the last **15 minutes of elapsed meeting time**, including silence.
+Before 15 minutes, it covers the meeting so far. Segments are included by their
+start timestamp, with both endpoints inclusive. Speech still being transcribed
+is absent. The snapshot does not change while the answer is generated, including
+if recording stops after the question has been accepted.
+
+Serialized transcript input (including source IDs, speakers, and timestamps) is
+capped at **60,000 characters**. This is a coarse character guard, **not an exact
+input-token cap or a guarantee of the provider's context capacity**. Oversized
+windows retain the newest contiguous set of complete segments that fits;
+`shortened=true` and `window_start_ms` disclose the retained range. The guard
+applies to transcript text before JSON escaping, not the entire HTTP payload.
+
+References are derived from snapshot segments after validating the model's source
+IDs. Supported answers require one to three distinct valid IDs. These checks
+prevent invented reference metadata; they do not independently prove that an
+answer is entailed by the cited speech. Unsupported questions return
+`"Not discussed in the transcript available for MM:SS–MM:SS."` with no references.
+Empty windows return a clear no-finalized-speech message with no LLM call.
+Timestamps at one hour or more use `HH:MM:SS`.
+
+Non-empty requests call the existing LLM `/chat` once with `thinking=false` and
+`max_tokens=1024`. They use `REQUEST_TIMEOUT_S`, not a separate timeout setting.
+Q&A has a dedicated process-wide worker pool, separate from audio ingestion and
+minutes generation. Its maximum concurrency is **one quarter of the default shared
+executor size, rounded down** (minimum one). The shared default is
+`min(32, (os.cpu_count() or 1) + 4)` on Python 3.11/3.12, using
+`os.process_cpu_count()` instead on 3.13+. For example, a shared maximum of 14
+gives Q&A 3 workers; the shared maximum of 32 gives Q&A 8. It starts once with
+the application;
+the actual capacity is logged at startup. Excess requests fail immediately with
+429 rather than waiting in an unbounded queue. Cancelling a request does not
+release its capacity until its underlying worker finishes. Shutdown refuses new
+jobs and releases the executor without blocking the event loop; running HTTP
+calls finish under their existing timeout behavior.
+
+Neither questions nor answers are persisted or logged; broad questions cover
+only the returned window. LLM failures are errors, never unsupported answers.
+
+| Condition | Status |
+|---|---|
+| Invalid session id / unknown session | 400 / 404 |
+| Missing key / missing scope | 401 / 403 |
+| Invalid question | 422 |
+| Finalization has begun | 409 |
+| All dedicated Q&A workers are occupied | 429 |
+| Newest complete segment alone exceeds the size cap | 413 |
+| Malformed completion or invalid citations | 502 |
+| LLM unavailable or Q&A runner shutting down | 503 |
+| LLM request timeout | 504 |
+
+---
+
 ## `POST /meetings/{session_id}/stop`
 
 End the session and get everything back. This is the only call that produces minutes.
+
+The optional request body can provide a caller-selected PDF title. It is limited
+to 100 characters:
+
+```json
+{"title": "Sponsorship Sync"}
+```
+
+When present, `title` takes precedence over the LLM-generated title. Omitting
+the body preserves the LLM title behavior, with `Meeting Minutes` as the final
+fallback.
 
 What it does, in order: wait for the end-of-audio barrier (max 5 s) → close the Transcribe streams → assemble the final transcript → call `llm` for minutes → render the PDF → tear the session down.
 
@@ -137,11 +229,20 @@ What it does, in order: wait for the end-of-audio barrier (max 5 s) → close th
 
 `pdf_b64` is the base64-encoded minutes PDF. `minutes.title` may be an empty string, in which case the PDF falls back to a generic title.
 
+**Minutes can be incomplete even on a successful response.** Above 120,000
+transcript characters, only the first and last 60,000 characters are sent for
+summarization, with an omission marker between them. The returned transcript and
+the PDF's transcript section still contain the full assembled text. The parser
+can also salvage truncated model JSON into successful minutes while losing
+content after the truncation point; this logs `salvaged truncated minutes JSON`
+but adds no response warning flag. Review the full transcript when completeness
+matters.
+
 **If `llm` is unreachable, `/stop` still returns 200** — `minutes` comes back as `{"summary": "(minutes unavailable: LLM service error)", "decisions": [], "action_items": []}` with a PDF built around it. There is no error status for a failed summarization; check the `summary` string.
 
 **No meeting audio is returned, ever.** Audio exists only as transcription input — never mixed, never persisted, never written to disk.
 
-**The session is gone after this call.** It is deregistered as part of stopping, so a subsequent `/transcript` or `/stop` returns 404. Persist the response — this service retains nothing.
+**The session is gone after this call.** It is deregistered as part of stopping, so a subsequent `/transcript` or `/stop` returns 404. Retain the PDF response. With `record` context, finalized text/metadata is handed to documentation-system before cleanup or retained temporarily in memory for retry after the reply; see [durable record context](#durable-record-context) for retention and durability limits.
 
 This call is **slow relative to the others**: it blocks on the drain barrier, the Transcribe flush, and an LLM round trip. Budget accordingly; `REQUEST_TIMEOUT_S` (default 60) bounds the `llm` leg.
 
@@ -189,6 +290,38 @@ bot                                  meeting
 ## Constraints worth designing around
 
 - **One process owns a session end-to-end.** No sticky routing means misrouted `/transcript` and `/stop`. Do not scale to multiple replicas without it.
-- **A restart loses every in-flight meeting.** Nothing is persisted.
+- **A restart loses live sessions and unaccepted hand-offs.** Completed records accepted by documentation-system survive in its database and Google Docs.
 - **`MAX_MEETING_MS`** (default 14,400,000 = 4 h) is a backstop: a session stops accepting audio past it. 4 h is also Amazon Transcribe's per-stream cap.
 - **One open Transcribe stream per active speaker**, for the whole meeting. Large meetings can hit the account's concurrent-stream quota.
+
+## Durable record context
+
+`POST /meetings/{session_id}/stop` accepts optional `record` alongside `title`:
+
+```json
+{
+  "title": "Planning",
+  "record": {
+    "guild_id": "123", "text_channel_id": "456", "voice_channel_id": "789",
+    "requester_discord_id": "1234", "started_at": "2026-10-22T14:00:00-04:00",
+    "participants": [{"discord_id": "1234", "display_name": "Angela"}]
+  }
+}
+```
+
+Record context requires a UUID session ID and a guild matching the live session.
+Context and participant models forbid extra fields. Legacy calls without it
+retain the PDF flow. The service adds end time and the existing transcript and
+`Minutes` fields, then PUTs documentation-system before finalization cleanup.
+No second LLM call, PDF parsing, audio persistence, or disk write is involved.
+Concurrent stops share one shielded finalization task, so request cancellation
+does not interrupt the hand-off.
+
+`StopResponse` additionally contains `record: null` for legacy/PDF-only calls,
+or `{status, doc_url, admin_only}`. `status` is the catalog persistence state
+(often `pending`, since acceptance is durable before Google work), or
+`handoff_pending` if acceptance failed. In that case the normal PDF still
+returns; the finalized text is held in memory and retried with backoff for
+`RECORD_HANDOFF_HOLD_S`. Expiry logs `meeting.record_handoff_failed` with only
+the meeting ID. A process crash before acceptance can lose this in-memory
+payload; the Discord PDF and explicit delayed-save notice are the fallback.

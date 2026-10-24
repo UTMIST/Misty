@@ -1,5 +1,8 @@
 import {
-  joinVoiceChannel, EndBehaviorType, entersState, VoiceConnectionStatus,
+  joinVoiceChannel,
+  EndBehaviorType,
+  entersState,
+  VoiceConnectionStatus,
 } from '@discordjs/voice';
 
 // After /record stop we keep forwarding until the receive streams have been
@@ -67,9 +70,9 @@ export function createRecorder({
   // GUILD_CREATE, whose voice_states entries carry no member object at all, so
   // nothing is cached for them until we ask the API.
   function resolveMember(guild, userId) {
-    return guild?.voiceStates?.cache?.get(userId)?.member
-      ?? guild?.members?.cache?.get(userId)
-      ?? null;
+    return (
+      guild?.voiceStates?.cache?.get(userId)?.member ?? guild?.members?.cache?.get(userId) ?? null
+    );
   }
 
   function nameFor(member, userId) {

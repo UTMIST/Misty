@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resolvePrincipal } from '../src/auth/principal.js';
 import { authorize, rankOf, ACCESS_RANK } from '../src/auth/policy.js';
-import { DirectoryUnavailable } from '../src/directoryClient.js';
+import { DirectoryUnavailable } from '../src/clients/directoryClient.js';
 
 test('resolvePrincipal returns { person } when linked', async () => {
   const person = { id: 'p1', display_name: 'Alex' };
@@ -17,7 +17,15 @@ test('resolvePrincipal returns null when unlinked', async () => {
 
 test('resolvePrincipal propagates DirectoryUnavailable', async () => {
   await assert.rejects(
-    () => resolvePrincipal({ getPersonByDiscordId: async () => { throw new DirectoryUnavailable('down'); } }, '123'),
+    () =>
+      resolvePrincipal(
+        {
+          getPersonByDiscordId: async () => {
+            throw new DirectoryUnavailable('down');
+          },
+        },
+        '123',
+      ),
     DirectoryUnavailable,
   );
 });
@@ -33,7 +41,10 @@ test('authorize linked requires a principal', () => {
 });
 
 test('authorize denies unknown policy (fail closed)', () => {
-  assert.deepEqual(authorize('superadmin', { person: {} }), { ok: false, reason: 'unknown_policy' });
+  assert.deepEqual(authorize('superadmin', { person: {} }), {
+    ok: false,
+    reason: 'unknown_policy',
+  });
 });
 
 const principal = (level) => ({ person: { access_level: level } });

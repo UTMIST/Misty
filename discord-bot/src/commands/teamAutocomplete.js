@@ -32,7 +32,10 @@ function toChoices(teams, typed) {
   const needle = (typed ?? '').toLowerCase();
   return teams
     .filter((t) => typeof t.label === 'string' && t.label.length > 0)
-    .filter((t) => t.label.toLowerCase().includes(needle) || (t.slug ?? '').toLowerCase().includes(needle))
+    .filter(
+      (t) =>
+        t.label.toLowerCase().includes(needle) || (t.slug ?? '').toLowerCase().includes(needle),
+    )
     .slice(0, 25)
     .map((t) => ({ name: t.label, value: t.slug }));
 }
@@ -42,14 +45,20 @@ function toChoices(teams, typed) {
 export async function myTeamsAutocomplete({ typed, principal, ctx }) {
   if (!principal?.person?.id) return [];
   // Two directory calls (memberships + all teams) instead of N per-team lookups.
-  const result = await withinBudget(ctx, Promise.all([
-    ctx.directory.listMemberships({ personId: principal.person.id, activeOnly: true }),
-    ctx.directory.listTeams({ activeOnly: true }),
-  ]));
+  const result = await withinBudget(
+    ctx,
+    Promise.all([
+      ctx.directory.listMemberships({ personId: principal.person.id, activeOnly: true }),
+      ctx.directory.listTeams({ activeOnly: true }),
+    ]),
+  );
   if (result === null) return []; // timed out — degrade to no suggestions
   const [memberships, teams] = result;
   const myTeamIds = new Set(memberships.map((m) => m.team_id));
-  return toChoices(teams.filter((t) => myTeamIds.has(t.id)), typed);
+  return toChoices(
+    teams.filter((t) => myTeamIds.has(t.id)),
+    typed,
+  );
 }
 
 // Suggest ALL active teams. Used by /team's admin subcommands, which operate on

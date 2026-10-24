@@ -43,7 +43,11 @@ test('/help lists current registry commands, descriptions, and excludes itself',
 });
 
 test('/help filters commands by caller access level', async () => {
-  const anonymous = await help.handler({ options: {}, principal: null, ctx: { commands: fakeCommands } });
+  const anonymous = await help.handler({
+    options: {},
+    principal: null,
+    ctx: { commands: fakeCommands },
+  });
   assert.match(anonymous.embeds[0].description, /\/link/);
   assert.doesNotMatch(anonymous.embeds[0].description, /\/profile|\/seed|\/root/);
 
@@ -68,7 +72,12 @@ test('/help command detail shows options and accepts a leading slash', async () 
   const payload = await help.handler({
     options: { command: '/SEARCH' },
     principal: null,
-    ctx: { commands: new Map([['help', help], ['search', detailed]]) },
+    ctx: {
+      commands: new Map([
+        ['help', help],
+        ['search', detailed],
+      ]),
+    },
   });
   assert.equal(payload.embeds[0].title, '/search');
   assert.match(payload.embeds[0].fields[0].value, /query.*required.*Search query/);
@@ -98,7 +107,12 @@ test('/help command detail filters subcommands by caller access level', async ()
   const payload = await help.handler({
     options: { command: 'team' },
     principal: { person: { access_level: 'member' } },
-    ctx: { commands: new Map([['help', help], ['team', parent]]) },
+    ctx: {
+      commands: new Map([
+        ['help', help],
+        ['team', parent],
+      ]),
+    },
   });
   const subcommands = payload.embeds[0].fields[0].value;
   assert.match(subcommands, /list/);

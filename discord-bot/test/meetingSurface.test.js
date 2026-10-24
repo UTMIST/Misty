@@ -23,9 +23,15 @@ function makeFakes({ stopImpl, posterImpl } = {}) {
   const openStreamOpts = [];
 
   const notifies = [];
-  const notify = async (n) => { notifies.push(n); };
+  const notify = async (n) => {
+    notifies.push(n);
+  };
   const stream = {
-    endAudio: () => { callOrder.push('stream.endAudio'); },
+    sendControl: () => {},
+    sendFrame: () => {},
+    endAudio: () => {
+      callOrder.push('stream.endAudio');
+    },
     close: (...args) => {
       callOrder.push('stream.close');
       closeCalls.push(args);
@@ -101,7 +107,7 @@ test('start opens a stream, starts the recorder, and returns recording + session
   assert.equal(fakes.openStreamCalls[0].opts.guildId, 'g1');
   assert.equal(typeof fakes.openStreamCalls[0].opts.onError, 'function');
   assert.equal(fakes.makeRecorderCalls.length, 1);
-  assert.equal(fakes.makeRecorderCalls[0].sink, fakes.stream);
+  assert.equal(typeof fakes.makeRecorderCalls[0].sink.sendFrame, 'function');
   // allow the fire-and-forget recorder.start promise to settle
   await Promise.resolve();
   assert.deepEqual(fakes.recorderStartCalls, [voiceChannel]);
@@ -149,11 +155,38 @@ test('stop calls recorder.stop, stream.close, meetingClient.stop, then poster wi
     minutes: 'm',
     pdf_b64: 'p',
   });
+
   // Critical ordering: meetingClient.stop (finalize server-side) MUST happen
   // before stream.close() -- closing the WS first races the session into
   // being discarded server-side (WS-disconnect-without-prior-/stop => discard,
   // no finalize), which would lose the minutes/PDF/audio.
-  assert.deepEqual(fakes.callOrder, ['recorder.stop', 'stream.endAudio', 'client.stop', 'stream.close']);
+  assert.deepEqual(fakes.callOrder, [
+    'recorder.stop',
+    'stream.endAudio',
+    'client.stop',
+    'stream.close',
+  ]);
+});
+
+test('stop carries the meeting name and start time through to the client and poster', async () => {
+  const fakes = makeFakes();
+  const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1', now: () => 1234 });
+  await surface.start({
+    guildId: 'g1',
+    voiceChannel: { id: 'vc1' },
+    textChannel: { id: 'tc1' },
+    name: 'Sponsorship Sync',
+  });
+
+  await surface.stop('g1');
+
+  assert.deepEqual(fakes.posterCalls[0], {
+    channel: fakes.posterCalls[0].channel,
+    report: { transcript: 't', minutes: 'm', pdf_b64: 'p' },
+    requesterId: undefined,
+    name: 'Sponsorship Sync',
+    startedAt: 1234,
+  });
 });
 
 test('stop with no active session returns not-recording', async () => {
@@ -258,7 +291,9 @@ test('a WS stream error tears down the session so a subsequent start for that gu
 
 test('a failed join reports error, not recording', async () => {
   const fakes = makeFakes();
-  fakes.recorder.start = async () => { throw new Error('join failed'); };
+  fakes.recorder.start = async () => {
+    throw new Error('join failed');
+  };
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
 
   const originalError = console.error;
@@ -267,12 +302,20 @@ test('a failed join reports error, not recording', async () => {
     // Telling the user "🔴 Recording…" when the bot never joined means a
     // missing Connect permission or a full channel looks like success, and they
     // only discover the meeting was never captured at /record stop.
-    const result = await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+    const result = await surface.start({
+      guildId: 'g1',
+      voiceChannel: { id: 'vc1' },
+      textChannel: { id: 'tc1' },
+    });
     assert.equal(result.status, 'error');
 
     // ...and the guild is left clean, so they can just try again.
     fakes.recorder.start = async () => {};
-    const second = await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+    const second = await surface.start({
+      guildId: 'g1',
+      voiceChannel: { id: 'vc1' },
+      textChannel: { id: 'tc1' },
+    });
     assert.equal(second.status, 'recording');
   } finally {
     console.error = originalError;
@@ -281,7 +324,9 @@ test('a failed join reports error, not recording', async () => {
 
 test('a failed join is logged and never throws', async () => {
   const fakes = makeFakes();
-  fakes.recorder.start = async () => { throw new Error('join failed'); };
+  fakes.recorder.start = async () => {
+    throw new Error('join failed');
+  };
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
 
   const originalError = console.error;
@@ -297,7 +342,7 @@ test('a failed join is logged and never throws', async () => {
   }
 });
 
-test('activeSession returns {sessionId, voiceChannel} while active and null otherwise', async () => {
+test('activeSession binds the session, voice channel and exact text channel while active', async () => {
   const fakes = makeFakes();
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
 
@@ -306,7 +351,11 @@ test('activeSession returns {sessionId, voiceChannel} while active and null othe
 
   assert.equal(surface.activeSession('g1'), null);
   await surface.start({ guildId: 'g1', voiceChannel, textChannel });
-  assert.deepEqual(surface.activeSession('g1'), { sessionId: 'sess-1', voiceChannel });
+  assert.deepEqual(surface.activeSession('g1'), {
+    sessionId: 'sess-1',
+    voiceChannel,
+    textChannelId: 'tc1',
+  });
 
   await surface.stop('g1');
   assert.equal(surface.activeSession('g1'), null);
@@ -335,6 +384,7 @@ test('a WS error stops the recorder, not just the stream', async () => {
   const fakes = makeFakes();
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
   await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+  fakes.notifies.length = 0; // Consent notice is covered separately.
   fakes.callOrder.length = 0;
 
   fakes.openStreamOpts.at(-1).onError(new Error('socket died'));
@@ -349,17 +399,25 @@ test('a WS error stops the recorder, not just the stream', async () => {
   // meeting. The channel gets the minutes; nobody gets a "died" warning.
   assert.equal(fakes.stopCalls.length, 1, 'the transcript was never salvaged via POST /stop');
   assert.equal(fakes.posterCalls.length, 1, 'the minutes were never posted');
-  assert.equal(fakes.notifies.length, 0, `unexpected failure notice: ${JSON.stringify(fakes.notifies)}`);
+  assert.equal(
+    fakes.notifies.length,
+    0,
+    `unexpected failure notice: ${JSON.stringify(fakes.notifies)}`,
+  );
 });
-
 
 test('a dropped socket that cannot be salvaged tells the channel, and still leaves the voice channel', async () => {
   // The grace period has expired, the service redeployed, or /stop failed --
   // whatever the reason, the minutes are genuinely gone and the meeting must
   // not be left silently dead with the bot parked in the voice channel.
-  const fakes = makeFakes({ stopImpl: () => { throw new Error('404 session gone'); } });
+  const fakes = makeFakes({
+    stopImpl: () => {
+      throw new Error('404 session gone');
+    },
+  });
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
   await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+  fakes.notifies.length = 0; // Consent notice is covered separately.
   fakes.callOrder.length = 0;
 
   fakes.openStreamOpts.at(-1).onClose();
@@ -407,7 +465,11 @@ test('a stream that fails synchronously never registers a session', async () => 
   const originalError = console.error;
   console.error = () => {};
   try {
-    const result = await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+    const result = await surface.start({
+      guildId: 'g1',
+      voiceChannel: { id: 'vc1' },
+      textChannel: { id: 'tc1' },
+    });
     assert.equal(result.status, 'error');
   } finally {
     console.error = originalError;
@@ -429,6 +491,7 @@ test('a normal stop does not announce that the recording died', async () => {
   const fakes = makeFakes();
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
   await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+  fakes.notifies.length = 0; // Consent notice is covered separately.
 
   const result = await surface.stop('g1');
   assert.equal(result.status, 'stopped');
@@ -436,7 +499,11 @@ test('a normal stop does not announce that the recording died', async () => {
   fakes.openStreamOpts.at(-1).onClose();
   await new Promise((r) => setImmediate(r));
 
-  assert.equal(fakes.notifies.length, 0, `told the user a completed meeting died: ${JSON.stringify(fakes.notifies)}`);
+  assert.equal(
+    fakes.notifies.length,
+    0,
+    `told the user a completed meeting died: ${JSON.stringify(fakes.notifies)}`,
+  );
   assert.equal(fakes.recorderStopCalls.length, 1, 'the recorder was stopped twice');
 });
 
@@ -452,6 +519,7 @@ test('a permanently lost voice connection finalizes the meeting', async () => {
   const fakes = makeFakes();
   const surface = createMeetingSurface({ ...fakes, genId: () => 'sess-1' });
   await surface.start({ guildId: 'g1', voiceChannel: { id: 'vc1' }, textChannel: { id: 'tc1' } });
+  fakes.notifies.length = 0; // Consent notice is covered separately.
 
   const { onVoiceLost } = fakes.makeRecorderCalls.at(-1);
   assert.equal(typeof onVoiceLost, 'function', 'onVoiceLost was never wired to the recorder');
@@ -465,4 +533,155 @@ test('a permanently lost voice connection finalizes the meeting', async () => {
   assert.equal(surface.status('g1').status, 'not-recording');
   // ...and they are told why the minutes stop where they do.
   assert.match(fakes.notifies.at(0)?.content ?? '', /voice connection/i);
+});
+
+test('stop hands off identities and context; save:false keeps PDF only', async () => {
+  for (const save of [true, false]) {
+    const fakes = makeFakes();
+    const calls = [];
+    fakes.meetingClient.stop = async (id, body) => {
+      calls.push(body);
+      return {
+        transcript: 't',
+        minutes: {},
+        pdf_b64: 'p',
+        record: save ? { status: 'handoff_pending' } : undefined,
+      };
+    };
+    const surface = createMeetingSurface({ ...fakes, genId: () => 'meeting-id', now: () => 1000 });
+    await surface.start({
+      guildId: '1',
+      voiceChannel: { id: '3' },
+      textChannel: { id: '2' },
+      requesterId: '4',
+      name: 'Planning',
+      save,
+    });
+    fakes.makeRecorderCalls[0].sink.sendControl({ speakerId: '4', displayName: 'Angela' });
+    assert.equal((await surface.stop('1')).status, 'stopped');
+    assert.equal(fakes.posterCalls.length, 1);
+    if (save) {
+      assert.deepEqual(calls[0].record, {
+        guild_id: '1',
+        text_channel_id: '2',
+        voice_channel_id: '3',
+        requester_discord_id: '4',
+        started_at: new Date(1000).toISOString(),
+        participants: [{ discord_id: '4', display_name: 'Angela' }],
+      });
+      assert.match(fakes.notifies[0].content, /Everyone present should consent/);
+      assert.match(fakes.notifies.at(-1).content, /save is delayed/);
+    } else {
+      assert.equal(calls[0].record, undefined);
+      assert.equal(fakes.notifies.length, 0);
+    }
+  }
+});
+
+test('link delivery precedes PDF so attachment failure cannot suppress a saved record', async () => {
+  const fakes = makeFakes({
+    stopImpl: async () => ({ record: { status: 'saved' }, pdf_b64: 'p' }),
+    posterImpl: async () => {
+      throw new Error('PDF failed');
+    },
+  });
+  const delivered = [];
+  const surface = createMeetingSurface({
+    ...fakes,
+    genId: () => 'saved-id',
+    deliverRecord: async (id) => {
+      delivered.push(id);
+      return { status: 'posted' };
+    },
+  });
+  await surface.start({
+    guildId: 'g1',
+    voiceChannel: {},
+    textChannel: { id: '2' },
+    requesterId: '4',
+  });
+  await surface.stop('g1');
+  assert.deepEqual(delivered, ['saved-id']);
+  assert.equal(fakes.stopCalls.length, 1);
+  assert.equal(fakes.notifies.length, 1); // consent only, no false delivery failure
+});
+
+test('failed link delivery reports recovery and still delivers the PDF', async () => {
+  const fakes = makeFakes({
+    stopImpl: async () => ({ record: { status: 'saved' }, pdf_b64: 'p' }),
+  });
+  const surface = createMeetingSurface({
+    ...fakes,
+    deliverRecord: async () => {
+      throw new Error('Discord denied');
+    },
+  });
+  await surface.start({
+    guildId: 'g1',
+    voiceChannel: {},
+    textChannel: { id: '2' },
+    requesterId: '4',
+  });
+  assert.equal((await surface.stop('g1')).status, 'stopped');
+  assert.equal(fakes.posterCalls.length, 1);
+  assert.match(fakes.notifies.at(-1).content, /saved, but its link could not be delivered/);
+});
+
+test('a saved recording stops forwarding immediately on a channel move', async () => {
+  const fakes = makeFakes();
+  const frames = [];
+  const stops = [];
+  fakes.stream.sendFrame = (...args) => frames.push(args);
+  fakes.meetingClient.stop = async (id, body) => {
+    stops.push(body);
+    return {};
+  };
+  const surface = createMeetingSurface({ ...fakes });
+  await surface.start({
+    guildId: '1',
+    voiceChannel: { id: '3' },
+    textChannel: { id: '2' },
+    requesterId: '4',
+  });
+  const sink = fakes.makeRecorderCalls[0].sink;
+  sink.sendControl({ speakerId: '4', displayName: 'Original speaker' });
+  sink.sendFrame('4', 0, Buffer.from('original'));
+  surface.updateVoiceChannel('1', { id: '3' });
+  assert.equal(surface.status('1').status, 'recording');
+  // Draining the recorder can deliver buffered destination-channel audio.
+  // Both it and new frames must be refused before the first stop await.
+  fakes.recorder.stop = async () => {
+    sink.sendFrame('5', 1, Buffer.from('destination drain'));
+    await settle();
+  };
+  const stopping = surface.updateVoiceChannel('1', { id: '99' });
+  sink.sendControl({ speakerId: '5', displayName: 'Destination speaker' });
+  sink.sendFrame('5', 2, Buffer.from('destination'));
+  surface.updateVoiceChannel('1', { id: '100' });
+  assert.equal(surface.status('1').status, 'not-recording');
+  assert.equal((await stopping).status, 'stopped');
+  assert.equal(frames.length, 1);
+  assert.equal(stops.length, 1);
+  assert.equal(stops[0].record.voice_channel_id, '3');
+  assert.deepEqual(stops[0].record.participants, [
+    { discord_id: '4', display_name: 'Original speaker' },
+  ]);
+  assert.equal(fakes.posterCalls.length, 1);
+  assert.match(fakes.notifies.at(-1).content, /moved voice channels/);
+});
+
+test('save:false recordings continue to follow channel moves', async () => {
+  const fakes = makeFakes();
+  const surface = createMeetingSurface({ ...fakes });
+  await surface.start({
+    guildId: '1',
+    voiceChannel: { id: '3' },
+    textChannel: { id: '2' },
+    save: false,
+  });
+  surface.updateVoiceChannel('1', { id: '99' });
+  assert.equal(surface.activeSession('1').voiceChannel.id, '99');
+  assert.equal(surface.status('1').status, 'recording');
+  assert.equal(fakes.stopCalls.length, 0);
+  await surface.stop('1');
 });

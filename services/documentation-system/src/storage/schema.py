@@ -1,21 +1,34 @@
 """SQLAlchemy Core Table definitions for the documentation-system schema."""
 
+from pgvector.sqlalchemy import VECTOR
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Computed,
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     MetaData,
     Table,
     Text,
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR, UUID
 
 metadata = MetaData()
+
+source_refresh_run = Table(
+    "source_refresh_run",
+    metadata,
+    Column("singleton", Boolean, primary_key=True),
+    Column("run_id", UUID(as_uuid=True), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("created_by", Text, nullable=False),
+    CheckConstraint("singleton", name="ck_source_refresh_run_singleton"),
+)
 
 sources = Table(
     "sources",
@@ -50,6 +63,9 @@ docs = Table(
     Column("owning_person_label", Text, nullable=True),
     Column("content_snapshot", Text, nullable=True),
     Column("fetched_at", DateTime(timezone=True), nullable=True),
+    Column("purged_at", DateTime(timezone=True), nullable=True),
+    Column("source_access_synced_at", DateTime(timezone=True), nullable=True),
+    Column("source_access_attempted_at", DateTime(timezone=True), nullable=True),
     Column("active", Boolean, nullable=False, server_default=text("true")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
@@ -71,6 +87,17 @@ docs = Table(
     Index("ix_docs_source", "source_id"),
 )
 
+# Migration-owned rollback data; application adapters never read or write it.
+doc_source_url_backfill = Table(
+    "doc_source_url_backfill",
+    metadata,
+    Column(
+        "doc_id", UUID(as_uuid=True), ForeignKey("docs.id", ondelete="CASCADE"), primary_key=True
+    ),
+    Column("original_url", Text, nullable=False),
+    Column("replacement_url", Text, nullable=False),
+)
+
 doc_tags = Table(
     "doc_tags",
     metadata,
@@ -89,18 +116,48 @@ doc_grants = Table(
     Column("grantee_id", UUID(as_uuid=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("created_by", Text, nullable=False),
+    Column("origin", Text, nullable=False, server_default=text("'manual'")),
+    Column("source_permission_id", Text, nullable=True),
+    Column("source_principal", Text, nullable=True),
+    Column("source_role", Text, nullable=True),
+    Column("source_inherited", Boolean, nullable=False, server_default=text("false")),
+    Column("source_expires_at", DateTime(timezone=True), nullable=True),
+    Column(
+        "source_inherited_from",
+        ARRAY(Text),
+        nullable=False,
+        server_default=text("ARRAY[]::text[]"),
+    ),
+    Column("expires_at", DateTime(timezone=True), nullable=True),
     CheckConstraint(
         "(grantee_type = 'org' AND grantee_id IS NULL) OR "
         "(grantee_type IN ('person', 'team') AND grantee_id IS NOT NULL)",
         name="ck_doc_grants_grantee_shape",
     ),
-    UniqueConstraint("doc_id", "grantee_type", "grantee_id", name="uq_doc_grants_grantee"),
     Index("ix_doc_grants_doc", "doc_id"),
+    Index(
+        "uq_doc_grants_manual_grantee",
+        "doc_id",
+        "grantee_type",
+        "grantee_id",
+        unique=True,
+        postgresql_where=text("origin = 'manual' AND grantee_id IS NOT NULL"),
+    ),
     Index(
         "uq_doc_grants_org",
         "doc_id",
         unique=True,
-        postgresql_where=text("grantee_type = 'org'"),
+        postgresql_where=text("origin = 'manual' AND grantee_type = 'org'"),
+    ),
+    Index(
+        "uq_doc_grants_source_permission",
+        "doc_id",
+        "origin",
+        "source_permission_id",
+        "grantee_type",
+        "grantee_id",
+        unique=True,
+        postgresql_where=text("origin <> 'manual'"),
     ),
 )
 
@@ -121,6 +178,44 @@ doc_content = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
 )
 
+doc_chunks = Table(
+    "doc_chunks",
+    metadata,
+    Column(
+        "doc_id", UUID(as_uuid=True), ForeignKey("docs.id", ondelete="CASCADE"), primary_key=True
+    ),
+    # One complete set per (doc, model): during a re-embed (#209) the target
+    # model's set is built beside the one search serves (migration 017).
+    Column("embedding_model", Text, primary_key=True),
+    Column("ordinal", Integer, primary_key=True),
+    Column("chunk_text", Text, nullable=False),
+    Column("start_offset", Integer, nullable=False),
+    Column("end_offset", Integer, nullable=False),
+    Column("source_content_hash", Text, nullable=False),
+    # NULL on pre-fingerprint chunks: keep them available but queue a refresh.
+    Column("source_title_hash", Text, nullable=True),
+    Column("embedding", VECTOR(1536), nullable=False),
+    Column("dimensions", Integer, nullable=False),
+    Column(
+        "search_vector",
+        TSVECTOR,
+        Computed("to_tsvector('simple'::regconfig, chunk_text)", persisted=True),
+        nullable=False,
+    ),
+    CheckConstraint("ordinal >= 0", name="ck_doc_chunks_ordinal"),
+    CheckConstraint(
+        "start_offset >= 0 AND end_offset > start_offset "
+        "AND char_length(chunk_text) = end_offset - start_offset",
+        name="ck_doc_chunks_offsets",
+    ),
+    CheckConstraint("source_content_hash ~ '^[0-9a-f]{64}$'", name="ck_doc_chunks_content_hash"),
+    CheckConstraint("source_title_hash ~ '^[0-9a-f]{64}$'", name="ck_doc_chunks_title_hash"),
+    CheckConstraint("embedding_model ~ '[^[:space:]]'", name="ck_doc_chunks_model"),
+    CheckConstraint("dimensions = 1536", name="ck_doc_chunks_dimensions"),
+    # Exact vector scans initially (#208); the PK serves per-document reads.
+    Index("ix_doc_chunks_search_vector", "search_vector", postgresql_using="gin"),
+)
+
 api_keys = Table(
     "api_keys",
     metadata,
@@ -136,4 +231,53 @@ api_keys = Table(
     Column("updated_by", Text, nullable=False),
     Column("revoked_at", DateTime(timezone=True), nullable=True),
     Column("last_used_at", DateTime(timezone=True), nullable=True),
+)
+
+
+meeting_records = Table(
+    "meeting_records",
+    metadata,
+    Column("failed_at", DateTime(timezone=True), nullable=True),
+    Column("meeting_id", UUID(as_uuid=True), primary_key=True),
+    Column("payload_hash", Text, nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("doc_id", UUID(as_uuid=True), ForeignKey("docs.id"), nullable=True),
+    Column("google_document_id", Text, nullable=True, unique=True),
+    Column("google_deleted_at", DateTime(timezone=True), nullable=True),
+    Column("google_deletions", JSONB, nullable=False, server_default=text("'{}'")),
+    Column("removed_google_document_ids", ARRAY(Text), nullable=False, server_default=text("'{}'")),
+    Column("index_pending", Boolean, nullable=False, server_default=text("false")),
+    Column("doc_url", Text, nullable=True),
+    Column("guild_id", Text, nullable=True),
+    Column("text_channel_id", Text, nullable=True),
+    Column("voice_channel_id", Text, nullable=True),
+    Column("requester_discord_id", Text, nullable=True),
+    Column("title", Text, nullable=True),
+    Column("summary", Text, nullable=True),
+    Column("last_error", Text, nullable=True),
+    Column("discord_message_id", Text, nullable=True),
+    Column("removed_by", Text, nullable=True),
+    Column("requester_person_id", UUID(as_uuid=True), nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("ended_at", DateTime(timezone=True), nullable=True),
+    Column("generated_at", DateTime(timezone=True), nullable=True),
+    Column("create_lease_until", DateTime(timezone=True), nullable=True),
+    Column("next_reconcile_at", DateTime(timezone=True), nullable=True),
+    Column("next_attempt_at", DateTime(timezone=True), nullable=True),
+    Column("removed_at", DateTime(timezone=True), nullable=True),
+    Column("participants", JSONB, nullable=False),
+    Column("decisions", JSONB, nullable=False),
+    Column("action_items", JSONB, nullable=False),
+    Column("audience_team_ids", ARRAY(UUID(as_uuid=True)), nullable=False),
+    Column("audience_group_emails", ARRAY(Text), nullable=False),
+    Column("pending_payload", JSONB(none_as_null=True), nullable=True),
+    Column("persistence_status", Text, nullable=False),
+    Column("create_attempt_id", UUID(as_uuid=True), nullable=True),
+    Column("attempts", Integer, nullable=False),
+    Column("delivery_status", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("created_by", Text, nullable=False),
+    Column("updated_by", Text, nullable=False),
+    Index("ix_meeting_records_due", "next_attempt_at", "next_reconcile_at"),
 )

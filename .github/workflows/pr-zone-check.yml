@@ -1,11 +1,12 @@
 name: pr-zone-check
 
-# Discourages multi-zone PRs. Zones mirror the areas in .github/CODEOWNERS.
+# Discourages multi-zone PRs. Zones mirror the zone lines in .github/CODEOWNERS
+# and are defined in docs/CODE-OWNERSHIP.md.
 # A PR touching more than one zone gets a warning (non-blocking) — keep changes
-# scoped to a single area so ownership/review stays clean.
+# scoped to a single zone so ownership/review stays clean.
 #
-# To ENFORCE instead of discourage, change the `exit 0` at the end to `exit 1`
-# and add this job as a required status check in branch protection.
+# To ENFORCE, add `exit 1` inside the count > 1 branch, preserving the final
+# `exit 0` for valid PRs, and require this job in branch protection.
 #
 # See issue #34.
 
@@ -28,7 +29,7 @@ jobs:
     steps:
       - name: Detect zones touched
         run: |
-          # Keep in sync with the area list in .github/CODEOWNERS.
+          # Keep in sync with the zone list in .github/CODEOWNERS.
           # First match wins, so the specific paths must precede the
           # services/* and packages/* catch-alls — those exist so a newly
           # added service lands in its own bucket instead of silently
@@ -40,6 +41,7 @@ jobs:
               packages/*)                       echo packages/other ;;
               services/connectors/*)            echo services/connectors ;;
               services/documentation-system/*)  echo services/documentation-system ;;
+              services/gateway/*)               echo services/gateway ;;
               services/llm/*)                   echo services/llm ;;
               services/meeting/*)               echo services/meeting ;;
               services/team-tracking/*)         echo services/team-tracking ;;
@@ -68,10 +70,10 @@ jobs:
 
           if [ "$count" -gt 1 ]; then
             joined=$(echo "$zones" | paste -sd ',' - | sed 's/,/, /g')
-            echo "::warning::This PR touches multiple zones ($joined). Multi-zone PRs are discouraged — consider splitting so each area is reviewed on its own."
+            echo "::warning::This PR touches multiple zones ($joined). Multi-zone PRs are discouraged — consider splitting so each zone is reviewed on its own."
           else
             echo "OK: single-zone PR."
           fi
 
-          # Non-blocking by design. Change to `exit 1` (and require this check) to enforce.
+          # Non-blocking. To enforce, fail inside the multi-zone branch, not here.
           exit 0

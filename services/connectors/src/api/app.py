@@ -18,9 +18,11 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(AuditLogMiddleware, logger_name="connectors.audit")
 
-    from src.api.routers import fetch as fetch_router
+    from src.api.routers import discovery, meeting, fetch as fetch_router
 
     app.include_router(fetch_router.router)
+    app.include_router(discovery.router)
+    app.include_router(meeting.router)
 
     @app.get("/health")
     def health() -> dict[str, str]:

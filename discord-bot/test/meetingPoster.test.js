@@ -1,15 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { makeAttachmentPoster } from '../src/adapters/discord.js';
+import { makeAttachmentPoster } from '../src/adapters/discord/meetingPosts.js';
 
 function fakeChannel({ sendImpl } = {}) {
   const calls = [];
   return {
     calls,
-    send: sendImpl ?? (async (payload) => {
-      calls.push(payload);
-      return payload;
-    }),
+    send:
+      sendImpl ??
+      (async (payload) => {
+        calls.push(payload);
+        return payload;
+      }),
   };
 }
 
@@ -17,12 +19,16 @@ test('poster posts a PDF attachment decoded from pdf_b64', async () => {
   const poster = makeAttachmentPoster();
   const pdfBytes = Buffer.from('%PDF-fake-content');
   const channel = fakeChannel();
-  await poster({ channel, report: { pdf_b64: pdfBytes.toString('base64') } });
+  await poster({
+    channel,
+    report: { pdf_b64: pdfBytes.toString('base64') },
+    startedAt: Date.UTC(2026, 9, 4, 23, 30),
+  });
 
   assert.equal(channel.calls.length, 1);
   const { files } = channel.calls[0];
   assert.equal(files.length, 1);
-  assert.equal(files[0].name, 'meeting-minutes.pdf');
+  assert.equal(files[0].name, 'meeting_2026-10-04_1930.pdf');
   assert.ok(Buffer.from(files[0].attachment).equals(pdfBytes));
 });
 
@@ -36,11 +42,26 @@ test('poster never attaches audio, even if the report still carries some', async
       pdf_b64: pdfBytes.toString('base64'),
       audio_b64: Buffer.from('audio-bytes').toString('base64'),
     },
+    name: 'Sponsorship / Sync: Q4',
+    startedAt: Date.UTC(2026, 9, 4, 23, 30),
   });
 
   const { files } = channel.calls[0];
   assert.equal(files.length, 1);
-  assert.equal(files[0].name, 'meeting-minutes.pdf');
+  assert.equal(files[0].name, 'Sponsorship Sync Q4_2026-10-04_1930.pdf');
+});
+
+test('poster collapses whitespace and falls back when a name sanitizes empty', async () => {
+  const poster = makeAttachmentPoster();
+  const channel = fakeChannel();
+  await poster({
+    channel,
+    report: { pdf_b64: Buffer.from('pdf').toString('base64') },
+    name: '  <>:"/\\\\|?*  ',
+    startedAt: Date.UTC(2026, 9, 4, 23, 30),
+  });
+
+  assert.equal(channel.calls[0].files[0].name, 'meeting_2026-10-04_1930.pdf');
 });
 
 test('poster mentions the member who started the recording', async () => {
@@ -70,7 +91,11 @@ test('a failed send surfaces instead of being swallowed', async () => {
   // means the minutes are gone permanently. Swallowing it told the user
   // "minutes will post here shortly" for a meeting that no longer exists.
   const poster = makeAttachmentPoster();
-  const channel = { send: async () => { throw new Error('missing permissions'); } };
+  const channel = {
+    send: async () => {
+      throw new Error('missing permissions');
+    },
+  };
   const originalError = console.error;
   console.error = () => {};
   try {

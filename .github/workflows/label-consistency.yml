@@ -1,0 +1,35 @@
+name: Label consistency
+
+# Fails when either hand-maintained label list drifts between the files that
+# carry it:
+#   zones (the PR axis)    — 5 files; zone_for() in pr-zone-check.yml is canonical
+#   areas (the issue axis) — 4 files; the areas array in area-label-issues.yml is
+# plus the services/ and packages/ layout on disk. See docs/CODE-OWNERSHIP.md.
+#
+# Cheap enough to be a required status check — add it in branch protection.
+
+on:
+  push:
+    branches: [staging, main]
+  pull_request:
+    branches: [staging, main]
+    # Deliberately NOT path-filtered. GitHub creates no check run for a workflow
+    # skipped by a `paths:` filter, so requiring this in branch protection would
+    # leave every PR that misses the filter stuck on "Expected — waiting for
+    # status", unmergeable without an admin override. The script is a
+    # dependency-free node run of a few dozen milliseconds; always running it
+    # costs far less than that failure mode.
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check zone and area list consistency
+        run: node scripts/check-labels.mjs

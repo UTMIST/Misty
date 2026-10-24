@@ -4,12 +4,50 @@ Task walkthroughs for working on `llm`. Assumes you've read the [README](../READ
 
 ## Conventions you need to know first
 
-- **The Protocol is the hinge.** `src/providers/base.py` defines `LLMProvider` (one method: `chat(LLMRequest) -> LLMResult`). The router depends on that, never on a concrete provider.
-- **Providers never import FastAPI; the router never imports a vendor SDK.** If you need `boto3` in `src/api/`, or `HTTPException` in `src/providers/`, the layering is wrong.
-- **Two type families, mapped in one place.** `contracts/` holds Pydantic wire models; `src/providers/base.py` holds plain dataclasses. `src/api/routers/chat.py` is the only translator. Don't pass a `ChatRequest` into a provider.
-- **Raise the normalized error.** Providers raise `ProviderRateLimited` / `ProviderTimeout` / `ProviderUnavailable`. A raw vendor exception escaping a provider becomes a 500 instead of a clean 502 — that's a bug.
+- **The Protocol is the hinge.** `src/providers/base.py` defines `LLMProvider.chat(LLMRequest) -> LLMResult` and `EmbeddingProvider.embed(EmbeddingRequest) -> EmbeddingResult`. Routers depend on these, never on concrete providers.
+- **Providers never import FastAPI; the router never imports a vendor SDK.** If you need `boto3` or `openai` in `src/api/`, or `HTTPException` in `src/providers/`, the layering is wrong.
+- **Two type families, mapped once per capability.** `contracts/` holds Pydantic wire models; `src/providers/base.py` holds plain dataclasses. `src/api/routers/chat.py` and `embed.py` translate between them. Don't pass wire models into providers.
+- **Raise the normalized error.** Providers raise the `ProviderError` subclasses described in [ARCHITECTURE.md](ARCHITECTURE.md#error-normalization). A raw vendor exception escaping a provider becomes a 500 — that's a bug.
 - **Validate before you spend.** Anything checkable without calling the model belongs in the Pydantic model or a dependency, so it 422s/403s before a paid call.
 - **Credentials are `SecretStr`.** Every credential field in `Settings` is `pydantic.SecretStr`; unwrap with `.get_secret_value()` at the boundary. See [`packages/auth/README.md`](../../../packages/auth/README.md#credential-config-convention).
+
+## Changing tool-use transport
+
+Read [API.md](API.md#client-executed-tools) before changing structured messages.
+Wire models stay in `contracts/`; provider dataclasses stay in
+`src/providers/base.py`; only the chat router maps between them. Framework-free
+JSON validation helpers may be shared without importing the wire models into
+providers. Update every relevant provider codec for a supported block or tool field. OpenAI
+uses Responses and carries encrypted reasoning state; Bedrock carries signed reasoning.
+Provider-specific blocks must fail before inference on incompatible backends.
+History validation exists at the HTTP boundary (`ChatRequest`) and the reusable
+provider boundary (`validate_tool_request`); change and test both together so
+invalid HTTP input stays a 422 instead of becoming a provider-side 502.
+
+Preserve the exact no-tools/string-message request mapping and response JSON.
+Tool tests must also exercise a complete round-trip through a stubbed real SDK,
+including signed reasoning, redacted bytes, parallel calls, and error results.
+Botocore Stubber does not exercise response parsing: use intercepted real
+HTTP transports when testing the raw boundary or an SDK upgrade. Focused review
+regressions are retained in `tests/test_tool_stop_reasons.py`: empty completions,
+truncated tool calls, metadata/audit preservation, and strict-request controls.
+Keep response-side empty-list support separate from request validation. The initial
+broad tool suite remains removed; see the [audit record](TOOL-USE-AUDIT.md#test-cleanup).
+OpenAI treats added JSON response properties as backward-compatible. Validate the
+fields the adapter consumes and ignore extra metadata on known response objects;
+preserve bounded additions inside opaque reasoning state for replay. Do not add
+an exhaustive response-property allowlist. Unknown output/content types, malformed
+required fields, and unsupported function execution modes still fail closed.
+Bedrock's raw SDK shape validation remains strict.
+Unknown or malformed upstream blocks must normalize to a provider error rather
+than being silently discarded or coerced into valid-looking data. The explicit
+exception is withholding tool calls from `max_tokens` turns and all other incomplete
+OpenAI responses; preserve the stop metadata instead of treating partial arguments
+as executable. Invalid input must fail before inference and must not echo or log
+tool/continuation data.
+
+Do not implement execution, authorization decisions for named tools, or a loop
+inside this service. Those remain consumer responsibilities (#71).
 
 ## Local setup
 
@@ -17,14 +55,22 @@ Task walkthroughs for working on `llm`. Assumes you've read the [README](../READ
 cd services/llm
 cp .env.example .env
 uv sync --extra dev
-uv run pytest          # confirm the environment works — no Docker, no network, no AWS
+uv run pytest          # confirm the environment works — no Docker, no network, no credentials
 ```
 
-You only need AWS credentials to make *real* Bedrock calls. The suite uses a fake provider.
+Default chat and embeddings share `OPENAI_API_KEY`; optional Bedrock chat needs AWS
+credentials. Tests use fakes. Keep real values in gitignored `.env`, and placeholders only in `.env.example`.
+See [DEPLOYMENT.md](DEPLOYMENT.md#variables) for the non-local credential boot checks.
 
-## Walkthrough: add a provider backend
+## Embedding guards
 
-Say you're adding a direct-to-Anthropic-API backend alongside the two Bedrock ones.
+Keep `MAX_INPUT_CHARS` / `MAX_BATCH_INPUTS` in `contracts/embed.py` and
+`EMBED_MAX_REQUEST_CHARS` in `src/config.py` aligned with the [API limits](API.md#post-embed).
+Preserve the [batching and timeout guarantees](API.md#batching-and-timeouts).
+
+## Walkthrough: add a chat provider backend
+
+Say you're adding a direct-to-Anthropic-API backend alongside OpenAI and the two Bedrock chat ones.
 
 1. **Implement the Protocol** at `src/providers/anthropic_direct.py`. Copy `bedrock_converse.py` for shape:
 
@@ -59,6 +105,7 @@ Say you're adding a direct-to-Anthropic-API backend alongside the two Bedrock on
        )
 
    PROVIDERS: dict[str, Callable[[Settings], LLMProvider]] = {
+       "openai": _build_openai,
        "bedrock": _build_bedrock,
        "bedrock-converse": _build_bedrock_converse,
        "anthropic-direct": _build_anthropic_direct,
@@ -66,6 +113,8 @@ Say you're adding a direct-to-Anthropic-API backend alongside the two Bedrock on
    ```
 
    `get_provider` raises `ValueError` for an unknown `LLM_PROVIDER`, so a typo fails at wiring time.
+   Add the provider's model set to `MODELS_BY_PROVIDER` in `contracts/models.py` too;
+   boot validation checks this catalog before wiring.
 
 3. **Add its config** to `src/config.py` (`SecretStr` for the key) and `.env.example`. Decide whether `verify_production_secrets()` should require it — see the config walkthrough below.
 
@@ -73,32 +122,41 @@ Say you're adding a direct-to-Anthropic-API backend alongside the two Bedrock on
 
 5. **Update the README's provider table** and the `LLM_PROVIDER` row in its config table.
 
-## Walkthrough: allow a new model
+## Walkthrough: allow a new chat model
 
 Model names are an allowlist, not a passthrough.
 
-1. Add it to `ALLOWED_MODELS` in `contracts/chat.py`.
+1. Add it to the appropriate provider set in `contracts/models.py`. The union is
+   the wire allowlist; each provider set also validates boot configuration and overrides.
 2. **Map it in each provider that needs a mapping.** `BedrockConverseProvider` keeps an explicit neutral-name → inference-profile-id table; a name in `ALLOWED_MODELS` with no entry there will fail at call time rather than validation time.
-3. Confirm the AWS account actually has access to it in the configured region — this is the usual cause of a 502 on a newly added model.
+3. Confirm the selected provider account has access (and the AWS region for Bedrock) — this is the usual cause of a 502 on a newly added model.
 4. Add a validation test (the new name is accepted, a bogus one still 422s) and update the `model` row in [API.md](API.md) and the README.
+
+For embeddings, keep `ALLOWED_EMBED_MODELS` in `contracts/embed.py` and the id/dimension
+tables in `openai_embed.py` in sync. Test ordering, fixed width, and typed failures offline;
+record model changes and downstream compatibility in [ARCHITECTURE.md](ARCHITECTURE.md#initial-embedding-model).
 
 ## Walkthrough: add a config setting
 
 1. Add the field to `Settings` in `src/config.py` (`SecretStr` if credential-shaped).
 2. Add it to `.env.example` with a working local default and a comment.
-3. Decide whether `verify_production_secrets()` should require it outside `local`. Ask: *would a deploy missing this be broken in a confusing way at request time?* If yes, add it — a misconfigured deploy should die at boot. `API_KEY` and `AWS_REGION` are required for exactly this reason.
-4. Add a row to the README's configuration table.
+3. Decide whether `verify_production_secrets()` should require it outside `local`. Ask: *would a deploy missing this be broken in a confusing way at request time?* If yes, add it — a misconfigured deploy should die at boot. `API_KEY` and `OPENAI_API_KEY` are required for exactly this reason; `AWS_REGION`
+   is required only for Bedrock chat.
+4. Add a row to the README's configuration table. New deploy variables also require updates to [DEPLOYMENT.md](DEPLOYMENT.md) and the [platform Railway guide](../../../docs/RAILWAY-DEPLOYMENT.md).
 5. Add a case to `tests/test_config.py` — there are existing ones for both "boot check passes" and "boot check refuses".
 
 ## Testing
 
-Single-mode. No Docker, no database, no network, no AWS credentials:
+Single-mode. No Docker, no database, no network, no AWS or OpenAI credentials:
 
 ```bash
 uv run pytest
 ```
 
-A `_FakeProvider` implementing `LLMProvider` is injected via `app.dependency_overrides[get_llm]`. Coverage spans the `/chat` happy path and neutral-type mapping, auth (missing key → 401, no `chat` scope → 403, `chat` → 200, `admin` → 200), validation (empty messages, unknown model → 422), provider-error → status mapping, the key store, the `llm-keys` CLI, config/boot checks, both Bedrock adapters against stubbed clients, the audit log, and the OpenAPI schema.
+Route tests inject fake `LLMProvider` / `EmbeddingProvider` implementations through
+`app.dependency_overrides[get_llm]` / `[get_embedder]`. Provider tests use stubbed clients
+or mock transports. Coverage includes auth/scopes, validation, batch order/dimensions,
+normalized failures, the key store and CLI, config/boot checks, audit metadata, and OpenAPI.
 
 Useful invocations:
 
@@ -108,7 +166,7 @@ uv run pytest -k provider            # by name substring
 uv run pytest -x -q                  # stop at first failure, quiet
 ```
 
-**Never write a test that makes a real Bedrock call.** The suite must stay runnable offline and free.
+**Never write a test that makes a real Bedrock or OpenAI call.** The suite must stay runnable offline and free.
 
 ## Linting and formatting
 
@@ -124,11 +182,11 @@ CI runs `llm-test`: `uv sync --extra dev`, `uv run pytest`, `ruff check`, **and*
 
 ## Checklist before you push
 
-- [ ] New provider implements `LLMProvider` and is registered in `PROVIDERS`.
+- [ ] Providers implement the appropriate `LLMProvider` / `EmbeddingProvider` Protocol; new chat backends are registered in `PROVIDERS`.
 - [ ] Every vendor exception is normalized to a `ProviderError` subclass — none escape raw.
 - [ ] No FastAPI import under `src/providers/`; no vendor SDK import under `src/api/`.
-- [ ] A new model is in `ALLOWED_MODELS` **and** mapped in every provider that needs it.
+- [ ] A new model is in the appropriate allowlist **and** its provider mappings, with declared dimensions for embeddings.
 - [ ] Anything checkable without a paid call fails at validation/auth time, not after.
 - [ ] Credential settings are `SecretStr`, unwrapped only at the boundary.
-- [ ] Tests run offline with no AWS credentials.
+- [ ] Tests run offline with no AWS or OpenAI credentials.
 - [ ] `uv run pytest`, `uv run ruff check .`, and `uv run ruff format --check .` are clean.

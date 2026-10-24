@@ -1,7 +1,8 @@
 import { resolvePrincipal } from './auth/principal.js';
 import { authorize } from './auth/policy.js';
-import { DirectoryUnavailable } from './directoryClient.js';
-import { authMessages } from './messages.js';
+import { DirectoryUnavailable } from './clients/directoryClient.js';
+import { authMessages } from './messages/auth.js';
+import { checkOnce } from './helperChecks.js';
 
 /**
  * Select the commands registered on the surface where an intent originated.
@@ -16,52 +17,82 @@ function commandsAvailableToIntent(commands, intent, appContext) {
   const includeBeta = Boolean(
     appContext.discordGuildId && intent.discordGuildId === appContext.discordGuildId,
   );
-  return new Map(
-    [...commands].filter(([, candidate]) => !candidate.beta || includeBeta),
-  );
+  return new Map([...commands].filter(([, candidate]) => !candidate.beta || includeBeta));
 }
 
 // The single Policy Enforcement Point: authenticate -> authorize -> dispatch.
 // Command handlers never re-implement any of this.
 //
 /**
- * Authenticate, authorize, and dispatch a surface-neutral command intent.
+ * Authenticate and authorize a surface-neutral command intent.
  *
  * @param {object} intent Command invocation metadata.
  * @param {object} dependencies Command registry and shared application context.
- * @returns {Promise<object|null>} Reply payload, or null for an unknown command.
+ * @returns {Promise<object>} Authorized command/principal, or an error reply.
  */
-export async function dispatch(intent, { commands, appContext }) {
+export async function authorizeCommand(intent, { commands, appContext, checks = new Map() }) {
   const command = commands.get(intent.commandName);
-  if (!command) return null;
+  if (!command || !commandsAvailableToIntent(commands, intent, appContext).has(command.name)) {
+    return { error: authMessages.denied('forbidden') };
+  }
 
   const activeSubcommand = intent.subcommand
     ? command.subcommands.find((s) => s.name === intent.subcommand)
     : null;
+  if (intent.subcommand && !activeSubcommand) return { error: authMessages.denied('forbidden') };
   const rawAuth = activeSubcommand?.auth ?? command.auth;
   const resolvedAuth = typeof rawAuth === 'function' ? rawAuth(intent) : rawAuth;
   const policy = resolvedAuth ?? 'linked'; // fail-secure default
 
   // --- Authentication ---
   let principal = null;
-  if (policy !== 'public' || command.identifyCaller) {
+  if (intent.requireLinked || policy !== 'public' || command.identifyCaller) {
     try {
-      principal = await resolvePrincipal(appContext.directory, intent.discordUserId);
+      principal = await checkOnce(checks, `principal:${intent.discordUserId}`, () =>
+        resolvePrincipal(appContext.directory, intent.discordUserId),
+      );
     } catch (e) {
       if (e instanceof DirectoryUnavailable) {
         // Optional identification must not turn a public command into an
         // unavailable one. It simply falls back to anonymous visibility.
-        if (policy === 'public') principal = null;
-        else return authMessages.unavailable(); // fail closed
+        if (policy === 'public' && !intent.requireLinked) principal = null;
+        else return { error: authMessages.unavailable() }; // fail closed
       } else {
         throw e;
       }
     }
   }
 
+  // Helper tools always require the requesting user's current, active identity,
+  // including tools backed by public slash commands. Never accept model identity.
+  if (
+    intent.requireLinked &&
+    (!principal ||
+      principal.person.active === false ||
+      (intent.expectedPersonId && principal.person.id !== intent.expectedPersonId) ||
+      (intent.expiresAt && Date.now() >= intent.expiresAt))
+  ) {
+    return { error: authMessages.denied('not_linked') };
+  }
+
   // --- Authorization ---
   const decision = authorize(policy, principal);
-  if (!decision.ok) return authMessages.denied(decision.reason);
+  if (!decision.ok) return { error: authMessages.denied(decision.reason) };
+  return { command, principal };
+}
+
+/** Dispatch through the shared policy check; unknown commands return null. */
+export async function dispatch(intent, { commands, appContext, checks = new Map() }) {
+  if (!commands.has(intent.commandName)) return null;
+  const { command, principal, error } = await authorizeCommand(intent, {
+    commands,
+    appContext,
+    checks,
+  });
+  if (error) {
+    if (intent.requireLinked) throw new Error('Helper command is no longer authorized');
+    return error;
+  }
 
   // --- Dispatch ---
   try {
@@ -70,11 +101,20 @@ export async function dispatch(intent, { commands, appContext }) {
       options: intent.options ?? {},
       subcommand: intent.subcommand ?? null,
       principal,
-      ctx: { ...appContext, commands: availableCommands },
+      ctx: { ...appContext, commands: availableCommands, sharedHelp: intent.sharedHelp === true },
       discordUserId: intent.discordUserId,
       discordHandle: intent.discordHandle,
+      discordGuildId: intent.discordGuildId ?? null,
+      discordChannelId: intent.discordChannelId ?? null,
+      channelUsedParent: Boolean(intent.channelUsedParent),
     });
   } catch (err) {
+    if (intent.requireLinked) {
+      console.error(`Helper command ${intent.commandName} failed`);
+      // Let the pending action stop the batch; do not turn an unexpected
+      // execution failure into an ordinary result or expose backend details.
+      throw new Error('Helper command failed');
+    }
     console.error(`Command ${intent.commandName} failed:`, err);
     return authMessages.internalError();
   }
@@ -122,7 +162,7 @@ export async function dispatchAutocomplete(intent, { commands, appContext }) {
   const command = commands.get(intent.commandName);
   if (!command) return [];
   const activeOptions = intent.subcommand
-    ? command.subcommands.find((s) => s.name === intent.subcommand)?.options ?? []
+    ? (command.subcommands.find((s) => s.name === intent.subcommand)?.options ?? [])
     : command.options;
   const option = activeOptions.find((o) => o.name === intent.focusedOption);
   if (!option || typeof option.autocomplete !== 'function') return [];

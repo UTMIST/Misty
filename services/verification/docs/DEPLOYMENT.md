@@ -13,7 +13,7 @@ Service-specific deploy notes. The full platform runbook is [`docs/RAILWAY-DEPLO
 | **Healthcheck** | `/health` |
 | **Port** | Binds Railway's injected `${PORT}`; 8003 locally |
 | **Exposure** | Private. Reached by the bot as `verification.railway.internal:${PORT}`. |
-| **State** | One table of short-lived rows. See [Data retention](#data-retention). |
+| **State** | One table of persistent rows containing short-lived codes. See [Data retention](#data-retention). |
 
 ## Variables
 
@@ -38,7 +38,12 @@ Service-specific deploy notes. The full platform runbook is [`docs/RAILWAY-DEPLO
 - `EMAIL_BACKEND=fake`,
 - a selected real backend missing its required credentials.
 
-The `fake` check is the one people trip over, and it's the most important. A deploy running the fake backend looks perfectly healthy — green healthcheck, 202 on every `request-code` — while delivering no mail at all and 404ing every confirm. Refusing to boot is strictly better than that.
+The `fake` check prevents a service from passing health checks and returning 202
+for accepted requests while delivering no code to the user. The fake still
+stores a code row, and confirmation follows the normal state machine; missing
+delivery prevents normal user completion. Real-backend checks validate presence
+of credentials, not their contents or provider access; see
+[request-code errors](API.md#errors).
 
 ## No key provisioning
 
@@ -65,7 +70,10 @@ Then `git revert` the code change and push.
 
 ## Data retention
 
-`verification_codes` holds one row per subject with a live or recently-consumed code. Rows are superseded on reissue (unique `subject` + upsert), so the table's steady-state size is bounded by *distinct subjects that have ever verified*, not by verification volume.
+`verification_codes` holds one row per subject with a successfully stored
+request, whether confirmed or not. Rows are superseded on reissue (unique
+`subject` + upsert), so the table grows with distinct subjects that have had
+stored requests. Code expiry does not remove the email/subject association.
 
 **Nothing prunes consumed or expired rows.** There is no cleanup job. Each row holds an email address and an HMAC — no plaintext code — but it is still personal data sitting there indefinitely. If retention becomes a concern, a periodic `DELETE FROM verification_codes WHERE expires_at < now() - interval '30 days'` is safe: the confirm path treats a missing row and an expired-consumed row identically (both 404 `no_pending_code`).
 
@@ -81,7 +89,7 @@ There is no in-flight state to worry about beyond codes issued in the last 10 mi
 
 - **Container dies at boot.** Read the error — it names which guard tripped. Most often `EMAIL_BACKEND` is still `fake`, or `CODE_HMAC_SECRET`/`API_KEY` is still a dev default.
 - **Every `request-code` returns 502 `email_send_failed`.** The mail provider is rejecting the send. For `resend`: check `RESEND_API_KEY` and that `EMAIL_FROM` is on a verified domain. For `gmail`: check domain-wide delegation is granted and `GMAIL_SENDER` is impersonable. Note that nothing is stored on this path, so users can retry immediately.
-- **Codes are sent but every confirm 404s.** The subject doesn't match between the two calls. `subject` is opaque and compared exactly — a caller that builds it differently on the two paths (say `discord:12345` vs `discord:12345 `) will never match. Trimming happens, but nothing else is normalized.
+- **Codes are sent but every confirm 404s.** Check that the subject matches between the two calls. `subject` is opaque and compared exactly after trimming — `discord:12345` and `email:12345` differ, while trailing whitespace alone does not. Nothing else is normalized.
 - **Users report "code expired" immediately.** Check clock skew on the instance; `expires_at` is computed server-side from `datetime.now(timezone.utc)`.
 - **Legitimate users hitting 429 `rate_limited`.** The 60 s window keys on **email**, not subject. A user retrying `/link` quickly, or two subjects using the same address, will collide. This is working as designed — the window is in `src/policy.py` if it genuinely needs revisiting.
 - **429 `too_many_attempts` on a fresh code.** The attempt counter is per row, and a reissue replaces the row — so this shouldn't survive a new `request-code`. If it does, the reissue didn't happen (check for a 429 `rate_limited` on that call instead).

@@ -70,9 +70,17 @@ curl -sS -X POST http://localhost:8003/verification/request-code \
 | Condition | Status | Detail |
 |---|---|---|
 | Another code for this email within 60 s | 429 | `rate_limited` |
-| Mail provider failed | 502 | `email_send_failed` |
+| Mail failure normalized to `EmailSendError` | 502 | `email_send_failed` |
+| Unhandled mail setup/transport exception | 500 | No domain error detail guaranteed |
 | Invalid email / empty subject / extra field | 422 | Pydantic validation error |
 | Missing/invalid `X-API-Key` | 401 | — |
+
+The router catches only `EmailSendError`. Resend wraps `urllib.error.URLError`,
+but a raw transport `TimeoutError` can escape. Gmail builds its client and parses
+credentials before its send exception handler, so setup errors can also escape
+as 500s. Boot checks require credentials to be present; they do not validate
+their contents or provider access. Normalizing these remaining failure paths
+requires a separate implementation change.
 
 ---
 

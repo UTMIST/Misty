@@ -1,8 +1,9 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from contracts.groups import GroupProvider
 from contracts.storage import StorageAdapter
 from contracts.types import (
     Person,
@@ -11,7 +12,8 @@ from contracts.types import (
     PersonIdentifierUpdate,
 )
 from src.api.auth import AuthedKey, get_actor, require_scope
-from src.api.deps import get_storage
+from src.api.deps import get_group_provider, get_storage
+from src.google_groups import current_team_ids, schedule_sync
 
 router = APIRouter(prefix="/people", tags=["identifiers"])
 
@@ -62,16 +64,20 @@ def list_identifiers(
 def add_person_email(
     person_id: UUID,
     payload: AddEmailIn,
+    background: BackgroundTasks,
     storage: StorageAdapter = Depends(get_storage),
+    groups: GroupProvider | None = Depends(get_group_provider),
     actor: str = Depends(get_actor),
     _: AuthedKey = Depends(require_scope("identifiers:write")),
 ) -> PersonIdentifier:
     if storage.get_person(person_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="person not found")
     try:
-        return storage.add_person_email(person_id, payload.email, actor=actor)
+        added = storage.add_person_email(person_id, payload.email, actor=actor)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    schedule_sync(background, storage, groups, current_team_ids(storage, person_id), actor=actor)
+    return added
 
 
 @router.post(

@@ -1,0 +1,89 @@
+name: Feature or task
+description: New capability, improvement, or a chunk of planned work
+labels: ["type/feature"]
+body:
+  - type: input
+    id: blocked-by
+    attributes:
+      label: Blocked by
+      description: >-
+        Issue numbers this depends on, like `#40, #42`. The label automation
+        reads this field and keeps the `blocked` / `ready` labels in sync as
+        those issues close and reopen. Leave it empty if nothing blocks this.
+      placeholder: "#40, #42"
+    validations:
+      required: false
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: The capability, in one or two sentences.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: >-
+        The problem it solves. For a student org with rotating leadership, "who
+        is worse off today without this, and how" is the useful framing.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: >-
+        Which parts of the system this involves, and so what someone picking it
+        up would need to know. Pick every one that applies — issues routinely
+        span several. This is a different axis from a PR's zone: one
+        `area/service` issue can span six zones.
+      multiple: true
+      options:
+        - bot
+        - deployment
+        - docs-system
+        - integration
+        - observability
+        - service
+        - tooling
+        - not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: done
+    attributes:
+      label: Done looks like
+      description: >-
+        Concrete and checkable. A reviewer should be able to tell whether this
+        shipped without asking you.
+      value: |
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+
+  - type: textarea
+    id: design-notes
+    attributes:
+      label: Design notes
+      description: >-
+        Optional. Worth writing if any of these apply: it needs a new endpoint,
+        scope, or config variable; it needs a migration; it crosses a service
+        boundary or adds a dependency between services; it changes something an
+        existing consumer relies on; it conflicts with a documented convention
+        (say which, and why it's worth it).
+    validations:
+      required: false
+
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: Optional, but it's the field that most often prevents scope creep.
+    validations:
+      required: false

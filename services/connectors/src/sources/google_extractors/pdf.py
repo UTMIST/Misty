@@ -6,11 +6,12 @@ new API client. pypdf rather than pymupdf: pymupdf is AGPL.
 """
 
 import io
+import logging
 
 import pypdf
 
 from src.sources.base import SourceUnsupported
-from src.sources.google_extractors.base import ExtractedText, execute
+from src.sources.google_extractors.base import ExtractedText, execute_bytes
 from src.sources.google_extractors.drive_export import DRIVE_READONLY
 
 PDF_MIME = "application/pdf"
@@ -19,13 +20,22 @@ NO_TEXT_LAYER_WARNING = (
     "pdf has no extractable text layer (likely a scanned document); no content was captured"
 )
 
+# Malformed PDFs can put document text in pypdf diagnostics. Stop child
+# records at the package boundary, including ERRORs and explicit child levels.
+# Configure once: toggling logging around extraction races concurrent fetches.
+_pypdf_logger = logging.getLogger("pypdf")
+_pypdf_logger.addHandler(logging.NullHandler())
+_pypdf_logger.propagate = False
+
 
 class PdfExtractor:
     scopes = (DRIVE_READONLY,)
     services = ("drive",)
 
     def extract(self, services: dict, file_id: str, mime: str) -> ExtractedText:
-        payload = execute(services["drive"].files().get(fileId=file_id, alt="media"))
+        payload = execute_bytes(
+            services["drive"].files().get_media(fileId=file_id, supportsAllDrives=True)
+        )
 
         # Parsing failures are properties of the FILE, not of the upstream
         # call, so they map to SourceUnsupported (422) rather than

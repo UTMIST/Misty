@@ -7,7 +7,7 @@ import seed from '../src/commands/seed.js';
 import teamCmd from '../src/commands/team.js';
 import myTeamsCmd from '../src/commands/my-teams.js';
 import { commands, partitionCommands } from '../src/commands/index.js';
-import { DirectoryUnavailable } from '../src/directoryClient.js';
+import { DirectoryUnavailable } from '../src/clients/directoryClient.js';
 import { buildDiscordData } from '../src/registerCommands.js';
 import { defineCommand } from '../src/defineCommand.js';
 
@@ -64,10 +64,21 @@ test('whoami is linked-gated and stable', () => {
 });
 
 test('whoami replies with an ephemeral embed carrying person + identifiers', async () => {
-  const person = { id: 'p1', display_name: 'Alex', primary_email: 'alex@utmist.ca', access_level: 'admin', active: true };
+  const person = {
+    id: 'p1',
+    display_name: 'Alex',
+    primary_email: 'alex@utmist.ca',
+    access_level: 'admin',
+    active: true,
+  };
   const identifiers = [{ provider: 'discord', external_id: '123', handle: 'alex' }];
   const ctx = {
-    directory: { listIdentifiers: async (id) => { assert.equal(id, 'p1'); return identifiers; } },
+    directory: {
+      listIdentifiers: async (id) => {
+        assert.equal(id, 'p1');
+        return identifiers;
+      },
+    },
   };
   const payload = await whoami.handler({ principal: { person }, ctx });
   assert.equal(payload.ephemeral, true);
@@ -82,9 +93,19 @@ test('whoami replies with an ephemeral embed carrying person + identifiers', asy
 });
 
 test('whoami degrades gracefully when identifiers fetch fails', async () => {
-  const person = { id: 'p1', display_name: 'Alex', primary_email: 'alex@utmist.ca', access_level: 'member', active: true };
+  const person = {
+    id: 'p1',
+    display_name: 'Alex',
+    primary_email: 'alex@utmist.ca',
+    access_level: 'member',
+    active: true,
+  };
   const ctx = {
-    directory: { listIdentifiers: async () => { throw new DirectoryUnavailable('down'); } },
+    directory: {
+      listIdentifiers: async () => {
+        throw new DirectoryUnavailable('down');
+      },
+    },
   };
   const payload = await whoami.handler({ principal: { person }, ctx });
   assert.equal(payload.ephemeral, true);
@@ -93,9 +114,19 @@ test('whoami degrades gracefully when identifiers fetch fails', async () => {
 });
 
 test('whoami rethrows non-DirectoryUnavailable errors from listIdentifiers', async () => {
-  const person = { id: 'p1', display_name: 'Alex', primary_email: 'alex@utmist.ca', access_level: 'member', active: true };
+  const person = {
+    id: 'p1',
+    display_name: 'Alex',
+    primary_email: 'alex@utmist.ca',
+    access_level: 'member',
+    active: true,
+  };
   const ctx = {
-    directory: { listIdentifiers: async () => { throw new Error('boom'); } },
+    directory: {
+      listIdentifiers: async () => {
+        throw new Error('boom');
+      },
+    },
   };
   await assert.rejects(() => whoami.handler({ principal: { person }, ctx }), /boom/);
 });
@@ -131,11 +162,19 @@ test('seed adapter passes options + caller into seedService and renders outcome'
   const ctx = {
     seedService: {
       seedPerson: async (args, opts) => {
-        assert.deepEqual(args, { email: 'new@utmist.ca', displayName: 'New Person', level: 'admin' });
+        assert.deepEqual(args, {
+          email: 'new@utmist.ca',
+          displayName: 'New Person',
+          level: 'admin',
+        });
         assert.equal(opts.caller.access_level, 'admin');
         return {
           outcome: 'SEEDED',
-          person: { display_name: 'New Person', primary_email: 'new@utmist.ca', access_level: 'admin' },
+          person: {
+            display_name: 'New Person',
+            primary_email: 'new@utmist.ca',
+            access_level: 'admin',
+          },
         };
       },
     },
@@ -154,7 +193,10 @@ test('seed adapter defaults level to member when option missing', async () => {
     seedService: {
       seedPerson: async (args) => {
         assert.equal(args.level, 'member');
-        return { outcome: 'SEEDED', person: { display_name: 'A', primary_email: 'a@utmist.ca', access_level: 'member' } };
+        return {
+          outcome: 'SEEDED',
+          person: { display_name: 'A', primary_email: 'a@utmist.ca', access_level: 'member' },
+        };
       },
     },
   };
@@ -177,6 +219,8 @@ test('/team is stable and its subcommands carry per-subcommand auth', () => {
   assert.equal(authFor('add'), 'admin');
   assert.equal(authFor('remove'), 'admin');
   assert.equal(authFor('rename'), 'admin');
+  assert.equal(authFor('google-status'), 'admin');
+  assert.equal(authFor('google-sync'), 'admin');
   assert.equal(authFor('list'), 'linked');
   assert.equal(authFor('roster'), 'linked');
 });
@@ -187,7 +231,14 @@ test('/team create dispatches teamService.createTeam with options and caller', a
     teamService: {
       createTeam: async (args, opts) => {
         seen = { args, opts };
-        return { outcome: 'CREATED', team: { slug: 'ml', label: 'ML' } };
+        return {
+          outcome: 'CREATED',
+          team: { slug: 'ml', label: 'ML' },
+          google: {
+            outcome: 'SYNC_RESULT',
+            state: { group_email: 'ml@utmist.skule.ca', status: 'synced' },
+          },
+        };
       },
     },
   };
@@ -227,7 +278,10 @@ test('/team list forwards active_only=false when explicitly provided', async () 
   let seen = null;
   const ctx = {
     teamService: {
-      listTeams: async (args) => { seen = args; return { outcome: 'LISTED', teams: [] }; },
+      listTeams: async (args) => {
+        seen = args;
+        return { outcome: 'LISTED', teams: [] };
+      },
     },
   };
   await teamCmd.handler({
@@ -259,6 +313,60 @@ test('/team rename dispatches renameTeam', async () => {
   assert.match(payload.content, /New ML/);
 });
 
+test('/team google-status dispatches getGoogleGroupStatus', async () => {
+  let seen = null;
+  const ctx = {
+    teamService: {
+      getGoogleGroupStatus: async (args) => {
+        seen = args;
+        return {
+          outcome: 'STATUS',
+          team: { slug: 'ml', label: 'ML' },
+          state: { group_email: 'ml@utmist.skule.ca', status: 'synced' },
+        };
+      },
+    },
+  };
+  const payload = await teamCmd.handler({
+    subcommand: 'google-status',
+    options: { team: 'ml' },
+    principal: { person: { access_level: 'admin' } },
+    ctx,
+  });
+  assert.deepEqual(seen, { teamSlug: 'ml' });
+  assert.match(payload.content, /synced/i);
+  assert.equal(payload.ephemeral, true);
+});
+
+test('/team google-sync dispatches syncGoogleGroup', async () => {
+  let seen = null;
+  const ctx = {
+    teamService: {
+      syncGoogleGroup: async (args) => {
+        seen = args;
+        return {
+          outcome: 'SYNC_RESULT',
+          team: { slug: 'ml', label: 'ML' },
+          state: {
+            group_email: 'ml@utmist.skule.ca',
+            status: 'needs_external_members',
+            last_error: 'Allow external members',
+          },
+        };
+      },
+    },
+  };
+  const payload = await teamCmd.handler({
+    subcommand: 'google-sync',
+    options: { team: 'ml' },
+    principal: { person: { access_level: 'admin' } },
+    ctx,
+  });
+  assert.deepEqual(seen, { teamSlug: 'ml' });
+  assert.match(payload.content, /external-member/i);
+  assert.equal(payload.ephemeral, true);
+});
+
 test('/team add dispatches addMember using the mentioned user snowflake', async () => {
   let seen = null;
   const ctx = {
@@ -281,7 +389,10 @@ test('/team add dispatches addMember using the mentioned user snowflake', async 
     ctx,
   });
   assert.deepEqual(seen, {
-    discordSnowflake: '555', teamSlug: 'ml', roleKindId: 'lead', isTeamAdmin: true,
+    discordSnowflake: '555',
+    teamSlug: 'ml',
+    roleKindId: 'lead',
+    isTeamAdmin: true,
   });
   assert.match(payload.content, /Alex/);
 });
@@ -340,7 +451,9 @@ test('/team roster dispatches getRoster', async () => {
         return {
           outcome: 'ROSTER',
           team: { slug: 'ml', label: 'ML' },
-          members: [{ person: { display_name: 'Alex' }, role_kind_id: 'member', is_team_admin: false }],
+          members: [
+            { person: { display_name: 'Alex' }, role_kind_id: 'member', is_team_admin: false },
+          ],
         };
       },
     },
@@ -359,7 +472,10 @@ test('/team roster forwards as_of when provided', async () => {
   let seen = null;
   const ctx = {
     teamService: {
-      getRoster: async (args) => { seen = args; return { outcome: 'ROSTER', team: { slug: 'ml', label: 'ML' }, members: [] }; },
+      getRoster: async (args) => {
+        seen = args;
+        return { outcome: 'ROSTER', team: { slug: 'ml', label: 'ML' }, members: [] };
+      },
     },
   };
   await teamCmd.handler({
@@ -372,7 +488,12 @@ test('/team roster forwards as_of when provided', async () => {
 });
 
 test('/team handler falls back to a generic reply for an unknown subcommand', async () => {
-  const payload = await teamCmd.handler({ subcommand: 'nonsense', options: {}, principal: null, ctx: {} });
+  const payload = await teamCmd.handler({
+    subcommand: 'nonsense',
+    options: {},
+    principal: null,
+    ctx: {},
+  });
   assert.equal(payload.ephemeral, true);
   assert.match(payload.content, /went wrong/i);
 });
@@ -383,7 +504,10 @@ test('/my-teams is linked-gated, stable, and dispatches getMyTeams with caller p
   let seen = null;
   const ctx = {
     teamService: {
-      getMyTeams: async (args) => { seen = args; return { outcome: 'MY_TEAMS', memberships: [] }; },
+      getMyTeams: async (args) => {
+        seen = args;
+        return { outcome: 'MY_TEAMS', memberships: [] };
+      },
     },
   };
   const payload = await myTeamsCmd.handler({
@@ -399,22 +523,28 @@ test('registry includes team and my-teams', () => {
   assert.equal(commands.get('my-teams'), myTeamsCmd);
 });
 
-test('every command is stable (registered globally); none are beta', () => {
+test('all commands including in-progress qna register globally', () => {
   const { stable, beta } = partitionCommands([...commands.values()]);
   assert.ok(stable.some((c) => c.name === 'doc'));
-  // `record` was promoted off the beta channel in the staging → main release, so
-  // the beta partition is now empty. registerCommands still sends the (empty)
-  // beta body to the testing guild, which clears the stale guild-scoped copy.
-  assert.deepEqual(beta.map((c) => c.name), []);
+  assert.deepEqual(
+    beta.map((c) => c.name),
+    [],
+  );
   assert.equal(stable.length, commands.size);
 });
 
 test('buildDiscordData marks autocomplete string options', () => {
   const cmd = defineCommand({
-    name: 'doc', description: 'd', handler: async () => ({ content: 'x' }),
+    name: 'doc',
+    description: 'd',
+    handler: async () => ({ content: 'x' }),
     subcommands: [
-      { name: 'list', description: 'l', handler: async () => ({ content: 'y' }),
-        options: [{ name: 'team', type: 'string', description: 't', autocomplete: async () => [] }] },
+      {
+        name: 'list',
+        description: 'l',
+        handler: async () => ({ content: 'y' }),
+        options: [{ name: 'team', type: 'string', description: 't', autocomplete: async () => [] }],
+      },
     ],
   });
   const json = buildDiscordData(cmd);

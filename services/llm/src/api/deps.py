@@ -3,8 +3,8 @@ from functools import lru_cache
 from platform_auth import InMemoryKeyStore, key_store_from_config
 
 from src.config import get_settings
-from src.providers.base import LLMProvider
-from src.providers.registry import get_provider
+from src.providers.base import EmbeddingProvider, LLMProvider
+from src.providers.registry import get_embedding_provider, get_provider
 
 
 @lru_cache(maxsize=1)
@@ -30,3 +30,15 @@ def get_llm() -> LLMProvider:
     """FastAPI dependency: process-wide LLM provider. Tests override via
     app.dependency_overrides[get_llm] = lambda: fake."""
     return _provider()
+
+
+@lru_cache(maxsize=1)
+def _embedder() -> EmbeddingProvider:
+    return get_embedding_provider(get_settings())
+
+
+def get_embedder() -> EmbeddingProvider:
+    """FastAPI dependency: process-wide embedding provider. Tests override via
+    app.dependency_overrides[get_embedder] = lambda: fake. Cached separately from
+    _provider(); embedding configuration is also validated at startup."""
+    return _embedder()

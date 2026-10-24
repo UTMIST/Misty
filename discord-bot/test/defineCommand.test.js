@@ -31,17 +31,11 @@ test('defineCommand preserves explicit values', () => {
 });
 
 test('defineCommand throws on missing name', () => {
-  assert.throws(
-    () => defineCommand({ description: 'x', handler: async () => ({}) }),
-    /name/,
-  );
+  assert.throws(() => defineCommand({ description: 'x', handler: async () => ({}) }), /name/);
 });
 
 test('defineCommand throws on missing handler', () => {
-  assert.throws(
-    () => defineCommand({ name: 'x', description: 'x' }),
-    /handler/,
-  );
+  assert.throws(() => defineCommand({ name: 'x', description: 'x' }), /handler/);
 });
 
 test('defineCommand defaults ephemeral to true', () => {
@@ -70,7 +64,12 @@ test('subcommands inherit and override ephemeral', () => {
     ephemeral: false,
     subcommands: [
       { name: 'inherits', description: 'i', handler: async () => ({ content: 'ok' }) },
-      { name: 'overrides', description: 'o', ephemeral: true, handler: async () => ({ content: 'ok' }) },
+      {
+        name: 'overrides',
+        description: 'o',
+        ephemeral: true,
+        handler: async () => ({ content: 'ok' }),
+      },
     ],
     handler: async () => ({ content: 'top' }),
   });
@@ -85,9 +84,7 @@ test('defineCommand normalizes subcommands', () => {
     name: 'foo',
     description: 'x',
     auth: 'admin',
-    subcommands: [
-      { name: 'bar', description: 'b', handler: async () => ({ content: 'ok' }) },
-    ],
+    subcommands: [{ name: 'bar', description: 'b', handler: async () => ({ content: 'ok' }) }],
     handler: async () => ({ content: 'top' }),
   });
   assert.equal(cmd.subcommands.length, 1);
@@ -101,18 +98,33 @@ test('defineCommand preserves option.autocomplete on subcommand options', () => 
     description: 'd',
     handler: async () => ({ content: 'x' }),
     subcommands: [
-      { name: 'add', description: 'a', handler: async () => ({ content: 'y' }),
-        options: [{ name: 'team', type: 'string', autocomplete: resolver }] },
+      {
+        name: 'add',
+        description: 'a',
+        handler: async () => ({ content: 'y' }),
+        options: [{ name: 'team', type: 'string', autocomplete: resolver }],
+      },
     ],
   });
   assert.equal(cmd.subcommands[0].options[0].autocomplete, resolver);
 });
 
 test('defineCommand throws if an option has both choices and autocomplete', () => {
-  assert.throws(() => defineCommand({
-    name: 'doc',
-    description: 'd',
-    handler: async () => ({ content: 'x' }),
-    options: [{ name: 'team', type: 'string', choices: [{ name: 'ML', value: 'ml' }], autocomplete: async () => [] }],
-  }), /choices.*autocomplete|autocomplete.*choices/i);
+  assert.throws(
+    () =>
+      defineCommand({
+        name: 'doc',
+        description: 'd',
+        handler: async () => ({ content: 'x' }),
+        options: [
+          {
+            name: 'team',
+            type: 'string',
+            choices: [{ name: 'ML', value: 'ml' }],
+            autocomplete: async () => [],
+          },
+        ],
+      }),
+    /choices.*autocomplete|autocomplete.*choices/i,
+  );
 });

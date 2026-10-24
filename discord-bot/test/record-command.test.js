@@ -8,6 +8,16 @@ test('record command is stable with start/status/stop subcommands', () => {
   assert.equal(record.beta, false);
   const names = record.subcommands.map((s) => s.name).sort();
   assert.deepEqual(names, ['start', 'status', 'stop']);
+  const options = record.subcommands.find((s) => s.name === 'start').options;
+  assert.equal(options.find((o) => o.name === 'save').type, 'boolean');
+  const name = options.find((o) => o.name === 'name');
+  assert.deepEqual(name, {
+    name: 'name',
+    type: 'string',
+    required: false,
+    description: 'Name for the meeting minutes',
+    maxLength: 100,
+  });
 });
 
 test('record is registered in the command registry', () => {
@@ -17,7 +27,10 @@ test('record is registered in the command registry', () => {
 test('record is on the stable channel (registered globally, not testing-guild only)', () => {
   const { stable, beta } = partitionCommands([...commands.values()]);
   assert.ok(stable.some((c) => c.name === 'record'));
-  assert.deepEqual(beta.map((c) => c.name), []);
+  assert.deepEqual(
+    beta.map((c) => c.name),
+    [],
+  );
 });
 
 test('record handler is a guard that is never reached via the neutral path (adapter intercepts)', async () => {

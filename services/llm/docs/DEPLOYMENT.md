@@ -23,27 +23,77 @@ A redeploy is a plain restart — nothing to migrate, no state to drain. In-flig
 | `LLM_ENV` | `staging` / `production` | Anything but `local` turns on the boot check |
 | `API_KEY` | a real random string | **Required** by the boot check |
 | `CONSUMER_KEYS` | JSON array | Malformed → boot failure |
-| `AWS_REGION` | e.g. `us-east-1` | **Required** by the boot check |
-| `LLM_PROVIDER` | `bedrock-converse` | Leave at default unless model access changed |
-| `LLM_MODEL` | `claude-sonnet-4-6` | Default when a request omits `model` |
-| `REQUEST_TIMEOUT_S` | `60` | Per-request timeout to the provider |
-| `THINKING_DEFAULT` | `true` | Applied when a request omits `thinking` |
+| `AWS_REGION` | e.g. `us-east-1` | Required only when selecting a Bedrock chat backend |
+| `LLM_PROVIDER` | `openai` | Chat backend; Bedrock remains an explicit rollback option |
+| `LLM_MODEL` | `gpt-6.1-sol` | Default when a `/chat` request omits `model` |
+| `REQUEST_TIMEOUT_S` | `60` | SDK timeout setting; see [embedding semantics](API.md#batching-and-timeouts) |
+| `THINKING_DEFAULT` | `true` | Applied when a `/chat` request omits `thinking` |
 
-AWS credentials come from the standard chain — `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, or `AWS_BEARER_TOKEN_BEDROCK`.
+When selecting Bedrock, AWS credentials come from the standard chain — `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, or `AWS_BEARER_TOKEN_BEDROCK`.
 
-**The boot check requires `API_KEY` (overridden from the dev default) and `AWS_REGION`.** It does *not* verify that the credentials work or that the account has model access — those only surface on a real `/chat` call, as a 502.
+**Outside `local`, the boot check requires `API_KEY` (overridden from the dev default) and `OPENAI_API_KEY`.** Bedrock also requires `AWS_REGION`. Invalid chat provider/model pairs fail at boot in every environment. It checks configuration, not whether credentials work or the account has model access; those failures surface on a real provider call.
 
-Usage bills as **standard Amazon Bedrock** (AWS credits apply), deliberately not Claude Platform on AWS / Marketplace.
+Default chat usage bills through **OpenAI**. The optional Bedrock backends still bill through standard Amazon Bedrock.
+
+## Embeddings (`POST /embed`)
+
+Embeddings bill through **OpenAI, not AWS credits**. Callers need the independent
+[`embed` scope](#consumer-keys).
+
+| Variable | Default | Notes |
+|---|---|---|
+| `EMBED_MODEL` | `openai-embed-3-small` | **1536 dimensions**; see [model choice and compatibility](ARCHITECTURE.md#initial-embedding-model) |
+| `OPENAI_API_KEY` | `""` | **Required outside `local`**, even when current consumers only use `/chat` |
+| `EMBED_MAX_REQUEST_CHARS` | `400000` | Aggregate character cap; see [API limits](API.md#post-embed) |
+
+**Before merging to an auto-deploy branch or deploying llm, ensure a real `OPENAI_API_KEY`
+is configured in the target environment.** A missing key stops non-local startup. Locally,
+the service still boots without it: `/embed` and OpenAI `/chat` return 503 while
+`/health` stays usable. Bedrock chat uses its own AWS configuration.
+
+## Switching chat to OpenAI
+
+On the **llm service only**, set these existing variables together:
+
+```dotenv
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-6.1-sol
+THINKING_DEFAULT=true
+```
+
+Keep the existing `OPENAI_API_KEY` used for embeddings. Changing Python defaults
+will not override Railway variables that still explicitly select Bedrock/Claude.
+Deploy llm after updating this pair; do not change consumer URLs, keys, prompts,
+or embedding settings. The bot and meeting service keep calling `POST /chat`.
+No dependency update or database migration is needed.
+
+The adapter uses OpenAI Responses with `store=false`, no automatic retries, and
+the existing SDK timeout. `thinking=true` maps to medium effort; false maps to low
+because GPT-6.1 Sol cannot disable reasoning. Both consume the caller's output
+budget, whose OpenAI minimum is 16 tokens. Validate answer completeness and latency
+with representative bot and minutes prompts during the deployment smoke check.
+
+Start new tool conversations when switching providers. OpenAI encrypted state and
+Bedrock signed reasoning are incompatible; see [the replay contract](API.md#thinking-and-continuation).
+Rollback selects `LLM_PROVIDER=bedrock-converse` and `LLM_MODEL=claude-sonnet-4-6`
+together and restores the AWS region/credentials. There is no automatic fallback.
+
+See the [migration record](OPENAI-MIGRATION.md) for scope, tests, and file rationale.
 
 ## Consumer keys
 
-llm has no `api_keys` table. Keys live in `CONSUMER_KEYS`, and the CLI only *prints*:
+llm has no `api_keys` table. Keys live in `CONSUMER_KEYS`, and the CLI only *prints*.
+Run from the repo root; provision a new embedding caller only when approved:
 
 ```bash
 uv --project services/llm run llm-keys --name meeting --scopes chat
+# Example embedding-only caller, not an indexing-pipeline deployment:
+uv --project services/llm run llm-keys --name embedding-caller --scopes embed
 ```
 
-- **stdout** — the plaintext key, shown **once**. Set it as the consumer's `LLM_API_KEY`.
+`chat` and `embed` are independent; use `--scopes chat embed` only when a caller needs both.
+
+- **stdout** — the plaintext key, shown **once**. Give it to the consumer for `X-API-Key` (`meeting` stores it as `LLM_API_KEY`).
 - **stderr** — the JSON object. Append it to llm's `CONSUMER_KEYS` array.
 
 Then redeploy llm. **Revoking is the reverse**: drop the entry and redeploy. There is no revoke command, because there is no database.
@@ -61,6 +111,31 @@ Then redeploy llm. **Revoking is the reverse**: drop the entry and redeploy. The
 
 This is a genuine hard dependency, unlike `documentation-system` → `connectors`, which degrades gracefully.
 
+## Tool-use rollout
+
+Tool-use transport (#70) uses the existing `/chat` route, `chat` scope, credentials,
+and provider selection. It needs no new environment variables or migration, and
+all chat backends implement client-executed tools, with provider-specific continuation blocks. Deploy the service before
+a consumer starts sending tool definitions or structured history. Existing
+text-only consumers do not need to change.
+
+Keep the configured provider stable across a tool exchange; signed continuation
+blocks are not a cross-provider migration format. Consumers should pin a neutral
+request model and a thinking setting across all rounds. Rolling back the service
+while a tool-capable consumer is active requires disabling that consumer's tool
+flow first; the older contract does not implement it.
+
+Tool-mode provider bodies are validated before SDK parsing, but after HTTP
+buffering. Malformed Converse error bodies become 502 without entering SDK retry
+evaluation; well-formed errors retain native SDK retries. Account for that
+fail-closed behavior and the absence of a streaming download-size limit.
+
+All repository tests use offline SDK doubles. Before enabling a real consumer,
+perform an explicitly authorized smoke test of a complete tool-call/result/final
+answer exchange with the deployed model, including reasoning replay when
+thinking is enabled. This PR does not execute tools or deploy the bot loop (#71).
+See [API.md](API.md#client-executed-tools) for the consumer contract.
+
 ## Rollback
 
 `git revert` + push. No schema to reverse, no state to reconcile.
@@ -69,16 +144,16 @@ Note that **a key rotation is not covered by a code rollback** — `CONSUMER_KEY
 
 ## Cost and quota notes
 
-- Every `/chat` call bills against the AWS account. There is no per-consumer budget or rate limit in this service — a runaway consumer is bounded only by Bedrock's own throttling, which surfaces as **429**.
+- Every `/chat` call bills against the selected provider account. There is no per-consumer budget or rate limit in this service — a runaway consumer is bounded only by the provider's own throttling, which surfaces as **429**.
 - `max_tokens` defaults to 16,000 and is capped at 64,000 by the request model. A consumer that doesn't set it gets the default, not the cap.
-- `THINKING_DEFAULT=true` means extended thinking is on unless a consumer explicitly sends `"thinking": false`. That's a real cost difference; consumers doing cheap mechanical work should send `false`.
+- `THINKING_DEFAULT=true` selects medium reasoning on GPT-6.1 Sol. `"thinking": false` lowers effort to low; reasoning remains enabled. Reasoning tokens count toward output usage and `max_tokens`.
 - Requests that fail validation (422) or authorization (403) are rejected before the provider is called and cost nothing.
 
 ## Troubleshooting
 
-- **Every `/chat` returns 502.** The usual causes, in order: AWS credentials missing or wrong in the environment; `AWS_REGION` set to a region without model access; the configured `LLM_MODEL` not enabled on the account. All three normalize to `ProviderUnavailable`. `/health` stays green through all of them.
-- **502 only for one model.** That model is in `ALLOWED_MODELS` but either unmapped in `BedrockConverseProvider`'s profile table or not enabled on the account.
-- **429s under load.** Bedrock throttling. There is no retry or queue in this service by design — the consumer decides whether to back off.
-- **504s.** `REQUEST_TIMEOUT_S` (default 60) is shorter than the completion took. Large `max_tokens` with thinking enabled can exceed it.
-- **Container dies at boot.** `LLM_ENV` is non-`local` and either `API_KEY` is still the dev default or `AWS_REGION` is unset — the error names which. Or `CONSUMER_KEYS` isn't a JSON **array**.
-- **A consumer suddenly gets 403.** Its key is valid but lacks `chat`. Check the `scopes` on its `CONSUMER_KEYS` entry — a key minted with the wrong scopes authenticates fine and fails only at authorization.
+- **Every `/chat` returns 502.** Check the selected provider credential and account model access. For Bedrock, also check region/profile access. Upstream auth/config errors normalize to `ProviderUnavailable`. A missing local OpenAI key returns 503. `/health` stays green through all of them.
+- **422 for a chat model.** Request models must be in the selected provider’s catalog. Check `LLM_PROVIDER` and `LLM_MODEL` together; invalid configured pairs fail at boot.
+- **429s under load.** Upstream throttling; the consumer decides whether to back off.
+- **504s.** Provider timeout or connection failure. SDK timeouts are not hard whole-request deadlines; account for phase timeouts and provider-specific retry behavior in consumer budgets.
+- **Container dies at boot.** Check the [boot requirements](#variables) and that `CONSUMER_KEYS` is a JSON **array**. The startup error names the failing check.
+- **A consumer suddenly gets 403.** Its key is valid but lacks the endpoint's required scope. Check the `scopes` on its `CONSUMER_KEYS` entry — authentication is not authorization.

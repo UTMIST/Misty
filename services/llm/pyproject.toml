@@ -24,6 +24,8 @@ dependencies = [
     # AnthropicBedrockMantle` fails in Task 3, run `uv add "anthropic[bedrock]@latest"`.
     "anthropic[bedrock]",
     "boto3>=1.40",
+    # OpenAI chat and embeddings share the SDK; clients are built lazily.
+    "openai==2.16.0",
     "platform-auth",
 ]
 

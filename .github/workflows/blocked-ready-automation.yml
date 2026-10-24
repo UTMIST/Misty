@@ -2,19 +2,21 @@ name: blocked-ready-automation
 
 # Keeps issue blocker state in sync automatically.
 #
-# Declare blockers in an issue body with a line like:
-#   Blocked by: #40, #42
-# (case-insensitive, anywhere in the body; the colon is optional, so
-# "Blocked by #40" also works). The `blocked` label marks issues
-# that still have an open blocker; `ready` marks issues whose blockers are all
-# resolved.
+# Declare blockers in the "Blocked by" field of an issue form, like `#40, #42`.
+# GitHub renders that as a "### Blocked by" section, which is what this reads.
+#
+# It also still accepts the pre-forms inline shape, `Blocked by: #40, #42`
+# anywhere in the body (case-insensitive, colon optional) — every issue filed
+# before the forms landed uses it, and those issues are still open.
+#
+# The `blocked` label marks issues that still have an open blocker; `ready`
+# marks issues whose blockers are all resolved.
 #
 # - When an issue is OPENED or EDITED: it evaluates its OWN `Blocked by:` line and
 #   sets its own state — `blocked` if any blocker is still open, `ready` if all are
-#   closed (or there is no `Blocked by:` line to act on). This is what makes a
-#   freshly-created blocked issue land its state without manual labelling.
+#   closed. With no blocker references it returns without updating labels.
 # - When a blocker issue is CLOSED: every issue it blocks whose blockers are now
-#   ALL closed gets `blocked` removed + `ready` added.
+#   ALL closed gets `blocked` removed + `ready` added, even if already assigned.
 # - When a blocker issue is REOPENED: the issues it blocks get re-blocked
 #   (`ready` removed + `blocked` added).
 #
@@ -50,9 +52,9 @@ jobs:
           PROJECTS_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
         with:
           script: |
-            // --- Project board config (stable IDs for the "Misty" project #2) ---
-            const PROJECT_ID   = 'PVT_kwHOBKcJlc4BcaH-';
-            const STATUS_FIELD = 'PVTSSF_lAHOBKcJlc4BcaH-zhXDMKo';
+            // --- Project board config (stable IDs for org project #13, "Misty") ---
+            const PROJECT_ID   = 'PVT_kwDOAovuf84BgUkT';
+            const STATUS_FIELD = 'PVTSSF_lADOAovuf84BgUkTzhahLEM';
             const OPT_READY    = '08afe404';
             const OPT_BLOCKED  = 'dc1ac841';
 
@@ -61,11 +63,32 @@ jobs:
             const action  = context.payload.action; // opened|edited|closed|reopened|assigned|unassigned
             const token   = process.env.PROJECTS_TOKEN;
 
-            // Parse a "Blocked by: #1, #2" line into blocker numbers.
+            // Parse blocker numbers out of an issue body. Two shapes, because
+            // the issue forms changed the rendering and every issue filed
+            // before them is still open:
+            //   form:   "### Blocked by\n\n#40, #42"   (value on a LATER line)
+            //   legacy: "Blocked by: #40, #42"         (value on the SAME line)
+            // The legacy regex requires a value after "by" on that same line,
+            // so it matches nothing at all against a form-rendered body — the
+            // section has to be tried first.
             const blockersOf = (body) => {
-              const line = (body || '').match(/^.*blocked by:?\s.*$/im);
-              if (!line) return [];
-              return [...line[0].matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
+              const src = body || '';
+              const lines = src.split(/\r?\n/);
+              const start = lines.findIndex((l) => /^###\s+Blocked by\s*$/i.test(l));
+              let scope;
+              if (start !== -1) {
+                const out = [];
+                for (let i = start + 1; i < lines.length; i++) {
+                  if (/^###\s/.test(lines[i])) break;
+                  out.push(lines[i]);
+                }
+                // An empty optional field renders as "_No response_", which
+                // carries no issue refs and so yields [] on its own.
+                scope = out.join('\n');
+              } else {
+                scope = (src.match(/^.*blocked by:?\s.*$/im) || [''])[0];
+              }
+              return [...scope.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
             };
 
             // Cache issue state lookups (blockers may be closed, so not in the open list).

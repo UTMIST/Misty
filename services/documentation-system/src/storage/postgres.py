@@ -1,15 +1,71 @@
+import sys
+from collections.abc import Sequence
 from datetime import datetime, timezone
+from hashlib import sha256
 from uuid import UUID
 
-from sqlalchemy import and_, delete, false, insert, or_, select, text, update
+from sqlalchemy import (
+    Float,
+    Numeric,
+    and_,
+    cast,
+    delete,
+    exists,
+    false,
+    func,
+    insert,
+    literal,
+    literal_column,
+    or_,
+    select,
+    text,
+    union_all,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from contracts.storage import DuplicateActiveUrl
-from contracts.types import ApiKey, Doc, DocContentMeta, DocGrant, Source
-from contracts.visibility import Actor, ActorContext, DENY, SEE_ALL
-from src.storage.schema import api_keys, doc_content, doc_grants, doc_tags, docs, sources
+from contracts.retrieval import ChunkCitation, RetrievalUnavailable, SearchHit
+from contracts.storage import DuplicateActiveUrl, DuplicateDocId, ExistingGoogleDoc, PurgedDocument
+from contracts.types import (
+    ApiKey,
+    Doc,
+    DocChunk,
+    DocContentMeta,
+    DocGrant,
+    DocIndexState,
+    IndexCoverage,
+    IndexModelCoverage,
+    Source,
+    SourceGrant,
+)
+from contracts.visibility import Actor, ActorContext, Channel, DENY, SEE_ALL
+from src.content import content_hash
+from src.google_identity import GOOGLE_ID_PATTERNS, google_file_id
+from src.retrieval import candidate_limit, fuse, terms, validate_search
+from src.storage.chunks import validate_chunks_for_content, validate_doc_chunks
+from src.storage.schema import (
+    api_keys,
+    doc_chunks,
+    doc_content,
+    doc_grants,
+    doc_tags,
+    docs,
+    source_refresh_run,
+    sources,
+    meeting_records,
+)
+from contracts.meeting import MeetingRecord
+from src.storage.meeting import changed, catalog_values
+
+
+# Matches text with something to embed. chunk_text embeds nothing when
+# str.strip() empties the text, so the class is exactly the characters it
+# strips; listing literal characters keeps the match independent of locale.
+_HAS_NON_WHITESPACE = (
+    "[^" + "".join(c for c in map(chr, range(sys.maxunicode + 1)) if c.isspace()) + "]"
+)
 
 
 def _now() -> datetime:
@@ -55,12 +111,321 @@ class PostgresStorageAdapter:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
 
+    def put_meeting(self, record):
+        with self._engine.begin() as conn:
+            created = (
+                conn.execute(
+                    pg_insert(meeting_records)
+                    .values(
+                        **record.model_dump(
+                            mode="python", exclude={"participants", "pending_payload"}
+                        ),
+                        participants=record.participants,
+                        pending_payload=record.pending_payload,
+                    )
+                    .on_conflict_do_nothing(index_elements=[meeting_records.c.meeting_id])
+                    .returning(meeting_records.c.meeting_id)
+                ).scalar_one_or_none()
+                is not None
+            )
+            row = (
+                conn.execute(
+                    select(meeting_records).where(meeting_records.c.meeting_id == record.meeting_id)
+                )
+                .mappings()
+                .one()
+            )
+            current = MeetingRecord.model_validate(dict(row))
+            if current.payload_hash != record.payload_hash:
+                raise ValueError("meeting payload conflict")
+            return current, created
+
+    def get_meeting(self, meeting_id):
+        with self._engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(meeting_records).where(meeting_records.c.meeting_id == meeting_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            return MeetingRecord.model_validate(dict(row)) if row else None
+
+    def get_meeting_by_google_id(self, document_id):
+        with self._engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(meeting_records).where(
+                        or_(
+                            meeting_records.c.google_document_id == document_id,
+                            meeting_records.c.removed_google_document_ids.any(document_id),
+                        )
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            return MeetingRecord.model_validate(dict(row)) if row else None
+
+    def list_meetings(self):
+        with self._engine.connect() as conn:
+            return [
+                MeetingRecord.model_validate(dict(row))
+                for row in conn.execute(
+                    select(meeting_records).order_by(
+                        meeting_records.c.created_at, meeting_records.c.meeting_id
+                    )
+                ).mappings()
+            ]
+
+    def change_meeting(self, record, values, *, actor, live_at=None):
+        updated = changed(record, values, actor)
+        with self._engine.begin() as conn:
+            conditions = (
+                []
+                if live_at is None
+                else [
+                    meeting_records.c.create_lease_until > live_at,
+                    meeting_records.c.create_attempt_id == record.create_attempt_id,
+                    meeting_records.c.removed_at.is_(None),
+                ]
+            )
+            row = (
+                conn.execute(
+                    update(meeting_records)
+                    .where(
+                        meeting_records.c.meeting_id == record.meeting_id,
+                        meeting_records.c.version == record.version,
+                        *conditions,
+                    )
+                    .values(**updated.model_dump())
+                    .returning(meeting_records)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            return MeetingRecord.model_validate(dict(row)) if row else None
+
+    def catalog_meeting(self, record, result, grants, *, expires_at, actor):
+        with self._engine.begin() as conn:
+            row = (
+                conn.execute(
+                    select(meeting_records)
+                    .where(meeting_records.c.meeting_id == record.meeting_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if (
+                not row
+                or row["version"] != record.version
+                or row["removed_at"]
+                or not row["google_document_id"]
+            ):
+                return False
+            current = MeetingRecord.model_validate(dict(row))
+            values, body, digest, now = catalog_values(current, result, actor)
+            doc_id = values["id"]
+            lock_key = int.from_bytes(
+                sha256(f"google-file:{current.google_document_id}".encode()).digest()[:8],
+                signed=True,
+            )
+            conn.execute(select(func.pg_advisory_xact_lock(lock_key)))
+            existing = self._get_doc_by_google_file_id(conn, current.google_document_id)
+            if existing:
+                if existing.purged_at or not existing.active:
+                    raise ValueError("meeting catalog identity retired")
+                doc_id = existing.id
+                values.pop("id")
+                values.pop("created_at")
+                values.pop("created_by")
+                conn.execute(update(docs).where(docs.c.id == doc_id).values(**values))
+                for table in (doc_grants, doc_content, doc_tags, doc_chunks):
+                    conn.execute(delete(table).where(table.c.doc_id == doc_id))
+            else:
+                conn.execute(insert(docs).values(**values))
+            conn.execute(insert(doc_tags).values(doc_id=doc_id, tag="meeting"))
+            if body:
+                conn.execute(
+                    insert(doc_content).values(
+                        doc_id=doc_id,
+                        content_text=body,
+                        content_hash=digest,
+                        fetched_at=now,
+                        updated_at=now,
+                    )
+                )
+            for grant in grants:
+                conn.execute(
+                    insert(doc_grants).values(
+                        doc_id=doc_id,
+                        **grant.model_dump(),
+                        origin="google_drive",
+                        created_at=now,
+                        created_by=actor,
+                        expires_at=min(expires_at, grant.source_expires_at)
+                        if grant.source_expires_at
+                        else expires_at,
+                    )
+                )
+            updated = changed(
+                current,
+                {
+                    "doc_id": doc_id,
+                    "persistence_status": "saved",
+                    "index_pending": True,
+                    "last_error": None,
+                },
+                actor,
+            )
+            conn.execute(
+                update(meeting_records)
+                .where(meeting_records.c.meeting_id == current.meeting_id)
+                .values(**updated.model_dump())
+            )
+            return True
+
+    def purge_meeting_catalog(self, meeting_id, google_document_ids, *, actor):
+        with self._engine.begin() as conn:
+            # The removal marker freezes the canonical ID before these locks.
+            # Use the same identity locks as create_doc so earlier insertions
+            # commit before our lookup and later insertions see the tombstone.
+            current = self.get_meeting(meeting_id)
+            if current is None or not current.removed_at:
+                raise ValueError("meeting removal marker required")
+            identities = (
+                set(current.removed_google_document_ids)
+                | set(google_document_ids)
+                | set(current.google_deletions)
+            )
+            if current.google_document_id:
+                identities.add(current.google_document_id)
+            for file_id in sorted(identities):
+                lock_key = int.from_bytes(
+                    sha256(f"google-file:{file_id}".encode()).digest()[:8], signed=True
+                )
+                conn.execute(select(func.pg_advisory_xact_lock(lock_key)))
+            row = (
+                conn.execute(
+                    select(meeting_records)
+                    .where(meeting_records.c.meeting_id == meeting_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .one()
+            )
+            current = MeetingRecord.model_validate(dict(row))
+            identities.update(current.removed_google_document_ids)
+            matches = (
+                conn.execute(
+                    select(docs.c.id)
+                    .where(
+                        or_(
+                            docs.c.id == current.doc_id,
+                            *(
+                                func.substring(docs.c.url_normalized, p).in_(identities)
+                                for p in GOOGLE_ID_PATTERNS
+                            ),
+                        )
+                    )
+                    .order_by(docs.c.id)
+                    .with_for_update()
+                )
+                .scalars()
+                .all()
+            )
+            for doc_id in matches:
+                self._purge_doc(conn, doc_id, actor=actor)
+            if identities != set(current.removed_google_document_ids):
+                current = changed(
+                    current, {"removed_google_document_ids": sorted(identities)}, actor
+                )
+                conn.execute(
+                    update(meeting_records)
+                    .where(meeting_records.c.meeting_id == meeting_id)
+                    .values(**current.model_dump())
+                )
+            return current
+
+    def purge_doc(self, doc_id, *, actor):
+        with self._engine.begin() as conn:
+            return self._purge_doc(conn, doc_id, actor=actor)
+
+    def _purge_doc(self, conn, doc_id, *, actor):
+        row = conn.execute(select(docs.c.id).where(docs.c.id == doc_id).with_for_update()).first()
+        if row is None:
+            return False
+        for table in (doc_content, doc_chunks, doc_grants, doc_tags):
+            conn.execute(delete(table).where(table.c.doc_id == doc_id))
+        conn.execute(
+            update(docs)
+            .where(docs.c.id == doc_id)
+            .values(
+                title=None,
+                description=None,
+                content_snapshot=None,
+                owning_team_id=None,
+                owning_team_label=None,
+                owning_person_id=None,
+                owning_person_label=None,
+                active=False,
+                purged_at=func.coalesce(docs.c.purged_at, _now()),
+                updated_at=_now(),
+                updated_by=actor,
+            )
+        )
+        return True
+
+    def acquire_source_refresh_run(self, run_id: UUID, *, actor: str) -> bool:
+        with self._engine.begin() as conn:
+            return (
+                conn.execute(
+                    pg_insert(source_refresh_run)
+                    .values(singleton=True, run_id=run_id, created_by=actor)
+                    .on_conflict_do_nothing()
+                    .returning(source_refresh_run.c.run_id)
+                ).scalar_one_or_none()
+                is not None
+            )
+
+    def release_source_refresh_run(self, run_id: UUID) -> bool:
+        with self._engine.begin() as conn:
+            return (
+                conn.execute(
+                    delete(source_refresh_run)
+                    .where(source_refresh_run.c.run_id == run_id)
+                    .returning(source_refresh_run.c.run_id)
+                ).scalar_one_or_none()
+                is not None
+            )
+
+    def is_ready(self) -> bool:
+        try:
+            with self._engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+        except SQLAlchemyError:
+            return False
+        return True
+
     def _visibility_clause(self, ctx: ActorContext):
         """None means 'no filter' (SEE_ALL). Otherwise a boolean SQL expression."""
         if ctx is SEE_ALL:
             return None
         if ctx is DENY:
             return false()
+        if isinstance(ctx, Channel):
+            return (
+                select(doc_grants.c.id)
+                .where(
+                    doc_grants.c.doc_id == docs.c.id,
+                    doc_grants.c.origin == "google_drive",
+                    doc_grants.c.expires_at > func.now(),
+                    doc_grants.c.grantee_type == "team",
+                    doc_grants.c.grantee_id.in_(list(ctx.source_team_ids)),
+                )
+                .exists()
+            )
         actor: Actor = ctx
         team_ids = list(actor.team_ids)
         grant_exists = (
@@ -68,24 +433,138 @@ class PostgresStorageAdapter:
             .where(
                 doc_grants.c.doc_id == docs.c.id,
                 or_(
-                    doc_grants.c.grantee_type == "org",
+                    doc_grants.c.origin == "manual",
+                    doc_grants.c.expires_at > func.now(),
+                ),
+                or_(
+                    and_(
+                        doc_grants.c.origin == "manual",
+                        doc_grants.c.grantee_type == "org",
+                    ),
                     and_(
                         doc_grants.c.grantee_type == "person",
                         doc_grants.c.grantee_id == actor.person_id,
                     ),
                     and_(
+                        doc_grants.c.origin == "manual",
                         doc_grants.c.grantee_type == "team",
                         doc_grants.c.grantee_id.in_(team_ids),
+                    ),
+                    and_(
+                        doc_grants.c.origin != "manual",
+                        doc_grants.c.grantee_type == "team",
+                        doc_grants.c.grantee_id.in_(list(actor.source_team_ids)),
                     ),
                 ),
             )
             .exists()
         )
-        owner = or_(
-            docs.c.owning_person_id == actor.person_id,
-            docs.c.owning_team_id.in_(team_ids),
+        return grant_exists
+
+    def search_chunks(self, *, query, embedding, visibility, k, min_cosine) -> list[SearchHit]:
+        embedding = validate_search(query, embedding, visibility, k, min_cosine)
+        # One statement/snapshot for both paths. Materializing the authorized
+        # corpus prevents either top-k branch from ranking invisible rows.
+        eligible = (
+            select(
+                docs.c.id.label("doc_id"),
+                docs.c.title,
+                docs.c.url,
+                docs.c.source_id,
+                doc_chunks.c.ordinal,
+                doc_chunks.c.start_offset,
+                doc_chunks.c.end_offset,
+                doc_chunks.c.source_content_hash,
+                doc_chunks.c.chunk_text,
+                doc_chunks.c.embedding,
+            )
+            .select_from(doc_chunks.join(docs, docs.c.id == doc_chunks.c.doc_id))
+            .where(
+                docs.c.active.is_(True),
+                self._visibility_clause(visibility),
+                doc_chunks.c.embedding_model == embedding.model,
+                doc_chunks.c.dimensions == embedding.dimensions,
+            )
+            .cte("eligible")
+            .prefix_with("MATERIALIZED")
         )
-        return or_(owner, grant_exists)
+        columns = [c for c in eligible.c if c.name != "embedding"]
+        tie = (eligible.c.doc_id, eligible.c.ordinal)
+        cosine = cast(
+            func.round(
+                cast(1 - eligible.c.embedding.cosine_distance(embedding.vector), Numeric), 6
+            ),
+            Float,
+        )
+        vector = (
+            select(*columns, literal("vector").label("branch"), cosine.label("branch_score"))
+            .where(
+                func.vector_norm(eligible.c.embedding) > 0,
+                cosine >= min_cosine,
+            )
+            .order_by(cosine.desc(), *tie)
+            .limit(candidate_limit(k))
+            .subquery("vector_hits")
+        )
+        branches = [select(vector)]
+        wanted = sorted(set(terms(query)))
+        if wanted:
+            # The same explicit tokenization as the offline adapter. Runtime
+            # normalization avoids silently differing email/hyphen parsers.
+            normalized = func.btrim(
+                func.lower(
+                    func.regexp_replace(
+                        eligible.c.chunk_text.collate("C"), "[^A-Za-z0-9]+", " ", "g"
+                    )
+                )
+            )
+            tokens = func.string_to_array(normalized, " ")
+            density = cast(
+                sum(func.cardinality(func.array_positions(tokens, term)) for term in wanted), Float
+            ) / func.greatest(func.cardinality(tokens), 1)
+            config = literal_column("'simple'::regconfig")
+            matches = func.to_tsvector(config, normalized).op("@@")(
+                func.plainto_tsquery(config, " ".join(wanted))
+            )
+            keyword = (
+                select(*columns, literal("keyword").label("branch"), density.label("branch_score"))
+                .where(matches)
+                .order_by(density.desc(), *tie)
+                .limit(candidate_limit(k))
+                .subquery("keyword_hits")
+            )
+            branches.append(select(keyword))
+        try:
+            with self._engine.connect() as conn:
+                merged = union_all(*branches).subquery("candidates")
+                rows = (
+                    conn.execute(
+                        select(merged).order_by(
+                            merged.c.branch,
+                            merged.c.branch_score.desc(),
+                            merged.c.doc_id,
+                            merged.c.ordinal,
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+        except SQLAlchemyError as exc:
+            raise RetrievalUnavailable("retrieval storage unavailable") from exc
+        ranked = {"vector": [], "keyword": []}
+        for row in rows:
+            ranked[row["branch"]].append(
+                SearchHit(
+                    doc_id=row["doc_id"],
+                    title=row["title"],
+                    url=row["url"],
+                    source_id=row["source_id"],
+                    text=row["chunk_text"],
+                    score=0,
+                    chunk=ChunkCitation(**{name: row[name] for name in ChunkCitation.model_fields}),
+                )
+            )
+        return fuse(ranked["vector"], ranked["keyword"], k)
 
     def _grants_for(self, conn, doc_id: UUID) -> list[DocGrant]:
         rows = conn.execute(
@@ -100,6 +579,14 @@ class PostgresStorageAdapter:
                 grantee_label=None,
                 created_at=r.created_at,
                 created_by=r.created_by,
+                origin=r.origin,
+                source_permission_id=r.source_permission_id,
+                source_principal=r.source_principal,
+                source_role=r.source_role,
+                source_inherited=r.source_inherited,
+                source_inherited_from=list(r.source_inherited_from),
+                source_expires_at=r.source_expires_at,
+                expires_at=r.expires_at,
             )
             for r in rows
         ]
@@ -116,6 +603,7 @@ class PostgresStorageAdapter:
         return Doc(
             id=row.id,
             url=row.url,
+            purged_at=row.purged_at,
             url_normalized=row.url_normalized,
             title=row.title,
             source_id=row.source_id,
@@ -126,6 +614,8 @@ class PostgresStorageAdapter:
             owning_person_label=row.owning_person_label,
             content_snapshot=row.content_snapshot,
             fetched_at=row.fetched_at,
+            source_access_synced_at=row.source_access_synced_at,
+            source_access_attempted_at=row.source_access_attempted_at,
             active=row.active,
             tags=self._tags_for(conn, row.id) if tags is None else tags,
             created_at=row.created_at,
@@ -152,17 +642,59 @@ class PostgresStorageAdapter:
         fetched_at,
         tags,
         actor,
+        skip_existing_google=False,
+        doc_id=None,
     ) -> Doc:
+        file_id = google_file_id(url_normalized)
+        if skip_existing_google and file_id is None:
+            raise ValueError("Google identity required for discovery insertion")
         with self._engine.begin() as conn:
+            if file_id is not None:
+                # Every Google insert (manual and discovery) takes the same
+                # transaction-scoped lock. A row need not exist yet to lock it.
+                # Retirements preserve rows, so checking both active and retired
+                # identities here cannot miss an operator retirement during fetch.
+                lock_key = int.from_bytes(
+                    sha256(f"google-file:{file_id}".encode()).digest()[:8], signed=True
+                )
+                conn.execute(select(func.pg_advisory_xact_lock(lock_key)))
+                existing = self._get_doc_by_google_file_id(conn, file_id)
+                if existing is not None and existing.purged_at:
+                    raise PurgedDocument("document was permanently purged")
+                removed = conn.execute(
+                    select(meeting_records.c.meeting_id).where(
+                        or_(
+                            meeting_records.c.google_document_id == file_id,
+                            meeting_records.c.removed_google_document_ids.any(file_id),
+                        ),
+                        meeting_records.c.removed_at.is_not(None),
+                    )
+                ).first()
+                if removed:
+                    raise PurgedDocument("meeting was permanently removed")
+                if skip_existing_google:
+                    existing = self._get_doc_by_google_file_id(conn, file_id)
+                    if existing is not None:
+                        raise ExistingGoogleDoc(existing)
+            # Identity first, so a call that collides on both the id and the url fails
+            # the same way here as in the in-memory adapter, which has no url
+            # constraint to reach. The insert below would otherwise report the url
+            # conflict and never surface the one the caller actually controls.
+            if doc_id is not None:
+                taken = conn.execute(select(docs.c.id).where(docs.c.id == doc_id)).one_or_none()
+                if taken is not None:
+                    raise DuplicateDocId(doc_id)
             # New docs are always active, so they fall under the partial unique
             # index on url_normalized WHERE active. A concurrent ingest that
             # already inserted an active row for this URL makes this a no-op:
             # on_conflict_do_nothing suppresses the IntegrityError (which would
             # otherwise poison the transaction) and RETURNING yields no row.
             # Signal that to the caller so ingest can fall back to dedup/merge.
-            row = conn.execute(
+            insert_doc = (
                 pg_insert(docs)
                 .values(
+                    # Omitted when None so the column's gen_random_uuid() default applies.
+                    **({"id": doc_id} if doc_id is not None else {}),
                     url=url,
                     url_normalized=url_normalized,
                     source_id=source_id,
@@ -182,7 +714,18 @@ class PostgresStorageAdapter:
                     index_where=text("active"),
                 )
                 .returning(docs)
-            ).one_or_none()
+            )
+            try:
+                row = conn.execute(insert_doc).one_or_none()
+            except IntegrityError as e:
+                # The check above has already rejected an id this transaction can see,
+                # so reaching here means a concurrent insert took it in between. The
+                # url_normalized conflict is absorbed by on_conflict_do_nothing, leaving
+                # the primary key as the only unique violation; other integrity failures
+                # (a bad source_id FK) must keep their own type.
+                if doc_id is None or getattr(e.orig, "sqlstate", None) != "23505":
+                    raise
+                raise DuplicateDocId(doc_id) from e
             if row is None:
                 raise DuplicateActiveUrl(url_normalized)
             for tag in set(tags):
@@ -220,6 +763,26 @@ class PostgresStorageAdapter:
             ).first()
             return self._row_to_doc(conn, row) if row else None
 
+    def get_doc_by_google_file_id(self, file_id: str) -> Doc | None:
+        with self._engine.connect() as conn:
+            return self._get_doc_by_google_file_id(conn, file_id)
+
+    def _get_doc_by_google_file_id(self, conn, file_id: str) -> Doc | None:
+        row = conn.execute(
+            select(docs)
+            .where(
+                or_(
+                    *(
+                        func.substring(docs.c.url_normalized, p) == file_id
+                        for p in GOOGLE_ID_PATTERNS
+                    )
+                )
+            )
+            .order_by(docs.c.active.desc(), docs.c.created_at, docs.c.id)
+            .limit(1)
+        ).first()
+        return self._row_to_doc(conn, row) if row else None
+
     def list_docs(
         self,
         *,
@@ -227,6 +790,7 @@ class PostgresStorageAdapter:
         owning_person_id=None,
         source_id=None,
         tag=None,
+        has_content=None,
         active_only=True,
         visibility: ActorContext = SEE_ALL,
     ) -> list[Doc]:
@@ -240,6 +804,11 @@ class PostgresStorageAdapter:
             conditions.append(docs.c.owning_person_id == owning_person_id)
         if source_id is not None:
             conditions.append(docs.c.source_id == source_id)
+        if has_content is not None:
+            row_exists = (
+                select(doc_content.c.doc_id).where(doc_content.c.doc_id == docs.c.id).exists()
+            )
+            conditions.append(row_exists if has_content else ~row_exists)
         clause = self._visibility_clause(visibility)
         if clause is not None:
             conditions.append(clause)
@@ -272,13 +841,20 @@ class PostgresStorageAdapter:
         patch["updated_by"] = actor
         with self._engine.begin() as conn:
             row = conn.execute(
-                update(docs).where(docs.c.id == doc_id).values(**patch).returning(docs)
+                update(docs)
+                .where(docs.c.id == doc_id, docs.c.purged_at.is_(None))
+                .values(**patch)
+                .returning(docs)
             ).one_or_none()
             return self._row_to_doc(conn, row) if row else None
 
     def add_tag(self, doc_id: UUID, tag: str) -> bool:
         with self._engine.begin() as conn:
-            exists = conn.execute(select(docs.c.id).where(docs.c.id == doc_id)).one_or_none()
+            exists = conn.execute(
+                select(docs.c.id)
+                .where(docs.c.id == doc_id, docs.c.purged_at.is_(None))
+                .with_for_update()
+            ).one_or_none()
             if exists is None:
                 return False
             already = conn.execute(
@@ -297,12 +873,17 @@ class PostgresStorageAdapter:
 
     def add_grant(self, doc_id, *, grantee_type, grantee_id, actor) -> bool:
         with self._engine.begin() as conn:
-            exists = conn.execute(select(docs.c.id).where(docs.c.id == doc_id)).one_or_none()
+            exists = conn.execute(
+                select(docs.c.id)
+                .where(docs.c.id == doc_id, docs.c.purged_at.is_(None))
+                .with_for_update()
+            ).one_or_none()
             if exists is None:
                 return False
             already = conn.execute(
                 select(doc_grants.c.id).where(
                     doc_grants.c.doc_id == doc_id,
+                    doc_grants.c.origin == "manual",
                     doc_grants.c.grantee_type == grantee_type,
                     doc_grants.c.grantee_id.is_(None)
                     if grantee_id is None
@@ -323,6 +904,7 @@ class PostgresStorageAdapter:
                                 grantee_type=grantee_type,
                                 grantee_id=grantee_id,
                                 created_by=actor,
+                                origin="manual",
                             )
                         )
                 except IntegrityError:
@@ -334,6 +916,7 @@ class PostgresStorageAdapter:
             result = conn.execute(
                 delete(doc_grants).where(
                     doc_grants.c.doc_id == doc_id,
+                    doc_grants.c.origin == "manual",
                     doc_grants.c.grantee_type == grantee_type,
                     doc_grants.c.grantee_id.is_(None)
                     if grantee_id is None
@@ -346,11 +929,73 @@ class PostgresStorageAdapter:
         with self._engine.connect() as conn:
             return self._grants_for(conn, doc_id)
 
+    def replace_source_grants(
+        self,
+        doc_id: UUID,
+        *,
+        origin: str,
+        grants: list[SourceGrant],
+        synced_at: datetime,
+        expires_at: datetime,
+        actor: str,
+    ) -> bool:
+        with self._engine.begin() as conn:
+            # Serialize complete replacements even when no grant rows exist yet.
+            exists = conn.execute(
+                select(docs.c.id)
+                .where(docs.c.id == doc_id, docs.c.purged_at.is_(None))
+                .with_for_update()
+            ).one_or_none()
+            if exists is None:
+                return False
+            conn.execute(
+                delete(doc_grants).where(
+                    doc_grants.c.doc_id == doc_id,
+                    doc_grants.c.origin == origin,
+                )
+            )
+            for grant in grants:
+                conn.execute(
+                    insert(doc_grants).values(
+                        doc_id=doc_id,
+                        grantee_type=grant.grantee_type,
+                        grantee_id=grant.grantee_id,
+                        created_at=synced_at,
+                        created_by=actor,
+                        origin=origin,
+                        source_permission_id=grant.source_permission_id,
+                        source_principal=grant.source_principal,
+                        source_role=grant.source_role,
+                        source_inherited=grant.source_inherited,
+                        source_inherited_from=grant.source_inherited_from,
+                        source_expires_at=grant.source_expires_at,
+                        expires_at=min(expires_at, grant.source_expires_at)
+                        if grant.source_expires_at is not None
+                        else expires_at,
+                    )
+                )
+            conn.execute(
+                update(docs)
+                .where(docs.c.id == doc_id, docs.c.purged_at.is_(None))
+                .values(
+                    source_access_synced_at=synced_at,
+                    source_access_attempted_at=synced_at,
+                    updated_at=synced_at,
+                    updated_by=actor,
+                )
+            )
+            return True
+
     def upsert_doc_content(
         self, doc_id: UUID, *, content_text: str, content_hash: str, fetched_at: datetime | None
     ) -> None:
         now = _now()
         with self._engine.begin() as conn:
+            current = conn.execute(
+                select(docs.c.purged_at).where(docs.c.id == doc_id).with_for_update()
+            ).one_or_none()
+            if current is not None and current.purged_at is not None:
+                return
             conn.execute(
                 pg_insert(doc_content)
                 .values(
@@ -404,6 +1049,246 @@ class PostgresStorageAdapter:
             if row is None:
                 return None
             return DocContentMeta(content_hash=row.content_hash, fetched_at=row.fetched_at)
+
+    def replace_doc_chunks(self, doc_id: UUID, chunks: list[DocChunk]) -> bool:
+        validated = validate_doc_chunks(chunks)
+        with self._engine.begin() as conn:
+            # Lock the parent even when no chunks exist yet. Concurrent writers
+            # serialize here before deleting/inserting, so sets cannot mix.
+            existing = conn.execute(
+                select(docs.c.id)
+                .where(docs.c.id == doc_id, docs.c.purged_at.is_(None))
+                .with_for_update()
+            ).scalar_one_or_none()
+            if existing is None:
+                return False
+            self._write_chunks(conn, doc_id, validated)
+        return True
+
+    def replace_doc_chunks_if_current(
+        self,
+        doc_id: UUID,
+        expected_content_hash: str,
+        chunks: list[DocChunk],
+        *,
+        expected_title_hash: str,
+    ) -> bool:
+        validated = validate_chunks_for_content(chunks, expected_content_hash, expected_title_hash)
+        with self._engine.begin() as conn:
+            # Same parent lock as replace_doc_chunks, so chunk writers serialize.
+            doc = conn.execute(
+                select(docs.c.active, docs.c.title).where(docs.c.id == doc_id).with_for_update()
+            ).one_or_none()
+            if (
+                doc is None
+                or not doc.active
+                or content_hash(doc.title or "") != expected_title_hash
+            ):
+                return False
+            # Also lock the content row: upsert_doc_content never touches
+            # `docs`, so only this lock makes it wait until the check and the
+            # write commit together. A newer upsert then lands after us and
+            # its own indexing trigger replaces this set.
+            current_hash = conn.execute(
+                select(doc_content.c.content_hash)
+                .where(doc_content.c.doc_id == doc_id)
+                .with_for_update()
+            ).scalar_one_or_none()
+            if current_hash != expected_content_hash:
+                return False
+            self._write_chunks(conn, doc_id, validated, keep_other_models=True)
+        return True
+
+    @staticmethod
+    def _write_chunks(
+        conn, doc_id: UUID, validated: list[DocChunk], *, keep_other_models: bool = False
+    ) -> None:
+        stmt = delete(doc_chunks).where(doc_chunks.c.doc_id == doc_id)
+        # An empty set clears every model: there is no text left to embed.
+        if keep_other_models and validated:
+            stmt = stmt.where(doc_chunks.c.embedding_model == validated[0].embedding_model)
+        conn.execute(stmt)
+        if validated:
+            conn.execute(
+                insert(doc_chunks),
+                [{"doc_id": doc_id, **chunk.model_dump()} for chunk in validated],
+            )
+
+    def clear_doc_chunks_if_unindexable(self, doc_id: UUID) -> bool:
+        with self._engine.begin() as conn:
+            # Share the chunk writers' parent lock and recheck eligibility
+            # after acquiring it. A newer successful index must survive a
+            # cleanup based on an old inactive/contentless snapshot.
+            active = conn.execute(
+                select(docs.c.active).where(docs.c.id == doc_id).with_for_update()
+            ).scalar_one_or_none()
+            if active is None:
+                return True
+            if active:
+                content_id = conn.execute(
+                    select(doc_content.c.doc_id).where(doc_content.c.doc_id == doc_id)
+                ).scalar_one_or_none()
+                if content_id is not None:
+                    return False
+            conn.execute(delete(doc_chunks).where(doc_chunks.c.doc_id == doc_id))
+        return True
+
+    def delete_doc_content(self, doc_id: UUID, *, expected: DocContentMeta | None) -> bool:
+        with self._engine.begin() as conn:
+            # The chunk writers' parent lock: no index write can interleave.
+            existing = conn.execute(
+                select(docs.c.id).where(docs.c.id == doc_id).with_for_update()
+            ).scalar_one_or_none()
+            if existing is None:
+                return False
+            row = conn.execute(
+                select(doc_content.c.content_hash, doc_content.c.fetched_at)
+                .where(doc_content.c.doc_id == doc_id)
+                .with_for_update()
+            ).one_or_none()
+            current = DocContentMeta(**row._mapping) if row is not None else None
+            if current != expected:
+                return False
+            conn.execute(delete(doc_chunks).where(doc_chunks.c.doc_id == doc_id))
+            conn.execute(delete(doc_content).where(doc_content.c.doc_id == doc_id))
+        return True
+
+    def get_doc_index_states(self, doc_id: UUID) -> dict[str, DocIndexState]:
+        # One hash per set (validate_doc_chunks), so min() just picks the
+        # shared value.
+        stmt = (
+            select(
+                func.min(doc_chunks.c.source_content_hash).label("source_content_hash"),
+                func.min(doc_chunks.c.source_title_hash).label("source_title_hash"),
+                doc_chunks.c.embedding_model,
+                func.count().label("chunk_count"),
+            )
+            .where(doc_chunks.c.doc_id == doc_id)
+            .group_by(doc_chunks.c.embedding_model)
+            .order_by(doc_chunks.c.embedding_model)
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).mappings()
+            return {row["embedding_model"]: DocIndexState(**row) for row in rows}
+
+    def delete_doc_chunks_except(self, doc_id: UUID, keep_models: Sequence[str]) -> bool:
+        with self._engine.begin() as conn:
+            # The chunk writers' parent lock.
+            conn.execute(select(docs.c.id).where(docs.c.id == doc_id).with_for_update())
+            result = conn.execute(
+                delete(doc_chunks).where(
+                    doc_chunks.c.doc_id == doc_id,
+                    doc_chunks.c.embedding_model.not_in(list(keep_models)),
+                )
+            )
+        return result.rowcount > 0
+
+    def list_docs_for_indexing(
+        self,
+        *,
+        models: Sequence[str],
+        stale_only: bool = True,
+        after: UUID | None = None,
+        limit: int = 100,
+    ) -> list[UUID]:
+        has_content = doc_content.c.doc_id.is_not(None)
+        has_chunks = exists().where(doc_chunks.c.doc_id == docs.c.id)
+        wanted = and_(docs.c.active.is_(True), has_content)
+        if stale_only:
+            title_hash = func.encode(
+                func.sha256(func.convert_to(func.coalesce(docs.c.title, ""), "UTF8")), "hex"
+            )
+
+            # One hash pair per set, so any row of a model's set speaks for it.
+            # A NULL (unknown) title hash never matches, so it stays due.
+            def current_set(model: str):
+                return exists().where(
+                    doc_chunks.c.doc_id == docs.c.id,
+                    doc_chunks.c.embedding_model == model,
+                    doc_chunks.c.source_content_hash == doc_content.c.content_hash,
+                    doc_chunks.c.source_title_hash == title_hash,
+                )
+
+            other_model = exists().where(
+                doc_chunks.c.doc_id == docs.c.id,
+                doc_chunks.c.embedding_model.not_in(list(models)),
+            )
+            # Whitespace-only text has nothing to embed: indexing it clears its
+            # chunks and records nothing, so it is listed only while it has some.
+            has_text = doc_content.c.content_text.regexp_match(_HAS_NON_WHITESPACE)
+            wanted = and_(
+                wanted,
+                or_(*(~current_set(model) for model in models), other_model),
+                or_(has_chunks, has_text),
+            )
+        orphaned = and_(has_chunks, or_(docs.c.active.is_(False), ~has_content))
+        stmt = (
+            select(docs.c.id)
+            .select_from(docs.outerjoin(doc_content, doc_content.c.doc_id == docs.c.id))
+            .where(or_(wanted, orphaned))
+            .order_by(docs.c.id)
+            .limit(limit)
+        )
+        if after is not None:
+            stmt = stmt.where(docs.c.id > after)
+        with self._engine.connect() as conn:
+            return list(conn.execute(stmt).scalars())
+
+    def get_index_coverage(self, models: Sequence[str]) -> IndexCoverage:
+        indexable = and_(docs.c.active.is_(True), exists().where(doc_content.c.doc_id == docs.c.id))
+        totals = select(
+            doc_chunks.c.embedding_model,
+            func.count(func.distinct(doc_chunks.c.doc_id)).label("docs"),
+            func.count().label("chunks"),
+            func.coalesce(func.sum(func.char_length(doc_chunks.c.chunk_text)), 0).label(
+                "chunk_chars"
+            ),
+        ).group_by(doc_chunks.c.embedding_model)
+        with self._engine.connect() as conn:
+            indexable_docs = conn.execute(
+                select(func.count()).select_from(docs).where(indexable)
+            ).scalar_one()
+            stored = {row.embedding_model: row for row in conn.execute(totals)}
+            coverage = []
+            for model in sorted({*stored, *models}):
+                missing = conn.execute(
+                    select(func.count())
+                    .select_from(docs)
+                    .where(
+                        indexable,
+                        exists().where(doc_chunks.c.doc_id == docs.c.id),
+                        ~exists().where(
+                            doc_chunks.c.doc_id == docs.c.id,
+                            doc_chunks.c.embedding_model == model,
+                        ),
+                    )
+                ).scalar_one()
+                row = stored.get(model)
+                coverage.append(
+                    IndexModelCoverage(
+                        model=model,
+                        docs=row.docs if row else 0,
+                        chunks=row.chunks if row else 0,
+                        chunk_chars=row.chunk_chars if row else 0,
+                        missing_docs=missing,
+                    )
+                )
+        return IndexCoverage(indexable_docs=indexable_docs, models=coverage)
+
+    def list_doc_chunks(
+        self, doc_id: UUID, *, visibility: ActorContext = SEE_ALL
+    ) -> list[DocChunk]:
+        stmt = (
+            select(*(doc_chunks.c[name] for name in DocChunk.model_fields))
+            .select_from(doc_chunks.join(docs, docs.c.id == doc_chunks.c.doc_id))
+            .where(doc_chunks.c.doc_id == doc_id)
+            .order_by(doc_chunks.c.embedding_model, doc_chunks.c.ordinal)
+        )
+        clause = self._visibility_clause(visibility)
+        if clause is not None:
+            stmt = stmt.where(clause)
+        with self._engine.connect() as conn:
+            return [DocChunk(**row) for row in conn.execute(stmt).mappings()]
 
     # --- Sources ---
 

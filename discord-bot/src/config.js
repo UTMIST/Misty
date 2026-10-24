@@ -1,3 +1,25 @@
+import { discordEnvironment } from './runtimeMode.js';
+import {
+  DEFAULT_HELPER_USER_MAX_REQUESTS,
+  DEFAULT_HELPER_USER_WINDOW_SECONDS,
+} from './helperRequestLimiter.js';
+
+// A boolean env flag that is OFF unless explicitly set to the literal "true".
+// Anything else (unset, "1", "yes", "false", typos) stays false, so a live
+// feature can never be turned on by accident.
+function booleanFlag(env, name) {
+  return env[name] === 'true';
+}
+
+function positiveInteger(env, name, fallback, maximum = Number.MAX_SAFE_INTEGER) {
+  if (env[name] === undefined) return fallback;
+  const value = Number(env[name]);
+  if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
+    throw new Error(`${name} must be a positive integer no greater than ${maximum}`);
+  }
+  return value;
+}
+
 const REQUIRED = [
   'DISCORD_TOKEN',
   'DISCORD_CLIENT_ID',
@@ -12,6 +34,7 @@ const REQUIRED = [
 ];
 
 export function loadConfig(env = process.env) {
+  env = discordEnvironment(env);
   const missing = REQUIRED.filter((k) => !env[k]);
   if (missing.length > 0) {
     throw new Error(`Missing required env vars: ${missing.join(', ')}`);
@@ -28,14 +51,32 @@ export function loadConfig(env = process.env) {
     docApiKey: env.DOC_API_KEY,
     llmBaseUrl: env.LLM_BASE_URL.replace(/\/+$/, ''),
     llmApiKey: env.LLM_API_KEY,
+    helperUserMaxRequests: positiveInteger(
+      env,
+      'HELPER_USER_MAX_REQUESTS',
+      DEFAULT_HELPER_USER_MAX_REQUESTS,
+    ),
+    helperUserWindowSeconds: positiveInteger(
+      env,
+      'HELPER_USER_WINDOW_SECONDS',
+      DEFAULT_HELPER_USER_WINDOW_SECONDS,
+      Math.floor(Number.MAX_SAFE_INTEGER / 1000),
+    ),
+    // Enable authorized document and command tools for Discord helper requests.
+    // Default OFF: stays text-only until retrieval and channel configuration are
+    // live in the target environment.
+    helperToolsEnabled: booleanFlag(env, 'HELPER_TOOLS_ENABLED'),
     verificationBaseUrl: env.VERIFICATION_BASE_URL.replace(/\/+$/, ''),
     verificationApiKey: env.VERIFICATION_API_KEY,
+    infrastructureDiscordUsername: env.INFRASTRUCTURE_DISCORD_USERNAME || undefined,
     meetingBaseUrl: env.MEETING_BASE_URL ? env.MEETING_BASE_URL.replace(/\/+$/, '') : undefined,
     meetingApiKey: env.MEETING_API_KEY || undefined,
     meetingWsUrl:
       env.MEETING_WS_URL ||
       (env.MEETING_BASE_URL
-        ? env.MEETING_BASE_URL.replace(/\/+$/, '').replace(/^http(s?):\/\//, (_m, s) => (s ? 'wss://' : 'ws://'))
+        ? env.MEETING_BASE_URL.replace(/\/+$/, '').replace(/^http(s?):\/\//, (_m, s) =>
+            s ? 'wss://' : 'ws://',
+          )
         : undefined),
   };
 }

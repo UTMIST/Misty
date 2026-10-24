@@ -1,11 +1,14 @@
 import { REST, Routes, SlashCommandBuilder } from 'discord.js';
+import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
 import { commands, partitionCommands } from './commands/index.js';
+import { runtimeMode } from './runtimeMode.js';
 
 function applyOption(target, o) {
   if (o.type === 'string') {
     target.addStringOption((so) => {
       so.setName(o.name).setDescription(o.description).setRequired(!!o.required);
+      if (o.maxLength !== undefined) so.setMaxLength(o.maxLength);
       if (o.autocomplete) so.setAutocomplete(true);
       else if (o.choices) so.addChoices(...o.choices);
       return so;
@@ -23,9 +26,7 @@ function applyOption(target, o) {
 }
 
 export function buildDiscordData(command) {
-  const b = new SlashCommandBuilder()
-    .setName(command.name)
-    .setDescription(command.description);
+  const b = new SlashCommandBuilder().setName(command.name).setDescription(command.description);
   if (command.subcommands.length) {
     for (const sub of command.subcommands) {
       b.addSubcommand((s) => {
@@ -40,7 +41,13 @@ export function buildDiscordData(command) {
   return b.toJSON();
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  if (runtimeMode() === 'idle') {
+    console.error(
+      'Refusing Discord command registration in an unrecognized Railway environment. Use production, staging, or the configured dev environment.',
+    );
+    process.exit(2);
+  }
   const config = loadConfig();
   const { stable, beta } = partitionCommands([...commands.values()]);
   const stableBody = stable.map((c) => buildDiscordData(c));
@@ -58,10 +65,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   if (config.discordGuildId) {
     // Registering betaBody (which may be empty) also CLEARS any previously
     // registered guild commands, so promoted/removed beta commands don't linger.
-    await rest.put(
-      Routes.applicationGuildCommands(config.discordClientId, config.discordGuildId),
-      { body: betaBody },
-    );
+    await rest.put(Routes.applicationGuildCommands(config.discordClientId, config.discordGuildId), {
+      body: betaBody,
+    });
     console.log(
       `Registered ${betaBody.length} beta commands to testing guild ${config.discordGuildId} (exclusive).`,
     );

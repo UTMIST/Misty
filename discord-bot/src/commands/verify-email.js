@@ -1,5 +1,5 @@
 import { defineCommand } from '../defineCommand.js';
-import { renderVerifyEmailResult } from '../messages.js';
+import { renderVerifyEmailResult } from '../messages/email.js';
 
 export default defineCommand({
   name: 'verify-email',
@@ -7,7 +7,12 @@ export default defineCommand({
   auth: 'linked',
   beta: false,
   options: [
-    { name: 'code', type: 'string', required: true, description: 'The 6-digit code from your email' },
+    {
+      name: 'code',
+      type: 'string',
+      required: true,
+      description: 'The 6-digit code from your email',
+    },
   ],
   async handler({ options, ctx, principal, discordUserId }) {
     const result = await ctx.emailService.confirmAndAddEmail({

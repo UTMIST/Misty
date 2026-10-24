@@ -6,9 +6,16 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for design decisions. The machine-readabl
 
 ## Base URL and auth
 
+`GET /health` is an unauthenticated liveness check. It returns `{"status":"ok"}`
+without contacting Postgres. `GET /health/ready` is an unauthenticated readiness
+check: it runs `SELECT 1` against this service's database, returning the same
+body on success or `503` with
+`{"detail":"team-tracking database unavailable"}` on failure. Railway uses
+`/health/ready` for deployment health checks.
+
 Local development: `http://localhost:8000`. In staging/production the API is deployed to Railway and reachable **only over Railway's private network** (no public domain) — consumers (bot, docs-system) hit it at `http://team-tracking.railway.internal:8000`. External access is a one-click "add public domain" in Railway if ever needed.
 
-Every request — read or write — must include a valid **scoped API key** in the `X-API-Key` header:
+Other requests — read or write — must include a valid **scoped API key** in the `X-API-Key` header:
 
 ```
 X-API-Key: tt_<prefix>_<secret>
@@ -24,12 +31,13 @@ Each endpoint requires a specific scope. A key only reaches an endpoint if its s
 
 | Domain | Scopes |
 |--------|--------|
-| People | `people:read`, `people:write` |
+| People | `people:read`, `people:write`, `people:elevate` (additional gate for privileged creation / access-level updates) |
 | Teams | `teams:read`, `teams:write` |
 | Role kinds | `role_kinds:read` |
 | Memberships | `memberships:read`, `memberships:write` |
 | Providers | `providers:read` |
 | Identifiers | `identifiers:read`, `identifiers:write` |
+| Channels | `channels:read`, `channels:write` |
 | Dev-only | `dev:spoof` — local-dev only; refused against `TT_ENV=production` at both issuance and request time |
 | Wildcard | `admin` — grants every scope, but does NOT satisfy the `dev:spoof` guard |
 
@@ -108,8 +116,9 @@ curl -sS http://localhost:8000/api-keys/self \
   -H "X-API-Key: dev-api-key-change-me"
 ```
 
-Returns `401` if the key is missing or invalid. Never returns `403` (there
-is no scope to lack).
+Returns `401` if the key is missing or invalid. No additional scope is required,
+but the production `dev:spoof` guard still returns `403` for a key carrying that
+literal scope.
 
 ---
 
@@ -117,7 +126,8 @@ is no scope to lack).
 
 ### POST /people
 
-Create a new person. **Scope:** `people:write`.
+Create a new person. **Scope:** `people:write`, plus `people:elevate` when
+`access_level` is not `member` (the `admin` wildcard satisfies both).
 
 **Request body:**
 
@@ -125,10 +135,11 @@ Create a new person. **Scope:** `people:write`.
 |-------|------|----------|-------|
 | `display_name` | string | yes | Free-form; handles any name convention |
 | `primary_email` | string | yes | Normalized to lowercase; must be unique |
+| `access_level` | string | no | `member` (default), `admin`, or `superuser`; non-`member` requires `people:elevate` |
 
 **Response:** `Person` object, HTTP 201.
 
-**Errors:** 409 if `primary_email` already exists. 422 if required fields are missing.
+**Errors:** 403 if a non-`member` `access_level` is supplied without `people:elevate`. 409 if `primary_email` already exists. 422 if required fields are missing or `access_level` is invalid.
 
 ```bash
 curl -sS -X POST http://localhost:8000/people \
@@ -146,6 +157,7 @@ curl -sS -X POST http://localhost:8000/people \
   "display_name": "Alex Chen",
   "primary_email": "alex@utmist.ca",
   "active": true,
+  "access_level": "member",
   "created_at": "2026-06-30T12:00:00Z",
   "updated_at": "2026-06-30T12:00:00Z",
   "created_by": "bootstrap-script",
@@ -221,7 +233,7 @@ curl -sS "http://localhost:8000/people/550e8400-e29b-41d4-a716-446655440000" \
 
 ### PATCH /people/{person_id}
 
-Update one or more fields on a person. Only fields present in the request body are changed (standard partial-update semantics). **Scope:** `people:write`.
+Update one or more fields on a person. Only fields present in the request body are changed (standard partial-update semantics). **Scope:** `people:write`, plus `people:elevate` for any non-null `access_level`, including demotion or restating the current value. The `admin` wildcard satisfies both.
 
 **Path parameters:**
 
@@ -236,10 +248,11 @@ Update one or more fields on a person. Only fields present in the request body a
 | `display_name` | string | |
 | `primary_email` | string | Normalized to lowercase; must be unique |
 | `active` | boolean | Set to `false` to soft-retire a person |
+| `access_level` | string | `member`, `admin`, or `superuser`; any non-null value requires `people:elevate` |
 
 **Response:** Updated `Person` object, HTTP 200.
 
-**Errors:** 404 if not found. 409 if new `primary_email` conflicts with an existing record. 422 if a field fails validation.
+**Errors:** 403 if a non-null `access_level` is supplied without `people:elevate`. 404 if not found. 409 if new `primary_email` conflicts with an existing record. 422 if a field fails validation.
 
 ```bash
 # Soft-retire a person
@@ -400,6 +413,68 @@ curl -sS -X PATCH "http://localhost:8000/teams/660e8400-e29b-41d4-a716-446655440
 
 ---
 
+## Team Google Groups
+
+When Google Groups is configured (see [DEPLOYMENT.md](DEPLOYMENT.md#managed-google-groups)), every team gets a managed group at `<slug>@<GOOGLE_GROUPS_DOMAIN>`, and team-tracking keeps its members equal to the team's current membership. Consumers use the mapping to share Drive documents with a team, or to map a group address back to a team.
+
+Syncing happens after the response, never inside it: `POST`/`PATCH /teams`, `POST`/`PATCH /memberships`, `POST /memberships/{id}/end`, `POST /people/{id}/emails`, and a `PATCH /people/{id}` that changes `active` or `primary_email` each sync the affected teams. Those endpoints' responses and status codes are unchanged, and a Google failure never fails them; it is recorded on the mapping instead. Who belongs in a group, and how retries work, is in [ARCHITECTURE.md](ARCHITECTURE.md#managed-google-groups).
+
+**`TeamGoogleGroup` shape:**
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `team_id` | UUID | |
+| `group_email` | string | The group's address. Fixed once `group_name` is set. |
+| `group_name` | string \| null | Cloud Identity resource (`groups/{id}`); `null` until creation succeeds |
+| `status` | string | `synced`, `needs_external_members`, or `failed` |
+| `last_error` | string \| null | Why the last sync did not converge |
+| `last_synced_at` | datetime \| null | Last time a sync fully converged |
+| `pending_changes` | array | Unconfirmed membership writes: `action` (`add`/`remove`), `email`, nullable `membership_name` and `operation_name`; defaults to `[]` |
+| `created_at`, `updated_at`, `created_by`, `updated_by` | | `updated_by` is the key whose write triggered the last sync |
+
+`status` meanings:
+
+- `synced`: Google membership matches Team Tracking as of `last_synced_at`. For active teams, both external-member settings were also verified, even when the group is empty. Retired teams only require membership removal; their settings are left unchanged. A stored result from an older deployment needs a new sync to establish settings verification.
+- `needs_external_members`: settings were verified, but Google still rejected an external addition. Other additions and removals were attempted. Follow the [recovery runbook](DEPLOYMENT.md#external-member-setup-and-recovery) and retry sync.
+- `failed`: group creation/read, settings verification, or a membership change failed or remains unconfirmed. A settings failure holds all new additions but still attempts removals and preserves pending membership writes. `last_error` lists failures separated by `; `. `last_synced_at` remains the historical last success, not evidence the current attempt succeeded. Retry with the sync endpoint.
+
+An unfinished or uncertain membership write stays in `pending_changes` across retries and restarts. A pending addition is not replayed until Google shows its effect. A pending removal can retry against the same membership resource while the person remains unwanted; if they rejoin, sync waits for the original removal to finish before adding them again. The sync then reconciles against current directory membership. An empty Google group alone cannot clear a pending addition or make its mapping `synced`. See [pending-change recovery](DEPLOYMENT.md#pending-membership-changes).
+
+A team with no row has never been synced, either because Google Groups is unconfigured or because no write or backfill has touched the team yet.
+
+### GET /teams/google-groups
+
+Every team's mapping (including retired teams, whose groups are kept and reconciled to remove managed MEMBER-only memberships). Owners and managers remain; see [the reconciliation contract](ARCHITECTURE.md#managed-google-groups). **Scope:** `teams:read`.
+
+### GET /teams/{team_id}/google-group
+
+One team's mapping. **Scope:** `teams:read`. **Errors:** 404 if the team has no mapping.
+
+### GET /teams/by-synced-google-group/{email}
+
+The team (same body as `GET /teams/{team_id}`) whose managed group has this address, matched case-insensitively. Fails closed for access decisions: it answers only when the team's last sync is `synced`. Retired teams still resolve (check `active` in the body); sync removes managed MEMBER-only memberships but retains owners/managers and existing Drive shares. Retirement alone is not complete access revocation; see [the reconciliation contract](ARCHITECTURE.md#managed-google-groups). **Scope:** `teams:read`.
+
+**Errors:** 404 for an unknown address or a mapping in `needs_external_members` or `failed`. This reads the recorded sync state and makes no Google call.
+
+### GET /people/{person_id}/synced-google-teams
+
+Mappings (same shape as `GET /teams/google-groups`) for the `synced` teams whose Google Group currently contains this person as a MEMBER under their `primary_email` or any verified `email` identifier. Membership is read live from Google, one call per synced team, so it reflects Google even when the directory disagrees. Owners and managers don't count. **Scope:** `people:read`.
+
+**Errors:** 404 if the person does not exist. 503 if Google Groups is not configured or Google can't be read; there is no partial answer.
+
+### POST /teams/{team_id}/google-group/sync
+
+Create the group if it is missing, configure and verify external-member settings for active teams, reconcile members, and return the resulting mapping. Safe to repeat. **Scope:** `teams:write`.
+
+**Errors:** 404 if the team does not exist. 409 if the team is retired and never had a group. 503 if Google Groups is not configured. A Google failure is still a 200, with `status: "failed"` in the body.
+
+```bash
+curl -sS -X POST "http://localhost:8000/teams/660e8400-e29b-41d4-a716-446655440001/google-group/sync" \
+  -H "X-API-Key: dev-api-key-change-me"
+```
+
+---
+
 ## Role kinds
 
 Role kinds are the controlled vocabulary for the seniority axis of team roles. The four seed values are `executive`, `director`, `lead`, and `member`. Role kinds are read-only through the API (no create/update endpoints). Both endpoints require scope `role_kinds:read`.
@@ -461,7 +536,7 @@ curl -sS "http://localhost:8000/role_kinds/lead" \
 
 ## Providers
 
-Providers are the controlled vocabulary of identity provider types. The five seed values are `discord`, `github`, `notion`, `uoft_email`, and `email`. They are read-only through the API (no create/update endpoints). Both endpoints require scope `providers:read`.
+Providers are the controlled vocabulary of identity provider types. The four seed values are `discord`, `github`, `uoft_email`, and `email`. They are read-only through the API (no create/update endpoints). Both endpoints require scope `providers:read`.
 
 The `email` provider is special-cased: it is **multi-valued** (a person may have many `email` identifiers, unlike the "one link per provider" rule that governs every other provider) and is managed through its own dedicated endpoint, `POST /people/{id}/emails`, rather than the generic identifier `POST`/`PATCH`/`DELETE` endpoints below. See that section for details.
 
@@ -511,7 +586,7 @@ Get a single provider by its ID.
 
 | Param | Type | Notes |
 |-------|------|-------|
-| `provider_id` | string | e.g. `discord`, `github`, `notion` |
+| `provider_id` | string | e.g. `discord`, `github`, `uoft_email` |
 
 **Response:** `Provider` object, HTTP 200.
 
@@ -644,14 +719,14 @@ Link an external account to a person.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `provider` | string | yes | Must be an active provider ID; **not** `email` (rejected — use [`POST /people/{id}/emails`](#post-peopleperson_idemails)) |
+| `provider` | string | yes | Must be an existing provider ID; `active` is not checked. **Not** `email` (rejected — use [`POST /people/{id}/emails`](#post-peopleperson_idemails)) |
 | `external_id` | string | yes | The stable external identifier (e.g. snowflake, numeric id) |
 | `handle` | string | no | Optional human-readable handle or display name |
 
 **Response:** `PersonIdentifier` object, HTTP 201.
 
 **Errors:** 
-- 400 if `provider` does not exist or is inactive
+- 400 if `provider` does not exist (an inactive provider can still receive new links)
 - 404 if person not found
 - 409 if person already has that provider linked, if (provider, external_id) is linked to a different person, or if `provider="email"` (rejected — use [`POST /people/{id}/emails`](#post-peopleperson_idemails) instead)
 - 422 if required fields are missing or validation fails
@@ -730,6 +805,88 @@ curl -sS -X DELETE "http://localhost:8000/people/550e8400-e29b-41d4-a716-4466554
 
 ---
 
+## Channel team access
+
+The teams whose documents may inform answers in a Discord channel. A channel is addressed by its guild and channel snowflakes; both must be all digits, or the request is a 422. **An unconfigured channel, or one configured with no teams, has no document access.** Thread scope is the caller's decision: pass whichever channel id should govern.
+
+Like person identifiers, this is current state, not history: a replace or clear hard-deletes the previous configuration.
+
+Scopes: `channels:read` for GET, `channels:write` for PUT/DELETE.
+
+**`ChannelTeams` shape:**
+
+```json
+{
+  "guild_id": "111111111111111111",
+  "channel_id": "222222222222222222",
+  "team_ids": ["660e8400-e29b-41d4-a716-446655440001"],
+  "updated_by": "discord-bot",
+  "version": "edad6e056c0095ff"
+}
+```
+
+- `team_ids` lists **active** teams only, sorted. Retiring a team (`PATCH /teams/{id}` with `active: false`) removes it from every channel immediately, without a write here.
+- `version` is a fingerprint of `team_ids` (a truncated SHA-256 of the sorted ids). It changes exactly when the channel's effective access changes, including a retirement, and is not derived from timestamps, so the order concurrent writes commit in cannot hide a change. Use it as a cache key; if it differs from the value you cached, drop what you cached. An unconfigured channel and one configured with no teams share the same version, because both grant nothing.
+- `updated_by` is the key that last configured the channel. `null` when unconfigured.
+
+Concurrent PUTs, append POSTs, and DELETEs on the same channel are serialized. Replace and clear: the last one to commit wins outright, never a mix of two requests. Append unions under the same lock, so concurrent appends accumulate and an append cannot resurrect teams a concurrent clear already removed.
+
+### GET /channels/{guild_id}/{channel_id}/teams
+
+Read a channel's teams. Always 200. An unconfigured channel returns `team_ids: []` with `updated_by` null, so there is no 404 to special-case.
+
+```bash
+curl -sS "http://localhost:8000/channels/111111111111111111/222222222222222222/teams" \
+  -H "X-API-Key: dev-api-key-change-me"
+```
+
+### PUT /channels/{guild_id}/{channel_id}/teams
+
+Replace the channel's whole team set. `{"team_ids": []}` clears it.
+
+**Request body:**
+
+```json
+{ "team_ids": ["660e8400-e29b-41d4-a716-446655440001", "660e8400-e29b-41d4-a716-446655440002"] }
+```
+
+**Response:** `ChannelTeams`, HTTP 200.
+
+**Errors:** 400 if any id is not an active team; the existing configuration is left unchanged. 422 for duplicate ids, unknown fields, or non-numeric guild/channel ids.
+
+```bash
+curl -sS -X PUT "http://localhost:8000/channels/111111111111111111/222222222222222222/teams" \
+  -H "X-API-Key: dev-api-key-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"team_ids": ["660e8400-e29b-41d4-a716-446655440001"]}'
+```
+
+### POST /channels/{guild_id}/{channel_id}/teams/append
+
+Atomically union `team_ids` onto the channel's current active set. Same body shape as PUT. An empty list is a true no-op: it returns the current configuration without rewriting rows (so `updated_by` and mappings for retired teams are unchanged). Holds the same per-channel write lock as PUT/DELETE for the whole read-merge-write.
+
+**Response:** `ChannelTeams`, HTTP 200.
+
+**Errors:** 400 if any id is not an active team; the existing configuration is left unchanged. 422 for duplicate ids, unknown fields, or non-numeric guild/channel ids.
+
+```bash
+curl -sS -X POST "http://localhost:8000/channels/111111111111111111/222222222222222222/teams/append" \
+  -H "X-API-Key: dev-api-key-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"team_ids": ["660e8400-e29b-41d4-a716-446655440002"]}'
+```
+
+### DELETE /channels/{guild_id}/{channel_id}/teams
+
+Clear the channel's configuration. HTTP 204, idempotent: clearing an unconfigured channel is also 204.
+
+```bash
+curl -sS -X DELETE "http://localhost:8000/channels/111111111111111111/222222222222222222/teams" \
+  -H "X-API-Key: dev-api-key-change-me"
+```
+
+---
+
 ## Memberships
 
 A `TeamMembership` row records that a person holds a role on a team for a date range. Rows are never deleted; when someone leaves, the row gains an `ended_at` date.
@@ -747,11 +904,11 @@ Create a new membership. **Scope:** `memberships:write`.
 | `role_kind_id` | string | no | FK → role_kinds.id; defaults to `"member"` |
 | `is_team_admin` | boolean | no | Default `false` |
 | `started_at` | date | no | ISO 8601 date (e.g. `"2026-01-15"`); defaults to today at storage layer |
-| `ended_at` | date | no | ISO 8601 date; null = currently active |
+| `ended_at` | date | no | ISO 8601 date; exclusive upper bound; null = no end date |
 
 **Response:** `TeamMembership` object, HTTP 201.
 
-**Errors:** 400 if `person_id`, `team_id`, or `role_kind_id` does not exist. 422 if required fields are missing or types are wrong.
+**Errors:** 400 if `person_id`, `team_id`, or `role_kind_id` does not exist, or the date range overlaps another membership for the same person and team (regardless of role). Adjacent half-open ranges are allowed; see [temporal integrity](../README.md#behavior-notes). 422 if required fields are missing or types are wrong.
 
 ```bash
 curl -sS -X POST http://localhost:8000/memberships \
@@ -797,7 +954,7 @@ List memberships, with optional filters. All filters are AND-combined. **Scope:*
 |-------|------|---------|-------|
 | `team_id` | UUID | — | Filter to memberships on this team |
 | `person_id` | UUID | — | Filter to memberships held by this person |
-| `active_only` | boolean | `false` | If `true`, returns only rows where `ended_at IS NULL` |
+| `active_only` | boolean | `false` | If `true`, returns rows where `ended_at IS NULL OR ended_at > today`; does not check `started_at` |
 | `as_of` | date | — | ISO 8601 date; returns rows where `started_at <= as_of AND (ended_at IS NULL OR ended_at > as_of)` |
 | `is_team_admin` | boolean | — | If provided, filters to rows matching this admin flag |
 
@@ -807,11 +964,11 @@ List memberships, with optional filters. All filters are AND-combined. **Scope:*
 
 ```bash
 # Current members of the Partnerships team
-curl -sS "http://localhost:8000/memberships?team_id=660e8400-e29b-41d4-a716-446655440001&active_only=true" \
+curl -sS "http://localhost:8000/memberships?team_id=660e8400-e29b-41d4-a716-446655440001&as_of=$(date +%F)" \
   -H "X-API-Key: dev-api-key-change-me"
 
 # All memberships Alex currently holds
-curl -sS "http://localhost:8000/memberships?person_id=550e8400-e29b-41d4-a716-446655440000&active_only=true" \
+curl -sS "http://localhost:8000/memberships?person_id=550e8400-e29b-41d4-a716-446655440000&as_of=$(date +%F)" \
   -H "X-API-Key: dev-api-key-change-me"
 
 # Roster as of a past date
@@ -819,7 +976,7 @@ curl -sS "http://localhost:8000/memberships?team_id=660e8400-e29b-41d4-a716-4466
   -H "X-API-Key: dev-api-key-change-me"
 
 # Current admins of a team
-curl -sS "http://localhost:8000/memberships?team_id=660e8400-e29b-41d4-a716-446655440001&is_team_admin=true&active_only=true" \
+curl -sS "http://localhost:8000/memberships?team_id=660e8400-e29b-41d4-a716-446655440001&is_team_admin=true&as_of=$(date +%F)" \
   -H "X-API-Key: dev-api-key-change-me"
 ```
 
@@ -866,7 +1023,7 @@ Update one or more fields on a membership. Use this for general edits (changing 
 
 **Response:** Updated `TeamMembership` object, HTTP 200.
 
-**Errors:** 404 if not found. 400 if `role_kind_id` does not exist.
+**Errors:** 404 if not found. 400 if `role_kind_id` does not exist or the resulting date range overlaps another membership for the same person and team.
 
 ```bash
 # Promote to lead
@@ -899,18 +1056,20 @@ End a membership by setting its `ended_at` date. This is a semantic shortcut ove
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `ended_at` | date | yes | ISO 8601 date; the last day of membership |
+| `ended_at` | date | yes | ISO 8601 date; the first excluded day (exclusive upper bound) |
 
 **Response:** Updated `TeamMembership` object with `ended_at` set, HTTP 200.
 
-**Errors:** 404 if not found.
+**Errors:** 404 if not found. 400 if the resulting date range overlaps another membership for the same person and team.
+
+To include April 30 as the last day of membership, set `ended_at` to May 1:
 
 ```bash
 curl -sS -X POST "http://localhost:8000/memberships/770e8400-e29b-41d4-a716-446655440002/end" \
   -H "X-API-Key: dev-api-key-change-me" \
   -H "X-Actor: admin" \
   -H "Content-Type: application/json" \
-  -d '{"ended_at": "2026-04-30"}'
+  -d '{"ended_at": "2026-05-01"}'
 ```
 
 ---
@@ -918,20 +1077,21 @@ curl -sS -X POST "http://localhost:8000/memberships/770e8400-e29b-41d4-a716-4466
 ## Common queries recipe book
 
 These examples use placeholder UUIDs. Substitute real IDs from your data.
+Current-roster queries use `as_of` with today's date to check both date bounds.
 
 **Who is currently on the Partnerships team?**
 
 ```bash
-curl -sS "http://localhost:8000/memberships?team_id=<partnerships-uuid>&active_only=true" \
+curl -sS "http://localhost:8000/memberships?team_id=<partnerships-uuid>&as_of=$(date +%F)" \
   -H "X-API-Key: dev-api-key-change-me"
 ```
 
-Returns all membership rows with `ended_at IS NULL` for that team. To resolve person details, call `GET /people/{person_id}` for each `person_id` in the results.
+Returns that team's membership rows where `started_at <= today AND (ended_at IS NULL OR ended_at > today)`. To resolve person details, call `GET /people/{person_id}` for each `person_id` in the results.
 
 **Who are the current team admins of Partnerships?**
 
 ```bash
-curl -sS "http://localhost:8000/memberships?team_id=<partnerships-uuid>&is_team_admin=true&active_only=true" \
+curl -sS "http://localhost:8000/memberships?team_id=<partnerships-uuid>&is_team_admin=true&as_of=$(date +%F)" \
   -H "X-API-Key: dev-api-key-change-me"
 ```
 
@@ -947,7 +1107,7 @@ Returns rows where `started_at <= 2024-12-15` AND (`ended_at IS NULL` OR `ended_
 **What teams is Alex currently on?**
 
 ```bash
-curl -sS "http://localhost:8000/memberships?person_id=<alex-uuid>&active_only=true" \
+curl -sS "http://localhost:8000/memberships?person_id=<alex-uuid>&as_of=$(date +%F)" \
   -H "X-API-Key: dev-api-key-change-me"
 ```
 

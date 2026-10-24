@@ -1,0 +1,104 @@
+name: Bug report
+description: Something is broken or behaves differently than documented
+labels: ["type/bug"]
+body:
+  - type: input
+    id: blocked-by
+    attributes:
+      label: Blocked by
+      description: >-
+        Issue numbers this depends on, like `#40, #42`. The label automation
+        reads this field. Leave it empty if nothing blocks this.
+      placeholder: "#40, #42"
+    validations:
+      required: false
+
+  - type: textarea
+    id: whats-wrong
+    attributes:
+      label: What's wrong
+      description: One or two sentences.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: >-
+        Which parts of the system are involved, and so what someone picking
+        this up would need to know. Pick every one that applies.
+      multiple: true
+      options:
+        - bot
+        - deployment
+        - docs-system
+        - integration
+        - observability
+        - service
+        - tooling
+        - not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - local
+        - staging
+        - production
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: What should have happened, and where that's documented if it is.
+    validations:
+      required: true
+
+  # Not `required`: a `render`ed textarea is pre-filled with an empty code
+  # fence, so it is never truly empty and the validation cannot fire cleanly.
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: >-
+        What happened. Include the status code, the error, or the log line.
+      render: shell
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: >-
+        Useful if you have them: does it reproduce in the web playground
+        (`npm run dev:web`), or only on the real Discord surface? Does the
+        service's `/health` answer — several services boot fine and only fail on
+        a real call? Anything in the audit log for that request (actor,
+        endpoint, status)?
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: no-secrets
+    attributes:
+      label: Before you file
+      options:
+        - label: >-
+            This issue contains no API keys, one-time codes, or `.env` contents.
+          required: true
