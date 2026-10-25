@@ -105,6 +105,13 @@ Each team gets a Google Group so Drive documents and channel access can be grant
 2. `POST /teams/{id}/google-group/sync` runs a sync immediately: the recovery path after fixing whatever the mapping's `last_error` describes.
 3. `team-tracking-groups sync` (CLI) syncs every team. It does the initial backfill, and run on a schedule it also applies changes no write triggers: a future `started_at` arriving or a future `ended_at` passing. See [DEPLOYMENT.md](DEPLOYMENT.md#managed-google-groups).
 
+The CLI continues through recorded provider failures and finishes the pass
+with a warning if any team is incomplete. A rejected address leaves its
+mapping failed while the process completes normally with exit code 0. This
+does not change reconciliation, pending-write recovery or access decisions.
+Unexpected execution failures still fail the process. See the
+[scheduled-run contract](DEPLOYMENT.md#backfill-and-the-scheduled-sync).
+
 **No duplicate groups.** The group's address is `<slug>@<domain>`. Each group is created with the description `Managed by Misty team-tracking (team <uuid>)`. If creation hits `409 already exists`, the provider looks the address up, adopts the group only if its description is exactly that marker (a previous attempt that succeeded but was never recorded), and otherwise fails with "already in use". So a retry never duplicates a group or takes over a stranger's. Until creation succeeds the address follows the current slug, so a taken address can be fixed by renaming the team. After that the address never changes, even if the slug does.
 
 **External members.** For every active managed group, the provider reads the
