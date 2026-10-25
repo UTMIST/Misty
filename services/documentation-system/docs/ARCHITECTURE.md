@@ -831,8 +831,13 @@ so grants still come only from each file's complete, resolved source ACL.
 
 Discovery has separate invocation and clean-completion heartbeat checks. Only a
 newly completed clean scan resets the completion deadline; bounded continuation
-cannot keep a stalled corpus apparently healthy. The local checkpoint lock spans
-the final pings, and monitoring failures never replay import work. Timing,
+cannot keep a stalled corpus apparently healthy. Item/page/time budget stops and
+completed traversals with handled gaps exit successfully with structured warnings.
+The runner returns a scan outcome separately from the process exit code, so these
+successful invocations cannot reset the clean-scan deadline. Checkpoint summaries
+distinguish an in-progress scan from a completed traversal with warnings; a retained
+completion timestamp may belong to the previous traversal. The local checkpoint lock
+spans the final pings, and monitoring failures never replay import work. Timing,
 ownership and recovery live in the [monitoring runbook](DISCOVERY.md#failure-stuck-run-and-completion-alerts).
 
 `StorageAdapter.get_doc_by_google_file_id` matches supported URL aliases in both

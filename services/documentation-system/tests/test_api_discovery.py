@@ -317,7 +317,7 @@ def test_http_runner_imports_nested_shares_through_catalog_and_reuses_refresh(ct
     import httpx
     from pydantic import SecretStr
 
-    from src.discovery import DiscoveryClient, Settings, State, run_discovery
+    from src.discovery import DiscoveryClient, ScanOutcome, Settings, State, run_discovery
 
     client, store, fetchers = ctx
     listings = {
@@ -344,11 +344,11 @@ def test_http_runner_imports_nested_shares_through_catalog_and_reuses_refresh(ct
     )
     state = State(identity="default")
     runner = DiscoveryClient(settings, httpx.Client(transport=httpx.MockTransport(transport)))
-    assert run_discovery(runner, settings, state, lambda: None) == 0
+    assert run_discovery(runner, settings, state, lambda: None) == ScanOutcome.COMPLETED
     assert state.counts["indexed"] == 2
     assert len(store.list_docs()) == 2
     listings["folder"].append({"file_id": "later", "kind": "file", "source_id": "gdocs"})
-    assert run_discovery(runner, settings, state, lambda: None) == 0
+    assert run_discovery(runner, settings, state, lambda: None) == ScanOutcome.COMPLETED
     assert state.counts["existing"] == 2
     assert state.counts["indexed"] == 1
     assert len(fetchers.calls) == len(fake_embedder.calls) == 3
