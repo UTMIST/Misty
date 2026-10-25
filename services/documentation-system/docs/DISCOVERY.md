@@ -137,11 +137,25 @@ and empty cursor history; history is collected as their current listing resumes.
 
 Exit codes:
 
-- `0`: full scan completed without import/listing gaps (or explicitly disabled).
-- `1`: traversal finished with incomplete listings, failed imports, registered files
-  without content, or indexing failures. Completion is not proof all files indexed.
-- `2`: budget reached, overlap, configuration, HTTP or response failure; checkpoint
-  retained. Bounded continuation is expected for a large corpus but must converge.
+- `0`: invocation finished normally, including item/page/time budget stops and
+  completed traversals with handled import/listing gaps (or explicitly disabled).
+  Budget stops retain the checkpoint for the next invocation. Completion is not
+  proof all files indexed. Exit `1` is no longer used.
+- `2`: overlap, configuration, checkpoint storage, HTTP, malformed response, folder
+  bound or monitor-delivery failure. Inspect the cause before retrying. The folder
+  bound applies to the full scan, so another invocation alone cannot resolve it.
+
+The finish event separates process health from scan progress: `outcome` is
+`completed`, `completed_with_gaps`, `item_budget`, `page_budget`, `time_budget`, or
+`failed`. Normal budget stops and handled gaps log `level: warning`; actual failures
+log `level: error`. An HTTP timeout during an accepted request remains a failure,
+even when it occurs near the time budget: it is not proof the server stopped work.
+
+Both finish events and `--status` expose `scan_status`: `not_started`, `in_progress`,
+`completed`, or `completed_with_warnings`. During continuation, `completed_at` and
+`last_counts` still describe the previous completed traversal. A non-null historical
+timestamp does not mean the current scan finished. No checkpoint reset or migration
+is needed for this change.
 
 Counts distinguish `indexed`, `existing` (current stored index), `registered`
 (missing content or initial Google ACL sync), `index_failed`, `retired`, `disabled`,
@@ -164,11 +178,16 @@ infer an on-call backup from CODEOWNERS or issue assignments.
 | `Misty staging discovery runs` | Cron `*/15 * * * *`, UTC; 30-minute grace | `DISCOVERY_MONITOR_URL` | `/start` after acquiring the checkpoint lock; success only on exit 0, otherwise `/fail` |
 | `Misty staging discovery completion` | Simple period 23 hours; grace 1 hour | `DISCOVERY_COMPLETION_MONITOR_URL` | Success only after a newly completed clean scan has been checkpointed; no start/failure pings |
 
-The first check reports exits 1/2, overlaps, missed invocations and runs stuck for
+The first check reports exit 2, overlaps, missed invocations and runs stuck for
 30 minutes after start. The grace leaves room for the 900-second work budget and
 an already accepted request's phase timeouts. The second check alerts after 24
 hours without a clean completed scan. Repeated continuation, restarts, `--status`,
 disabled runs and completed traversals with indexing/listing gaps cannot reset it.
+Normal budget stops and handled gaps send success only to the invocation check.
+As before, audience/extraction warning counts alone do not block the completion
+heartbeat when no import, content/index or listing gaps remain; they still appear
+in the warning-level summary. `completed_at` records traversal completion, while
+the completion monitor independently tracks the last clean traversal.
 Arm the completion check's initial deadline when provisioning it, before enabling
 the runner; a check left in `new` state does not detect a first scan that never
 finishes. Send one setup success with a distinct setup user agent and record its
@@ -194,10 +213,11 @@ excluded. It covers a process unable to report to Healthchecks. The project-wide
 webhook also includes other services; it does not replace discovery's two checks.
 
 For an alert, inspect sanitized start/finish summaries and checkpoint status before
-changing limits or restarting. A nonzero result can mean expected bounded
-continuation, a content/index gap, denied listing, dependency failure, overlap or
-monitor failure. Preserve the checkpoint and identify the cause. Tune limits from
-observed progress; never acknowledge a completed scan by manually pinging success.
+changing limits or restarting. Warning outcomes identify expected bounded
+continuation or handled content/index/listing gaps; nonzero exits identify actual
+runner, dependency or monitor failures. Preserve the checkpoint and identify the
+cause. Tune limits from observed progress; never acknowledge a completed scan by
+manually pinging success.
 Coordinate recovery of ambiguous API work using the lifecycle guidance below.
 
 To verify delivery, use disposable checks with short periods and the discovery

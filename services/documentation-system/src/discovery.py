@@ -8,6 +8,7 @@ import argparse
 from collections import Counter
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
+from enum import StrEnum
 import fcntl
 import json
 import os
@@ -32,6 +33,21 @@ class RetryableDiscoveryError(DiscoveryError):
 
 
 MAX_IMPORT_ATTEMPTS = 3
+SCAN_GAP_COUNTS = (
+    "registered",
+    "index_failed",
+    "import_failed",
+    "listing_failed",
+    "incomplete_pages",
+)
+
+
+class ScanOutcome(StrEnum):
+    COMPLETED = "completed"
+    COMPLETED_WITH_GAPS = "completed_with_gaps"
+    ITEM_BUDGET = "item_budget"
+    PAGE_BUDGET = "page_budget"
+    TIME_BUDGET = "time_budget"
 
 
 class Settings(BaseSettings):
@@ -116,7 +132,17 @@ class State(BaseModel):
     last_counts: dict[str, int] = Field(default_factory=dict)
 
     def summary(self):
+        scan_status = "not_started"
+        if self.frontier or self.pending:
+            scan_status = "in_progress"
+        elif self.completed_at:
+            scan_status = (
+                "completed_with_warnings"
+                if any(self.counts.get(key, 0) for key in (*SCAN_GAP_COUNTS, "warnings"))
+                else "completed"
+            )
         return {
+            "scan_status": scan_status,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "queued_listings": len(self.frontier),
@@ -318,11 +344,11 @@ def checkpoint(settings: Settings):
         yield state, lambda: save_state(path, state)
 
 
-def run_discovery(client, settings: Settings, state: State, save) -> int:
+def run_discovery(client, settings: Settings, state: State, save) -> ScanOutcome:
     """Bound new requests, checkpoint each result, never refresh existing docs.
 
-    Exit 0: full scan without failures. 1: full scan with item/listing gaps.
-    2: interrupted/budget-limited; next invocation continues this checkpoint.
+    Normal completion and budget stops return an outcome, not a process exit code.
+    Errors raise; a budget stop retains work for the next scheduled invocation.
     A completed scan starts again on the next scheduled invocation.
     """
     deadline = time.monotonic() + settings.discovery_max_seconds
@@ -330,10 +356,13 @@ def run_discovery(client, settings: Settings, state: State, save) -> int:
     def timeout():
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise DiscoveryError("time budget reached; checkpoint retained")
+            return None
         return min(settings.discovery_timeout_seconds, remaining)
 
-    client.check_scope(timeout())
+    request_timeout = timeout()
+    if request_timeout is None:
+        return ScanOutcome.TIME_BUDGET
+    client.check_scope(request_timeout)
     if not state.frontier and not state.pending:
         state.frontier = [Listing()]
         state.pending_attempts = 0
@@ -349,10 +378,12 @@ def run_discovery(client, settings: Settings, state: State, save) -> int:
         save()
 
     while state.frontier or state.pending:
-        timeout()
+        request_timeout = timeout()
+        if request_timeout is None:
+            return ScanOutcome.TIME_BUDGET
         if state.pending:
             if items >= settings.discovery_max_items:
-                return 2
+                return ScanOutcome.ITEM_BUDGET
             item = state.pending[0]
             if item.file_id in settings.discovery_excluded_ids:
                 counts["excluded"] += 1
@@ -367,7 +398,7 @@ def run_discovery(client, settings: Settings, state: State, save) -> int:
                 counts[item.kind] += 1
             else:
                 try:
-                    result = client.import_file(item, timeout())
+                    result = client.import_file(item, request_timeout)
                 except RetryableDiscoveryError:
                     state.pending_attempts += 1
                     if state.pending_attempts < MAX_IMPORT_ATTEMPTS:
@@ -386,9 +417,9 @@ def run_discovery(client, settings: Settings, state: State, save) -> int:
             persist()
         else:
             if pages >= settings.discovery_max_pages:
-                return 2
+                return ScanOutcome.PAGE_BUDGET
             listing = state.frontier[0]
-            page = client.list_page(listing, timeout())
+            page = client.list_page(listing, request_timeout)
             pages += 1
             counts["pages"] += 1
             if page is None:
@@ -408,18 +439,9 @@ def run_discovery(client, settings: Settings, state: State, save) -> int:
     state.last_counts = dict(counts)
     persist()
     return (
-        1
-        if any(
-            counts[k]
-            for k in (
-                "registered",
-                "index_failed",
-                "import_failed",
-                "listing_failed",
-                "incomplete_pages",
-            )
-        )
-        else 0
+        ScanOutcome.COMPLETED_WITH_GAPS
+        if any(counts[k] for k in SCAN_GAP_COUNTS)
+        else ScanOutcome.COMPLETED
     )
 
 
@@ -432,6 +454,7 @@ def main(argv=None) -> int:
     started = time.monotonic()
     state = monitor = completion_monitor = None
     code = 2
+    outcome = None
     monitor_failed = False
     # Keep the checkpoint lock through the final pings. A rejected overlapping
     # runner may report failure but must never replace the owner's start time.
@@ -466,24 +489,30 @@ def main(argv=None) -> int:
             print(json.dumps({"event": "start", "run_id": run_id}), flush=True)
             if monitor:
                 monitor_failed = not monitor.ping("start")
-            code = run_discovery(client, settings, state, save)
+            outcome = run_discovery(client, settings, state, save)
+            code = 0
         except (ValidationError, SettingsError, OSError):
             print("invalid discovery configuration or checkpoint storage", file=sys.stderr)
         except DiscoveryError as exc:
             print(str(exc), file=sys.stderr)
         # Partial scans and errors must never reset the full-scan deadline.
-        # Only a newly completed clean traversal (exit 0) sends this success.
-        if completion_monitor and code == 0:
+        # A successful bounded invocation need not be a clean completed scan.
+        if completion_monitor and outcome == ScanOutcome.COMPLETED:
             monitor_failed = not completion_monitor.ping("success") or monitor_failed
         if monitor:
             event = "success" if code == 0 and not monitor_failed else "fail"
             monitor_failed = not monitor.ping(event) or monitor_failed
         if monitor_failed:
             code = 2
+        level = "error" if code else "info"
+        if not code and (outcome != ScanOutcome.COMPLETED or state.counts.get("warnings", 0)):
+            level = "warning"
         print(
             json.dumps(
                 {
                     "event": "finish",
+                    "level": level,
+                    "outcome": outcome if outcome is not None else "failed",
                     "run_id": run_id,
                     "exit_code": code,
                     "monitor_failed": monitor_failed,

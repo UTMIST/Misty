@@ -6,7 +6,17 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from src.discovery import DiscoveryError, DiscoveryMonitor, Settings, State, checkpoint, main
+from src.discovery import (
+    DiscoveryError,
+    DiscoveryMonitor,
+    Item,
+    Listing,
+    Settings,
+    State,
+    checkpoint,
+    main,
+    save_state,
+)
 
 
 @pytest.mark.parametrize(
@@ -76,7 +86,15 @@ def monitored_cli(monkeypatch, tmp_path):
         monkeypatch.setenv(name, value)
     requests = []
     monitor_events = []
-    outcome = {"import": "indexed", "monitor_failure": None, "listing_failure": False}
+    outcome = {
+        "import": "indexed",
+        "monitor_failure": None,
+        "listing_failure": False,
+        "incomplete": False,
+        "warnings": 0,
+        "listing_denied": False,
+        "import_rejected": False,
+    }
 
     def handler(request):
         requests.append(request)
@@ -99,21 +117,27 @@ def monitored_cli(monkeypatch, tmp_path):
             assert request.headers["x-api-key"] == "connector-secret"
             if outcome["listing_failure"]:
                 return httpx.Response(503, text="secret upstream content")
+            if outcome["listing_denied"]:
+                return httpx.Response(403, json={"detail": "source denied listing"})
             return httpx.Response(
                 200,
                 json={
+                    "incomplete": outcome["incomplete"],
                     "items": [
                         {"file_id": name, "kind": "file", "source_id": "gdocs"}
                         for name in ("one", "two")
-                    ]
+                    ],
                 },
             )
         assert request.url.path == "/docs/discovery"
         assert request.headers["x-api-key"] == "catalog-secret"
+        if outcome["import_rejected"]:
+            return httpx.Response(422, text="secret upstream detail")
         return httpx.Response(
             200,
             json={
                 "status": outcome["import"],
+                "warnings": outcome["warnings"],
                 "doc_id": "11111111-1111-1111-1111-111111111111",
             },
         )
@@ -141,8 +165,8 @@ def test_continuation_cannot_reset_completion_deadline_and_next_run_recovers(
 ):
     _, requests, events, _ = monitored_cli
     monkeypatch.setenv("DISCOVERY_MAX_ITEMS", "1")
-    assert main(["--require-monitor"]) == 2
-    assert events == ["/run-secret/start", "/run-secret/fail"]
+    assert main(["--require-monitor"]) == 0
+    assert events == ["/run-secret/start", "/run-secret"]
     events.clear()
     assert main(["--require-monitor"]) == 0
     assert events == ["/run-secret/start", "/complete-secret", "/run-secret"]
@@ -150,12 +174,17 @@ def test_continuation_cannot_reset_completion_deadline_and_next_run_recovers(
     assert sum(r.url.path == "/docs/discovery" for r in requests) == 2
 
 
-@pytest.mark.parametrize("result", ["registered", "index_failed"])
+@pytest.mark.parametrize(
+    "result", ["registered", "index_failed", "import_rejected", "listing_denied", "incomplete"]
+)
 def test_completed_traversal_with_gaps_does_not_reset_clean_scan_deadline(monitored_cli, result):
     _, _, events, outcome = monitored_cli
-    outcome["import"] = result
-    assert main(["--require-monitor"]) == 1
-    assert events == ["/run-secret/start", "/run-secret/fail"]
+    if result in {"registered", "index_failed"}:
+        outcome["import"] = result
+    else:
+        outcome[result] = True
+    assert main(["--require-monitor"]) == 0
+    assert events == ["/run-secret/start", "/run-secret"]
 
 
 def test_api_failure_reports_failure_without_replay_or_sensitive_logs(monitored_cli, capsys):
@@ -239,3 +268,109 @@ def test_railway_only_schedules_monitored_staging_runs():
     preview = config["environments"]["pr"]["deploy"]
     assert preview["cronSchedule"] is None
     assert "src.discovery" not in preview["startCommand"]
+
+
+@pytest.mark.parametrize("limit", ["items", "pages", "seconds"])
+def test_normal_limits_warn_resume_and_preserve_previous_completion(
+    monitored_cli, monkeypatch, capsys, limit
+):
+    config, requests, events, _ = monitored_cli
+    path = Path(config["DISCOVERY_STATE_PATH"])
+    previous_completion = "2026-10-24T00:00:00+00:00"
+    state = State(
+        identity="default",
+        started_at="2026-10-25T00:00:00+00:00",
+        completed_at=previous_completion,
+        last_counts={"indexed": 10},
+        frontier=[Listing(folder_id="first"), Listing(folder_id="second")],
+    )
+    if limit != "pages":
+        state.frontier = []
+        state.pending = [
+            Item(file_id=name, kind="file", source_id="gdocs") for name in ("one", "two")
+        ]
+    save_state(path, state)
+    monkeypatch.setenv(f"DISCOVERY_MAX_{limit.upper()}", "1")
+    clock = [0.0]
+    if limit == "seconds":
+        from src.discovery import DiscoveryClient
+
+        original_import = DiscoveryClient.import_file
+
+        def slow_import(self, item, timeout):
+            result = original_import(self, item, timeout)
+            clock[0] += 2
+            return result
+
+        monkeypatch.setattr("src.discovery.time.monotonic", lambda: clock[0])
+        monkeypatch.setattr(DiscoveryClient, "import_file", slow_import)
+
+    assert main(["--require-monitor"]) == 0
+    assert events == ["/run-secret/start", "/run-secret"]
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert summary["level"] == "warning"
+    assert (
+        summary["outcome"]
+        == {"items": "item_budget", "pages": "page_budget", "seconds": "time_budget"}[limit]
+    )
+    assert summary["scan_status"] == "in_progress"
+    persisted = State.model_validate_json(path.read_text())
+    assert persisted.completed_at == previous_completion
+    assert persisted.last_counts == {"indexed": 10}
+    assert persisted.started_at == state.started_at
+    assert persisted.pending or persisted.frontier
+    assert persisted.counts["indexed"] == (2 if limit == "pages" else 1)
+    events.clear()
+    assert main(["--require-monitor"]) == 0
+    assert events == ["/run-secret/start", "/complete-secret", "/run-secret"]
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert summary["scan_status"] == "completed"
+    assert summary["outcome"] == "completed"
+    assert summary["level"] == "info"
+    assert sum(r.url.path == "/docs/discovery" for r in requests) == (4 if limit == "pages" else 2)
+
+
+def test_completed_gaps_are_visible_in_finish_and_checkpoint_status(monitored_cli, capsys):
+    _, _, events, outcome = monitored_cli
+    outcome["import"] = "registered"
+    assert main(["--require-monitor"]) == 0
+    assert events == ["/run-secret/start", "/run-secret"]
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert summary["level"] == "warning"
+    assert summary["outcome"] == "completed_with_gaps"
+    assert summary["scan_status"] == "completed_with_warnings"
+    assert summary["counts"]["registered"] == 2
+    assert main(["--status"]) == 0
+    assert json.loads(capsys.readouterr().out)["scan_status"] == "completed_with_warnings"
+
+
+def test_audience_warnings_stay_visible_without_changing_clean_scan_contract(monitored_cli, capsys):
+    _, _, events, outcome = monitored_cli
+    outcome["warnings"] = 3
+    assert main(["--require-monitor"]) == 0
+    assert events == ["/run-secret/start", "/complete-secret", "/run-secret"]
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert summary["level"] == "warning"
+    assert summary["scan_status"] == "completed_with_warnings"
+    assert summary["outcome"] == "completed"
+    assert summary["counts"]["warnings"] == 6
+
+
+def test_failed_checkpoint_write_cannot_report_clean_completion(monitored_cli, monkeypatch, capsys):
+    _, requests, events, _ = monitored_cli
+    from src.discovery import save_state as original_save
+
+    def fail_final_write(path, state):
+        if state.completed_at:
+            raise OSError("secret storage detail")
+        original_save(path, state)
+
+    monkeypatch.setattr("src.discovery.save_state", fail_final_write)
+    assert main(["--require-monitor"]) == 2
+    assert events == ["/run-secret/start", "/run-secret/fail"]
+    assert sum(r.url.path == "/docs/discovery" for r in requests) == 2
+    output = capsys.readouterr()
+    assert "secret" not in output.out + output.err
+    summary = json.loads(output.out.splitlines()[-1])
+    assert summary["level"] == "error"
+    assert summary["outcome"] == "failed"

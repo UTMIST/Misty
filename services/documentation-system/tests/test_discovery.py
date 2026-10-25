@@ -11,6 +11,7 @@ from src.discovery import (
     Item,
     Listing,
     Page,
+    ScanOutcome,
     Settings,
     State,
     checkpoint,
@@ -68,12 +69,12 @@ def test_direct_nested_overlapping_paginated_and_recurring_new_shares(tmp_path):
     def save():
         save_state(path, state)
 
-    assert run_discovery(client, settings, state, save) == 0
+    assert run_discovery(client, settings, state, save) == ScanOutcome.COMPLETED
     assert state.counts["indexed"] == 3
     assert state.counts["existing"] == 1
     assert client.listed.count(("nested", None)) == 1
     assert len(client.catalog) == 3
-    assert run_discovery(client, settings, state, save) == 0
+    assert run_discovery(client, settings, state, save) == ScanOutcome.COMPLETED
     assert state.counts.get("indexed", 0) == 0
     assert state.counts["existing"] == 4
     client.pages[(None, None)] = Page(
@@ -81,7 +82,7 @@ def test_direct_nested_overlapping_paginated_and_recurring_new_shares(tmp_path):
     )
     client.pages[("parent", None)] = Page(items=[file("new-child")])
     client.pages[("new-folder", None)] = Page(items=[file("nested-new")])
-    assert run_discovery(client, settings, state, save) == 0
+    assert run_discovery(client, settings, state, save) == ScanOutcome.COMPLETED
     assert {"new-share", "new-child", "nested-new"} <= client.catalog
 
 
@@ -91,11 +92,11 @@ def test_budget_resumes_saved_page_and_does_not_relist(tmp_path):
     path = tmp_path / "state.json"
     state = State(identity="default")
     for _ in range(20):
-        code = run_discovery(client, settings, state, lambda: save_state(path, state))
+        outcome = run_discovery(client, settings, state, lambda: save_state(path, state))
         state = State.model_validate_json(path.read_text())
-        if code == 0:
+        if outcome == ScanOutcome.COMPLETED:
             break
-    assert code == 0
+    assert outcome == ScanOutcome.COMPLETED
     assert len(client.listed) == 4
     assert state.counts["indexed"] == 3
 
@@ -113,7 +114,7 @@ def test_ambiguous_import_keeps_current_item_for_next_invocation(tmp_path):
     # The timed-out POST may have committed remotely.
     client.catalog.add("direct")
     client.fail = None
-    assert run_discovery(client, Settings(), persisted, lambda: None) == 0
+    assert run_discovery(client, Settings(), persisted, lambda: None) == ScanOutcome.COMPLETED
     assert persisted.counts["existing"] == 2
 
 
@@ -137,7 +138,7 @@ def test_partial_listings_unsupported_exclusions_and_errors_continue():
     state = State(identity="default")
     assert (
         run_discovery(client, Settings(discovery_excluded_ids={"excluded"}), state, lambda: None)
-        == 1
+        == ScanOutcome.COMPLETED_WITH_GAPS
     )
     assert client.catalog == {"good"}
     for key in (
@@ -160,10 +161,10 @@ def test_import_failure_does_not_block_later_files_and_retries_next_scan():
         None if item.file_id == "bad" else original(item, timeout)
     )
     state = State(identity="default")
-    assert run_discovery(client, Settings(), state, lambda: None) == 1
+    assert run_discovery(client, Settings(), state, lambda: None) == ScanOutcome.COMPLETED_WITH_GAPS
     assert client.catalog == {"good"}
     client.import_file = original
-    assert run_discovery(client, Settings(), state, lambda: None) == 0
+    assert run_discovery(client, Settings(), state, lambda: None) == ScanOutcome.COMPLETED
     assert client.catalog == {"good", "bad"}
 
 
@@ -289,7 +290,10 @@ def test_persistent_import_failure_is_bounded_across_restarts(tmp_path, code):
         state = State.model_validate_json(path.read_text())
         assert attempted == ["bad"] * (attempt + 1)
         assert state.pending[0].file_id == "bad"
-    assert run_discovery(client, settings, state, lambda: save_state(path, state)) == 1
+    assert (
+        run_discovery(client, settings, state, lambda: save_state(path, state))
+        == ScanOutcome.COMPLETED_WITH_GAPS
+    )
     assert attempted == ["bad", "bad", "bad", "good"]
     assert state.counts["import_failed"] == 1
     assert state.counts["indexed"] == 1
@@ -297,7 +301,10 @@ def test_persistent_import_failure_is_bounded_across_restarts(tmp_path, code):
     # Exhaustion applies to one scan; a later scan can recover the file.
     recovered = True
     state = State.model_validate_json(path.read_text())
-    assert run_discovery(client, settings, state, lambda: save_state(path, state)) == 0
+    assert (
+        run_discovery(client, settings, state, lambda: save_state(path, state))
+        == ScanOutcome.COMPLETED
+    )
     assert attempted[-2:] == ["bad", "good"]
     assert state.counts.get("import_failed", 0) == 0
 
@@ -354,8 +361,10 @@ def test_time_budget_stops_before_provider_work(monkeypatch):
     times = iter([0, 0, 901])
     monkeypatch.setattr("src.discovery.time.monotonic", lambda: next(times))
     client = Fake()
-    with pytest.raises(DiscoveryError, match="time budget"):
+    assert (
         run_discovery(client, Settings(), State(identity="default"), lambda: None)
+        == ScanOutcome.TIME_BUDGET
+    )
     assert client.listed == []
 
 
@@ -367,9 +376,9 @@ def test_page_budget_continues_from_cursor_next_invocation():
     }
     state = State(identity="default")
     settings = Settings(discovery_max_pages=1)
-    assert run_discovery(client, settings, state, lambda: None) == 2
+    assert run_discovery(client, settings, state, lambda: None) == ScanOutcome.PAGE_BUDGET
     assert state.frontier[0].page_token == "next"
-    assert run_discovery(client, settings, state, lambda: None) == 0
+    assert run_discovery(client, settings, state, lambda: None) == ScanOutcome.COMPLETED
     assert client.catalog == {"after-empty-page"}
 
 
@@ -421,11 +430,11 @@ def test_listing_cycle_across_restarts_does_not_starve_later_folders(
     client, settings = api(handler), Settings(discovery_max_pages=1)
     path = tmp_path / "state.json"
     for _ in range(len(tokens) + 4):
-        code = run_discovery(client, settings, state, lambda: save_state(path, state))
+        outcome = run_discovery(client, settings, state, lambda: save_state(path, state))
         state = State.model_validate_json(path.read_text())
-        if code != 2:
+        if outcome != ScanOutcome.PAGE_BUDGET:
             break
-    assert code == 1
+    assert outcome == ScanOutcome.COMPLETED_WITH_GAPS
     assert state.completed_at is not None
     assert state.frontier == state.pending == []
     assert state.counts["listing_failed"] == 1
@@ -435,7 +444,10 @@ def test_listing_cycle_across_restarts_does_not_starve_later_folders(
 
     # The next full scan retries the failed listing with fresh history.
     recovered = True
-    assert run_discovery(client, Settings(), state, lambda: save_state(path, state)) == 0
+    assert (
+        run_discovery(client, Settings(), state, lambda: save_state(path, state))
+        == ScanOutcome.COMPLETED
+    )
     assert state.counts.get("listing_failed", 0) == 0
     assert imported == ["good", "good"]
 
