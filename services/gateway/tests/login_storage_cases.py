@@ -119,3 +119,10 @@ class LoginStorageCases:
         for minute in range(11, 15):
             assert adapter.reserve_login(challenge(NOW + timedelta(minutes=minute)))
         assert not adapter.reserve_login(challenge(NOW + timedelta(minutes=15)))
+
+    def test_configured_status_budget_remains_bounded(self, adapter):
+        for _ in range(75):
+            assert adapter.allow_login_request("compute", "status", None, NOW, status_limit=75)
+        assert not adapter.allow_login_request("compute", "status", None, NOW, status_limit=75)
+        assert adapter.allow_login_request("other", "status", None, NOW, status_limit=75)
+        assert adapter.allow_login_request("compute", "start", "192.0.2.1", NOW)

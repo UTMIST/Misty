@@ -33,11 +33,13 @@ class InMemoryStorageAdapter:
             self._limits[key] = (count + 1, expires)
         return True
 
-    def allow_login_request(self, owner, operation, client_ip, now):
+    def allow_login_request(self, owner, operation, client_ip, now, *, status_limit=600):
         with self._login_lock:
             self._logins = {k: v for k, v in self._logins.items() if v.expires_at > now}
             self._limits = {k: v for k, v in self._limits.items() if v[1] > now}
-            return self._spend(policy.request_limits(owner, operation, client_ip), now)
+            return self._spend(
+                policy.request_limits(owner, operation, client_ip, status_limit=status_limit), now
+            )
 
     def reserve_login(self, challenge: LoginChallenge) -> bool:
         with self._login_lock:

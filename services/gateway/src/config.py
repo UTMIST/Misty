@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The built-in dev secret for the gateway's OUTBOUND team-tracking key. Only
@@ -11,7 +11,7 @@ DEFAULT_DEV_API_KEY = "dev-api-key-change-me"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     database_url: str = "postgresql+psycopg://gateway:dev_password@localhost:5435/gateway"
 
@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     # edge. X-Forwarded-For is ignored. Keep false for direct access or internal
     # callers, whose headers are not sanitized by Railway's public edge.
     trust_proxy_headers: bool = False
+    login_status_per_minute: int = Field(default=600, ge=1, le=10000)
+    edge_requests_per_minute: int = Field(default=1200, ge=120, le=20000)
+
+    @model_validator(mode="after")
+    def status_capacity_has_edge_headroom(self):
+        if self.edge_requests_per_minute < self.login_status_per_minute + 120:
+            raise ValueError(
+                "EDGE_REQUESTS_PER_MINUTE must exceed LOGIN_STATUS_PER_MINUTE by at least 120"
+            )
+        return self
 
 
 @lru_cache(maxsize=1)

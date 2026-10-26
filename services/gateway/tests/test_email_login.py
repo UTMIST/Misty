@@ -378,3 +378,92 @@ def test_missing_and_active_challenges_share_verification_failure_behavior(login
     second = confirm(client, missing, "999999")
     assert first.status_code == second.status_code == 503
     assert first.json() == second.json()
+
+
+def test_status_capacity_exceeds_thirty_active_members(login):
+    client, _, directory, _ = login
+    directory.get_person = lambda person_id: {**PERSON, "id": person_id}
+    people = [str(uuid4()) for _ in range(100)]
+    for _ in range(2):
+        for person_id in people:
+            response = client.get(f"/v1/auth/people/{person_id}/status")
+            assert response.status_code == 200
+            assert response.json()["active"] is True
+
+
+@pytest.mark.parametrize("retry_outcome", ["sent", "retired", "expired", "throttled"])
+def test_explicit_delivery_cooldown_is_retried_once(login, monkeypatch, retry_outcome):
+    import json
+    import httpx
+    from src.api.routers import email_login
+    from src.verification.http_client import HttpVerificationClient
+
+    client, _, directory, verification = login
+    original = verification.request_code
+    calls = []
+    waits = []
+    clock = [policy.now()]
+    monkeypatch.setattr(policy, "now", lambda: clock[0])
+
+    async def wait(seconds):
+        waits.append(seconds)
+        clock[0] += timedelta(seconds=seconds)
+        if retry_outcome == "retired":
+            directory.person["active"] = False
+        if retry_outcome == "expired":
+            clock[0] += timedelta(minutes=10)
+
+    monkeypatch.setattr(email_login, "sleep", wait, raising=False)
+
+    def handle(request):
+        data = json.loads(request.content)
+        calls.append(data)
+        if len(calls) == 1 or retry_outcome == "throttled":
+            return httpx.Response(
+                429, json={"detail": "rate_limited"}, headers={"Retry-After": "1"}
+            )
+        original(data["subject"], data["email"])
+        return httpx.Response(202)
+
+    upstream = HttpVerificationClient(
+        "http://verification.test",
+        "test-key",
+        client=httpx.Client(transport=httpx.MockTransport(handle)),
+    )
+    verification.request_code = upstream.request_code
+    try:
+        response = start(client)
+        assert response.status_code == 202
+        assert waits == [1]
+        assert len(calls) == (1 if retry_outcome in {"retired", "expired"} else 2)
+        if retry_outcome == "sent":
+            assert confirm(client, response.json()["challenge_id"]).status_code == 200
+        else:
+            assert not verification.sent
+    finally:
+        upstream.close()
+
+
+@pytest.mark.parametrize("status", [429, 500, 502])
+def test_ambiguous_delivery_failure_never_retries(login, status):
+    import httpx
+    from src.verification.http_client import HttpVerificationClient
+
+    client, _, _, verification = login
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(status, json={"detail": "unknown"})
+
+    upstream = HttpVerificationClient(
+        "http://verification.test",
+        "test-key",
+        client=httpx.Client(transport=httpx.MockTransport(handle)),
+    )
+    verification.request_code = upstream.request_code
+    try:
+        assert start(client).status_code == 202
+        assert len(calls) == 1
+    finally:
+        upstream.close()

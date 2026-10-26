@@ -1,6 +1,6 @@
 import httpx
 
-from contracts.login import VerificationUnavailable
+from contracts.login import VerificationRateLimited, VerificationUnavailable
 
 
 class HttpVerificationClient:
@@ -20,6 +20,16 @@ class HttpVerificationClient:
 
     def request_code(self, subject: str, email: str) -> None:
         response = self._post("request-code", {"subject": subject, "email": email})
+        if response.status_code == 429:
+            delay = response.headers.get("Retry-After", "")
+            try:
+                known_cooldown = response.json() == {"detail": "rate_limited"}
+            except ValueError:
+                known_cooldown = False
+            if known_cooldown and len(delay) <= 2 and delay.isascii() and delay.isdecimal():
+                seconds = int(delay)
+                if 1 <= seconds <= 60:
+                    raise VerificationRateLimited(seconds)
         if response.status_code != 202:
             raise VerificationUnavailable("code delivery unavailable")
 

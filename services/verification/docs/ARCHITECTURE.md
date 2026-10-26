@@ -72,6 +72,9 @@ The cost is a genuine (small) race: mail delivered, then the write fails. The us
 So only the newest code is ever live: reissuing invalidates the previous one implicitly, with no cleanup pass and no way for two valid codes to coexist for one subject.
 
 Note the asymmetry: the **rate limit is keyed by email**, the **row is keyed by subject**. That's on purpose — the limit protects the *mailbox* from being flooded across whatever subjects an attacker invents, while the row models "the one proof in flight for this subject."
+A throttled request returns `Retry-After` rounded up to the remaining whole
+seconds before any send. Gateway can defer that specific failure without
+bypassing the mailbox limit; unknown errors must not authorize a retry.
 
 ## The confirm state machine
 

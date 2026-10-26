@@ -81,11 +81,15 @@ class PostgresStorageAdapter:
             )
         return True
 
-    def allow_login_request(self, owner, operation, client_ip, now):
+    def allow_login_request(self, owner, operation, client_ip, now, *, status_limit=600):
         with self._login_transaction() as conn:
             conn.execute(delete(login_challenges).where(login_challenges.c.expires_at <= now))
             conn.execute(delete(login_limits).where(login_limits.c.expires_at <= now))
-            return self._spend(conn, policy.request_limits(owner, operation, client_ip), now)
+            return self._spend(
+                conn,
+                policy.request_limits(owner, operation, client_ip, status_limit=status_limit),
+                now,
+            )
 
     def reserve_login(self, challenge: LoginChallenge) -> bool:
         with self._login_transaction() as conn:

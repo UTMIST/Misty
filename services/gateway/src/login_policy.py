@@ -20,8 +20,10 @@ def email_key(email: str) -> str:
     return sha256(email.encode()).hexdigest()
 
 
-def request_limits(owner: str, operation: str, client_ip: str | None) -> list[Limit]:
-    counts = {"start": 30, "confirm": 60, "status": 60}
+def request_limits(
+    owner: str, operation: str, client_ip: str | None, *, status_limit: int = 600
+) -> list[Limit]:
+    counts = {"start": 30, "confirm": 60, "status": status_limit}
     limits = [(f"app:{owner}:{operation}", counts[operation], 60)]
     if operation == "start":
         limits.append((f"app:{owner}:send-hour", 300, 3600))

@@ -89,7 +89,7 @@ adds single-use login redemption and eligibility checks around private HTTP call
 
 | Method | Path | Scope | Description |
 |--------|------|-------|-------------|
-| POST | `/verification/request-code` | `verification:write` | Generate + email a one-time code for `{subject, email}`. **202 Accepted** on success |
+| POST | `/verification/request-code` | `verification:write` | Generate + email a one-time code for `{subject, email}`. **202 Accepted** on success; pre-send cooldown returns **429** with `Retry-After`. |
 | POST | `/verification/confirm-code` | `verification:write` | Verify `{subject, code}`; **200** → `{verified, subject, email}` |
 | GET | `/health` | — (none) | Liveness probe → `{"status": "ok"}` |
 

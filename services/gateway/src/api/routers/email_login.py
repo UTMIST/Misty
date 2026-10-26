@@ -1,7 +1,10 @@
 import logging
+from asyncio import sleep
+from datetime import timedelta
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
+from starlette.concurrency import run_in_threadpool
 
 from contracts.directory import DirectoryClient
 from contracts.login import (
@@ -13,6 +16,7 @@ from contracts.login import (
     LoginChallenge,
     PersonStatusOut,
     VerificationClient,
+    VerificationRateLimited,
 )
 from contracts.storage import StorageAdapter
 from src import login_policy as policy
@@ -35,7 +39,13 @@ def _enabled():
 
 def _quota(storage, key, operation, client_ip=None):
     _enabled()
-    if not storage.allow_login_request(key.name, operation, client_ip, policy.now()):
+    if not storage.allow_login_request(
+        key.name,
+        operation,
+        client_ip,
+        policy.now(),
+        status_limit=get_settings().login_status_per_minute,
+    ):
         raise HTTPException(429, "rate limit exceeded", headers={"Retry-After": "60"})
 
 
@@ -58,18 +68,37 @@ def _eligible(person: dict | None, email: str | None = None) -> UUID | None:
     return person_id
 
 
-def _deliver(challenge, storage, directory, verification):
+def _send_and_activate(challenge, storage, directory, verification):
+    if policy.now() >= challenge.expires_at:
+        return
+    person_id = _eligible(directory.get_person_by_email(challenge.email), challenge.email)
+    if person_id is None or policy.now() >= challenge.expires_at:
+        return
+    verification.request_code(f"gateway-login:{challenge.id}", challenge.email)
+    storage.activate_login(challenge.id, person_id, policy.now())
+
+
+async def _deliver(challenge, storage, directory, verification):
     # Runs after the generic response has been sent. Upstream latency and failures
     # must not disclose account existence. No retries after ambiguous delivery.
-    try:
-        person_id = _eligible(directory.get_person_by_email(challenge.email), challenge.email)
-        if person_id is None:
+    for attempt in range(2):
+        try:
+            await run_in_threadpool(_send_and_activate, challenge, storage, directory, verification)
             return
-        verification.request_code(f"gateway-login:{challenge.id}", challenge.email)
-        storage.activate_login(challenge.id, person_id, policy.now())
-    except Exception:
-        # Exceptions may carry URLs, SQL parameters or provider response bodies.
+        except VerificationRateLimited as exc:
+            # Only an explicit pre-send throttle is safe to retry. Keep the same
+            # challenge and quota reservation; never wait in a worker thread.
+            if (
+                attempt == 0
+                and policy.now() + timedelta(seconds=exc.retry_after) < challenge.expires_at
+            ):
+                await sleep(exc.retry_after)
+                continue
+        except Exception:
+            # Exceptions may carry URLs, SQL parameters or provider response bodies.
+            pass
         logger.warning("email login delivery failed")
+        return
 
 
 @router.post("/email/start", response_model=EmailStartOut, status_code=202)

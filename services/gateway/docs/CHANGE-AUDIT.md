@@ -178,3 +178,46 @@ Ruff gates, rebuilt gateway image and real private-HTTP/browser integration pass
 No live configuration was changed. The companion compute PR contains the CLI
 origin/redirect and revocation fixes, explicit account migration, issuer checks,
 and dependency/runtime updates.
+
+
+### Independent audit follow-up: delivery and capacity
+
+Addresses the reproduced cross-consumer cooldown and resend-boundary failures,
+and the fixed status-capacity ceiling. Verification preserves its shared mailbox
+throttle and now tells authenticated callers the remaining cooldown. Gateway
+retries only that explicit pre-send refusal, once, asynchronously, using the same
+challenge and reservation. It rechecks eligibility/expiry and never retries an
+ambiguous failure. Repeated throttling or process loss may still prevent delivery.
+
+Status and pre-authentication IP budgets are now configured together, with bounded
+values and mandatory headroom. The defaults budget roughly 300 continuously active
+compute identities with the existing 30-second cache; this is quota sizing, not a
+throughput benchmark. Increasing the edge budget also permits more authentication
+work, so operators must monitor load. Invalid settings omit input values from
+error text to protect configured credentials.
+
+File rationale for the follow-up (paths relative to `services/gateway`):
+
+| Files | Reason |
+|---|---|
+| `contracts/login.py`, `src/verification/http_client.py`, `src/api/routers/email_login.py` | Represent and validate a known pre-send throttle; defer one retry without occupying a worker thread or charging again. |
+| `contracts/storage.py`, `src/login_policy.py`, `src/storage/in_memory.py`, `src/storage/postgres.py` | Apply the configured status budget with the same durable semantics in both adapters. |
+| `src/config.py`, `src/api/app.py`, `.env.example` | Validate and wire paired capacity settings and hide configuration inputs in startup errors. |
+| `tests/test_email_login.py`, `tests/test_verification.py`, `tests/test_config.py`, `tests/login_storage_cases.py` | Regress delayed delivery, bounded retries, expiry/retirement, unsafe retry responses, capacity enforcement and credential-safe errors. |
+| `tests/test_health.py` | Verify probe availability after exhausting the configured edge budget. |
+| `tests/smoke_stack.py` | Reproduce both cooldown collisions through real gateway/directory/verification HTTP and disposable Postgres, retaining fake mail only. |
+| `README.md`, `docs/API.md`, `docs/ARCHITECTURE.md`, `docs/DEPLOYMENT.md`, `docs/CHANGE-AUDIT.md` | Document the retry contract, limits, rollout order, file rationale and verification. |
+| `/services/verification/src/api/routers/verification.py`, `/services/verification/tests/test_request_code.py` | Return a rounded-up pre-send `Retry-After` and verify cross-consumer suppression followed by successful delivery. |
+| `/services/verification/README.md`, `/services/verification/docs/API.md`, `/services/verification/docs/ARCHITECTURE.md` | Explain the new response header while retaining the shared mailbox protection and unchanged confirm state machine. |
+| `/AGENTS.md`, `/docs/RAILWAY-DEPLOYMENT.md` | Record paired quota sizing and verification-before-gateway rollout. |
+
+The delivery and capacity regressions failed before the changes and pass after
+them. Both complete service suites passed against disposable Postgres, including
+migration round trips and source-path assertions. The Docker HTTP regression
+passed both previously failing delivery scenarios and verified one reservation
+per challenge, independent redemption and retirement. Repository `make check`
+and service Ruff gates passed. No real emails or live configuration were used.
+
+Other audit observations about quota exhaustion, shared NATs, credential blast
+radius and live ingress are operational risks, not claims removed by these fixes.
+The companion compute change separately revokes Misty sessions on local rollback.

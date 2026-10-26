@@ -69,3 +69,30 @@ def test_transport_failures_do_not_leak_request_data():
         upstream.request_code("opaque", "a@b.com")
     assert "private-request-data" not in str(exc.value)
     upstream.close()
+
+
+@pytest.mark.parametrize(
+    "header,body",
+    [
+        (None, {"detail": "rate_limited"}),
+        ("0", {"detail": "rate_limited"}),
+        ("61", {"detail": "rate_limited"}),
+        ("-1", {"detail": "rate_limited"}),
+        ("1.5", {"detail": "rate_limited"}),
+        ("NaN", {"detail": "rate_limited"}),
+        ("9" * 100, {"detail": "rate_limited"}),
+        ("1", {"detail": "different_failure"}),
+        ("1", None),
+    ],
+)
+def test_unknown_throttles_never_authorize_retry(header, body):
+    from contracts.login import VerificationRateLimited
+
+    headers = {"Retry-After": header} if header is not None else {}
+    upstream = client(lambda _: httpx.Response(429, json=body, headers=headers))
+    try:
+        with pytest.raises(VerificationUnavailable) as exc:
+            upstream.request_code("opaque", "a@b.com")
+        assert not isinstance(exc.value, VerificationRateLimited)
+    finally:
+        upstream.close()

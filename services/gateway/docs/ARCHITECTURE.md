@@ -58,7 +58,18 @@ verification for the opaque `gateway-login:<challenge UUID>` subject, then binds
 the original person ID. Background failures log only a static message; they never
 change the already-sent generic response. Tasks are not a durable delivery queue.
 On process loss, the user retries after the cooldown; budgets are retained and no
-ambiguous send is retried automatically. Monitor delivery-failure logs.
+ambiguous send is retried automatically. The one safe exception is verification
+429 `rate_limited` with a valid 1–60 second `Retry-After`: no send occurred. The
+gateway waits asynchronously and retries once on the existing challenge, without
+spending another mailbox reservation. It rechecks eligibility and challenge
+expiry first. The shared mailbox throttle remains intact across Discord and
+compute, and a second throttle is terminal. Monitor delivery-failure logs.
+
+Status capacity and the pre-authentication flood guard are configured together;
+see [capacity and limits](API.md#limits-and-failures). Compute retains its
+30-second eligibility cache. Larger status quotas increase the allowed auth and
+directory workload, so size the one-worker deployment and monitor latency/errors
+before raising them; do not remove the pre-authentication guard.
 
 Before confirmation reaches verification, the gateway atomically reserves a
 challenge attempt. Three attempts per challenge and five deliveries per mailbox

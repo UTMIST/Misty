@@ -8,7 +8,13 @@ from contracts.login import LoginChallenge
 
 class StorageAdapter(Protocol):
     def allow_login_request(
-        self, owner: str, operation: str, client_ip: str | None, now: datetime
+        self,
+        owner: str,
+        operation: str,
+        client_ip: str | None,
+        now: datetime,
+        *,
+        status_limit: int = 600,
     ) -> bool:
         """Atomically spend app and attested-IP quotas; prune expired login state."""
         ...

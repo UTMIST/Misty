@@ -34,6 +34,7 @@ def create_app() -> FastAPI:
     # auth has resolved the key (see src/api/ratelimit.py).
     app.add_middleware(
         ClientRateLimitMiddleware,
+        limit=get_settings().edge_requests_per_minute,
         trust_proxy=get_settings().trust_proxy_headers,
     )
     app.add_middleware(LoginBoundaryMiddleware)

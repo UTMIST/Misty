@@ -12,6 +12,14 @@ class VerificationUnavailable(Exception):
     """Private verification failed; no upstream payload may escape."""
 
 
+class VerificationRateLimited(VerificationUnavailable):
+    """Verification explicitly refused delivery before sending any email."""
+
+    def __init__(self, retry_after: int):
+        super().__init__("code delivery cooling down")
+        self.retry_after = retry_after
+
+
 class VerificationClient(Protocol):
     def request_code(self, subject: str, email: str) -> None: ...
     def confirm_code(self, subject: str, code: str) -> str | None: ...

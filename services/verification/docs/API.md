@@ -64,7 +64,7 @@ curl -sS -X POST http://localhost:8003/verification/request-code \
 
 ### Behavior
 
-- **Rate limited per email.** If an unconsumed code for that *email* was created within `RATE_LIMIT_WINDOW` (60 s), the request is rejected with **429 `rate_limited`**. Note the limit keys on email, not subject — it protects the mailbox regardless of how many subjects a caller invents.
+- **Rate limited per email.** If an unconsumed code for that *email* was created within `RATE_LIMIT_WINDOW` (60 s), the request is rejected with **429 `rate_limited`**. The response includes `Retry-After` with the remaining window rounded up to whole seconds; this 429 occurs before any email send. Note the limit keys on email, not subject — it protects the mailbox regardless of how many subjects a caller invents.
 - **Send before persist.** The email goes out first. On `EmailSendError` the endpoint returns **502 `email_send_failed`** and stores nothing, so the caller isn't rate-limited out of an immediate retry.
 - **Supersede on reissue.** A new request for an existing subject atomically replaces that subject's row. Only the newest code is ever live.
 - The code is 6 digits, generated with `secrets`, expires after `CODE_TTL` (10 min), and is stored only as an HMAC-SHA256 digest.

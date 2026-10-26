@@ -105,8 +105,16 @@ Use the same environment for all three services and keep verification private.
 Set `GATEWAY_ENV=staging` or `production` explicitly: successful auth responses
 attest this value, and compute requires the matching `MISTY_ENVIRONMENT`.
 Use separate gateway keys and compute databases for staging and production.
+Set `LOGIN_STATUS_PER_MINUTE` (default 600) and `EDGE_REQUESTS_PER_MINUTE`
+(default 1200) for expected status refreshes and total traffic from each backend
+IP. Keep at least 120 requests/minute of edge headroom above the status budget.
+The default status budget accommodates roughly 300 continuously active members
+with a 30-second cache; allow margin for issuer checks and monitor upstream load.
+See [the capacity contract](API.md#limits-and-failures).
 
-1. Deploy verification with a dedicated `vf_` consumer key named `gateway`, scoped
+1. Deploy verification with the cooldown `Retry-After` response before rolling
+   out the gateway retry. Older verification deployments are safe but cannot
+   recover a deferred send. Provision a dedicated `vf_` consumer key named `gateway`, scoped
    only `verification:write`, using its [provisioning guide](../../verification/docs/DEPLOYMENT.md#scoped-consumer-keys).
    Keep the bot's existing bootstrap credential until it is separately migrated.
 2. Issue a new team-tracking key with `people:read` and `identifiers:read`, using a

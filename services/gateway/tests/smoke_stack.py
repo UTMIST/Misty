@@ -90,6 +90,7 @@ def main():
         gateway_db = f"postgresql+psycopg://smoke:{password}@{pg}:5432/gateway"
         verification_db = f"postgresql+psycopg://smoke:{password}@{pg}:5432/verification"
         verification = network + "-verification"
+        verification_bootstrap = secrets.token_urlsafe(32)
         credential = json.loads(
             docker(
                 "run",
@@ -121,6 +122,7 @@ def main():
             "verification:ci",
             {
                 "DATABASE_URL": verification_db,
+                "API_KEY": verification_bootstrap,
                 "VF_ENV": "local",
                 "EMAIL_BACKEND": "fake",
                 "CONSUMER_KEYS": json.dumps([credential["entry"]]),
@@ -261,6 +263,29 @@ def main():
             "auth:email",
             "auth:status",
         )
+        # A separate private consumer has just sent a Discord-link code. Age the
+        # fixture's timestamp to avoid spending a minute in CI, retaining the real
+        # verification cooldown and HTTP response that previously lost this login.
+        assert (
+            http(
+                verification_url,
+                "/verification/request-code",
+                key=verification_bootstrap,
+                payload={"subject": "discord:smoke", "email": "smoke@example.test"},
+            )[0]
+            == 202
+        )
+        docker(
+            "exec",
+            pg,
+            "psql",
+            "-U",
+            "smoke",
+            "-d",
+            "verification",
+            "-c",
+            "UPDATE verification_codes SET created_at=now()-interval '55 seconds' WHERE subject='discord:smoke'",
+        )
         status, challenge = http(
             gateway_url,
             "/v1/auth/email/start",
@@ -284,6 +309,81 @@ def main():
                 )
                 == "1"
             )
+        )
+        # Simulate the gateway minute expiring before verification's minute. The
+        # resend must eventually activate without superseding the first code.
+        docker(
+            "exec",
+            pg,
+            "psql",
+            "-U",
+            "smoke",
+            "-d",
+            "gateway",
+            "-c",
+            "UPDATE login_limits SET expires_at=now()-interval '1 second' WHERE bucket LIKE 'email:%:send:60'",
+        )
+        docker(
+            "exec",
+            pg,
+            "psql",
+            "-U",
+            "smoke",
+            "-d",
+            "verification",
+            "-c",
+            f"UPDATE verification_codes SET created_at=now()-interval '55 seconds' WHERE subject='gateway-login:{challenge_id}'",
+        )
+        resend_status, resend = http(
+            gateway_url,
+            "/v1/auth/email/start",
+            key=compute_key,
+            payload={"email": "smoke@example.test", "client_ip": "192.0.2.2"},
+        )
+        assert resend_status == 202
+        resend_id = resend["challenge_id"]
+        wait_for(
+            lambda: (
+                docker(
+                    "exec",
+                    pg,
+                    "psql",
+                    "-U",
+                    "smoke",
+                    "-d",
+                    "gateway",
+                    "-Atc",
+                    f"SELECT count(*) FROM login_challenges WHERE id='{resend_id}' AND person_id IS NOT NULL",
+                )
+                == "1"
+            )
+        )
+        assert (
+            http(
+                gateway_url,
+                "/v1/auth/email/confirm",
+                key=compute_key,
+                payload={"challenge_id": resend_id, "code": "123456", "client_ip": "192.0.2.2"},
+            )[0]
+            == 200
+        )
+        assert (
+            docker(
+                "exec",
+                pg,
+                "psql",
+                "-U",
+                "smoke",
+                "-d",
+                "gateway",
+                "-Atc",
+                "SELECT count FROM login_limits WHERE bucket LIKE 'email:%:send:3600'",
+            )
+            == "2"
+        )
+        print(
+            "PASS: shared-mailbox cooldown and resend timing recover over real private HTTP",
+            flush=True,
         )
         payload = {"challenge_id": challenge_id, "code": "123456", "client_ip": "192.0.2.1"}
         assert http(gateway_url, "/v1/auth/email/confirm", key=compute_key, payload=payload) == (

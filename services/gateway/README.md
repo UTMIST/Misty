@@ -69,6 +69,8 @@ schema is at `http://localhost:8006/openapi.json`.
 | `DATABASE_URL` | The gateway's **own** Postgres — it holds external keys, short-lived login challenges, and abuse counters. Directory records remain in team-tracking. |
 | `DIRECTORY_BASE_URL` | team-tracking's base URL — where the gateway makes its **outbound** call. |
 | `DIRECTORY_API_KEY` | The gateway's **one internal** team-tracking key, scoped `identifiers:read`, plus `people:read` for email login. Follow the [directory-pinned provisioning procedure](docs/DEPLOYMENT.md#database-and-internal-access). |
+| `LOGIN_STATUS_PER_MINUTE` | Status/issuer requests per consumer per minute; default 600, range 1–10000. |
+| `EDGE_REQUESTS_PER_MINUTE` | Pre-authentication requests per IP per minute; default 1200, range 120–20000. Must exceed the status quota by at least 120. |
 | `EMAIL_LOGIN_ENABLED` | `false` by default. Enable after provisioning private verification and directory access. |
 | `VERIFICATION_BASE_URL` | Private verification URL; local default `http://localhost:8003`. |
 | `VERIFICATION_API_KEY` | A distinct scoped `vf_` key; blank/dev values are refused outside local mode when login is enabled. |
@@ -161,7 +163,7 @@ Two layers, because they defend different things:
 | Layer | Where | Limit | Keyed on |
 |---|---|---|---|
 | Per-consumer quota | Router dependency, **after** auth | 60 / 60s | `AuthedKey.name` — an issued key |
-| Flood guard | Middleware, **in front of** auth | 120 / 60s | Client IP (health routes exempt) |
+| Flood guard | Middleware, **in front of** auth | `EDGE_REQUESTS_PER_MINUTE` (default 1200 / 60s) | Client IP (health routes exempt) |
 
 The quota is the one a consumer notices. It runs after `require_api_key`, so it
 can only ever be keyed on the name of a key we issued — the set is bounded by

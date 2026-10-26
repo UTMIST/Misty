@@ -71,7 +71,11 @@ browser's code; the UI must retain the corresponding request ID.
 Eligibility lookup and code delivery run after the response is sent, to keep
 account-dependent provider latency out of the public response. Delivery is best
 effort: an upstream failure or restart may leave an unusable challenge. There is
-no automatic resend after ambiguous delivery. The user may request another code
+no automatic resend after ambiguous delivery. An explicit verification cooldown
+that guarantees no email was sent permits one deferred retry, at most 60 seconds
+later, on the same challenge and reservation. Eligibility and expiry are checked
+again before sending; waiting does not occupy an HTTP worker thread. Repeated
+throttling or process loss can still prevent delivery. The user may request another code
 after the cooldown; 202 means accepted, not proof of delivery or membership.
 
 ### Confirm
@@ -110,7 +114,7 @@ Windows start on the first admitted request and expire after the duration below.
 |---|---|
 | App start requests | 30/minute, 300/hour |
 | App confirm requests | 60/minute |
-| App status/issuer requests | Separate 60/minute |
+| App status/issuer requests | `LOGIN_STATUS_PER_MINUTE` (default 600/minute), separate from login admission |
 | Backend-attested client IP | 5 starts/minute, 30 confirms/minute, shared across apps |
 | Mailbox sends | 1/minute, 5/hour, 20/day, shared across apps |
 | Challenge guesses | 3, reserved before calling verification |
@@ -129,7 +133,13 @@ bucket. Mailbox quotas include unknown/inactive addresses. Delivery failure does
 not refund them. App/IP exhaustion returns **429** with `Retry-After: 60` (a retry
 may still hit the hourly limit). Mailbox limits remain hidden behind generic
 202/400 responses. Status requests have a separate app quota, but all endpoints
-still share the existing pre-authentication edge-IP flood guard (120/minute).
+still share the pre-authentication edge-IP flood guard (`EDGE_REQUESTS_PER_MINUTE`,
+default 1200/minute). Configure the two limits together: startup rejects edge
+capacity below the status budget plus 120 requests/minute. With 30-second compute
+status caching, the default status budget covers roughly 300 continuously active
+identities; leave room for issuer checks and size shared-IP traffic separately.
+This is a request budget, not a measured throughput guarantee. Increasing it does
+not extend how long a retired member can retain access.
 
 Missing/invalid key → 401; missing scope → 403; oversized body → 413;
 invalid input → 422; disabled login or unavailable upstream → 503.
