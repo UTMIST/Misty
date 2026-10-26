@@ -14,13 +14,17 @@ Railway + Neon dashboards / CLIs.
 | `llm` | `/` | **none** | — | Stateless OpenAI chat/embedding API with optional Bedrock chat; keys from `CONSUMER_KEYS`. |
 | `meeting` | `/` | **none** | — | **Stateful in-memory**; keys from `CONSUMER_KEYS`. See the single-replica warning in step 2, and the WebSocket keepalive note in the Notes section — its `startCommand` is the one that isn't the plain template. |
 | `connectors` | `/` | **none** | — | Stateless outbound adapter (Google Drive/Docs); keys from `CONSUMER_KEYS`. Recommended to deploy before `documentation-system` (not required) — see its `CONNECTORS_API_KEY` note in step 3. |
-| `gateway` | `/` | Neon (own project) | `alembic upgrade head` | Public scoped reads; one replica. See [gateway setup](../services/gateway/docs/DEPLOYMENT.md). |
+| `gateway` | `/` | Neon (own project) | `alembic upgrade head` | Public scoped reads and optional email login; one replica. See [gateway setup](../services/gateway/docs/DEPLOYMENT.md). |
 | `discord-bot` | `discord-bot` | none | `node src/registerCommands.js` | Node Discord frontend. Pre-deploy registers the slash commands with Discord (step 5). |
 
 The gateway receives a public HTTPS domain. All other services remain **private**
 and reach each other as `<service>.railway.internal:<PORT>`. Gateway credentials,
 consumer keys, proxy settings, and verification are covered in its
 [deployment runbook](../services/gateway/docs/DEPLOYMENT.md).
+Email login requires gateway migration002, `EMAIL_LOGIN_ENABLED`, private
+`VERIFICATION_BASE_URL`/`VERIFICATION_API_KEY`, a scoped `vf_` entry in verification
+`CONSUMER_KEYS`, directory `people:read`, and compute `auth:email`/`auth:status`.
+Follow [enablement](../services/gateway/docs/DEPLOYMENT.md#enable-email-login) in order.
 
 For the optional persistent `dev` environment used to test one PR at a
 time with a dedicated Discord bot, see [PR previews](pr-previews.md). That

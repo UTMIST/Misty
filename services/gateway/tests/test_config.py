@@ -62,3 +62,15 @@ def test_directory_key_is_redacted_in_repr():
     assert "super-secret-value" not in repr(s)
     assert "super-secret-value" not in str(s.directory_api_key)
     assert s.directory_api_key.get_secret_value() == "super-secret-value"
+
+
+@pytest.mark.parametrize("value", ["", " ", DEFAULT_DEV_API_KEY])
+def test_enabled_email_login_needs_real_verification_key(value):
+    with pytest.raises(RuntimeError, match="VERIFICATION_API_KEY"):
+        verify_production_secrets(_settings(email_login_enabled=True, verification_api_key=value))
+
+
+def test_verification_key_is_redacted():
+    settings = _settings(verification_api_key="test-private-key")
+    assert "test-private-key" not in repr(settings)
+    assert settings.verification_api_key.get_secret_value() == "test-private-key"

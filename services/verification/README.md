@@ -65,12 +65,25 @@ injected sender (see [local setup](docs/CONTRIBUTING.md#local-setup)).
 
 ## Auth model
 
-Auth is provided by the shared `platform_auth` package (`build_auth` in `src/api/auth.py`), configured **env-key-only**:
+Auth uses shared `platform_auth` with two supported credential paths:
 
-- Both verification POST endpoints require `X-API-Key`. The only accepted key is the shared bootstrap env key (`API_KEY`), which carries the `admin` scope. There is **no key-issuing CLI and no DB-backed keys** here — `NullApiKeyStore` (`src/storage/null_keys.py`) short-circuits all key lookups, so the `vf_<prefix>_<secret>` envelope is reserved but unused. The env key must therefore be a plain opaque string, not shaped like that envelope.
-- `require_scope("verification:write")` gates both verification endpoints. The scopes recognized are **`verification:write`** and **`admin`** (a wildcard that satisfies any check); the env key's `admin` scope covers both.
-- `/health`, `/openapi.json` and the interactive API documentation routes are unauthenticated.
-- `AuditLogMiddleware` (from `platform_auth`, logger `verification.audit`) logs one line per request. Authenticated requests have `key_name=env-bootstrap`; `X-Actor` does not change attribution on these routes. See the [authentication caveat](docs/API.md#authentication). `dev:spoof` is disabled.
+- Scoped `vf_` keys come from `CONSUMER_KEYS` (a SecretStr JSON array of
+  `{name,prefix,key_hash,scopes}`). Store argon2 hashes, never plaintext keys in
+  that array. The gateway gets its own key scoped `verification:write`.
+- The existing bootstrap `API_KEY` still carries `admin`, preserving the bot flow.
+  It must be a plain opaque string, not a `vf_` envelope.
+- Both POSTs require `verification:write`; `/health` and API docs are unauthenticated.
+- Audit records the authenticated key's name, never codes or request bodies.
+  `dev:spoof` is disabled and `X-Actor` does not alter endpoint attribution.
+
+| Additional setting | Default | Purpose |
+|---|---|---|
+| `CONSUMER_KEYS` | Empty | Scoped private consumers; malformed JSON fails at boot. |
+
+See [key provisioning and rotation](docs/DEPLOYMENT.md#scoped-consumer-keys).
+There is no key table or dedicated key CLI. The existing verification state
+machine, including correct-code replay for Discord, is unchanged; the gateway
+adds single-use login redemption and eligibility checks around private HTTP calls.
 
 ## API at a glance
 
@@ -138,7 +151,7 @@ verification/
 ├── src/
 │   ├── api/                  FastAPI application
 │   │   ├── app.py            create_app(): verify_production_secrets, audit middleware, /health, router
-│   │   ├── auth.py           build_auth() over platform_auth: require_scope, env-key-only (envelope "vf_")
+│   │   ├── auth.py           build_auth() over platform_auth: require_scope, scoped + bootstrap (envelope "vf_")
 │   │   ├── deps.py           get_storage / get_email_sender / get_key_store wiring
 │   │   └── routers/
 │   │       └── verification.py   request-code + confirm-code endpoints
@@ -146,8 +159,7 @@ verification/
 │   ├── storage/              VerificationStore implementations
 │   │   ├── schema.py         verification_codes table (SQLAlchemy Core)
 │   │   ├── in_memory.py      InMemoryVerificationStore — tests
-│   │   ├── postgres.py       PostgresVerificationStore — production (atomic upsert + increment)
-│   │   └── null_keys.py      NullApiKeyStore — env-key-only auth (no DB keys)
+│   │   └── postgres.py       PostgresVerificationStore — production (atomic upsert + increment)
 │   │
 │   ├── email/                EmailSender implementations + registry
 │   │   ├── base.py           EmailSender Protocol + EmailSendError

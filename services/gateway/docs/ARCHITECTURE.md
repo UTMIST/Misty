@@ -5,14 +5,16 @@ private services over authenticated HTTP and returns explicitly selected fields.
 Each private service remains responsible for its own database and business rules.
 See the platform's [access architecture](../../../docs/ARCHITECTURE.md#access-architecture-two-doors-not-one-gateway).
 
-The gateway's Postgres database contains only its external key registry. Its
-outbound `DIRECTORY_API_KEY` is issued by team-tracking with `identifiers:read`.
+The gateway's Postgres database contains its external key registry, short-lived
+login challenges, and abuse counters. Its outbound `DIRECTORY_API_KEY` needs
+`identifiers:read` for resolution and `people:read` for email login/status.
 Inbound keys use `gw_`; the internal key uses `tt_`. The shared auth library
 verifies the envelope, hash, revocation state, and scope. No environment bootstrap
 key is accepted, and the CLI allows only explicitly supported external scopes.
 
-The request path is audit middleware → IP limit → authentication → consumer quota
-→ endpoint scope → upstream client → curated response. `deps.py` supplies the
+The resolver path is audit middleware → IP limit → authentication → consumer quota
+→ endpoint scope → upstream client → curated response. Login adds a bounded body
+reader and no-store headers, then scope checks and durable login quotas. `deps.py` supplies the
 pooled HTTP client through the `DirectoryClient` Protocol. Each app lifespan owns
 its client, constructed lazily after scope checks under a lock so concurrent first
 requests share one pool. Shutdown closes that pool after requests drain; an unused
@@ -43,16 +45,48 @@ This keeps probes accessible after quota exhaustion without letting a public
 readiness flood occupy the database pool or fill worker threads with lock waiters.
 The [health contract](API.md#health) describes the resulting detection delay.
 
+## Email login ownership and concurrency
+
+The [email-login contract](API.md#email-login) implements compute's sign-in
+requirements. The gateway owns eligibility orchestration and app-bound challenges;
+verification owns code generation, HMAC storage, email delivery, and code checking.
+Directory records remain in team-tracking. Communication is scoped private HTTP.
+
+A start atomically reserves mailbox quotas and a pending challenge before any
+lookup or delivery. A background task looks up the active primary email, requests
+verification for the opaque `gateway-login:<challenge UUID>` subject, then binds
+the original person ID. Background failures log only a static message; they never
+change the already-sent generic response. Tasks are not a durable delivery queue.
+On process loss, the user retries after the cooldown; budgets are retained and no
+ambiguous send is retried automatically. Monitor delivery-failure logs.
+
+Before confirmation reaches verification, the gateway atomically reserves a
+challenge attempt and a mailbox attempt. It then rechecks the original person's
+active flag and email. A final compare-and-set permits exactly one redemption.
+Private verification's existing correct-code replay remains available for the
+Discord flow; the public login boundary is strictly single-use. There is no
+cross-service transaction with directory changes: status checks on compute requests
+close the eligibility gap after authentication.
+
+Both adapters implement the same storage protocol. Postgres serializes short
+login-state transactions with a transaction-scoped advisory lock, never held during
+HTTP. This intentionally simple design fits the one-worker, low-volume deployment.
+Expiry indexes support pruning on each authenticated login/status request. Gateway
+challenges retain email/UUID until expiry and the next request; rate buckets retain
+hashes of email/IP (pseudonymous, not anonymous) for at most their one-day window
+and the next request. Verification retains separate HMAC/email rows; follow its
+[data-retention procedure](../../verification/docs/DEPLOYMENT.md#data-retention).
+
+The authenticated compute backend attests `client_ip`; it must derive that value
+from trusted ingress. This does not alter edge `X-Real-IP` handling. Mailbox and
+application quotas do not depend on the attestation. Keep the existing one-replica,
+one-worker limit because the pre-authentication flood guard and resolver quotas
+are still process-local. Persistent login quotas alone do not authorize scaling.
+
 ## Future compute-platform access
 
-The compute platform can become another external consumer with its own key.
-Add specific operations as its requirements become concrete: define returned
-fields, endpoint scopes, and any per-user or per-team authorization first. Then
-call the owning service's API. No database connection string or internal key is
-handed to the compute platform.
-
-`resolve:discord` is the only implemented data permission. Issuing a key with that
-scope does not grant general directory or document access. Application identity
-also does not establish an end user's identity: a future user-specific endpoint
-must implement an explicit delegation contract and preserve the owning service's
-access checks. Add new endpoints via the [contribution guide](CONTRIBUTING.md).
+Compute receives only the scopes it uses (`auth:email`, `auth:status`). Login
+proves identity and current eligibility, not compute roles or general directory
+access. Additional data access still requires explicit operations and permissions,
+following the [contribution guide](CONTRIBUTING.md). Never expose database access
+or allow a claimed user identity to bypass a private service's authorization.

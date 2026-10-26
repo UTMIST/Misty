@@ -12,7 +12,7 @@ Service-specific deploy notes. The full platform runbook is [`docs/RAILWAY-DEPLO
 | **Install** | `uv sync --frozen --no-dev --package verification` |
 | **Healthcheck** | `/health` |
 | **Port** | Binds Railway's injected `${PORT}`; 8003 locally |
-| **Exposure** | Private. Reached by the bot as `verification.railway.internal:${PORT}`. |
+| **Exposure** | Private. Reached by the bot and gateway as `verification.railway.internal:${PORT}`. |
 | **State** | One table of persistent rows containing short-lived codes. See [Data retention](#data-retention). |
 
 ## Variables
@@ -22,6 +22,7 @@ Service-specific deploy notes. The full platform runbook is [`docs/RAILWAY-DEPLO
 | `VF_ENV` | `staging` / `production` | Anything but `local` turns on the boot guard |
 | `DATABASE_URL` | Neon connection string | Must not be the `dev_password@localhost` default |
 | `API_KEY` | a real random string | **Plain opaque string** — not shaped like `vf_<prefix>_<secret>` |
+| `CONSUMER_KEYS` | optional scoped `vf_` entries | JSON with `name`, `prefix`, `key_hash`, `scopes`; validated at boot |
 | `CODE_HMAC_SECRET` | a real random string | Must differ from the dev default |
 | `EMAIL_BACKEND` | `resend` or `gmail` | **`fake` is refused outside `local`** |
 | `EMAIL_FROM` | the sending address | Required by `resend` |
@@ -45,16 +46,26 @@ delivery prevents normal user completion. Real-backend checks validate presence
 of credentials, not their contents or provider access; see
 [request-code errors](API.md#errors).
 
-## No key provisioning
+## Scoped consumer keys
 
-verification is the only service with **nothing to provision**. There is no `api_keys` table, no CLI, no `CONSUMER_KEYS` array. `NullApiKeyStore` short-circuits key lookups and only the bootstrap `API_KEY` authenticates.
+Set `CONSUMER_KEYS` to a JSON array of `{name,prefix,key_hash,scopes}` entries.
+For the gateway, generate a `vf_` token using the shared library's
+`generate_key("vf_")` from the verification service environment. Store the returned
+plaintext only in gateway `VERIFICATION_API_KEY`; add the returned prefix/hash
+with `name: gateway` and `scopes: ["verification:write"]` to verification's array.
+Follow the [shared config-backed key procedure](../../../packages/auth/README.md#key-store-wiring)
+for the format. Use a secure operator script/secret store; do not paste token or
+hash material into chat, logs, or source control.
 
-So wiring the bot to verification is just:
+There is no key database or CLI here. Rotation is: add a uniquely named second
+entry, redeploy verification, update gateway, verify, then remove the old entry
+and redeploy verification. This allows overlap. Keep keys separate per environment.
 
-1. Set a real random `API_KEY` on the verification service.
-2. Set the same value as `VERIFICATION_API_KEY` on the discord-bot, plus `VERIFICATION_BASE_URL=http://${{verification.RAILWAY_PRIVATE_DOMAIN}}:${{verification.PORT}}` — the `${{service.VAR}}` reference form, since a literal `${PORT}` would resolve to the *bot's* own port.
-
-**Rotating it is a two-service, ordered operation.** Both services must be updated, and there's no overlap window — the old key stops working the moment verification restarts. Do it when `/link` traffic is quiet, and update the bot first or expect a brief window of failed link attempts.
+The existing bot bootstrap path remains: verification `API_KEY` equals the bot's
+`VERIFICATION_API_KEY`, and the bot's base URL is
+`http://${{verification.RAILWAY_PRIVATE_DOMAIN}}:${{verification.PORT}}`.
+Do not give this bootstrap key to new consumers. Its rotation still requires
+coordinated updates because it has no overlap window.
 
 ## Migrations
 
@@ -75,7 +86,9 @@ request, whether confirmed or not. Rows are superseded on reissue (unique
 `subject` + upsert), so the table grows with distinct subjects that have had
 stored requests. Code expiry does not remove the email/subject association.
 
-**Nothing prunes consumed or expired rows.** There is no cleanup job. Each row holds an email address and an HMAC — no plaintext code — but it is still personal data sitting there indefinitely. If retention becomes a concern, a periodic `DELETE FROM verification_codes WHERE expires_at < now() - interval '30 days'` is safe: the confirm path treats a missing row and an expired-consumed row identically (both 404 `no_pending_code`).
+**Nothing automatically prunes consumed or expired rows.** Gateway login uses a
+new subject per delivered challenge, so schedule the cleanup below before sustained
+external login traffic. There is no cleanup job. Each row holds an email address and an HMAC — no plaintext code — but it is still personal data sitting there indefinitely. If retention becomes a concern, a periodic `DELETE FROM verification_codes WHERE expires_at < now() - interval '30 days'` is safe: the confirm path treats a missing row and an expired-consumed row identically (both 404 `no_pending_code`).
 
 `CODE_HMAC_SECRET` rotation invalidates every in-flight code. With a 10-minute TTL the blast radius is 10 minutes, so it's safe to rotate whenever you like — no coordination needed.
 

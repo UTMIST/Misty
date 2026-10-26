@@ -1,6 +1,6 @@
 """Exercise the built gateway and current directory over HTTP with disposable databases.
 
-Run from the repo root after building gateway:ci and team-tracking:ci. Requires
+Run after building gateway:ci, team-tracking:ci, and verification:ci. Requires
 Docker and Python's standard library; never reads .env or contacts a live service.
 """
 
@@ -56,14 +56,14 @@ def main():
     containers = []
     docker("network", "create", network)
 
-    def start(name, image, env, *, public=False):
+    def start(name, image, env, *, public=False, command=()):
         containers.append(name)
         args = ["run", "-d", "--name", name, "--network", network]
         if public:
             args += ["-p", "127.0.0.1::8000"]
         for field in env:
             args += ["-e", field]
-        docker(*args, image, env=env)
+        docker(*args, image, *command, env=env)
         if public:
             port = json.loads(docker("inspect", name))[0]["NetworkSettings"]["Ports"]["8000/tcp"][
                 0
@@ -85,8 +85,58 @@ def main():
             )
         )
         docker("exec", pg, "createdb", "-U", "smoke", "gateway")
+        docker("exec", pg, "createdb", "-U", "smoke", "verification")
         directory_db = f"postgresql+psycopg://smoke:{password}@{pg}:5432/directory"
         gateway_db = f"postgresql+psycopg://smoke:{password}@{pg}:5432/gateway"
+        verification_db = f"postgresql+psycopg://smoke:{password}@{pg}:5432/verification"
+        verification = network + "-verification"
+        credential = json.loads(
+            docker(
+                "run",
+                "--rm",
+                "verification:ci",
+                "python",
+                "-c",
+                "import json; from platform_auth import generate_key; "
+                "key, prefix, digest = generate_key('vf_'); "
+                "print(json.dumps({'key':key,'entry':{'name':'gateway','prefix':prefix,"
+                "'key_hash':digest,'scopes':['verification:write']}}))",
+            )
+        )
+        docker(
+            "run",
+            "--rm",
+            "--network",
+            network,
+            "-e",
+            "DATABASE_URL",
+            "verification:ci",
+            "alembic",
+            "upgrade",
+            "head",
+            env={"DATABASE_URL": verification_db},
+        )
+        verification_url = start(
+            verification,
+            "verification:ci",
+            {
+                "DATABASE_URL": verification_db,
+                "VF_ENV": "local",
+                "EMAIL_BACKEND": "fake",
+                "CONSUMER_KEYS": json.dumps([credential["entry"]]),
+                "PORT": "8000",
+            },
+            public=True,
+            # Test-container-only deterministic generator, with an in-memory fake
+            # sender. No production test hook, code inbox, or real mail call.
+            command=(
+                "python",
+                "-c",
+                "import src.codes; src.codes.generate_code=lambda:'123456'; "
+                "import uvicorn; uvicorn.run('src.api.app:app',host='0.0.0.0',port=8000)",
+            ),
+        )
+        wait_for(lambda: http(verification_url, "/health")[0] == 200)
         bootstrap = secrets.token_urlsafe(32)
         docker(
             "run",
@@ -117,6 +167,7 @@ def main():
             "gateway",
             "--scopes",
             "identifiers:read",
+            "people:read",
         )
         assert internal_key.startswith("tt_")
         gateway_url = start(
@@ -127,6 +178,9 @@ def main():
                 "DIRECTORY_BASE_URL": f"http://{directory}:8000",
                 "DIRECTORY_API_KEY": internal_key,
                 "GATEWAY_ENV": "staging",
+                "EMAIL_LOGIN_ENABLED": "true",
+                "VERIFICATION_BASE_URL": f"http://{verification}:8000",
+                "VERIFICATION_API_KEY": credential["key"],
             },
             public=True,
         )
@@ -196,12 +250,79 @@ def main():
         assert missing == unlinked
         assert missing[0] == 404
 
+        compute_key = docker(
+            "exec",
+            gateway,
+            "gateway-keys",
+            "issue",
+            "--name",
+            "compute",
+            "--scopes",
+            "auth:email",
+            "auth:status",
+        )
+        status, challenge = http(
+            gateway_url,
+            "/v1/auth/email/start",
+            key=compute_key,
+            payload={"email": "smoke@example.test", "client_ip": "192.0.2.1"},
+        )
+        assert status == 202
+        challenge_id = challenge["challenge_id"]
+        wait_for(
+            lambda: (
+                docker(
+                    "exec",
+                    pg,
+                    "psql",
+                    "-U",
+                    "smoke",
+                    "-d",
+                    "gateway",
+                    "-Atc",
+                    f"SELECT count(*) FROM login_challenges WHERE id='{challenge_id}' AND person_id IS NOT NULL",
+                )
+                == "1"
+            )
+        )
+        payload = {"challenge_id": challenge_id, "code": "123456", "client_ip": "192.0.2.1"}
+        assert http(gateway_url, "/v1/auth/email/confirm", key=compute_key, payload=payload) == (
+            200,
+            {"person_id": person["id"], "email": "smoke@example.test"},
+        )
+        assert (
+            http(gateway_url, "/v1/auth/email/confirm", key=compute_key, payload=payload)[0] == 400
+        )
+        status_path = f"/v1/auth/people/{person['id']}/status"
+        assert http(gateway_url, status_path, key=compute_key) == (200, {"active": True})
+        assert (
+            http(
+                directory_url,
+                f"/people/{person['id']}",
+                key=bootstrap,
+                payload={"active": False},
+                method="PATCH",
+            )[0]
+            == 200
+        )
+        assert http(gateway_url, status_path, key=compute_key) == (200, {"active": False})
+        print(
+            "PASS: scoped email login over private HTTP, single redemption, and retirement",
+            flush=True,
+        )
+
         docker("stop", directory)
         assert http(gateway_url, path, key=external_key) == (
             503,
             {"detail": "directory temporarily unavailable"},
         )
-        key_id = docker("exec", gateway, "gateway-keys", "list", "--active-only").split()[0]
+        key_id = next(
+            line.split()[0]
+            for line in docker(
+                "exec", gateway, "gateway-keys", "list", "--active-only"
+            ).splitlines()
+            if "smoke-consumer" in line
+        )
         docker("exec", gateway, "gateway-keys", "revoke", key_id)
         assert http(gateway_url, path, key=external_key)[0] == 401
         print("PASS: identical misses, upstream outage, and immediate key revocation", flush=True)

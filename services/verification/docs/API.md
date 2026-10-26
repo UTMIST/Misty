@@ -11,11 +11,15 @@ Base URL (local): `http://localhost:8003` · Swagger UI: `/docs` · Schema: `/op
 ## Authentication
 
 ```
-X-API-Key: <the API_KEY env value>
+X-API-Key: <scoped vf_ key or bootstrap API_KEY>
 ```
 
-verification is **env-key-only**. There is no key-issuing CLI and no DB-backed keys — `NullApiKeyStore` short-circuits key lookups, so the only accepted credential is the bootstrap `API_KEY`, which carries the `admin` scope. The `vf_` envelope is reserved but unused, so **the env key must be a plain opaque string, not shaped like `vf_<prefix>_<secret>`.**
-
+Private consumers may authenticate with scoped `vf_` keys configured through
+`CONSUMER_KEYS`. The gateway uses a dedicated `verification:write` credential.
+The existing bootstrap `API_KEY` remains supported with `admin`; it must be a
+plain opaque string, not shaped like `vf_<prefix>_<secret>`. See
+[provisioning](DEPLOYMENT.md#scoped-consumer-keys). No keys are stored in this
+service's database.
 Both endpoints are gated by `require_scope("verification:write")`; `admin` satisfies it. `/health` is unauthenticated.
 
 `dev:spoof` is disabled.

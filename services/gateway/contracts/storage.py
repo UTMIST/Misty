@@ -1,10 +1,43 @@
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
 from contracts.types import ApiKey
+from contracts.login import LoginChallenge
 
 
 class StorageAdapter(Protocol):
+    def allow_login_request(
+        self, owner: str, operation: str, client_ip: str | None, now: datetime
+    ) -> bool:
+        """Atomically spend app and attested-IP quotas; prune expired login state."""
+        ...
+
+    def reserve_login(self, challenge: LoginChallenge) -> bool:
+        """Atomically reserve mailbox send quotas and persist a pending challenge.
+
+        Quotas apply equally to unknown/inactive mailboxes and are never refunded.
+        Older challenges remain usable until replacement delivery succeeds.
+        """
+        ...
+
+    def activate_login(self, challenge_id: UUID, person_id: UUID, now: datetime) -> bool:
+        """Bind after delivery and invalidate older challenges for this app/email.
+
+        A late activation cannot supersede a newer successfully delivered code.
+        """
+        ...
+
+    def admit_login_attempt(
+        self, challenge_id: UUID, owner: str, now: datetime
+    ) -> LoginChallenge | None:
+        """Atomically spend challenge and mailbox guess budgets before verification."""
+        ...
+
+    def redeem_login(self, challenge_id: UUID, owner: str, now: datetime) -> bool:
+        """Single-use compare-and-set; exactly one concurrent redemption can succeed."""
+        ...
+
     def is_ready(self) -> bool: ...
     def create_api_key(
         self, *, name: str, prefix: str, key_hash: str, scopes: list[str], actor: str

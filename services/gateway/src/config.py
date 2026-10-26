@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # src/api/deps.py building the outbound header) call .get_secret_value().
     directory_base_url: str = "http://localhost:8000"
     directory_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
+    email_login_enabled: bool = False
+    verification_base_url: str = "http://localhost:8003"
+    verification_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
 
     gateway_env: Literal["local", "staging", "production"] = "local"
 
@@ -60,6 +63,12 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
     secret = settings.directory_api_key.get_secret_value().strip()
     if not secret or secret == DEFAULT_DEV_API_KEY:
         insecure.append("DIRECTORY_API_KEY")
+    if settings.email_login_enabled:
+        verification_secret = settings.verification_api_key.get_secret_value().strip()
+        if not verification_secret or verification_secret == DEFAULT_DEV_API_KEY:
+            insecure.append("VERIFICATION_API_KEY")
+        if not settings.verification_base_url.strip():
+            insecure.append("VERIFICATION_BASE_URL")
     if insecure:
         raise RuntimeError(
             f"Refusing to start in gateway_env={settings.gateway_env!r}: "
