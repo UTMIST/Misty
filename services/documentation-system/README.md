@@ -112,9 +112,11 @@ For recurring Google content and access refreshes, run `doc-source-refresh` hour
 from an external scheduler. It drains the existing refresh endpoint in bounded
 batches and checks its key before starting. The checked-in staging command adds
 `--meeting-records` and requires both `docs:write` and `meetings:write`; a manual
-docs-only run omits that flag and needs `docs:write`. It exits nonzero on refresh,
-index, or enabled meeting-phase failures, or an incomplete run. It discovers no new
-documents. See the [refresh schedule](docs/DEPLOYMENT.md#source-access-refresh-schedule) for limits,
+docs-only run omits that flag and needs `docs:write`. A drained run with handled
+refresh, index, or meeting-item failures exits `0` and logs a warning with the
+failure counts. Incomplete runs and runner/monitor failures still exit nonzero.
+It discovers no new documents. See the
+[refresh schedule](docs/DEPLOYMENT.md#source-access-refresh-schedule) for limits,
 exit codes, and the separate Railway cron config. Migration `011` adds the shared
 runner guard: overlapping runners fail before sending a start heartbeat. A crashed
 or incomplete run requires the documented operator recovery before another run.
