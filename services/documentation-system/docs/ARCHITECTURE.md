@@ -219,6 +219,8 @@ reconciliation. Ownership fields are attribution metadata and do not authorize a
 It keeps database/provider credentials in the API, checks its scoped key before
 refreshing, and never replays an ambiguous POST. Separate refresh and index failure
 counts preserve the distinction between source freshness and searchable content.
+After draining, handled item failures produce a structured warning and exit `0`;
+the successful heartbeat means the runner completed, not that every item refreshed.
 Railway failure notifications and independent start/finish heartbeat pings cover
 process failures and missing runs; monitoring failure does not undo or replay API
 work. Deployment, recovery and monitoring setup live in the
@@ -913,9 +915,10 @@ The removal marker retries version conflicts before proceeding.
 
 `retry-due` reports attempted/succeeded/failed meetings and separate persistence,
 indexing and cleanup failure counts. Pending or terminal failures and incomplete
-cleanup are not successful recovery. The runner includes these outcomes in its
-exit code, summary and heartbeat; known work failures release the run guard after
-the failure heartbeat, while transport or monitoring uncertainty retains it.
+cleanup are not successful recovery. The runner preserves these outcomes in its
+warning summary while a drained run exits `0` and sends a completion heartbeat.
+Known work failures release the run guard after that heartbeat, while transport
+or monitoring uncertainty retains it and produces a nonzero exit.
 
 Meeting content is fetched with the writer OAuth identity in initial ingest,
 refetch and scheduled refresh. An ambiguous owner 404 follows the nondestructive

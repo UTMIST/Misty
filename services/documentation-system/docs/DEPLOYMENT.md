@@ -572,8 +572,8 @@ waiting a second day and risking the 48-hour expiry.
 The defaults refresh after 24 hours and expire source-derived grants after 48 hours. A
 connector/directory failure retains the last complete grant set until its existing expiry;
 after that, source grants no longer authorize reads. Manual grants remain independent;
-ownership is metadata only and never authorizes access. Alert on a non-zero `failed`
-count or on the scheduler not completing for 24 hours.
+ownership is metadata only and never authorizes access. Review non-zero `failed`
+counts in warning summaries separately from runner-failure and missed-run alerts.
 
 Only Drive `user` permissions matching a primary/verified email and Drive `group`
 permissions matching an active, membership-synced Team Tracking mapping become grants.
@@ -617,15 +617,19 @@ POST may still finish in the API; the runner never immediately retries it. Faile
 document attempts are recorded by the API and become due again after the configured
 refresh interval. Per-document failures do not stop draining other batches.
 
-Output contains aggregate counts, nonsecret run UUIDs and sanitized errors. Exit `0`
-means the enabled phases drained and no refresh/index/meeting failures occurred;
-`1` means the queues were drained with failures; `2` means configuration/auth/HTTP/response
+The final JSON log contains aggregate counts, a nonsecret run UUID and sanitized
+errors. Exit `0` means the enabled queues drained, including handled refresh, index
+or meeting-item failures. Those failures produce `level=warning` and
+`outcome=completed_with_warnings`; a clean drain uses `level=info` and
+`outcome=completed`. Exit `2` and `outcome=failed` mean configuration/auth/HTTP/response
 failure, an exhausted budget, or a conflicting runner. An unacknowledged monitor
 ping also exits `2`; `drained` still records whether the API work completed.
 Previously completed batch counts remain in the
 summary after an HTTP failure. `index_failed` requires the normal `POST /docs/index`
 recovery workflow and its separately scoped key; the refresh runner does not re-index
-repeatedly. Alert on either nonzero exit and on no completed run for 24 hours.
+repeatedly. A completed run with warnings does not create a Railway crash or
+heartbeat failure; item failure counters remain visible for operator follow-up.
+Alert on nonzero exits and missing completed runs.
 
 ### Staging deployment and review gate
 
@@ -677,21 +681,24 @@ Use two independent signals, routed to the same operations destination:
    Railway webhooks are project-wide, so direct Discord delivery includes other
    services/environments. For staging-runner-only alerts, a receiver must filter
    the staging environment and runner service IDs. Test delivery and prove that
-   exits `1` and `2` generate the expected event during acceptance; a successful
+   exit `2` generates the expected event during acceptance, while a completed run
+   with handled item failures produces a warning without a crash; a successful
    deployment is not proof of a successful cron run. See
    [Railway webhooks](https://docs.railway.com/observability/webhooks).
 2. Create a Healthchecks-compatible check named `Misty staging source refresh`,
    scheduled `0 * * * *` in UTC with a **55-minute grace period**, and connect its
    notification integration. Store its base HTTPS ping URL as the secret
    `SOURCE_REFRESH_MONITOR_URL`. The runner sends empty `POST` pings to `/start`,
-   the base URL for a clean drain, or `/fail` for an incomplete/failed run, with a
+   the base URL for a completed drain (including handled item failures), or `/fail`
+   for an incomplete run or runner failure, with a
    per-run UUID. UUIDs correlate durations; [Healthchecks only times the most
    recently started run](https://healthchecks.io/docs/measuring_script_run_time/#alerting-logic-when-using-run-ids),
    so the database guard supplies overlap protection. It sends no catalog key,
    counts, document content or source URL to the monitor. The check detects a
    missing finish, a missed invocation, or a
    process killed before it can report; its alert fires before 24 hours without
-   a clean completed run. See the [ping API](https://healthchecks.io/docs/http_api/).
+   a completed run. It is a runner-liveness signal; inspect the structured warning
+   summary for item coverage gaps. See the [ping API](https://healthchecks.io/docs/http_api/).
 
 A start without completion for 55 minutes is a stuck-run incident. A second runner
 is rejected and reports failure immediately, so it cannot hide that incident with
@@ -845,8 +852,9 @@ batch budgets and no direct DB or Google credentials. Production scheduling
 remains explicitly disabled in `railway.source-refresh.json` until rollout.
 Deploy the updated API before the runner: the new runner requires full meeting
 outcome counts and rejects an older attempted-only response. Meeting persistence,
-indexing and cleanup failures produce exit 1 and a failure heartbeat, with separate
-`meeting_*_failed` summary counts. API/transport uncertainty still produces exit 2.
+indexing and cleanup failures remain in the separate `meeting_*_failed` summary
+counts. A drained run logs a warning, exits `0` and sends a completion heartbeat;
+API/transport uncertainty still produces exit `2`.
 
 Recovery: inspect `GET /meeting-records?persistence_status=failed` or
 `persistence_status=inaccessible`; use privileged
