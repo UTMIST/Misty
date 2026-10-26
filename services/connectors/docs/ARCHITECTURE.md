@@ -202,5 +202,5 @@ the writer router returns content-free `{code, uncertain}` details, and callers
 must preserve ambiguous-create recovery. Content is an
 in-memory HTML upload converted in the same Drive create operation; no empty Doc
 is published and retries never replace a human-edited body. See the
-[durable record design](../../../docs/MEETING-RECORDING.md#durable-records-design-212)
+[durable record architecture](../../../docs/MEETING-RECORDING.md#durable-records)
 and [writer API](API.md#meeting-writer-googledocs).

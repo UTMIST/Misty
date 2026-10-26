@@ -32,4 +32,4 @@ uses live credentials. CI runs it after building both images.
 - Verify migration upgrade → downgrade → upgrade on a disposable database.
 - Run the Docker HTTP smoke check for changes to outbound calls or deployment.
 - Keep [API](API.md), [deployment](DEPLOYMENT.md), and root deployment docs true.
-- Describe why each changed file is needed in the PR or a linked audit report.
+- Describe why each changed file is needed in the PR description.

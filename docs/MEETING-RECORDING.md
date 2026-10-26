@@ -26,7 +26,16 @@ The bot deliberately carries **no processing dependencies** (no `@aws-sdk`, no `
 
 ## Why the `meeting` service is *stateful*
 
-Every other backend service (`team-tracking`, `documentation-system`, `llm`, `verification`) is a stateless source-of-truth: a request goes in, a response comes out, nothing is held between calls. `meeting` is the deliberate exception. **Live transcription requires *something* to hold the rolling transcript across the life of a meeting**, and the bot is the wrong place (we're keeping it lean and processing-free). So the service keeps an **in-memory registry of active meeting sessions**, each holding one live Transcribe stream per speaker plus the growing rolling transcript those streams produce (see "Live" below). This is a considered trade, not an accident — it's the price of "ask Misty during the meeting" being possible at all. The audio itself is *not* held: each chunk goes straight to AWS and is dropped.
+**Live transcription requires the same process to own a meeting's rolling transcript
+and open streams across requests.** The service keeps an **in-memory registry of
+active meeting sessions**, each holding one Transcribe stream per speaker and the
+growing transcript (see "Live" below). The bot forwards audio; the meeting service
+processes it. Audio chunks go straight to AWS and are dropped.
+
+Other services have different state requirements: the directory, catalog,
+verification service and gateway store durable records in their own databases;
+llm and connectors are provider adapters without a local database. Gateway also
+has process-local rate limits and [requires one replica/worker](../services/gateway/docs/DEPLOYMENT.md).
 
 Live state is **ephemeral**: sessions and audio streams stay in memory. At stop, the optional record context enables a durable text-only hand-off to documentation-system before session cleanup. The meeting service never writes to disk. Abrupt disconnect recovery retains its existing grace period.
 
@@ -49,16 +58,14 @@ Discord voice  ──Opus──▶  bot recorder ──sendFrame──▶  meeti
 
 **Timeline correctness:** each forwarded frame carries `ts_ms` = milliseconds since the meeting started. AWS Transcribe reports word times relative to *each speaker's own* stream, and a speaker's stream carries only the frames they actually spoke — silence is never sent. So the service records an **anchor** whenever a frame arrives later than the audio already streamed accounts for, and maps word times through the nearest preceding anchor. Anchoring on the first `ts_ms` alone is not enough: it fixes only the speaker's first word, leaving cross-speaker order wrong past the opening minute and collapsing each speaker into one segment (the gap rule never sees a gap). `ts_ms` must always be sent and honored.
 
-## Durable records (design, #212)
+## Durable records
 
-**Status: persistence implemented by #222; link delivery implemented by #223.**
-Google Docs is the durable destination. See the service
+Google Docs is the durable destination for completed meeting text. See the service
 [API](../services/documentation-system/docs/API.md#meeting-records) and
 [rollout runbook](RAILWAY-DEPLOYMENT.md#meeting-record-persistence).
-The generic privileged catalog purge API remains a required rollout follow-up;
-meeting removal already uses an internal atomic purge with restoration guards. Decisions marked
-*proposed* are policy defaults for reviewers to confirm before rollout; they do
-not block #222/#223 implementation, which reads them from configuration.
+Meeting removal uses an internal atomic catalog purge with restoration guards.
+There is no public generic catalog-purge endpoint; use the meeting-record removal
+API for saved meetings, and distinguish it from soft-retiring an ordinary document.
 
 ### Artifact
 
@@ -77,8 +84,8 @@ Both explicit and automatic stop use the same path. Audio is never persisted or
 written to disk. Reuse the `StopResponse` fields; no second LLM call and no PDF
 parsing.
 
-**PDF: no durable copy (decided).** The Discord PDF attachment stays exactly as
-today — it is an immediate convenience copy and the fallback if persistence
+**PDF: stored only in Discord.** The PDF attachment is an immediate convenience
+copy and the fallback if Google persistence
 fails. Drive stores only the Google Doc. Anyone who needs a PDF later exports
 the Doc from Google; Misty does not regenerate one.
 
@@ -170,8 +177,9 @@ never write its body again.
 
 ### Hand-off and retry (closes the `/stop` gap)
 
-The transcript becomes durable **inside `/stop`, before the session is
-discarded**, when record context is supplied:
+With record context, `/stop` attempts to hand off finalized text before clearing
+the live session. The transcript becomes durable only when documentation-system
+accepts it; an unavailable catalog leaves an in-memory retry payload instead:
 
 ```text
 bot ──POST /meetings/{id}/stop {title, record context}──▶ meeting
@@ -185,21 +193,21 @@ documentation-system ── create Doc ──▶ connectors ──▶ Google Dri
                      ── ingest URL, set metadata ──▶ (own catalog)
 ```
 
-1. **The bot sends record context with `/stop`.** `StopRequest` gains optional
+1. **The bot sends record context with `/stop`.** `StopRequest` accepts optional
    `record` context: `guild_id`, `text_channel_id`, `voice_channel_id`,
    `requester_discord_id`, `started_at`, and `participants`
-   (`[{discord_id, display_name}]` — every speaker the session saw). Old
-   callers without it keep today's behavior (wire-contract change: meeting +
-   bot together).
+   (`[{discord_id, display_name}]` — every speaker the session saw). Callers
+   without it receive the transcript, minutes and PDF without durable storage.
 2. **`meeting` hands off before discarding.** After finalizing, it calls
    documentation-system `PUT /meeting-records/{meeting_id}` with the context,
    `ended_at`, the `Minutes` fields, and the assembled transcript. This is a
-   single Postgres insert, so it is fast. Only after a 2xx does `meeting`
-   discard the session. `StopResponse` gains `record: {status, doc_url}`.
+   durable acceptance before Google creation begins. After the hand-off attempt,
+   `meeting` clears the live session. `StopResponse.record` reports the outcome
+   as `{status, doc_url}`; only a catalog acknowledgement establishes durability.
 3. **If documentation-system is unreachable,** `meeting` returns the normal
    minutes/PDF with `record.status = "handoff_pending"`, holds the finalized
    payload in memory for `RECORD_HANDOFF_HOLD_S` (default 30 min), and retries
-   with backoff. The bot posts the PDF as today and says the Google Doc save is
+   with backoff. The bot posts the PDF and says the Google Doc save is
    delayed. If the hold expires, `meeting` logs `meeting.record_handoff_failed`
    (IDs only) and the PDF in Discord is the surviving copy — never silent.
 4. **documentation-system owns everything after acceptance.** A background
@@ -278,9 +286,7 @@ for permissions, duplicate-recovery limits and offline playground scenarios.
 
 ### Metadata schema (documentation-system, migration `012`)
 
-Migration 011 was used by the hourly refresh-runner guard before this implementation.
-
-New table `meeting_records`, both storage adapters, owned by
+The `meeting_records` table exists in both storage adapters and is owned by
 documentation-system (it already owns the catalog and has Postgres; `meeting`
 stays database-free):
 
@@ -320,9 +326,9 @@ directory API it already calls. The catalog `docs` row gets tag `meeting` and
 
 ### Google setup
 
-These follow the 2026-10-02 storage planning decisions (Drive organized by
-Discord channel ID; notes visible to whoever can access the voice channel; no
-per-user overrides) and the 2026-10-16 working session.
+Meeting folders are organized by Discord voice-channel ID. Access comes from
+the channel's configured teams and their managed Google Groups, with no per-user
+overrides. Configure both Discord permissions and the team mapping deliberately.
 
 **Writer identity: the UTMIST infrastructure Workspace account, via OAuth.**
 The existing connectors service account belongs to a project outside UTMIST's
@@ -338,8 +344,8 @@ the existing service account and read-only scopes.
 (`GOOGLE_MEETING_ROOT_FOLDER_ID`), owned by the infrastructure account — in a
 UTMIST Shared Drive if one is available, otherwise in that account's My Drive.
 If a Shared Drive is used, its membership is limited to infra/Drive admins,
-because every Shared Drive member can see every file. *Open item: infra leads
-confirm the location before #222 deploys; the code path is the same.*
+because every Shared Drive member can see every file. Confirm the root location
+and its admin-only audience before enabling the writer.
 
 **Layout: one subfolder per voice channel**, named by the voice channel's
 snowflake (stable across renames), created on first use and found again by
@@ -349,8 +355,7 @@ are shared with no members.
 **Permissions: per-Doc shares, not folder inheritance.** After its ID is
 recorded, each Doc gets direct *commenter* shares to the managed Google Group
 (`team_google_groups.group_email`) of each audience team — members can read
-and comment but not edit the record (2026-10-02: meeting files should not be
-edited). Nothing else is shared. Direct per-Doc shares avoid inherited access
+and comment but not edit the record. Nothing else is shared. Direct per-Doc shares avoid inherited access
 exposing a private meeting, and later changes to a channel's teams do not
 silently broaden old records.
 
@@ -368,18 +373,14 @@ sees meeting Docs, discovery (#291) cannot catalog them a second time.
 happened, via `/channel-access` (team-tracking
 `GET /channels/{guild}/{channel}/teams`, keyed by the voice channel's ID). An
 admin configures a voice channel by running `/channel-access` in that voice
-channel's chat. This matches the 2026-10-02 decision that anyone who can join
-the voice channel can see its notes, expressed through the existing teams →
-Google Groups mapping.
+channel's chat. Keep Discord voice-channel permissions and this team mapping
+aligned; Google access is not inferred from Discord role permissions.
 
-**Relation to #285.** #285 will define the live meeting audience (launch
-channel/thread, voice channel, team scope) for subtitles, `/qna`, and Discord
-posts, and hand it to this design. Until it lands, the voice-channel teams
-above are the record's audience. When #285 lands, documentation-system takes
-`audience_team_ids` from that hand-off instead; the Drive and catalog
-enforcement here is unchanged. Link delivery (#223) must also follow #285's
-placement rules — e.g. not posting a private thread's record link in a broader
-parent channel.
+**Discord and Google have separate audiences.** Voice-channel teams control the
+saved Doc's Google sharing. PDF and saved-link delivery retain the original text
+channel or thread; a private thread is never replaced by its broader parent.
+Live Q&A follows the [bot command's channel rules](../discord-bot/README.md#commands).
+Changing `/channel-access` does not change Discord channel permissions.
 
 **Fail closed.** Before writing, documentation-system checks that every
 audience team has a group with status `synced`. If the voice channel has no
@@ -412,12 +413,11 @@ existing Discord PDF unless its removal is separately requested. Do not report
 this as a delayed save or offer an automatic retry against the deleted canonical
 ID. Google and catalog copies follow the same purge policy as an admin removal.
 
-**Catalog grants follow Drive automatically.** Because access is Drive group
-shares, the existing source-ACL sync (#76/#261) turns them into catalog grants
-at ingest and on every refresh. Nothing grants catalog access that Drive does
-not.
+**Source grants follow Drive.** Source-ACL sync turns Drive group shares into
+catalog grants at ingest and on refresh. Independently managed catalog grants
+do not grant access to the Google Doc itself.
 
-### Consent and visibility *(proposed)*
+### Consent and visibility
 
 The onboarding rule already requires that everyone knows they are being
 recorded and is OK with it. Misty makes that explicit:
@@ -425,18 +425,18 @@ recorded and is OK with it. Misty makes that explicit:
 - At `/record start`, the bot posts in the text channel: recording has started;
   the transcript and minutes will be saved as a Google Doc visible to
   <teams | admins only>, plus a reminder that everyone present should consent; ask a Misty admin to remove a record.
-- `/record start` gains `save:false` to skip the Google Doc for that meeting
-  (PDF only, as today). Any participant may ask the requester to stop.
+- `/record start save:false` skips the Google Doc for that meeting
+  (PDF only). Any participant may ask the requester to stop.
 - Moving the bot ends a saved recording. Audio forwarding stops synchronously
   before receive-stream draining, so destination-channel speech cannot enter the
   original audience's record. Start a new recording for the destination audience.
   PDF-only (`save:false`) recordings continue to follow moves.
 - Posting a link in Discord never grants Drive access (#223).
 
-### Retention and removal *(proposed)*
+### Retention and removal
 
-- **Lifetime:** 12 months after `ended_at`
-  (`MEETING_RECORD_RETENTION_DAYS=365`). `retry-due` also runs expiry.
+- **Lifetime:** defaults to 365 days after `ended_at`, configured by
+  `MEETING_RECORD_RETENTION_DAYS`. `retry-due` also runs expiry.
 - **Transcript copies held for retries:** `pending_payload` is cleared once the
   canonical Doc ID is committed; for `failed` records it is cleared after 7 days.
 - **Deletion authority:** Misty admins (infra leads). Drive admins can also
@@ -453,14 +453,15 @@ recorded and is OK with it. Misty makes that explicit:
      Trash is not enough: in My Drive, people who already had access can still
      open a trashed file until it is permanently deleted. No recoverable Google
      copy is kept.
-  3. **Catalog:** a new documentation-system purge (`POST /docs/{id}/purge`,
-     privileged `docs:purge` scope, used internally by `/remove`) deletes the
-     doc's `content_snapshot`, its `doc_content` row, its `doc_chunks`, and
-     **all** its grants, then sets `active=false` and `purged_at`. Today's
-     `active=false` alone only removes search chunks — the snapshot, full
-     content, and grants survive it — so it is not used for removal. Only the
-     row ID, normalized URL, and Drive file ID remain, and ingest, refetch,
-     refresh, and discovery refuse a purged doc.
+  3. **Catalog:** `/remove` invokes an internal atomic purge of the linked doc
+     and every catalog alias of the canonical or discovered Google identities,
+     even if `record.doc_id` was never set. It clears titles, descriptions,
+     ownership metadata, snapshots, full text, chunks, tags and grants, then
+     sets `active=false` and `purged_at`. Identity and audit fields remain so
+     ingestion, refetch, refresh and discovery cannot restore a removed copy.
+     This runs even when Google cleanup is unavailable. Ordinary `active=false`
+     retirement only removes search chunks; it retains content and grants and
+     is not a substitute for removal.
   4. **Meeting record:** content columns (summary, decisions, action items,
      participants, payload) are cleared, keeping only a tombstone
      (`meeting_id`, canonical Google document ID, `removed_at/by`, and cleanup
@@ -469,12 +470,12 @@ recorded and is OK with it. Misty makes that explicit:
      late-created files. Clear every other field, including `title` and
      `requester_*`; keep only identifiers needed to finish any pending catalog
      or Discord cleanup until those steps succeed.
-  5. **Discord:** the design calls for bot deletion of its link message
-  (`discord_message_id`), but automatic Discord cleanup is outside #223.
-  Until that removal follow-up ships, the admin deletes both the link and PDF
-  message by hand, recording their locations before invoking `/remove` (the
-  bot does not track the PDF today). Copies members already downloaded cannot be recalled; the admin
-  tells the requester so. Expiry runs the same cascade.
+  5. **Discord:** the admin deletes both the link and PDF message manually,
+     recording their locations before invoking `/remove`. The bot tracks the
+     link's `discord_message_id`, but not the PDF, and does not automatically
+     delete either message. Copies members already downloaded cannot be
+     recalled; the admin tells the requester so. Expiry runs the Google/catalog
+     cascade and also requires separate Discord cleanup.
 - **Members who leave** lose access when they leave the managed Google Group;
   their past speech is not removed from records.
 
@@ -491,11 +492,10 @@ recorded and is OK with it. Misty makes that explicit:
   never triggers cleanup on its own: the record becomes `inaccessible`, is
   reported to admins, and the catalog retains its snapshot, `doc_content`, and
   chunks; existing grants still expire on their normal TTL and are not extended
-  by a failed fetch. This requires a meeting-specific change: today's generic
-  `SourceGone` handling immediately deletes `doc_content` and chunks on refetch
-  or refresh. For meeting-linked docs, an unconfirmed 404 from the owner fetch
-  must instead use the non-destructive fetch-failure path in ingest, refetch,
-  and refresh; it must not reach `delete_doc_content`. Destructive cleanup runs
+  by a failed fetch. Generic `SourceGone` handling deletes `doc_content` and
+  chunks on refetch or refresh. Meeting-linked docs instead use the
+  non-destructive fetch-failure path for an unconfirmed owner-fetch 404 during
+  ingestion, refetch and refresh. Destructive cleanup runs
   only after connectors'
   `GET /google/docs/{id}/status` — asked as the owning writer identity —
   confirms the Doc is `deleted` or `trashed`. The current Google adapter can
@@ -508,21 +508,9 @@ recorded and is OK with it. Misty makes that explicit:
   grants on the next refresh; `audience_team_ids` keeps the original snapshot
   for audit.
 
-### Implementation split and prerequisites
+### Verification and prerequisites
 
-| Work | Zone (owner) | Issue |
-|---|---|---|
-| `meeting_records` table + migration, `PUT/GET/PATCH /meeting-records`, guarded canonical adoption, recurring reconciliation including terminal records, `retry-due`, `/remove` cascade including unsafe-ACL removal, identity resolution, Doc HTML rendering, owner-identity fetch and non-destructive unconfirmed-404 handling for meeting docs in ingest/refetch/refresh | `services/documentation-system` (@angelayzheng) | #222 |
-| Catalog purge (`POST /docs/{id}/purge`, `docs:purge`) and refusing purged docs in ingest/refetch/refresh/discovery | `services/documentation-system` (@angelayzheng) | new follow-up, required before rollout |
-| `POST /google/docs` (unshared create with `appProperties`), `search`, `sharing` with read-back, owner `fetch` (content + full ACL), `status`, permanent `DELETE`, per-voice-channel folders, Workspace OAuth write credentials, `meeting-write`/`meeting-fetch` scopes | `services/connectors` (@michelle-yl) | #222 |
-| `StopRequest.record`, hand-off before discard, hold-and-retry, `StopResponse.record` | `services/meeting` (@andrei-akopian) | #222 |
-| Send record context on stop; post the Doc link; `delivery` PATCH; consent notice; `save:false` | `discord-bot` (@pusheen5000000) | #223 (+ the bot half of the wire change in #222) |
-| This document | `docs` (@qiuethan) | #212 |
-
-The `StopRequest`/`StopResponse` change spans `meeting` and `discord-bot`
-deliberately; ship both halves together and update "The wire contract" below.
-
-**#222 recovery tests use offline fakes.** Delay a create past lease expiry and
+**Recovery tests use offline fakes.** Delay a create past lease expiry and
 past a replacement reaching `saved`; reject the stale completion and delete its
 Doc on a later scan. Also cover an older duplicate appearing after canonical
 adoption (preserve the canonical Doc and human edits), late creates after
@@ -542,7 +530,7 @@ and that confirmed removal still purges every retained copy.
    that account's My Drive), creates `Misty Meeting Records/`, and sets
    `GOOGLE_MEETING_ROOT_FOLDER_ID`. In a Shared Drive, the account needs a role
    that can permanently delete files (Manager).
-2. New consumer keys: `meeting` → documentation-system (`meetings:write`);
+2. Consumer keys: `meeting` → documentation-system (`meetings:write`);
    documentation-system → connectors (`meeting-write`, `meeting-fetch`); bot → documentation-system
    (`meetings:read`, `meetings:write`).
 3. The Railway cron also calls `POST /meeting-records/retry-due`.
@@ -550,8 +538,8 @@ and that confirmed removal still purges every retained copy.
 5. Member (non-admin) access needs synced team groups (#237). Without them
    records are admin-only, which is safe and does not block shipping.
 
-Live subtitles (#224) and current-meeting Q&A (#225) keep reading in-memory
-session state and do not wait on any of this.
+Live Q&A reads in-memory session state and does not wait on durable persistence.
+It remains an in-progress feature; see [known limitations](#known-limitations-and-live-verification).
 
 ## The wire contract (keep both sides in lock-step)
 
@@ -610,11 +598,10 @@ Delivery still targets the text channel where recording started.
 
 `meeting` is a private Railway service (`meeting.railway.internal:<PORT>`), like the other services: `platform_auth` consumer keys, `/health`, Dockerfile build (no ffmpeg binary — PyAV bundles its own), GitHub-connected auto-deploy on push to `staging`. It needs AWS credentials (Transcribe, via the standard chain), an `llm` consumer key (for minutes), and its own `CONSUMER_KEYS` set. The bot gets a `meeting` consumer key (`MEETING_API_KEY`) and `MEETING_BASE_URL=http://meeting.railway.internal:<PORT>`; the WebSocket rides Railway's private network. If `MEETING_BASE_URL` is unset the bot boots fine and `/record` reports "not configured" — the feature degrades gracefully.
 
-## Known limitations & live-verify items
+## Known limitations and live verification
 
-- **Concurrent stream limits:** one open Transcribe stream per active speaker, held for the whole meeting — a 10-person call is 10 concurrent streams. Confirm the account's concurrent-stream quota before a large meeting; exceeding it surfaces as a `meeting.audit` warning and that speaker retries, then drops out.
-- **AWS session restarts:** Transcribe ends a session on its own (idle timeout, 4h cap). The wrapper reopens on the next audio and offsets the new session's word times by the audio already delivered — unit-tested against a fake, not yet observed against a real timeout.
-- **Speaker-timeline anchoring:** a speaker's stream carries only the frames they spoke, so word times are mapped onto meeting time via anchors recorded at each detected silence. The 200 ms tolerance is reasoned from Discord's ~20 ms cadence, not measured live.
+Audio handling changes need the service's [live verification checklist](../services/meeting/README.md#live-verification), covering speaker timing, AWS stream restarts, and concurrent-stream quotas. Repository tests use fakes and do not establish live provider acceptance.
+
 - **Meeting length cutoff:** `MAX_MEETING_MS` defaults to four hours. Once exceeded, the service drops new audio frames; it does not close the socket, finalize the session or deliver minutes. `/record stop` or auto-stop-on-empty is still required. Configure a millisecond limit through the service setting; do not rely on the cap to recover a stranded recording.
 - **Dropped WebSocket recovery has a deadline.** The service holds a disconnected session for `DISCONNECT_GRACE_S` (default 60s), and the bot responds to an unexpected `onClose`/`onError` by attempting normal finalization (`POST /stop`). Starting stop does not cancel the grace timer: if the session remains registered at expiry, teardown can interrupt an unfinished transcript flush. Recovery is therefore best effort; see the [disconnect contract](../services/meeting/docs/API.md#disconnect). A failed finalize reports "could not be recovered". Both the server-side hold and prompt bot-side salvage are required, and the close code is logged on both sides.
 - **Live Q&A:** `/qna question:<text>` is in progress and registered globally in every server the bot is in. It runs only in the recording’s original text channel, replies privately, and makes no directory lookup. The meeting service snapshots the last 15 minutes, shortens unusually dense windows with explicit disclosure, and returns validated speaker/timestamp references. No Q&A history is retained. See the [API contract](../services/meeting/docs/API.md#post-meetingssession_idqna) and [pipeline architecture](../services/meeting/docs/ARCHITECTURE.md#live-meeting-qa).

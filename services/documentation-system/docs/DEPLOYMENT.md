@@ -8,7 +8,7 @@ team-tracking dependency.
 lives in the platform-wide runbook:
 
 - **[`docs/RAILWAY-DEPLOYMENT.md`](../../../docs/RAILWAY-DEPLOYMENT.md)** — Railway + Neon setup and the branching/auto-deploy flow.
-- **[`docs/DEPLOYMENT-HISTORY.md`](../../../docs/DEPLOYMENT-HISTORY.md)** — how we got there and the bugs we hit.
+- **[Platform architecture](../../../docs/ARCHITECTURE.md)** — service boundaries, key storage and deployment constraints.
 
 For local dev, the [README quickstart](../README.md) is enough — this file is
 about the service in a real (staging / production) environment.
@@ -22,10 +22,10 @@ about the service in a real (staging / production) environment.
 - **A reachable team-tracking directory** — the source of truth for owners.
   See the directory-dependency section below; the service *runs* without it
   but ownership validation degrades.
-- **A reachable connectors service** — fetches content for the Google
+- **A reachable connectors service** — fetches content for GitHub and the Google
   sources. See "The connectors dependency" below: it is a soft dependency
   both at request time and at *boot* — a connectors outage or a missing
-  `CONNECTORS_API_KEY` degrades Google-source fetches but never blocks
+  `CONNECTORS_API_KEY` degrades Google/GitHub fetches but never blocks
   startup (see `verify_production_secrets()` below).
 - **A reachable llm service** — embeds stored content so it can be searched.
   Soft as well: see "The llm (embedding) dependency" below. Without it docs
@@ -63,13 +63,13 @@ runbook's env-var contract. Keep the defaults ONLY for local dev; anything
 running against a real Neon branch must set a strong `API_KEY` and its own
 scoped `DIRECTORY_API_KEY`, and should set its own scoped `CONNECTORS_API_KEY`
 (issued by the provisioning script / connectors' `connectors-keys` CLI — see
-the runbook) to enable Google-source content.
+the runbook) to enable Google/GitHub content.
 
 > **A staging or production deploy that has not set `API_KEY` or
 > `DIRECTORY_API_KEY` will refuse to boot.** `verify_production_secrets()`
 > treats those two as hard requirements once `docs_env` is `staging`/`production`.
 > `CONNECTORS_API_KEY` is different: a default there only logs a startup
-> warning — the service still boots, it just can't fetch Google-source
+> warning — the service still boots, it just can't fetch Google/GitHub
 > content (see "The connectors dependency" below).
 
 ## Authorized retrieval
@@ -109,11 +109,12 @@ real embeddings before changing it. See docs/EVALUATION.md.
 
 No migration or unfiltered-search feature flag is needed. Use the shared
 [contract fixture](API.md#authorized-retrieval-post-search) for consumer mocks;
-the [#277 integration verification](INGESTION-RETRIEVAL-AUDIT.md) also ingests its
+the [lifecycle testing guide](TESTING.md) also ingests its
 documents through the real indexing lifecycle before executing those exchanges.
-That runbook records reproducible offline/Postgres checks and the remaining
-controlled staging/provider acceptance. Real bot/DM/channel integration (#278)
-remains a separate release gate.
+That runbook records reproducible offline/Postgres checks and controlled provider
+acceptance requirements. Bot/DM/channel integration (#278) is implemented; follow
+the [helper activation guide](../../../discord-bot/README.md#channel-scope-and-activation)
+to verify the target environment before enabling its tools.
 
 ## Postgres
 
@@ -238,25 +239,28 @@ bodies are documented in [API.md](API.md).
 
 Consumers authenticate with scoped keys issued via the `doc-keys` CLI, which talks
 **directly to the database** (`DATABASE_URL` must be set/reachable from wherever you run
-it). See [`docs/API.md`](API.md) for how consumers present the key.
+it). See [`docs/API.md`](API.md) for how consumers present the key. Run this block
+from `services/documentation-system`; `--project .` and `python -m src.cli` keep
+the workspace's similarly named directory CLI from handling the command.
 
 ```bash
-# Issue the Discord bot's key: read+write for /doc add, plus literal act-as-user
-# so /doc list and /doc search run as the asking member.
+# Issue the Discord bot's key for /doc, personal/channel helper retrieval,
+# and saved meeting link delivery/recovery.
 # The plaintext key is printed to STDOUT exactly once — capture it now.
-uv run doc-keys issue --name discord-bot --scopes docs:read docs:write act-as-user
+uv --project . run python -m src.cli issue --name discord-bot \
+  --scopes docs:read docs:write act-as-user act-as-channel meetings:read meetings:write
 
 # Issue a read-only key for a dashboard.
-uv run doc-keys issue --name dashboard --scopes docs:read
+uv --project . run python -m src.cli issue --name dashboard --scopes docs:read
 
 # Issue a key for an operator or job that retries/re-runs indexing (POST /docs/index).
-uv run doc-keys issue --name index-admin --scopes docs:index
+uv --project . run python -m src.cli issue --name index-admin --scopes docs:index
 
 # List keys (metadata only — never plaintext).
-uv run doc-keys list --active-only
+uv --project . run python -m src.cli list --active-only
 
 # Revoke a compromised key by its id.
-uv run doc-keys revoke <api_key_id>
+uv --project . run python -m src.cli revoke <api_key_id>
 ```
 
 ## Repairing docs missing content (`doc-backfill` CLI)
@@ -453,7 +457,7 @@ set under **current** authorization. Its citations retain the old content hash;
 the newest stored content is not searchable until indexing recovers. An indexing
 failure cannot restore a revoked source grant. Confirmed source disappearance
 removes stored text and chunks together, while a transient fetch failure preserves
-them. Use the [integration runbook](INGESTION-RETRIEVAL-AUDIT.md) to verify recovery
+them. Use the [lifecycle testing guide](TESTING.md) to verify recovery
 and record controlled staging evidence before release acceptance.
 
 Embedding cost is per changed body or title; identical body/title hashes avoid repeat
@@ -539,16 +543,11 @@ authorizing a run, using the served model's row in `GET /docs/index/status`:
   characters, whichever comes first, run one doc at a time, plus one database write per
   doc.
 
-**Measured run: not yet performed.** Measuring cost is a deliberate paid run, not a test
-(#209). An authorized run should record the following here:
-
-| Field | Value |
-|-------|-------|
-| Date, environment | — |
-| Source → target model, dimensions | — |
-| Corpus: indexable docs, chunks, `chunk_chars` | — |
-| Wall time for step 2 | — |
-| Provider-reported tokens and cost | — |
+Measuring cost requires an authorized paid run. Record its environment and
+deployment revision, source and target models and dimensions, corpus size
+(indexable documents, chunks, and `chunk_chars`), wall time, and provider-reported
+tokens and cost in the rollout PR or issue. Use that evidence to estimate the next
+run against its current corpus and provider pricing.
 
 ## Source-access refresh schedule
 
@@ -764,32 +763,26 @@ Do not delete catalog data or roll back API migrations. Re-enable only one sched
 restore alerts, and repeat manual/scheduled acceptance with matching API/runner SHAs.
 Production activation requires a separate explicit rollout decision and config change.
 
-### Acceptance record for #292
+### Verify a refresh deployment
 
-The implementation is imported from the existing `qiuethan/google-identity-setup`
-workspace, with monitoring, strict index-count validation and staging/preview guards
-added during review. Local fake-provider checks are **not** staging acceptance.
-Record sanitized evidence in the issue or this table before the release go/no-go:
+Record the evidence in the release PR or rollout issue, alongside the target
+environment and deployed API/runner revisions:
 
-| Evidence | Status / required record |
-|---|---|
-| Review / publication | [PR #294](https://github.com/UTMIST/Misty/pull/294) targets staging; approval and merged staging SHA remain pending. |
-| Staging resource | No cron provisioned during implementation; record service/environment IDs and identical API/runner deployment SHAs. |
-| Alert ownership | Pending named responsible operator and backup. |
-| Alert destination | Existing Discord webhook `9af3f11e-b6b9-4ffa-beb5-29b1ac18791d` verified with `Deployment.failed`, `Deployment.crashed`, and `Deployment.oom_killed`; previews excluded, existing volume/monitor alerts preserved. Healthchecks integration `Misty staging refresh - Discord` is assigned to the refresh check and sends JSON POSTs to the same destination on down/up events, with mentions disabled; the existing email integration is retained. Channel name and delivery tests remain pending; never paste secret URLs. |
-| Heartbeat configuration | On 2026-10-21, configured `Misty staging source refresh` (slug `misty-staging-source-refresh`) in the operations Healthchecks account: `0 * * * *`, UTC, 55-minute grace. Settings and integration assignment verified by read-back. No pings received yet; wiring `SOURCE_REFRESH_MONITOR_URL` into the staging runner remains pending. Treat the ping UUID as a secret too. |
-| Manual + scheduled run | Pending both run IDs, UTC start/finish, exit code and aggregate counts, including `drained`. |
-| Multi-batch + partial failure | Offline runner/API test exercises three documents across batches with one refresh failure and one index failure; record controlled staging evidence separately. |
-| Content/access + recovery | Offline test checks updated content/grants, preservation on transient failure, separate indexing recovery and next-eligible refresh. Staging proof must use approved synthetic documents and access assertions; record outcomes without content/URLs. |
-| API unavailable / ambiguous timeout | Offline transport tests verify exit `2`, preserved progress and no POST retry; record a controlled staging outage/recovery without disrupting shared services. |
-| Overlap / stranded guard | Offline real-API tests prove a second runner cannot send start/success or release the owner; Postgres tests cover concurrent admission through separate connections. Record controlled staging overlap, exit/alert and explicit recovery evidence. |
-| Alert delivery + silence | Pending observed nonzero-exit webhook, stuck/missed-run alert and recovery notification at the chosen destination. |
-| Production | Not authorized by #292. |
+- One manual run and one real scheduled run, with run IDs, start/finish times,
+  exit codes and aggregate counts, including `drained`.
+- Updated content and grants on approved synthetic documents, recovery from a
+  transient fetch/index failure, and the next eligible refresh.
+- A controlled API outage or ambiguous timeout, with preserved progress and no
+  automatic POST replay; overlap rejection and stranded-guard recovery through
+  the [recovery procedure](#recovery-credential-rotation-and-disablerollback).
+- A named alert owner and backup, or an explicitly accepted coverage gap; verify
+  failure, missed-run and recovery notifications in the intended destination.
+- Disable/re-enable and credential rotation, with one scheduler active and old
+  credentials rejected.
 
-For controlled staging fault cases, use an isolated test API/dependency deployment
-or approved synthetic fixtures; never break the shared API, connectors or llm service
-just to trigger an alert. Do not close #292 until manual/scheduled runs and actual
-alert delivery are recorded. Pair this evidence with #291 for the release gate.
+Use [the lifecycle testing guide](TESTING.md#controlled-provider-acceptance) for
+content/access checks. A successful deployment or offline test run alone does
+not establish scheduler or alert delivery.
 
 ## Registry cleanup (migration `009`)
 

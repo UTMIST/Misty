@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1588" viewBox="0 0 640 794" role="img" aria-labelledby="title description">
+  <title id="title">Example of reviewing and confirming a document action</title>
+  <desc id="description">Simplified illustration, not an interactive control. A private preview lists the document URL, Robotics team, onboarding tag, and requested channel. A second private message says nothing has changed yet and provides Confirm and Cancel buttons. Only the requester can confirm, within two minutes.</desc>
+  <rect width="640" height="794" rx="20" fill="#f1f4fc"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <text x="28" y="40" fill="#002fcb" font-size="13" font-weight="700" letter-spacing="1.4">MISTY USER GUIDE</text>
+    <text x="28" y="78" fill="#19233f" font-size="28" font-weight="700">Review before you confirm</text>
+    <text x="28" y="105" fill="#57627a" font-size="15">Illustration · sample request · simplified Discord layout</text>
+    <rect x="24" y="126" width="592" height="600" rx="14" fill="#313338"/>
+    <circle cx="65" cy="168" r="21" fill="#4567ee"/>
+    <text x="65" y="176" text-anchor="middle" fill="#fff" font-size="23" font-weight="700">M</text>
+    <text x="101" y="165" fill="#fff" font-size="21" font-weight="700">Misty</text>
+    <rect x="168" y="148" width="42" height="22" rx="5" fill="#5865f2"/>
+    <text x="189" y="163" text-anchor="middle" fill="#fff" font-size="11" font-weight="700">APP</text>
+    <text x="101" y="189" fill="#b8becb" font-size="14">Private preview · after selecting Review privately</text>
+    <text x="101" y="230" fill="#f2f3f5" font-size="20">Review your request:</text>
+    <text x="101" y="270" fill="#fff" font-size="21" font-weight="700">Catalog a URL in the doc registry</text>
+    <text x="101" y="313" fill="#d8dce4" font-size="19">url: &quot;https://docs.google.com/</text>
+    <text x="101" y="340" fill="#d8dce4" font-size="19">document/d/YOUR_FILE_ID/edit&quot;</text>
+    <text x="101" y="383" fill="#d8dce4" font-size="19">team: <tspan font-weight="700" fill="#fff">Robotics</tspan> (robotics)</text>
+    <text x="101" y="419" fill="#d8dce4" font-size="19">tags: &quot;onboarding&quot;</text>
+    <text x="101" y="455" fill="#d8dce4" font-size="19">Requested in: <tspan fill="#c3cdff">#robotics</tspan> · UTMIST</text>
+    <path d="M44 480H596" stroke="#4a4d55"/>
+    <circle cx="65" cy="522" r="21" fill="#4567ee"/>
+    <text x="65" y="530" text-anchor="middle" fill="#fff" font-size="23" font-weight="700">M</text>
+    <text x="101" y="521" fill="#fff" font-size="21" font-weight="700">Misty</text>
+    <text x="101" y="558" fill="#f2f3f5" font-size="19">Nothing has changed yet. Only you can</text>
+    <text x="101" y="585" fill="#f2f3f5" font-size="19">confirm. This request expires two minutes</text>
+    <text x="101" y="612" fill="#f2f3f5" font-size="19">after this confirmation is first shown.</text>
+    <rect x="101" y="640" width="132" height="44" rx="5" fill="#248046"/>
+    <text x="167" y="668" text-anchor="middle" fill="#fff" font-size="18" font-weight="700">Confirm</text>
+    <rect x="245" y="640" width="118" height="44" rx="5" fill="#4e5058"/>
+    <text x="304" y="668" text-anchor="middle" fill="#fff" font-size="18" font-weight="700">Cancel</text>
+    <text x="28" y="753" fill="#19233f" font-size="16" font-weight="700">Check the URL, team, and destination first.</text>
+    <text x="28" y="778" fill="#57627a" font-size="14">These illustrated buttons do not perform an action.</text>
+  </g>
+</svg>

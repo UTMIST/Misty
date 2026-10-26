@@ -78,14 +78,18 @@ Goal: give a source without a fetcher (e.g. YouTube) full text for retrieval and
        "youtube": YouTubeFetcher(),   # new
    }
    ```
+   Extend the existing mapping; keep its Google/GitHub connector entries.
    The key **must** equal the source's `id` — that's how `fetch_for` finds it.
 3. **Enable fetching for that source.** Flip `content_fetch_enabled` to `true` for the
    source. That's a data change in the `sources` table, so write a migration that updates
    the seeded row (see below). Ingest only attempts a fetch when the source's
    `content_fetch_enabled` is true *and* a fetcher is registered.
-4. **Handle auth.** If the source `requires_auth`, your fetcher needs credentials. There's
-   no fetcher-specific config wired in v1 — add a setting to `src/config.py` (and document
-   it in [`DEPLOYMENT.md`](DEPLOYMENT.md)) and thread it through `default_registry()`.
+4. **Handle auth at the owning boundary.** Google and GitHub fetchers already use
+   `CONNECTORS_BASE_URL` / `CONNECTORS_API_KEY`; provider credentials belong to
+   connectors. Follow that path for another connector-backed source. If a new
+   in-process fetcher needs a credential, add a `SecretStr` setting in `src/config.py`,
+   `.env.example`, the README and [`DEPLOYMENT.md`](DEPLOYMENT.md), then unwrap it
+   only when wiring the fetcher in `default_registry()`.
 5. **Test** in `tests/test_fetchers.py`: parse-a-known-page, and the `FetchError` path.
    Fetchers accept an injected httpx client, so tests pass a fake instead of hitting the
    network. Add an ingest test asserting the full extracted text reaches `doc_content`,

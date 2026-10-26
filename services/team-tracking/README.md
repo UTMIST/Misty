@@ -6,7 +6,7 @@ Source-of-truth HTTP API for UTMIST's directory: people, teams, roles, membershi
 
 UTMIST runs a rotating volunteer org — people join teams, move between roles, and eventually hand off to successors. Without a canonical record of who is on what team right now (and who was on it six months ago), every downstream system has to guess. team-tracking is that canonical record — the **source of truth** for the directory.
 
-It answers questions like "who is currently on the Partnerships team," "who were the leads during fall semester," "is Alex an admin of the Events team right now," and "which person owns this Discord account." Downstream systems — the [documentation-system](../documentation-system) catalog, a future Discord bot, dashboards, sync jobs — call this API rather than each maintaining their own roster.
+It answers questions like "who is currently on the Partnerships team," "who were the leads during fall semester," "is Alex an admin of the Events team right now," and "which person owns this Discord account." Downstream systems, including the [documentation-system](../documentation-system) catalog and [Discord bot](../../discord-bot), call this API rather than each maintaining their own roster.
 
 Two design choices shape everything:
 
@@ -75,18 +75,20 @@ curl -sS http://localhost:8000/role_kinds \
   -H "X-API-Key: dev-api-key-change-me" | python3 -m json.tool
 ```
 
-**For production, use per-consumer scoped keys instead of the shared env key.** Issue them via the CLI:
+**For production, use per-consumer scoped keys instead of the shared env key.**
+Run from `services/team-tracking`. The explicit project and module invocation
+keep another workspace service's `src.cli` from handling the command:
 
 ```bash
 # Issue a read-only key for a Discord bot
-uv run team-tracking-keys issue --name discord-bot --scopes people:read memberships:read identifiers:read
+uv --project . run python -m src.cli issue --name discord-bot --scopes people:read memberships:read identifiers:read
 # Prints: tt_<prefix>_<secret>  (shown ONCE — capture it now)
 
 # List existing keys (metadata only, never plaintext)
-uv run team-tracking-keys list --active-only
+uv --project . run python -m src.cli list --active-only
 
 # Revoke a compromised key (soft-delete; history preserved)
-uv run team-tracking-keys revoke <api_key_id>
+uv --project . run python -m src.cli revoke <api_key_id>
 ```
 
 Scopes recognized today:
@@ -271,6 +273,6 @@ The directory has two storage adapters, scoped API-key auth, identity mapping, a
 **Not implemented (by design):**
 
 - **General connector framework** — external integrations use the HTTP API; the built-in Google Groups reconciler is described [above](#the-api-only-principle).
-- **Permission enforcement** — the API exposes primitives (memberships, admin flag) from which downstream systems derive access rules. No policy engine lives here.
-- **Admin UI** — officer edits go through whatever admin surface is chosen (NocoDB, Directus, direct SQL, or a custom app).
+- **General policy engine** — the API enforces key scopes and privileged-write rules; consumers derive their application permissions from directory identities and memberships.
+- **Standalone web admin UI** — admins can already manage people and teams through the [Discord commands](../../discord-bot/README.md#commands). Other admin clients must use the authenticated API.
 - **Pagination** — list endpoints return all matching rows. Adequate for UTMIST's roster size; add limit/offset when needed.

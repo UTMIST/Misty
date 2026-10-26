@@ -78,7 +78,9 @@ Bedrock signed reasoning are incompatible; see [the replay contract](API.md#thin
 Rollback selects `LLM_PROVIDER=bedrock-converse` and `LLM_MODEL=claude-sonnet-4-6`
 together and restores the AWS region/credentials. There is no automatic fallback.
 
-See the [migration record](OPENAI-MIGRATION.md) for scope, tests, and file rationale.
+Use the [provider architecture](ARCHITECTURE.md#openai-chat-default) for response
+compatibility and [contribution checks](CONTRIBUTING.md#changing-tool-use-transport)
+for SDK/transport changes.
 
 ## Consumer keys
 
@@ -133,12 +135,13 @@ fail-closed behavior and the absence of a streaming download-size limit.
 All repository tests use offline SDK doubles. Before enabling a real consumer,
 perform an explicitly authorized smoke test of a complete tool-call/result/final
 answer exchange with the deployed model, including reasoning replay when
-thinking is enabled. This PR does not execute tools or deploy the bot loop (#71).
+thinking is enabled. Tool execution and authorization belong to the consumer.
 See [API.md](API.md#client-executed-tools) for the consumer contract.
 
 ## Rollback
 
-`git revert` + push. No schema to reverse, no state to reconcile.
+Use the platform's [revert-PR procedure](../../../docs/RAILWAY-DEPLOYMENT.md#redeploy-and-rollback).
+There is no schema to reverse or service-owned state to reconcile.
 
 Note that **a key rotation is not covered by a code rollback** — `CONSUMER_KEYS` is a Railway variable, not source. Reverting a deploy leaves the current key set in place.
 

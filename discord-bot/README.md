@@ -327,14 +327,13 @@ server's active meeting and exact recording text channel, with no testing-guild
 restriction or user-level permission check.
 
 > `/record` requires the `meeting` service to be deployed in the target
-> environment, with `MEETING_BASE_URL` + `MEETING_API_KEY` set on the bot. It was
-> promoted from beta in the staging → main release; provision `meeting` in an
+> environment, with `MEETING_BASE_URL` + `MEETING_API_KEY` set on the bot. Provision `meeting` in an
 > environment **before** deploying the bot there (the deploy registers the
 > commands), or `/record` will be visible and fail.
 
 ### Meeting recording (`/record`) infra
 
-As of v2, recording is split across two services: the bot only joins voice and
+Recording is split across two services: the bot joins voice and
 streams raw Opus audio over a WebSocket to the separate `meeting` service,
 which owns Opus decoding, transcription (AWS Transcribe), and minutes
 generation, and returns the resulting PDF for the bot to post. See

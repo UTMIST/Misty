@@ -60,13 +60,17 @@ So wiring the bot to verification is just:
 
 Schema is versioned with Alembic; `001_initial_schema` creates `verification_codes` plus the email index. Migrations run as Railway's **`preDeployCommand`** on every deploy — they are not in the container `CMD`, so a migration failure blocks the release rather than producing a half-started service.
 
-To reverse a migration that shipped:
+Before reversing a migration, review its downgrade and the target code's schema
+requirements. Follow the platform's [rollback procedure](../../../docs/RAILWAY-DEPLOYMENT.md#redeploy-and-rollback),
+including backups and environment selection. From this service directory, for a
+compatible one-revision downgrade:
 
 ```bash
-railway run --service verification uv run alembic downgrade -1
+railway run --service verification --environment <staging|production> uv run alembic downgrade -1
 ```
 
-Then `git revert` the code change and push.
+Coordinate the schema step with the reviewed code rollback; do not downgrade
+under a running version that requires the newer schema.
 
 ## Data retention
 
@@ -81,7 +85,9 @@ stored requests. Code expiry does not remove the email/subject association.
 
 ## Rollback
 
-`git revert` + push. If a migration shipped with the change, `alembic downgrade -1` first (see above).
+Use the platform's [revert-PR procedure](../../../docs/RAILWAY-DEPLOYMENT.md#redeploy-and-rollback).
+If the change includes a migration, first plan schema compatibility and recovery
+using the [migration guidance](#migrations).
 
 There is no in-flight state to worry about beyond codes issued in the last 10 minutes, which expire on their own.
 

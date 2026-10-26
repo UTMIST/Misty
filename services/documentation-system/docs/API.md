@@ -106,7 +106,7 @@ permission changes become known at repeated Google ingest, refetch, or scheduled
 refresh. A failed reconciliation retains the last complete grants until their
 existing expiry; it never extends them. Manual grants remain independent. See the
 [refresh schedule](DEPLOYMENT.md#source-access-refresh-schedule) and
-[integration verification](INGESTION-RETRIEVAL-AUDIT.md) for the accepted freshness
+[lifecycle testing guide](TESTING.md) for the accepted freshness
 window, recovery cases, and release evidence.
 
 Ranking is hybrid exact cosine plus complete keyword matching, with reciprocal
@@ -925,6 +925,6 @@ grant expiry remain intact. Only independently confirmed trash/deletion or an
 explicit removal triggers purge. A security removal records
 `removed_by=security:unexpected_acl`; admins notify the requester and retain the
 Discord PDF unless its removal is separately requested. The bot implements
-[link delivery and recovery](../../../discord-bot/docs/meeting-delivery.md) in
-#223. Removal notices and deletion of already posted Discord links/PDFs remain
-admin operations; automatic Discord cleanup is outside #223.
+[link delivery and recovery](../../../discord-bot/docs/meeting-delivery.md).
+Removal notices and deletion of already posted Discord links/PDFs remain manual
+admin operations.
