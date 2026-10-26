@@ -102,6 +102,9 @@ belongs to disposable test databases only.
 
 The feature is off by default; existing resolver deployments continue to work.
 Use the same environment for all three services and keep verification private.
+Set `GATEWAY_ENV=staging` or `production` explicitly: successful auth responses
+attest this value, and compute requires the matching `MISTY_ENVIRONMENT`.
+Use separate gateway keys and compute databases for staging and production.
 
 1. Deploy verification with a dedicated `vf_` consumer key named `gateway`, scoped
    only `verification:write`, using its [provisioning guide](../../verification/docs/DEPLOYMENT.md#scoped-consumer-keys).
@@ -125,7 +128,9 @@ Use the same environment for all three services and keep verification private.
 
 6. Store the `gw_` key only in compute's backend secret store. Implement the
    [compute integration responsibilities](API.md#compute-integration-responsibilities),
-   including trusted client-IP derivation, browser-session challenge binding,
+   including an authenticated `/v1/auth/issuer` startup check and durable issuer/origin
+   binding, explicit UUID mappings for existing accounts, trusted client-IP
+   derivation, browser-session challenge binding,
    secure sessions, and fail-closed active-status checks. Keep one gateway replica
    and worker. Login counters are durable; the edge flood guard still is not.
 7. Verify with an approved active test member: request a code, confirm once,
@@ -146,7 +151,7 @@ records/counters on authenticated auth requests, so idle environments retain the
 until activity resumes.
 
 To disable new authentication, set `EMAIL_LOGIN_ENABLED=false` and redeploy; all
-three routes then fail closed. Revoke the compute key for immediate API access
+auth routes then fail closed. Revoke the compute key for immediate API access
 removal. Compute must end/reject its own sessions when status checks fail. Do not
 reset counters during routine deploys. For rollback, disable login and stop
 in-flight requests first; migration002 can be downgraded on a backup-protected

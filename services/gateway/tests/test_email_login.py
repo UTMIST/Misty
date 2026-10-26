@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -9,6 +10,7 @@ from src.api.app import create_app
 from src.api.hashing import generate_key
 from src.config import Settings, get_settings
 from src.storage.in_memory import InMemoryStorageAdapter
+from src import login_policy as policy
 
 EMAIL = "member@example.com"
 PERSON_ID = str(uuid4())
@@ -80,6 +82,42 @@ def confirm(client, challenge, code="123456", **extra):
     )
 
 
+def test_other_challenges_cannot_exhaust_a_valid_code(login, monkeypatch):
+    client, _, _, verification = login
+    clock = [datetime(2026, 10, 26, tzinfo=timezone.utc)]
+    monkeypatch.setattr(policy, "now", lambda: clock[0])
+    for _ in range(3):
+        challenge = start(client).json()["challenge_id"]
+        for _ in range(5):
+            assert confirm(client, challenge, "000000").status_code == 400
+        clock[0] += timedelta(seconds=61)
+    victim = start(client, client_ip="192.0.2.99").json()["challenge_id"]
+    assert f"gateway-login:{victim}" in verification.sent
+    assert confirm(client, victim, client_ip="192.0.2.99").status_code == 200
+
+
+def test_new_delivery_does_not_invalidate_another_browser_code(login, monkeypatch):
+    client, _, _, _ = login
+    now = datetime(2026, 10, 26, tzinfo=timezone.utc)
+    monkeypatch.setattr(policy, "now", lambda: now)
+    first = start(client).json()["challenge_id"]
+    now += timedelta(seconds=61)
+    second = start(client, client_ip="192.0.2.99").json()["challenge_id"]
+    assert confirm(client, first).status_code == 200
+    assert confirm(client, second, client_ip="192.0.2.99").status_code == 200
+
+
+def test_issuer_is_authenticated_and_matches_environment(login):
+    client, store, _, _ = login
+    assert client.get("/v1/auth/issuer").json() == {"issuer": "misty:local"}
+    assert client.get("/v1/auth/issuer", headers={"X-API-Key": "invalid"}).status_code == 401
+    token, prefix, key_hash = generate_key()
+    store.create_api_key(
+        name="resolver", prefix=prefix, key_hash=key_hash, scopes=["resolve:discord"], actor="test"
+    )
+    assert client.get("/v1/auth/issuer", headers={"X-API-Key": token}).status_code == 403
+
+
 @pytest.mark.parametrize("eligible", ["active", "missing", "inactive"])
 def test_start_is_generic_and_only_sends_to_active_people(login, eligible):
     client, _, directory, verification = login
@@ -89,14 +127,14 @@ def test_start_is_generic_and_only_sends_to_active_people(login, eligible):
         directory.person["active"] = False
     response = start(client, " MEMBER@EXAMPLE.COM ")
     assert response.status_code == 202
-    assert set(response.json()) == {"challenge_id", "expires_in", "message"}
+    assert set(response.json()) == {"challenge_id", "expires_in", "message", "issuer"}
     assert response.json()["expires_in"] == 600
     assert EMAIL not in response.text
     assert len(verification.sent) == (1 if eligible == "active" else 0)
     result = confirm(client, response.json()["challenge_id"])
     assert result.status_code == (200 if eligible == "active" else 400)
     if eligible == "active":
-        assert result.json() == {"person_id": PERSON_ID, "email": EMAIL}
+        assert result.json() == {"person_id": PERSON_ID, "email": EMAIL, "issuer": "misty:local"}
 
 
 def test_success_is_single_use_even_under_concurrent_requests(login):
@@ -123,13 +161,13 @@ def test_confirmation_rechecks_original_person_and_email(login, change):
     assert EMAIL not in response.text
 
 
-def test_concurrent_wrong_guesses_cannot_exceed_five_attempts(login):
+def test_concurrent_wrong_guesses_cannot_exceed_three_attempts(login):
     client, _, _, verification = login
     challenge = start(client).json()["challenge_id"]
     with ThreadPoolExecutor(max_workers=8) as pool:
         responses = list(pool.map(lambda _: confirm(client, challenge, "999999"), range(8)))
     assert all(r.status_code == 400 for r in responses)
-    assert len(verification.guesses) == 5
+    assert len(verification.guesses) == 3
     assert confirm(client, challenge).status_code == 400
 
 
@@ -171,7 +209,7 @@ def test_status_is_minimal_and_checks_current_state(login, person, active):
     directory.person = person
     response = client.get(f"/v1/auth/people/{PERSON_ID}/status")
     assert response.status_code == 200
-    assert response.json() == {"active": active}
+    assert response.json() == {"active": active, "issuer": "misty:local"}
     assert response.headers["cache-control"] == "no-store"
 
 

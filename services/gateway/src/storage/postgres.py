@@ -105,25 +105,6 @@ class PostgresStorageAdapter:
             ).one_or_none()
             if item is None:
                 return False
-            newer = conn.execute(
-                select(login_challenges.c.id)
-                .where(
-                    login_challenges.c.owner == item.owner,
-                    login_challenges.c.email == item.email,
-                    login_challenges.c.created_at > item.created_at,
-                    login_challenges.c.person_id.is_not(None),
-                )
-                .limit(1)
-            ).first()
-            if newer is not None:
-                return False
-            conn.execute(
-                delete(login_challenges).where(
-                    login_challenges.c.owner == item.owner,
-                    login_challenges.c.email == item.email,
-                    login_challenges.c.created_at < item.created_at,
-                )
-            )
             return (
                 conn.execute(
                     update(login_challenges)
@@ -148,7 +129,7 @@ class PostgresStorageAdapter:
                     login_challenges.c.attempts < policy.MAX_ATTEMPTS,
                 )
             ).one_or_none()
-            if row is None or not self._spend(conn, policy.guess_limits(row.email), now):
+            if row is None:
                 return None
             updated = conn.execute(
                 update(login_challenges)

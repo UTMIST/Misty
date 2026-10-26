@@ -72,7 +72,7 @@ schema is at `http://localhost:8006/openapi.json`.
 | `EMAIL_LOGIN_ENABLED` | `false` by default. Enable after provisioning private verification and directory access. |
 | `VERIFICATION_BASE_URL` | Private verification URL; local default `http://localhost:8003`. |
 | `VERIFICATION_API_KEY` | A distinct scoped `vf_` key; blank/dev values are refused outside local mode when login is enabled. |
-| `GATEWAY_ENV` | `local` / `staging` / `production`. In non-`local` envs, startup refuses to boot if `DIRECTORY_API_KEY` is blank or still the built-in dev default. |
+| `GATEWAY_ENV` | `local` / `staging` / `production`; determines the attested login issuer. In non-`local` envs, startup refuses to boot if `DIRECTORY_API_KEY` is blank or still the built-in dev default. |
 | `TRUST_PROXY_HEADERS` | Trust a single valid `X-Real-IP` supplied by an ingress that overwrites that header. **Set this to `true` behind Railway's public edge.** `X-Forwarded-For` is ignored. Missing/invalid/duplicate `X-Real-IP` falls back to the socket peer. Leave `false` for direct/private-network callers. |
 
 **There is deliberately no `API_KEY`.** Every other service in this repo carries
@@ -212,7 +212,7 @@ Scopes recognized today:
 
 - `resolve:discord` — Discord resolution.
 - `auth:email` — start and confirm email login.
-- `auth:status` — active-person status for compute sessions.
+- `auth:status` — environment issuer and active-person status for compute sessions.
 
 `platform_auth` also treats `admin` as a wildcard that satisfies every scope
 check. The CLI rejects `admin`, unknown scopes, and missing scopes. There is no bootstrap path that

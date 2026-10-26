@@ -51,23 +51,6 @@ class InMemoryStorageAdapter:
             item = self._logins.get(challenge_id)
             if item is None or item.expires_at <= now or item.redeemed:
                 return False
-            if any(
-                v.owner == item.owner
-                and v.email == item.email
-                and v.person_id is not None
-                and v.created_at > item.created_at
-                for v in self._logins.values()
-            ):
-                return False
-            self._logins = {
-                k: v
-                for k, v in self._logins.items()
-                if not (
-                    v.owner == item.owner
-                    and v.email == item.email
-                    and v.created_at < item.created_at
-                )
-            }
             self._logins[challenge_id] = item.model_copy(update={"person_id": person_id})
             return True
 
@@ -81,8 +64,6 @@ class InMemoryStorageAdapter:
                 or item.redeemed
                 or item.attempts >= policy.MAX_ATTEMPTS
             ):
-                return None
-            if not self._spend(policy.guess_limits(item.email), now):
                 return None
             item = item.model_copy(update={"attempts": item.attempts + 1})
             self._logins[challenge_id] = item

@@ -61,7 +61,10 @@ On process loss, the user retries after the cooldown; budgets are retained and n
 ambiguous send is retried automatically. Monitor delivery-failure logs.
 
 Before confirmation reaches verification, the gateway atomically reserves a
-challenge attempt and a mailbox attempt. It then rechecks the original person's
+challenge attempt. Three attempts per challenge and five deliveries per mailbox
+window bound guesses against codes issued in that window to fifteen; no shared
+guess counter lets an attacker block a different challenge. New delivery does
+not invalidate an earlier challenge. It then rechecks the original person's
 active flag and email. A final compare-and-set permits exactly one redemption.
 Private verification's existing correct-code replay remains available for the
 Discord flow; the public login boundary is strictly single-use. There is no
@@ -82,6 +85,12 @@ from trusted ingress. This does not alter edge `X-Real-IP` handling. Mailbox and
 application quotas do not depend on the attestation. Keep the existing one-replica,
 one-worker limit because the pre-authentication flood guard and resolver quotas
 are still process-local. Persistent login quotas alone do not authorize scaling.
+
+Successful auth responses attest `misty:<GATEWAY_ENV>`. The authenticated issuer
+endpoint supports compute's startup check; compute also checks each successful
+response and durably pins issuer plus gateway origin to its database. Explicit
+operator mappings are required before existing compute accounts can be claimed;
+email equality alone does not establish continuity of account ownership.
 
 ## Future compute-platform access
 

@@ -288,13 +288,16 @@ def main():
         payload = {"challenge_id": challenge_id, "code": "123456", "client_ip": "192.0.2.1"}
         assert http(gateway_url, "/v1/auth/email/confirm", key=compute_key, payload=payload) == (
             200,
-            {"person_id": person["id"], "email": "smoke@example.test"},
+            {"person_id": person["id"], "email": "smoke@example.test", "issuer": "misty:staging"},
         )
         assert (
             http(gateway_url, "/v1/auth/email/confirm", key=compute_key, payload=payload)[0] == 400
         )
         status_path = f"/v1/auth/people/{person['id']}/status"
-        assert http(gateway_url, status_path, key=compute_key) == (200, {"active": True})
+        assert http(gateway_url, status_path, key=compute_key) == (
+            200,
+            {"active": True, "issuer": "misty:staging"},
+        )
         assert (
             http(
                 directory_url,
@@ -305,7 +308,10 @@ def main():
             )[0]
             == 200
         )
-        assert http(gateway_url, status_path, key=compute_key) == (200, {"active": False})
+        assert http(gateway_url, status_path, key=compute_key) == (
+            200,
+            {"active": False, "issuer": "misty:staging"},
+        )
         print(
             "PASS: scoped email login over private HTTP, single redemption, and retirement",
             flush=True,

@@ -5,7 +5,9 @@ from hashlib import sha256
 from ipaddress import ip_address, ip_network
 
 TTL = timedelta(minutes=10)
-MAX_ATTEMPTS = 5
+# Five deliveries/hour * three guesses/challenge = at most fifteen guesses for
+# codes issued per mailbox window. Independent budgets prevent targeted lockout.
+MAX_ATTEMPTS = 3
 # (bucket, maximum admissions, window seconds)
 Limit = tuple[str, int, int]
 
@@ -39,7 +41,3 @@ def send_limits(email: str) -> list[Limit]:
         (f"email:{digest}:send:{seconds}", count, seconds)
         for count, seconds in [(1, 60), (5, 3600), (20, 86400)]
     ]
-
-
-def guess_limits(email: str) -> list[Limit]:
-    return [(f"email:{email_key(email)}:guess", 15, 3600)]

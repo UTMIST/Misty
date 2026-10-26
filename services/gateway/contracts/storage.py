@@ -17,21 +17,18 @@ class StorageAdapter(Protocol):
         """Atomically reserve mailbox send quotas and persist a pending challenge.
 
         Quotas apply equally to unknown/inactive mailboxes and are never refunded.
-        Older challenges remain usable until replacement delivery succeeds.
+        Other challenges remain independently usable until expiry or redemption.
         """
         ...
 
     def activate_login(self, challenge_id: UUID, person_id: UUID, now: datetime) -> bool:
-        """Bind after delivery and invalidate older challenges for this app/email.
-
-        A late activation cannot supersede a newer successfully delivered code.
-        """
+        """Bind after delivery without changing any other challenge's validity."""
         ...
 
     def admit_login_attempt(
         self, challenge_id: UUID, owner: str, now: datetime
     ) -> LoginChallenge | None:
-        """Atomically spend challenge and mailbox guess budgets before verification."""
+        """Atomically spend this challenge's attempt budget before verification."""
         ...
 
     def redeem_login(self, challenge_id: UUID, owner: str, now: datetime) -> bool:

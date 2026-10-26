@@ -9,6 +9,7 @@ from contracts.login import (
     EmailConfirmOut,
     EmailStartIn,
     EmailStartOut,
+    IssuerOut,
     LoginChallenge,
     PersonStatusOut,
     VerificationClient,
@@ -21,6 +22,10 @@ from src.config import get_settings
 
 logger = logging.getLogger("gateway.login")
 router = APIRouter(prefix="/v1/auth", tags=["email login"])
+
+
+def _issuer() -> str:
+    return f"misty:{get_settings().gateway_env}"
 
 
 def _enabled():
@@ -86,7 +91,7 @@ def start(
     if storage.reserve_login(challenge):
         background.add_task(_deliver, challenge, storage, directory, verification)
     # Mailbox throttling returns an indistinguishable, nonredeemable challenge.
-    return EmailStartOut(challenge_id=challenge.id)
+    return EmailStartOut(challenge_id=challenge.id, issuer=_issuer())
 
 
 @router.post("/email/confirm", response_model=EmailConfirmOut)
@@ -116,7 +121,18 @@ def confirm(
         raise invalid
     if not storage.redeem_login(challenge.id, key.name, policy.now()):
         raise invalid
-    return EmailConfirmOut(person_id=person_id, email=challenge.email)
+    return EmailConfirmOut(person_id=person_id, email=challenge.email, issuer=_issuer())
+
+
+@router.get("/issuer", response_model=IssuerOut)
+def issuer(
+    response: Response,
+    key: AuthedKey = Depends(require_scope("auth:status")),
+    storage: StorageAdapter = Depends(get_storage),
+) -> IssuerOut:
+    _quota(storage, key, "status")
+    response.headers["Cache-Control"] = "no-store"
+    return IssuerOut(issuer=_issuer())
 
 
 @router.get("/people/{person_id}/status", response_model=PersonStatusOut)
@@ -129,4 +145,6 @@ def status(
 ) -> PersonStatusOut:
     _quota(storage, key, "status")
     response.headers["Cache-Control"] = "no-store"
-    return PersonStatusOut(active=_eligible(directory.get_person(str(person_id))) == person_id)
+    return PersonStatusOut(
+        active=_eligible(directory.get_person(str(person_id))) == person_id, issuer=_issuer()
+    )

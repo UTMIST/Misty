@@ -59,19 +59,21 @@ class EmailConfirmIn(BaseModel):
         return value
 
 
-class EmailStartOut(BaseModel):
+class IssuerOut(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    issuer: str
+
+
+class EmailStartOut(IssuerOut):
     challenge_id: UUID
     expires_in: int = 600
     message: str = "If an active Misty account matches, a code will be sent."
 
 
-class EmailConfirmOut(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class EmailConfirmOut(IssuerOut):
     person_id: UUID
     email: str
 
 
-class PersonStatusOut(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class PersonStatusOut(IssuerOut):
     active: bool

@@ -124,14 +124,14 @@ Paths are repository-relative; grouped paths all share the stated purpose.
 | `services/gateway/src/login_policy.py` | Centralize send/guess/request windows and normalized email/IP bucket identities. |
 | `services/gateway/src/storage/schema.py`, `services/gateway/migrations/versions/002_email_login.py` | Define and reversibly migrate gateway-owned challenge and quota tables/indexes. |
 | `services/gateway/src/storage/in_memory.py`, `services/gateway/src/storage/postgres.py` | Equivalent synchronized admission, activation, cleanup and single-use redemption; readiness includes the new schema. |
-| `services/gateway/src/api/routers/email_login.py` | Implement start, confirm, status, active-member checks and post-response private delivery. |
+| `services/gateway/src/api/routers/email_login.py` | Implement start, confirm, issuer/status, active-member checks and post-response private delivery. |
 | `services/gateway/src/api/app.py`, `services/gateway/src/api/middleware.py` | Register routes, sanitize validation/upstream errors, bound body size, prevent response caching. |
 | `services/gateway/src/api/deps.py` | Own and close a lazily constructed private verification HTTP pool. |
 | `services/gateway/src/directory/http_client.py` | Use existing authenticated directory email/person lookup routes. |
 | `services/gateway/src/verification/__init__.py`, `services/gateway/src/verification/http_client.py` | Package the private verification client and sanitize provider/transport failures. |
 | `services/gateway/src/config.py`, `services/gateway/src/cli.py` | Add the opt-in feature, redacted internal credential/boot validation, and two external scopes. |
-| `services/gateway/tests/test_email_login.py`, `services/gateway/tests/test_verification.py` | Prove HTTP eligibility, replay/concurrency, generic responses, scope ordering, failure masking, resend recovery and private client contract. |
-| `services/gateway/tests/login_storage_cases.py`, `services/gateway/tests/test_login_storage.py`, `services/gateway/tests/test_postgres_adapter.py` | Exercise the same quotas, expiry, races, replacement and redemption semantics against both adapters, plus persistence across adapter recreation. |
+| `services/gateway/tests/test_email_login.py`, `services/gateway/tests/test_verification.py` | Prove HTTP eligibility, replay/concurrency, generic responses, scope ordering, failure masking, independent challenge budgets, issuer attestation and private client contract. |
+| `services/gateway/tests/login_storage_cases.py`, `services/gateway/tests/test_login_storage.py`, `services/gateway/tests/test_postgres_adapter.py` | Exercise the same quotas, expiry, races, independent challenge and redemption semantics against both adapters, plus persistence across adapter recreation. |
 | `services/gateway/tests/test_config.py` | Check the new secret is redacted and required when non-local login is enabled. |
 | `services/gateway/tests/smoke_stack.py`, `.github/workflows/ci.yml` | Verify real gateway → directory/verification HTTP using disposable DBs, scoped keys, a fake sender and test-container-only deterministic codes; build verification before this check. |
 | `services/verification/src/config.py`, `services/verification/src/api/deps.py`, `services/verification/src/api/app.py` | Support a separate scoped gateway identity through config-backed keys and boot validation. |
@@ -160,3 +160,21 @@ gateway, directory and verification containers with disposable databases and a
 fake mail sender. It covered login, rejection, replay, preserved compute identity,
 and retirement after the status cache expires. No live deployment or real email
 delivery was performed as part of these checks.
+
+### Security hardening verification
+
+The gateway uses three attempts per independent challenge and five deliveries
+per mailbox issuance window. A different challenge cannot exhaust or invalidate
+a member's delivered code. Send quotas remain shared to bound mail abuse; see
+[the limits and window trade-off](API.md#limits-and-failures). Successful responses
+include the environment issuer, and the scoped issuer endpoint supports compute's
+startup and database pinning checks.
+
+The mailbox-lockout and resend regressions failed on the previous implementation
+and passed after the fix. Shared storage tests verify the three-attempt cap,
+mailbox-wide delivery budget across applications, expiry and atomic redemption
+in both memory and disposable Postgres. Repository checks, migration round trip,
+Ruff gates, rebuilt gateway image and real private-HTTP/browser integration passed.
+No live configuration was changed. The companion compute PR contains the CLI
+origin/redirect and revocation fixes, explicit account migration, issuer checks,
+and dependency/runtime updates.

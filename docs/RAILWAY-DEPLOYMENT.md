@@ -24,6 +24,8 @@ consumer keys, proxy settings, and verification are covered in its
 Email login requires gateway migration002, `EMAIL_LOGIN_ENABLED`, private
 `VERIFICATION_BASE_URL`/`VERIFICATION_API_KEY`, a scoped `vf_` entry in verification
 `CONSUMER_KEYS`, directory `people:read`, and compute `auth:email`/`auth:status`.
+Set gateway `GATEWAY_ENV` explicitly; compute verifies the matching issuer and
+pins its gateway origin/environment to a separate database per environment.
 Follow [enablement](../services/gateway/docs/DEPLOYMENT.md#enable-email-login) in order.
 
 For the optional persistent `dev` environment used to test one PR at a
