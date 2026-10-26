@@ -1,6 +1,7 @@
 """The same recovery contract runs against memory and real Postgres."""
 
 from datetime import datetime, timedelta, timezone
+import json
 from uuid import UUID, uuid4
 from types import SimpleNamespace
 
@@ -399,7 +400,7 @@ class MeetingRecordCases:
 
     @pytest.mark.parametrize("previously_removed", [False, True])
     @pytest.mark.parametrize("delete_error", ["google_transport", "delete_unconfirmed"])
-    def test_unlisted_pending_duplicate_keeps_removal_and_monitoring_incomplete(
+    def test_unlisted_pending_duplicate_keeps_removal_incomplete_and_runner_warns(
         self, flow, meeting_api, monkeypatch, capsys, delete_error, previously_removed
     ):
         from pydantic import SecretStr
@@ -465,9 +466,11 @@ class MeetingRecordCases:
             ),
         )
         clock[0] += timedelta(hours=1)
-        assert source_refresh.main(["--meeting-records"]) == 1
-        assert events == ["start", "fail"]
-        assert "meeting_cleanup_failed=1" in capsys.readouterr().out
+        assert source_refresh.main(["--meeting-records"]) == 0
+        assert events == ["start", "success"]
+        finish = json.loads(capsys.readouterr().out.splitlines()[-1])
+        assert finish["meeting_cleanup_failed"] == 1
+        assert finish["level"] == "warning" and finish["outcome"] == "completed_with_warnings"
         current = records.storage.get_meeting(original.meeting_id)
         assert current.persistence_status == "removing"
         assert current.google_deletions["duplicate"] == "pending"
@@ -532,7 +535,7 @@ class MeetingRecordCases:
         assert all(doc.purged_at for doc in records.storage.list_docs(active_only=False))
 
     @pytest.mark.parametrize("failure", ["persistence", "index", "cleanup"])
-    def test_real_retry_api_propagates_meeting_failures_to_runner_and_heartbeat(
+    def test_real_retry_api_preserves_meeting_failures_in_runner_warning(
         self, flow, meeting_api, monkeypatch, capsys, failure
     ):
         from pydantic import SecretStr
@@ -562,15 +565,16 @@ class MeetingRecordCases:
                 base_url="http://testserver", api_key=SecretStr(headers["X-API-Key"]), client=client
             ),
         )
-        assert source_refresh.main(["--meeting-records"]) == 1
-        assert events == ["start", "fail"]
-        output = capsys.readouterr().out
-        assert "meeting_attempted=1 meeting_failed=1" in output
-        assert f"meeting_{failure}_failed=1" in output
+        assert source_refresh.main(["--meeting-records"]) == 0
+        assert events == ["start", "success"]
+        finish = json.loads(capsys.readouterr().out.splitlines()[-1])
+        assert finish["meeting_attempted"] == finish["meeting_failed"] == 1
+        assert finish[f"meeting_{failure}_failed"] == 1
+        assert finish["level"] == "warning" and finish["outcome"] == "completed_with_warnings"
         current = records.storage.get_meeting(original.meeting_id)
         if failure == "persistence":
             assert current.persistence_status == "failed" and current.doc_id is None
-        # Known work failures release the guard after the failure heartbeat.
+        # Known work failures release the guard after the completion heartbeat.
         owner = uuid4()
         assert records.storage.acquire_source_refresh_run(owner, actor="next-run")
         assert records.storage.release_source_refresh_run(owner)
