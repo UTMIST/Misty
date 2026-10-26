@@ -58,9 +58,13 @@ feature branch  ──PR──▶  staging  ──PR──▶  main
   `main` auto-deploys to the `production` Railway environment.
 - Keep branch-protection requirements aligned with the current CI job inventory;
   `main` also needs `main-source-guard`. Verify the actual GitHub settings. See
-  [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md) for what each job covers.
+  [the CI inventory](DEVELOPMENT.md#continuous-integration) for what each job covers.
 - CI supports a merge queue on `staging`; enable it only after the workflow
   support has landed. See the [rollout guide](DEVELOPMENT.md#merge-queue-on-staging).
+
+For user-facing releases, pair production promotion with the
+[release notes and wiki publication workflow](RELEASING.md). This runbook covers
+deployment and recovery; the wiki is published separately from its own repository.
 
 ## 1. Neon: databases + branches
 Create **four Neon projects** — `team-tracking`, `documentation-system`,
@@ -134,10 +138,10 @@ Set these per environment (staging vs production) per service.
 > **documentation-system boots fine without `CONNECTORS_API_KEY`.** Unlike
 > `API_KEY`/`DIRECTORY_API_KEY`, `verify_production_secrets()` only logs a
 > startup warning if it's still on the dev default outside `local` — it does
-> not fail the deploy. Without it, Google-source fetches (`gdocs`, `gsheets`,
-> `gslides`, `gdrive`) fail and are recorded as per-doc ingest warnings; the
+> not fail the deploy. Without it, GitHub and Google-source fetches (`github`,
+> `gdocs`, `gsheets`, `gslides`, `gdrive`) fail and are recorded as per-doc ingest warnings; the
 > catalog itself still works. Deploying connectors before documentation-system
-> is still recommended so Google fetches work from the start, but it is not
+> is still recommended so those fetches work from the start, but it is not
 > required — see the deploy order below.
 
 **The three DB-free services:**
@@ -203,8 +207,7 @@ Each `*_BASE_URL` follows the same private-network template shape, e.g.
 > Railway's dynamically-injected `PORT` isn't visible to cross-service template
 > refs. Without this, `DIRECTORY_BASE_URL` resolves to `http://…railway.internal:`
 > (empty port) and every bot → team-tracking call fails with "directory
-> temporarily unavailable." One of the three real bugs shipped through the
-> branching flow — see [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md).
+> temporarily unavailable." Keep service ports and consumer references aligned.
 
 Generate the `API_KEY` values locally so nothing sensitive appears in a shell
 transcript:
@@ -364,9 +367,9 @@ few seconds) so a hung Discord API call fails the deploy instead of holding it
 in progress forever. The success signal is the step's exit code, not a log
 line: on staging a clean run prints **both** `Registered N stable commands
 globally` and `Registered N beta commands to testing guild …`, and the deploy
-proceeds to start the new process. Seeing either line is also proof the
-service is reading `railway.json` at all (see the `railwayConfigFile` note in
-[`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md)).
+proceeds to start the new process. Verify the service uses the intended
+`railwayConfigFile` and that deploy logs show its pre-deploy command and
+healthcheck path; a successful image build alone does not verify that wiring.
 
 **A failure can leave Discord half-updated.** The script does two sequential
 bulk overwrites: global commands first, then the testing guild's. A failure
@@ -500,6 +503,39 @@ by an existing admin running `/seed` from Discord.
   unsummarized minutes rather than failing), or AWS credentials missing
   (transcript comes back empty).
 
+## Redeploy and rollback
+
+Merges deploy through the [branching model](#branching--auto-deploy-model).
+For a manual redeploy of the current revision, target the intended service and
+environment explicitly:
+
+```bash
+railway service redeploy --service <name> --environment <staging|production> --yes
+```
+
+For a code rollback, create a revert branch from current `staging`, revert the
+change, and open a PR into `staging`. Verify the resulting deployment before
+promoting `staging` to `main`. Keep rollback work in the normal review/CI flow;
+do not push a revert directly to either deployment branch.
+
+Review schema compatibility and the service's recovery instructions before
+running Alembic against the target database. A code revert does not reverse an
+applied migration, and a schema downgrade does not necessarily restore data:
+
+- Directory [migration 011](../services/team-tracking/docs/DEPLOYMENT.md#registry-cleanup-migration-011)
+  and catalog [migration 009](../services/documentation-system/docs/DEPLOYMENT.md#registry-cleanup-migration-009)
+  restore registry entries but preserve their data cleanup on downgrade.
+- Catalog migration `017` refuses downgrade while multiple embedding model sets
+  exist; follow the [model-change procedure](../services/documentation-system/docs/DEPLOYMENT.md#re-embedding-after-a-model-change-209).
+- Use a database backup or point-in-time recovery for lost data. Validate the
+  restore and preserve unrelated records before switching the service connection.
+
+Run database commands from the owning service directory. `railway run` executes
+locally with the selected environment's variables; the database must be reachable
+from that machine. For meeting deployments, wait until live sessions and pending
+[record hand-offs](../services/meeting/docs/DEPLOYMENT.md#durable-record-hand-off)
+are finished: restarting the process discards in-memory state.
+
 ## Notes
 - All seven Python Dockerfiles build with the repo root as context and
   `uv sync --frozen --no-dev --package <name>` to install just that workspace
@@ -521,8 +557,9 @@ by an existing admin running `/seed` from Discord.
   (bot → team-tracking) fail, check the `DIRECTORY_BASE_URL` reference next.
 - Staging uses the **separate staging Discord application** + private test guild,
   so staging commands never touch the real UTMIST server.
-- The `sh -c` wrapper on the API `startCommand` is deliberate — see the second
-  bug in [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md).
+- The `sh -c` wrapper on the API `startCommand` expands `${PORT}` before
+  starting uvicorn. Without the shell wrapper, uvicorn receives the literal
+  placeholder and rejects it as a port number.
 - **`meeting` carries extra WebSocket keepalive flags** on its `startCommand`:
   `--ws-ping-interval 60 --ws-ping-timeout 60`. uvicorn defaults to a 20 s ping
   with a 20 s pong deadline, which closes the socket on a client that is briefly
@@ -579,12 +616,12 @@ Rollout checks use a consented staging meeting: explicit and empty-channel stop,
 Doc sections and full transcript, native MIME type and configured destination,
 team commenter access, catalog source grants, repeat stop/persistence, recovery
 from a connector outage, and catalog visibility after a restart. Real Google
-credentials are never used by automated tests. Keep the PDF behavior; #223 posts
+credentials are never used by automated tests. Keep the PDF behavior; the bot posts
 the already-created Doc link and records its Discord message ID for recovery
 and the existing admin-owned removal workflow. Test delivery failures separately
 from save failures and recover after a bot restart; see the bot's
 [delivery runbook](../discord-bot/docs/meeting-delivery.md). Follow the
 [record removal runbook](../services/documentation-system/docs/DEPLOYMENT.md#meeting-record-persistence)
-for failed, inaccessible or unsafe-ACL records. The generic `docs:purge` endpoint
-remains a rollout follow-up from #212; meeting removal already uses an internal
-atomic purge with restoration guards.
+for failed, inaccessible or unsafe-ACL records. Meeting removal uses an internal
+atomic catalog purge with restoration guards; no public generic catalog-purge
+endpoint is exposed.

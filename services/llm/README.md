@@ -135,7 +135,7 @@ For the embedding contract, limits, and errors, see [`POST /embed`](docs/API.md#
 Tool transport additionally uses `contracts/tools.py` and `contracts/tool_validation.py`
 for wire validation, and `src/providers/tool_blocks.py` and `src/providers/raw_responses.py`
 for shared provider checks. See the [architecture](docs/ARCHITECTURE.md#stateless-tool-use-transport)
-for their boundaries and the [audit record](docs/TOOL-USE-AUDIT.md) for file-specific rationale.
+for their boundaries and [Testing](#testing) for the retained coverage.
 
 ```
 llm/
@@ -178,7 +178,8 @@ llm/
 
 `openai` (default) uses GPT-6.1 Sol through the Responses API. It reuses the existing
 OpenAI key and SDK. No consumer endpoint or auth changes are needed. See the
-[migration record](docs/OPENAI-MIGRATION.md) and [deployment steps](docs/DEPLOYMENT.md#switching-chat-to-openai).
+[provider architecture](docs/ARCHITECTURE.md#openai-chat-default) and
+[deployment steps](docs/DEPLOYMENT.md#switching-chat-to-openai).
 
 The two optional Bedrock chat providers remain available for rollback.
 
@@ -199,11 +200,12 @@ uv run pytest
 
 Route tests inject fake chat and embedding providers via `app.dependency_overrides`. Adapter tests use stubbed clients or mock transports, never real provider calls. Coverage includes auth/scopes, request limits, ordered fixed-width embeddings, normalized failures, key provisioning, config/boot checks, audit metadata, and OpenAPI.
 
-The broad tool-use suite was removed after the initial audit. Focused regressions
-in `tests/test_tool_stop_reasons.py` now cover empty completions and truncated tool
-responses through both SDKs, plus metadata, router, and validation controls. They do
-not replace the removed protocol-wide coverage. Historical verification and the
-cleanup rationale are recorded in [docs/TOOL-USE-AUDIT.md](docs/TOOL-USE-AUDIT.md#test-cleanup).
+`tests/test_tool_stop_reasons.py` covers empty completions and truncated tool
+responses through both Bedrock SDKs, plus metadata, router and validation controls.
+`tests/test_openai_chat.py` covers OpenAI response parsing and continuation.
+These focused regressions do not establish complete tool-protocol coverage or
+live-provider acceptance. Follow the [transport checklist](docs/CONTRIBUTING.md#changing-tool-use-transport)
+when changing codecs or upgrading an SDK.
 
 Lint and format with ruff:
 

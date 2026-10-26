@@ -375,80 +375,12 @@ or revalidated.
 The final lookup and Discord send are separate requests, not an atomic operation;
 checks cannot retract a message part that was already delivered.
 
-This builds on the shared `POST /search` contract (#176) and the member-search
-client shape from #210/#289; channel configuration (#239) and the DM/channel
-integration that flips the flag on (#278) land separately.
+This uses the shared `POST /search` contract (#176), member-search client
+(#210/#289), channel configuration (#239), and implemented DM/channel integration
+(#278). The tool flag defaults off in code; enabling it in an environment requires
+the [activation checks](../README.md#channel-scope-and-activation).
 
-### Command-tool implementation audit
-
-All implementation changes stay in the bot zone and reuse existing service
-clients, handlers, and policies. No backend schema, scope, or endpoint changes
-are required. The affected files have these responsibilities:
-
-| Files | Why changed |
-| --- | --- |
-| `src/commandTools.js` | Define the deliberate tool allowlist, validate arguments, bind requester/context, and share the pending deadline with command authorization. |
-| `src/router.js` | Share the existing policy enforcement point between action preparation and ordinary dispatch. |
-| `src/context.js` | Wire command tools, pending actions, and fresh requester authentication into the production executor. |
-| `src/toolExecutor.js`, `src/helperFlow.js` | Carry trusted request metadata, recheck identity, and return terminal actions without model replay; adopt the pending deadline while retaining evidence and read budgets. |
-| `src/helperActions.js` | Reserve bounded capacity before delivery/work and manage one presentation window for requester-bound, single-use actions. |
-| `src/helperChecks.js` | Coalesce duplicate validation lookups without reusing checks across effects or sends. |
-| `src/commands/help.js`, `src/messages/help.js` | Render a requester-independent public help guide while retaining personalized private help. |
-| `src/adapters/discord/helperActions.js` | Route explicit public projections, verify private delivery before private reads/Q&A, prohibit retries after execution, and handle confirmation/cancellation and admission failures. |
-| `src/adapters/discord/index.js`, `src/adapters/discord/interactions.js` | Route action buttons and preserve private visibility and access checks across split replies. |
-| `src/adapters/discord/mentions.js` | Bind real Discord context, recheck source access, bound history at the request, and hand actions to private delivery. |
-| `src/adapters/discord/recording.js`, `src/adapters/discord/qna.js` | Share existing meeting behavior with helper actions while preserving slash behavior, including the meeting-persistence `save` option from #306. |
-| `test/adapters-discord.test.js` | Preserve slash recording defaults and explicit save opt-out through the shared recording runner. |
-| `test/commandTools.test.js` | Exercise the real registry/router against fake services, including privilege changes and hostile arguments. |
-| `test/router.test.js` | Verify helper authorization errors cannot become public command results. |
-| `test/helperActions.test.js` | Cover failed DM sends, partial results, both capacity limits, concurrent admission/clicks, presentation clocks, source access, meeting identity, and mention integration. |
-| `test/toolExecutor.test.js`, `test/helperFlow.test.js`, `test/helper-retrieval.test.js` | Verify terminal handoff, retained evidence/read limits, destination-only rejection, requester revocation, and retrieval under production authentication wiring. |
-| `README.md`, `.env.example`, `src/config.js`, `docs/CONTRIBUTING.md` | Describe the expanded existing flag, user flow, authorization contract, and implementation rationale. |
-
-The multi-action/private-thread fix changes only the bot zone:
-
-| Files | Why changed |
-| --- | --- |
-| `src/toolExecutor.js` | Prepare every action in a model response and reject incomplete proposals before handing off. |
-| `src/helperActions.js` | Group actions under one confirmation, shared expiry and single-use claim; preserve individual execution results. |
-| `src/commandTools.js` | Instruct the model to include every requested action and resolve authorized display labels for the preview. |
-| `src/messages/helperActions.js` | Render readable member/team names, exact arguments and destination mentions without allowing labels to inject Markdown or pings. |
-| `src/adapters/discord/helperActions.js` | Keep server confirmations/results ephemeral in the source conversation and deliver all batch results. |
-| `test/toolExecutor.test.js` | Cover complete batches, failed preparation, revocation before writes and partial execution failure. |
-| `test/commandTools.test.js` | Verify readable, escaped previews without putting private labels in model results. |
-| `test/helperActions.test.js` | Exercise two removals through the real executor/router/service/confirmation path, duplicate clicks, requester privacy and server delivery. |
-| `README.md`, `docs/CONTRIBUTING.md` | Document the changed batch, preview and thread-delivery contracts. |
-
-The follow-up review fixes stay in the bot zone:
-
-| Files | Why changed |
-| --- | --- |
-| `src/router.js` | Propagate helper authorization and unexpected handler failures without exposing account/backend details; share principal resolution within a validation step. |
-| `src/commandTools.js`, `src/toolRegistry.js` | Mark terminal proposals independently of successful preparation, tolerate optional label failures, and specify document-round ordering and clarification behavior. |
-| `src/toolExecutor.js`, `src/helperFlow.js` | Reject partial or incompatible proposals, allow one clarification for sanitized all-failed preparations without executable retries, and bind evidence checks to each result. |
-| `src/helperActions.js`, `src/adapters/discord/helperActions.js` | Stop on later authorization failures while preserving earlier authorized results and private recording feedback. |
-| `src/helperChecks.js` | Share duplicate validation work only within a step; keep fresh checks before every effect and send. |
-| `src/commands/help.js`, `src/messages/help.js` | Keep public help independent of requester privileges and preserve private personalized help. |
-| `src/adapters/discord/mentions.js`, `src/adapters/discord/recording.js`, `src/adapters/discord/qna.js` | Propagate unexpected helper meeting failures, retain private start/stop details, and safely report ended recordings with a fresh session check. |
-| `src/meeting/meetingSurface.js` | Clarify the origin/session snapshot comment. |
-| `test/helperActions.test.js` | Reproduce removal, meeting and permission failures through confirmation; bound repeated lookups and cover private feedback, no retries and session changes. |
-| `test/commandTools.test.js`, `test/router.test.js` | Cover label fallbacks without bypassing deadlines, shared public help, and sanitized helper authorization errors. |
-| `test/adapters-discord.test.js` | Preserve private slash recording error replies when the meeting adapter throws. |
-| `test/helperFlow.test.js`, `test/toolExecutor.test.js` | Verify partial proposals never replay, all-failed proposals explain missing mentions/access without executable retries, and clarification preserves output budgets and evidence checks. |
-| `README.md`, `docs/CONTRIBUTING.md` | Keep the user-facing failure behavior, developer contract and file rationale accurate. |
-
-The public tool-result policy changes only the bot zone:
-
-| Files | Why changed |
-| --- | --- |
-| `src/commandTools.js` | Explicitly allow public directory/help reads and bind recording-status visibility to trusted origin metadata. |
-| `src/helperActions.js` | Recognize batches that can run publicly without opening a private interaction. |
-| `src/adapters/discord/helperActions.js` | Deliver each public projection separately from private results, retaining access checks and single-use execution. |
-| `src/adapters/discord/mentions.js`, `src/adapters/discord/recording.js` | Build safe recording announcements and retain their exact origin destination through confirmation. |
-| `src/messages/helperActions.js` | Render public recording updates without voice-channel locations or requester details. |
-| `src/meeting/meetingSurface.js` | Expose the active session's origin text-channel ID for publication checks. |
-| `test/commandTools.test.js`, `test/helperActions.test.js`, `test/meetingSurface.test.js` | Cover approved visibility, mixed batches, revoked access, recording failures, origin/session binding and private confirmations. |
-| `README.md`, `docs/CONTRIBUTING.md` | Document public defaults, private exceptions and the delivery contract. |
+### Verifying helper actions
 
 Offline tests use fake directory, document, model, meeting, and Discord services.
 Staging acceptance must still exercise real mentions/DMs, closed DMs, a member

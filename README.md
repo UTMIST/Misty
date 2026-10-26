@@ -1,84 +1,54 @@
-# UTMIST Ops Platform
+# Misty: UTMIST Internal Operations Platform
 
-The internal operations infrastructure for UTMIST — a canonical, machine-queryable record of _who runs the org_, _what the org owns_, and _how people reach it_. Deployed and running in production.
+Misty is a Discord-based assistant for UTMIST, connecting UTMIST's team directory,
+Google document access, and meeting notes. Team members can chat with her on Discord
+to find teammates, transcribe meetings, and search for documentation.
 
-UTMIST is a student org with rotating leadership and mixed technical fluency. Every year new leads inherit their predecessor's undocumented spreadsheets and lost Google Docs. This platform is our answer to that: **institutional knowledge that survives graduation.** Everything is exposed as HTTP APIs plus a Discord frontend, self-hostable if you ever want, deployed to Railway today because it's turnover-proof.
+Misty tracks team memberships and syncs Discord profiles with Google Drive
+permissions so that team resources are shared with the right members.
 
-**Status:** Live on Railway (staging + production) with Neon Postgres backing each service. Merges to `staging` auto-deploy to staging; merges to `main` auto-deploy to production.
+## For users
 
----
+- **[Misty user guide](https://github.com/UTMIST/Misty/wiki)**: setup, teams,
+  document sharing, conversations and meetings for members and administrators.
+- **[Releases](https://github.com/UTMIST/Misty/releases)**: user-facing changes and
+  release updates.
 
-## What you can do with it
+## For developers
 
-### As a UTMIST member (in Discord)
+This repository's documentation is for developers and operators building and
+running Misty. It describes implementation contracts, local development,
+testing, deployment and recovery.
 
-**Stable (registered globally — visible in every UTMIST server the bot is in):**
+| Task | Start here |
+|---|---|
+| Run the platform locally | [Developer onboarding](docs/DEVELOPMENT.md) |
+| Understand service boundaries and data flow | [Architecture](docs/ARCHITECTURE.md) |
+| Get credentials and access | [Access guide](docs/ACCESS.md) |
+| Join the team and pick up work | [Contributor onboarding](docs/ONBOARDING.md) |
+| Change a service | Its README, API reference and `docs/CONTRIBUTING.md`, linked below |
+| Deploy or recover a service | [Railway runbook](docs/RAILWAY-DEPLOYMENT.md) |
+| Ship a release and update the user wiki | [Release guide](docs/RELEASING.md) |
 
-- **`/link`** — attach your Discord account to your directory record so the bot knows who you are. Public (you don't need to be linked yet).
-- **`/verify-code`** — confirm the one-time code emailed to you to finish linking. Public.
-- **`/add-email`** — verify and add another email to your directory record. Requires you to be linked.
-- **`/verify-email`** — confirm the code emailed to you to finish adding that email. Requires you to be linked.
-- **`/whoami`** — see your linked identity, teams you're on, and access level. Requires you to be linked.
-- **`/team`** — look up, create, rename, add/remove members, and view rosters; also inspect or sync a team's Google Group. Ordinary reads require a linked identity; writes and both `google-status` / `google-sync` are admin-only. See the [bot command reference](discord-bot/README.md#commands).
-- **`/my-teams`** — list your active memberships. Requires you to be linked.
-- **`/doc`** — catalog and browse links (subcommands: `add`, `list`, `search`, `remove`), backed by documentation-system. `add`/`list`/`search` require a linked identity; `remove` is admin-only. Team-owner field has slug autocomplete.
-- **`/record`** — record the voice channel you're in and get meeting minutes back (subcommands: `start`, `status`, `stop`). When the first human enters an empty voice channel, the bot sends them a direct message prompting them to run `/record start`. Recording ends on `/record stop` **or automatically once everyone leaves the voice channel** (audio ingestion stops accepting frames after the configured duration cap; the cap does not finalize the meeting). On stop, the bot posts a branded PDF and, after saving succeeds, the Google Doc link with minutes and the full transcript in the originating channel or thread, @-mentioning whoever started the recording. Recipients need their own Drive access; `/record start save:false` keeps PDF only. Delayed saves and link delivery recover automatically; see the [delivery runbook](discord-bot/docs/meeting-delivery.md). Status reports Misty's current voice channel, starts are refused while a recording is already active in the server, and stops must come from the recorded voice channel unless it's already empty (the escape hatch for a runaway recording); refused actions explain the active channel and auto-stop behavior. Audio is never returned or persisted — it streams straight to AWS as transcription input and is never written to disk. `start` requires you to be linked; `status`/`stop` are public so a directory outage can't strand a running recording.
-- **Misty helper threads** — start a question with `@Misty`; Misty opens a thread and
-  answers with its recent history as context. Inside a thread Misty created, reply
-  directly to one of Misty's messages with the reply ping on to continue without
-  typing another mention. Ping-off replies, replies to people, and replies outside
-  Misty-created threads are ignored. A typed leading `@Misty` remains an independent
-  trigger.
-- **`/help`** — list the commands you can use, or show details for one. Public.
-- **`/bug`** — where to report a bug (GitHub issue link and optional infrastructure contact). Public.
-- **DM Misty directly** — linked members can start a private helper conversation and send follow-ups without a server channel or @mention. DM history is isolated per Discord user.
-
-There are currently no beta commands.
-
-**In progress (available globally):** `/qna question:<text>` privately answers questions about the current recording's last 15 minutes. Run it in the text channel where recording started. Replies include speaker/timestamp references and disclose any shortened window. See the [bot command documentation](discord-bot/README.md#commands).
-
-### As an admin (in Discord)
-
-- **`/seed`** — create a new person in the directory (member / admin / superuser). Requires admin+. Stable (visible globally). You can only grant a level at or below your own. An existing person is rejected; `/seed` does not promote them.
-- **`/team create`**, **`/team add`**, **`/team remove`**, **`/team rename`** — the write subcommands are admin-gated. Stable (visible globally).
-- **`/channel-access`** — show, set, append, or clear which teams' documents Misty may use when answering in the current channel (subcommands: `show`, `set`, `append`, `clear`). Admin-only. `set` replaces the list; `append` unions onto it. Threads inherit the parent channel's scope. Drive access stays personal.
-
-### As a developer / integration builder
-
-Every domain has a first-class HTTP API — build your own dashboard, sync job, or automation on top:
-
-- **[team-tracking](services/team-tracking/README.md)** — Endpoints across `people`, `teams`, `role_kinds`, `team_memberships`, `providers`, `person_identifiers`, `channels`, and `api_keys`. Full point-in-time roster queries. Scoped API keys, per-request audit log. **Actively consumed** by the Discord bot in production.
-- **[documentation-system](services/documentation-system/README.md)** — endpoints over `docs` and `sources`; ingest a URL and it's normalized, dedup'd, fetched (title + snapshot for supported sources), and owner-validated against team-tracking. Ownership degrades gracefully if the directory is unreachable. **Consumed** by the Discord bot's `/doc` command group (`add`, `list`, `search`, `remove`).
-- **[gateway](services/gateway/README.md)** — the one **public** service. A narrow, scoped, rate-limited door onto the directory for external consumers (e.g. a GitHub Action) that shouldn't hold an internal team-tracking key. First endpoint: `GET /v1/resolve/discord/{github_login}`, returning only a Discord id.
-
-Every service speaks OpenAPI. Point Swagger UI or codegen at them. (`meeting`'s WebSocket route isn't representable in OpenAPI — its wire format is documented in [`services/meeting/README.md`](services/meeting/README.md).)
-
-The other four are internal-facing: **[llm](services/llm/README.md)** (`POST /chat` via OpenAI or Bedrock, `chat` scope; embeddings use `POST /embed`), **[verification](services/verification/README.md)** (request/confirm an email code, `verification:write` scope), **[meeting](services/meeting/README.md)** (live transcription → minutes, `meetings` scope), and **[connectors](services/connectors/README.md)** (Google/GitHub content fetch, discovery and Google meeting-Doc writer operations; scopes depend on the endpoint).
-
-### As an operator
-
-- **Deploy is `git push`.** Merge to `staging` → Railway rebuilds and deploys staging automatically. Promote via a `staging → main` PR for production. No separate CD system.
-- **Roll back is `git revert`** + push. For migrations, follow the [migration-specific recovery guidance](docs/DEPLOYMENT-HISTORY.md#redeploy-and-rollback); downgrade does not necessarily restore cleaned-up data.
-- **Manage API keys.** Three different storage models, by design:
-  - **team-tracking, documentation-system, gateway** — issued into separate `api_keys` tables via each service’s key CLI. Gateway accepts issued `gw_` keys only; it has no bootstrap env key. Scoped, revocable, per-consumer, argon2-hashed at rest.
-  - **llm, meeting, connectors** — no key table. `llm-keys` / `meeting-keys` / `connectors-keys` _print_ a key plus a JSON entry you paste into that service's `CONSUMER_KEYS` variable; adding or revoking one is a redeploy.
-  - **verification** — no per-consumer keys at all. Only the bootstrap `API_KEY` env var authenticates, since its single consumer is the bot.
-
----
+The platform runs on Railway with separate staging and production environments.
+Merges to `staging` deploy to staging; production changes arrive through a
+`staging` → `main` promotion PR. Each database-backed service owns its database.
 
 ## The services
 
-| Service                                                                     | What it holds                                                                                                                                                    | Status                                                                                                                         |
-| --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| [`services/team-tracking/`](services/team-tracking/README.md)               | People, teams, roles, memberships, external identity mapping (Discord/GitHub/UofT email → person)                                                         | **Deployed** (staging + prod). Directory is empty on prod until seeded.                                                        |
-| [`services/documentation-system/`](services/documentation-system/README.md) | Catalog of URLs (docs/sheets/repos/videos) with owners, tags, and best-effort content snapshots                                                                  | **Deployed** (staging + prod). Consumed by the bot's `/doc` command group (`add`/`list`/`search`/`remove`), registered globally. |
-| [`services/llm/`](services/llm/README.md)                                   | Stateless (no DB) chat and embedding API; OpenAI is the default chat provider, with optional Bedrock backends                                                                          | **Deployed** (staging + prod). No database — provider calls are configured per operation.                                                        |
-| [`services/verification/`](services/verification/README.md)                 | Email verification: request a one-time code and confirm it, linking a subject (e.g. `discord:<id>`) to a verified email; requires the `verification:write` scope | **Deployed** (staging + prod).                                                                                                 |
-| [`services/meeting/`](services/meeting/README.md)                           | Meeting recording: transcribes a Discord voice session (Amazon Transcribe) and returns LLM-generated minutes as a branded PDF; no local DB; saved text is handed to the catalog/Google Doc persistence path          | **Deployed** (staging). Consumed by the bot's `/record` command group; requires the `meetings` scope.                          |
-| [`services/connectors/`](services/connectors/README.md)                     | Outbound adapter: Google/GitHub content fetch, Google discovery and meeting-Doc writer; no local DB              | **Deployed** (staging). Consumed by documentation-system; see its API for per-operation scopes.                  |
-| [`services/gateway/`](services/gateway/README.md) | Public API with scoped consumer keys and curated reads from private services | First endpoint: `GET /v1/resolve/discord/{github_login}`. See the [deployment runbook](services/gateway/docs/DEPLOYMENT.md). |
-| [`discord-bot/`](discord-bot/README.md)                                     | Discord slash-command frontend + a browser-based "web playground" for iterating on commands without a Discord token                                              | **Deployed** (staging + prod). All slash commands are stable and registered globally; 0 beta.                                  |
-| Search / retrieval | Authorized lexical + vector search over indexed full content | Implemented by catalog `POST /search`; see its [retrieval contract](services/documentation-system/docs/API.md#authorized-retrieval-post-search). |
+| Service | Responsibility | Consumers and configuration |
+| --- | --- | --- |
+| [team-tracking](services/team-tracking/README.md) | People, teams, memberships, identities, channel scopes and managed Google Groups | Directory for the bot, catalog and gateway; Google Groups sync requires its own OAuth setup. |
+| [documentation-system](services/documentation-system/README.md) | Catalog, indexed full text, authorized search, source grants and durable meeting records | Used by `/doc`, helper document questions, discovery/refresh jobs and the meeting hand-off. |
+| [llm](services/llm/README.md) | Stateless chat, client-executed tool transport and embeddings | Bot helper, meeting minutes/Q&A and catalog embeddings; providers configured per operation. |
+| [verification](services/verification/README.md) | Email ownership codes | The bot uses it for account linking and additional verified emails. |
+| [meeting](services/meeting/README.md) | Live transcription, minutes/PDF and live Q&A | `/record` and `/qna`; completed text can be handed to the catalog. One process owns live sessions. |
+| [connectors](services/connectors/README.md) | Google/GitHub fetch, Google discovery and meeting-Doc operations | Catalog consumer with separate read, discovery and writer scopes/credentials; no local database. |
+| [gateway](services/gateway/README.md) | Scoped public API backed by private services | `GET /v1/resolve/discord/{github_login}`; external consumers need an issued `gw_` key. |
+| [discord-bot](discord-bot/README.md) | Slash commands, mention/DM helper, voice recording and local web playground | Commands register globally. Live Q&A remains in progress; helper tools require explicit activation. |
+
+This is the implemented surface. Use the [deployment runbook](docs/RAILWAY-DEPLOYMENT.md)
+for environment setup and acceptance; record deployment results in the release PR.
 
 **How they relate.** Consumers use authenticated HTTP; services never share
 tables. The catalog calls the directory for ownership and access context,
@@ -110,7 +80,7 @@ Misty/
 │   ├── MEETING-RECORDING.md           How /record splits across the bot + meeting service
 │   ├── RAILWAY-DEPLOYMENT.md          Deploy runbook (Railway + Neon setup, key provisioning)
 │   ├── CODE-OWNERSHIP.md              Zones — what they are, who owns each, PR scope
-│   └── DEPLOYMENT-HISTORY.md          Design decisions, lessons learned, release log
+│   └── RELEASING.md                   Release notes and publication of the separate user wiki
 │
 ├── services/                          HTTP services (each in its own folder)
 │   ├── team-tracking/                 Directory service — port 8000, own Postgres
@@ -233,7 +203,7 @@ Depending on what you're here to do:
 **Deploying / operating**
 
 - [`docs/RAILWAY-DEPLOYMENT.md`](docs/RAILWAY-DEPLOYMENT.md) — the runbook (deploy, redeploy, provision keys, register commands, verify).
-- [`docs/DEPLOYMENT-HISTORY.md`](docs/DEPLOYMENT-HISTORY.md) — why the platform is deployed the way it is, and the non-obvious lessons.
+- [`docs/RELEASING.md`](docs/RELEASING.md) — production promotion, release notes and publishing user-guide changes from the separate wiki repository.
 
 **Building against the APIs**
 

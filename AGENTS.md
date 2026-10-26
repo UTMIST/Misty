@@ -23,7 +23,7 @@ discord-bot/                    Discord frontend + web playground
 1. **Read the service's own `docs/CONTRIBUTING.md`** before changing it. Every service has one, and each ends with a pre-push checklist specific to that service. They are not boilerplate — `verification`'s opens with a warning about the confirm-code state machine, `meeting`'s explains why you must not buffer audio.
 2. **Copy the nearest existing example.** The codebase is intentionally repetitive so patterns are easy to imitate. Find the closest existing case and mirror its shape rather than inventing a new one.
 3. **Prefer the smallest change that works.** This is a student org with rotating maintainers; clever is a liability.
-4. **Justify every changed file.** Explain why each created, edited, or deleted file is necessary in the PR description or a linked audit report.
+4. **Justify every changed file.** Explain why each created, edited, or deleted file is necessary in the PR description.
 
 ## Hard invariants
 
@@ -100,7 +100,7 @@ uv run ruff check . && uv run ruff format --check .
 
 `llm`, `meeting`, and `connectors` have no Postgres adapter — just `uv run pytest`. The bot: `cd discord-bot && npm test && npm run lint && npm run format:check`. The shared library: `cd packages/auth && uv run pytest`.
 
-Run what CI runs for that service — `.github/workflows/ci.yml` is authoritative, and [`docs/DEPLOYMENT-HISTORY.md`](docs/DEPLOYMENT-HISTORY.md#ci-on-every-pr-to-staging-or-main) lists the jobs and their coverage — rather than the generic pair, and don't quote test counts in docs or commit messages — they go stale immediately.
+Run what CI runs for that service — `.github/workflows/ci.yml` is authoritative, and [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md#continuous-integration) lists the jobs and their coverage — rather than the generic pair, and don't quote test counts in docs or commit messages — they go stale immediately.
 
 > **Every Python service is gated on both `ruff check` and `ruff format --check`.** There are no deferrals left. (The one job that runs neither is `python-test`, which only runs team-tracking's pytest — team-tracking's linting lives in the separate `python-lint` job.) If a job ever needs an exemption, `ci.yml` carries a comment saying so, and that file is the authority, not this one.
 >
@@ -144,11 +144,18 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 | What does endpoint Y do? | `services/X/docs/API.md` |
 | Why is X built this way? | `services/X/docs/ARCHITECTURE.md` |
 | How do I deploy / what env vars? | `services/X/docs/DEPLOYMENT.md`, [`docs/RAILWAY-DEPLOYMENT.md`](docs/RAILWAY-DEPLOYMENT.md) |
-| Why was this decided? | [`docs/DEPLOYMENT-HISTORY.md`](docs/DEPLOYMENT-HISTORY.md) |
+| How is the platform organized? | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | What zone is this in, and who owns it? | [`docs/CODE-OWNERSHIP.md`](docs/CODE-OWNERSHIP.md) |
 | How does `/record` work? | [`docs/MEETING-RECORDING.md`](docs/MEETING-RECORDING.md) |
+| How do we release and update user documentation? | [`docs/RELEASING.md`](docs/RELEASING.md) |
 
 ## Documentation is part of the change
+
+Repository docs serve developers and operators. Member/admin walkthroughs and
+their graphics live in the separate [GitHub wiki](https://github.com/UTMIST/Misty/wiki).
+Link users there from the README. Update implementation docs with the code;
+prepare user-guide changes for publication with the corresponding release using
+[`docs/RELEASING.md`](docs/RELEASING.md). Do not duplicate the wiki in this repo.
 
 This repo's docs are unusually detailed and are expected to stay true. If your change makes a statement in a doc wrong, fix the doc in the same PR:
 
@@ -159,3 +166,10 @@ This repo's docs are unusually detailed and are expected to stay true. If your c
 - Anything an agent would get wrong → this file.
 
 Don't restate what another doc already says — link to it. Repeated prose is what drifts.
+
+Keep these documents living: describe current behavior, constraints and reproducible
+procedures. Put dated audit findings, deployment observations, test results and
+changed-file rationale in the PR or issue. When retiring a document, move any
+still-useful guidance to its canonical reference and repair incoming links.
+Dates in API examples, fixtures and historical membership queries are data, not
+release-status claims; keep them when they explain the contract.

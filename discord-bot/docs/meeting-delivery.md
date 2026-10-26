@@ -71,21 +71,3 @@ state separately. They make no audio, Discord, Google, directory or catalog
 calls and require no acting identity selection. Ordinary commands still require
 an identity, and the preview cannot be submitted while a request is running.
 Voice capture still requires the real Discord adapter.
-
-## Changed-file rationale for #223
-
-| File | Why it is needed |
-|---|---|
-| `src/clients/meetingRecordClient.js` | Authenticated saved-reference reads and delivery receipts, with a deadline through JSON parsing. |
-| `src/meeting/meetingDelivery.js` | Independent delivery retry, concurrency control and startup/poll recovery. |
-| `src/messages/meeting.js` | Shared pointer rendering and accurate persistence/delivery notices. |
-| `src/adapters/discord/meetingPosts.js` | Exact-channel send/edit, safe mentions and duplicate recovery. |
-| `src/meeting/meetingSurface.js` | Deliver after finalization independently of the PDF result. |
-| `src/context.js`, `src/index.js` | Inject and start delivery only on the active Discord surface. |
-| `src/web/meetingDeliveryPreview.js`, `src/web/server.js`, `src/web/public/app.js` | Offline scenario execution, validated endpoint and playground controls. |
-| `test/meetingDelivery.test.js`, `test/meetingLinkPoster.test.js`, `test/meetingRecordClient.test.js` | Verify orchestration, Discord safety/recovery and authenticated transport. |
-| `test/meetingDeliveryPreview.test.js`, `test/meetingSurface.test.js` | Verify playground scenarios, identity/pending UI gates and delivery/PDF failure independence. |
-| `.env.example`, `README.md`, `docs/CONTRIBUTING.md` | Document required scopes, member behavior and local verification. |
-| `docs/meeting-delivery.md` | Delivery operations, limitations, verification and file rationale. |
-| Root `README.md`, `docs/MEETING-RECORDING.md`, `docs/RAILWAY-DEPLOYMENT.md` | Keep member instructions, design and deployment permissions aligned. |
-| `services/documentation-system/docs/API.md`, `services/documentation-system/docs/DEPLOYMENT.md` | Link the implemented delivery workflow and clarify that automatic Discord removal remains outside #223. |

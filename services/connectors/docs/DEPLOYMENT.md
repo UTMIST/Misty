@@ -86,8 +86,9 @@ If you add an extractor that needs a new Google API, both the API and its OAuth 
 
 ## Rollback
 
-`git revert` + push restores the previous image; there is no local schema to
-reverse. It does not undo Google writes or resolve interrupted operations.
+Use the platform's [revert-PR procedure](../../../docs/RAILWAY-DEPLOYMENT.md#redeploy-and-rollback).
+There is no local schema to reverse. A code rollback does not undo Google writes
+or resolve interrupted operations.
 Preserve catalog reconciliation and pending cleanup, and never blindly retry an
 ambiguous create; follow the
 [meeting persistence runbook](../../documentation-system/docs/DEPLOYMENT.md#meeting-record-persistence).

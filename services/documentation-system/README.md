@@ -1,6 +1,9 @@
 # documentation-system
 
-Source-of-truth HTTP API for UTMIST's document catalog: a registry of URLs (docs, sheets, slides, repos, videos) with owners, tags, and lightweight content snapshots.
+Source-of-truth HTTP API for UTMIST's document catalog, authorized content search,
+source access and durable meeting records. Supported sources provide full text for
+indexing as well as a bounded preview; unsupported sources can still be catalogued
+as links.
 
 ## What this service does
 
@@ -11,9 +14,14 @@ The documentation-system service is that canonical index. It exposes a REST API 
 - **Docs** — a URL plus metadata: title, description, owning team/person, tags, an optional best-effort content snapshot, and an active flag (soft delete).
 - **Sources** — a registry of URL "kinds" (`web`, `github`, `gdrive`, `gdocs`, `gsheets`, `gslides`, `youtube`) that says whether a source requires auth to fetch, has an API, and whether content fetching is even enabled for it.
 
-Content fetching is **egress-guarded (SSRF protection).** Ingesting a URL only ever fetches public destinations: the fetcher enforces an http/https scheme allowlist, resolves the target host, and refuses any private/loopback/link-local/reserved/carrier-grade-NAT or cloud-metadata (`169.254.169.254`) address — any hostname is accepted, but only if it resolves to a permitted public IP — before the request and again on every redirect hop. The connection is pinned to the validated IP (Host header + TLS SNI preserved) so DNS-rebinding can't slip an internal target past the check. A blocked or malformed URL is surfaced as an ordinary fetch failure (the doc is still catalogued with the URL as its title), never a 500.
+**Public-web fetching is egress-guarded (SSRF protection).** The `web` fetcher
+allows only HTTP(S), rejects non-public destination addresses, validates every
+redirect and pins the connection to the validated IP while preserving Host/TLS
+SNI. A blocked URL becomes an ingest warning. Google and GitHub URLs instead go
+through the configured connectors service, which parses supported provider URLs
+and uses their APIs; see its [fetch contract](../connectors/docs/API.md#post-fetch).
 
-Ingesting a URL is idempotent: re-submitting a known URL merges new tags onto the existing doc rather than creating a duplicate. De-duplication is enforced at the database level — a partial unique index on `url_normalized WHERE active` (migration 004) guarantees at most one active row per normalized URL, so concurrent adds of the same URL converge on a single canonical doc instead of racing to create duplicates, and re-adding a URL that was previously soft-removed reuses/re-catalogues it rather than piling up duplicate active entries. Ownership (`owning_team_id` / `owning_person_id`) is validated against UTMIST's team-tracking service when reachable, and degrades gracefully (id stored, label resolved later) when it isn't — the catalog never blocks on a downstream directory outage.
+Ingesting a URL is idempotent: re-submitting a known URL merges new tags onto the existing doc rather than creating a duplicate. De-duplication is enforced at the database level — a partial unique index on `url_normalized WHERE active` (migration 004) guarantees at most one active row per normalized URL, so concurrent adds of the same URL converge on a single canonical doc instead of racing to create duplicates, and re-adding a URL that was previously soft-removed reuses/re-catalogues it rather than piling up duplicate active entries. Ownership (`owning_team_id` / `owning_person_id`) is validated against UTMIST's team-tracking service when reachable. An owner-label lookup can degrade gracefully (id stored, label resolved later); access resolution and authorized search have their own fail-closed rules in the [API contract](docs/API.md#authorized-retrieval-post-search).
 
 ## Dependency on the team-tracking directory
 
@@ -35,7 +43,11 @@ through verified directory identities and group emails only through Team Trackin
 whose Google membership sync is healthy. Broad and unmapped principals produce no grant.
 Configure the dependency with `CONNECTORS_BASE_URL` and `CONNECTORS_API_KEY`.
 
-Connectors reachability at request time is soft for ingest but hard for refetch: a connectors outage during `POST /docs` is caught and turned into a per-doc warning (the doc is still catalogued, just without a content snapshot) — see the `FetchError` handling in `src/ingest.py`. During `POST /docs/{id}/refetch`, the same `FetchError` is instead surfaced as an HTTP 502 — see `src/api/routers/docs.py` — because refetch is an explicit user-initiated action rather than a batch ingest. It is also a soft dependency at *boot* in staging/production: `verify_production_secrets()` (`src/config.py`) logs a startup warning, not a boot refusal, if `CONNECTORS_API_KEY` is still the built-in dev default — this service still starts and catalogues docs, it just can't fetch Google-source content. See `docs/DEPLOYMENT.md` for the recommended (not required) deploy order (connectors before documentation-system, so Google fetches work from the start).
+GitHub README/text-file fetching uses the same connector dependency. Automatic
+discovery enumerates Google shares, not GitHub repositories. Meeting Docs use
+the connector's separate OAuth writer; see [meeting persistence](docs/DEPLOYMENT.md#meeting-record-persistence).
+
+Connectors reachability at request time is soft for ingest but hard for refetch: a connectors outage during `POST /docs` is caught and turned into a per-doc warning (the doc is still catalogued, just without a fresh content snapshot) — see the `FetchError` handling in `src/ingest.py`. During `POST /docs/{id}/refetch`, the same `FetchError` is instead surfaced as an HTTP 502 — see `src/api/routers/docs.py` — because refetch is an explicit user-initiated action rather than a batch ingest. It is also a soft dependency at *boot* in staging/production: `verify_production_secrets()` (`src/config.py`) logs a startup warning, not a boot refusal, if `CONNECTORS_API_KEY` is still the built-in dev default. The catalog still starts, but Google/GitHub fetching needs a valid connector key. See [deployment configuration](docs/DEPLOYMENT.md) for setup and source-access refresh settings.
 
 ## Dependency on the llm service
 
@@ -80,21 +92,25 @@ curl -sS http://localhost:8001/sources \
   -H "X-API-Key: dev-api-key-change-me" | python3 -m json.tool
 ```
 
-**For production, use per-consumer scoped keys instead of the shared env key.** Issue them via the CLI:
+**For production, use per-consumer scoped keys instead of the shared env key.**
+Run from `services/documentation-system`. The explicit project and module
+invocation avoid the shared workspace's `src.cli` name collision:
 
 ```bash
 # Issue a read/write key for an ingestion bot
-uv run doc-keys issue --name slack-bot --scopes docs:read docs:write
+uv --project . run python -m src.cli issue --name slack-bot --scopes docs:read docs:write
 # Prints: doc_<prefix>_<secret>  (shown ONCE — capture it now)
 
 # List existing keys (metadata only, never plaintext)
-uv run doc-keys list --active-only
+uv --project . run python -m src.cli list --active-only
 
 # Revoke a compromised key
-uv run doc-keys revoke <api_key_id>
+uv --project . run python -m src.cli revoke <api_key_id>
 ```
 
-Scopes: `docs:{read,write}`, `admin` (wildcard). See the auth model section below for how attested actors and audit fields work.
+The example grants catalog reads/writes. Search assertions, indexing, discovery
+and meeting operations have separate scopes; use the [scope reference](docs/API.md#scopes)
+when provisioning a consumer. See the auth model below for attested actors.
 
 A doc whose source fetch failed at ingest is catalogued without content (the failure is only a warning). Find and repair those with the `doc-backfill` CLI, which talks to this service over HTTP — so it needs a scoped key, not `DATABASE_URL`:
 
@@ -254,11 +270,11 @@ Auth is **Level 2** (scoped API keys), matching team-tracking:
 - There is **no `X-Actor` header** — the actor stamped on `created_by`/`updated_by`/audit log entries is always the authenticated key's own name (`AuthedKey.name`). A caller cannot claim to be someone else; this is the "attested actor" model.
 - Endpoint scopes distinguish catalog reads/writes, indexing and meeting operations. `admin` satisfies endpoint scope checks but does not replace literal person/channel assertion scopes; see the [scope reference](docs/API.md#scopes).
 - `AuditLogMiddleware` (imported from `platform_auth` directly, wired in `src/api/app.py`) logs every request with the resolved actor.
-- Manage keys with the CLI:
+- Manage keys with the CLI from `services/documentation-system`:
   ```bash
-  uv run doc-keys issue --name my-consumer --scopes docs:read docs:write
-  uv run doc-keys list --active-only
-  uv run doc-keys revoke <api_key_id>
+  uv --project . run python -m src.cli issue --name my-consumer --scopes docs:read docs:write
+  uv --project . run python -m src.cli list --active-only
+  uv --project . run python -m src.cli revoke <api_key_id>
   ```
 
 ## API at a glance
@@ -316,7 +332,7 @@ For ingestion → indexing → authorized retrieval acceptance (#277), run
 `uv run pytest tests/test_ingestion_retrieval.py -q`. The same cases run against
 Postgres in `tests/test_postgres_adapter.py::TestIngestionRetrieval`. They use the
 real HTTP clients with deterministic external responses, and never seed chunks.
-See the [integration runbook](docs/INGESTION-RETRIEVAL-AUDIT.md) for commands,
+See the [lifecycle testing guide](docs/TESTING.md) for commands,
 failure/freshness behavior, and controlled staging acceptance.
 
 **Full (includes Postgres integration):**
@@ -373,16 +389,19 @@ metadata. Ingest, refetch, refresh, and retirement keep the index current, and
 [storage contract](docs/ARCHITECTURE.md#doc_chunks) and
 [database prerequisites](docs/DEPLOYMENT.md#postgres).
 
-**Deferred (per design §3/§11 non-goals):**
+Automated ingestion/retrieval verification and bot integration are implemented.
+Controlled provider acceptance is an environment-specific check; see the
+[lifecycle testing guide](docs/TESTING.md) and
+[helper activation guide](../../discord-bot/README.md#channel-scope-and-activation).
 
-- Controlled staging/provider acceptance for #277 (automated ingestion/retrieval
-  verification is implemented; see the [audit](docs/INGESTION-RETRIEVAL-AUDIT.md)),
-  and bot/DM/channel integration (#278).
+**Current limits:**
+
 - An in-process scheduler or queue — Railway (or another external scheduler) calls the bounded refresh endpoint hourly; see the [refresh schedule](docs/DEPLOYMENT.md#source-access-refresh-schedule).
 - Additional fetchers — YouTube remains a registered source without a fetcher implementation.
 - Bulk import — ingest is one URL per request; no CSV/bulk endpoint.
 - Pagination — list endpoints return all matching rows, adequate for current catalog size.
-- Admin UI — no dashboard; catalog browsing goes through the API or a future thin client.
+- Standalone web admin UI — catalog browsing is available through the API and
+  the bot's `/doc` commands; document questions also use the helper when enabled.
 
 ## Automatic sharing discovery
 

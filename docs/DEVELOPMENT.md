@@ -24,9 +24,9 @@ need all of them at once — stand up only what you're touching.
 | [`llm`](../services/llm/README.md) | 8002 | — | Stateless chat/embedding proxy; OpenAI default, optional Bedrock chat. No DB. |
 | [`verification`](../services/verification/README.md) | 8003 | Postgres :5434 ⚠️ | Email one-time codes (request / confirm). Backs `/link` and `/add-email`. |
 | [`meeting`](../services/meeting/README.md) | 8004 | — | **Stateful.** Live voice transcription → minutes/PDF; saved text is handed to the catalog. No local DB. |
-| [`connectors`](../services/connectors/README.md) | 8005 | — | Stateless `POST /fetch` adapter — pulls Google Docs/Sheets/Slides/Drive content as text for the catalog. No DB. |
+| [`connectors`](../services/connectors/README.md) | 8005 | — | Google/GitHub content, Google ACLs/discovery and meeting-Doc writes. No local DB. |
 | [`gateway`](../services/gateway/README.md) | 8006 | Postgres :5435 | Public scoped API; owns its issued-key registry. |
-| [`discord-bot`](../discord-bot/README.md) | 3001 (playground) | — | Discord slash commands + a browser playground that needs no Discord token. |
+| [`discord-bot`](../discord-bot/README.md) | 3001 (playground) | — | Slash commands, mention/DM helper and voice recording. The browser playground needs no Discord token; its helper is text-only. |
 
 > ⚠️ **Known port clash:** `documentation-system` and `verification` both bind
 > host port **5434** for their dev Postgres
@@ -361,6 +361,11 @@ The end-to-end loop. The per-service CONTRIBUTING docs have the code-level
 walkthroughs (add an endpoint, add a storage method, write a migration) — this
 is the workflow around them.
 
+Update developer docs in the same PR as the code. For user-visible changes,
+identify the affected wiki pages and release-note items in the PR; prepare and
+publish those through the [release guide](RELEASING.md). User walkthroughs live
+in the separate wiki repository.
+
 1. **Branch off `staging`.** Never commit straight to `main`; a CI guard rejects
    PRs to `main` that don't come from `staging` (see below).
 
@@ -439,11 +444,8 @@ is the workflow around them.
    notify Discord. [Blocked/ready automation](../.github/workflows/blocked-ready-automation.yml)
    runs on issue events, not PR events; see its [current limits](ONBOARDING.md#getting-work).
 
-   > **`services/meeting` went to staging with no CI coverage at all** — no test
-   > job, and `docker-build` skipped its image. Both are now wired up
-   > (`meeting-test` + a meeting build/smoke step), and its `ruff format --check`
-   > deferral has since been cleared along with `documentation-system`'s. Every
-   > Python job now gates lint and formatting alike.
+   Add test, lint and image-build coverage in the same PR as a new service.
+   The [CI inventory](#continuous-integration) describes the current checks.
 
 5. **Merging deploys.** Merging to `staging` deploys to Railway **staging**;
    merging `staging → main` deploys to **production**. PRs to `main` additionally
@@ -497,6 +499,30 @@ See GitHub's [merge queue documentation](https://docs.github.com/en/repositories
 for queue settings and failure handling.
 
 ---
+
+## Continuous integration
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) defines the current jobs:
+
+- **`python-test`** — team-tracking, Postgres 16 service container, applies migrations, runs the full pytest suite
+- **`python-lint`** — team-tracking ruff check + format
+- **`auth-lib-test`** — the shared `packages/auth` (`platform_auth`) pytest suite + ruff check/format
+- **`verification-test`** — services/verification, Postgres 16 service container, `alembic upgrade head`, then `pytest` + ruff check/format
+- **`llm-test`** — services/llm pytest suite + ruff check/format
+- **`meeting-test`** — services/meeting pytest suite + ruff check/format. No Postgres container and no AWS credentials: the service has no database, and its Transcribe/LLM clients are faked via `app.dependency_overrides`, so the suite runs fully offline
+- **`connectors-test`** — services/connectors pytest suite + ruff check/format. No container and no Google credentials: the Google API clients are faked, so the suite runs fully offline
+- **`documentation-system-test`** — Postgres 16 service container, runs `alembic upgrade head`, then `pytest` with `RUN_PG_TESTS=1` and `RUN_PG_MIGRATION_TESTS=1` + ruff check/format
+- **`gateway-test`** — isolated wheel install, migration round trip, opt-in Postgres tests, pytest, ruff check/format
+- **`node-test`** — the bot’s `node --test` suite, ESLint and Prettier `--check`, plus readiness-checker verification
+- **`docker-build`** — builds *and boot-smoke-tests* every service image (`python -c "import src.api.app"` for the seven APIs, `node --check src/index.js` for the bot), plus the directory/gateway HTTP smoke check
+
+The same jobs also run on pushes to `staging` and `main`, and on
+`merge_group` events targeting `staging`. Queue enforcement is configured
+separately in GitHub; see the [rollout guide](#merge-queue-on-staging).
+
+Repository files define the jobs, not which checks GitHub currently requires.
+Verify branch-protection/merge-queue settings against that inventory; a job’s
+presence in YAML alone is not proof it gates merging.
 
 ## Database test setup
 

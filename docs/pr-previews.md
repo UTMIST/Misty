@@ -53,7 +53,7 @@ compatibility, not the correctness of arbitrary changes inside that file.
 
    The startup volume requirement applies only to `dev` so this feature does
    not break existing staging/production deployments that have no volume.
-   Gateway overlap is also a risk there; this PR does not establish a singleton
+   Gateway overlap is also a risk there; the dev guard does not establish a singleton
    guarantee for those environments. Extending it requires a coordinated
    infrastructure rollout with volumes provisioned before enforcing the guard.
 6. Set the following on the bot in the `dev` environment's variable editor:
@@ -115,7 +115,7 @@ other than persistent `dev` fails before any deployment changes.
 
 GitHub only exposes manual workflows after they exist on the default branch;
 see [GitHub's workflow-dispatch documentation](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).
-The terminal command can bootstrap this PR before that merge.
+Use the terminal selector if the workflow is not yet available on the default branch.
 
 ### From the terminal
 

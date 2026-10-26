@@ -154,8 +154,7 @@ even when it occurs near the time budget: it is not proof the server stopped wor
 Both finish events and `--status` expose `scan_status`: `not_started`, `in_progress`,
 `completed`, or `completed_with_warnings`. During continuation, `completed_at` and
 `last_counts` still describe the previous completed traversal. A non-null historical
-timestamp does not mean the current scan finished. No checkpoint reset or migration
-is needed for this change.
+timestamp does not mean the current scan finished.
 
 Counts distinguish `indexed`, `existing` (current stored index), `registered`
 (missing content or initial Google ACL sync), `index_failed`, `retired`, `disabled`,
@@ -170,8 +169,8 @@ checkpoint payloads, or API keys.
 Provision two independent Healthchecks-compatible checks, separate from source
 refresh. Both send down/up notifications to `#misty-staging-dev-alerts` with a
 discovery-specific label and mentions disabled. Primary owner: **Ethan Qiu**.
-Backup: **unassigned**, explicitly accepted by the operator on 2026-10-23; do not
-infer an on-call backup from CODEOWNERS or issue assignments.
+Backup: **unassigned**. Record an assigned backup or explicit acceptance of the
+coverage gap in the rollout issue; do not infer one from CODEOWNERS or issue assignments.
 
 | Check | Timing | Runner setting | Signal |
 |---|---|---|---|
