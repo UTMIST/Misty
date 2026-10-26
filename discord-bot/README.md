@@ -1,5 +1,9 @@
 # UTMIST Discord Bot
 
+This README covers development, configuration and implementation behavior.
+Members and Misty administrators should use the
+[Misty user guide](https://github.com/UTMIST/Misty/wiki).
+
 The Discord frontend for the UTMIST platform — a thin Node.js layer over the
 [team-tracking](../services/team-tracking) directory API. It gives UTMIST members
 slash commands to link their Discord account, look up teams and rosters, and

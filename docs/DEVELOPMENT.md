@@ -361,6 +361,11 @@ The end-to-end loop. The per-service CONTRIBUTING docs have the code-level
 walkthroughs (add an endpoint, add a storage method, write a migration) — this
 is the workflow around them.
 
+Update developer docs in the same PR as the code. For user-visible changes,
+identify the affected wiki pages and release-note items in the PR; prepare and
+publish those through the [release guide](RELEASING.md). User walkthroughs live
+in the separate wiki repository.
+
 1. **Branch off `staging`.** Never commit straight to `main`; a CI guard rejects
    PRs to `main` that don't come from `staging` (see below).
 

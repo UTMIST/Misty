@@ -147,8 +147,15 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 | How is the platform organized? | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | What zone is this in, and who owns it? | [`docs/CODE-OWNERSHIP.md`](docs/CODE-OWNERSHIP.md) |
 | How does `/record` work? | [`docs/MEETING-RECORDING.md`](docs/MEETING-RECORDING.md) |
+| How do we release and update user documentation? | [`docs/RELEASING.md`](docs/RELEASING.md) |
 
 ## Documentation is part of the change
+
+Repository docs serve developers and operators. Member/admin walkthroughs and
+their graphics live in the separate [GitHub wiki](https://github.com/UTMIST/Misty/wiki).
+Link users there from the README. Update implementation docs with the code;
+prepare user-guide changes for publication with the corresponding release using
+[`docs/RELEASING.md`](docs/RELEASING.md). Do not duplicate the wiki in this repo.
 
 This repo's docs are unusually detailed and are expected to stay true. If your change makes a statement in a doc wrong, fix the doc in the same PR:
 

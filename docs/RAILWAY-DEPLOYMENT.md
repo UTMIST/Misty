@@ -62,6 +62,10 @@ feature branch  ──PR──▶  staging  ──PR──▶  main
 - CI supports a merge queue on `staging`; enable it only after the workflow
   support has landed. See the [rollout guide](DEVELOPMENT.md#merge-queue-on-staging).
 
+For user-facing releases, pair production promotion with the
+[release notes and wiki publication workflow](RELEASING.md). This runbook covers
+deployment and recovery; the wiki is published separately from its own repository.
+
 ## 1. Neon: databases + branches
 Create **four Neon projects** — `team-tracking`, `documentation-system`,
 `verification`, and `gateway` (each service owns its own DB). In each project you get a `main`
