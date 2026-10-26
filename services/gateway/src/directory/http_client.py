@@ -56,6 +56,12 @@ class HttpDirectoryClient:
             raise DirectoryUnavailable("invalid directory person response")
         return result
 
+    def get_person_by_email(self, email: str) -> dict | None:
+        return self._get(f"/people/by-email/{quote(email, safe='')}")
+
+    def get_person(self, person_id: str) -> dict | None:
+        return self._get(f"/people/{quote(person_id, safe='')}")
+
     def list_identifiers(self, person_id: str) -> list[dict]:
         result = self._get(f"/people/{quote(person_id, safe='')}/identifiers")
         if result is None:

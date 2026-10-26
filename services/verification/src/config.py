@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://verification:dev_password@localhost:5434/verification"
     api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
+    consumer_keys: SecretStr = SecretStr("")
     code_hmac_secret: SecretStr = SecretStr(DEFAULT_DEV_HMAC_SECRET)
     vf_env: Literal["local", "staging", "production"] = "local"
     email_backend: Literal["fake", "resend", "gmail"] = "fake"

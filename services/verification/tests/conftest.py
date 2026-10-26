@@ -41,10 +41,13 @@ def _clear_settings_cache(_no_dotenv):
     # get_settings() is lru_cached, so a Settings built by an earlier test (or
     # at app-import time, before _no_dotenv could run) would otherwise persist.
     from src.config import get_settings
+    from src.api.deps import _key_store
 
     get_settings.cache_clear()
+    _key_store.cache_clear()
     yield
     get_settings.cache_clear()
+    _key_store.cache_clear()
 
 
 @pytest.fixture

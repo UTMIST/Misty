@@ -17,13 +17,12 @@ reviewer logins, but do not call the gateway or mention reviewers on Discord.
 
 The gateway exists for exactly that shape of consumer:
 
-- It holds **one internal team-tracking key** (scoped `identifiers:read`) for its own
+- It holds **one internal team-tracking key** (scoped `identifiers:read`, plus `people:read` for email login) for its own
   outbound calls — external callers never see it.
 - It issues and manages its **own, separate registry of external API keys** (via the
   `gateway-keys` CLI), scoped to gateway-specific permissions like `resolve:discord`.
-- It exposes a **narrow, curated surface** — today, one endpoint — that returns only
-  what the consumer needs (a Discord id), never a raw pass-through of team-tracking's
-  response.
+- It exposes a **narrow, curated surface**: Discord resolution and optional email
+  login for active Misty members. Responses contain only the fields each operation needs.
 - It rate-limits and audit-logs every request, since (unlike the internal services)
   its callers are outside UTMIST's control.
 
@@ -50,7 +49,7 @@ docker compose up -d postgres
 # 2. Install dependencies (including dev tools)
 uv sync --extra dev
 
-# 3. Apply database migrations (creates the api_keys table)
+# 3. Apply database migrations (key registry and login state)
 uv run alembic upgrade head
 
 # 4. Start the API server
@@ -67,10 +66,15 @@ schema is at `http://localhost:8006/openapi.json`.
 
 | Variable | Purpose |
 |---|---|
-| `DATABASE_URL` | The gateway's **own** Postgres — it holds only `api_keys` (its external key registry), never a copy of team-tracking's data. |
+| `DATABASE_URL` | The gateway's **own** Postgres — it holds external keys, short-lived login challenges, and abuse counters. Directory records remain in team-tracking. |
 | `DIRECTORY_BASE_URL` | team-tracking's base URL — where the gateway makes its **outbound** call. |
-| `DIRECTORY_API_KEY` | The gateway's **one internal** team-tracking key, scoped `identifiers:read`. Follow the [directory-pinned provisioning procedure](docs/DEPLOYMENT.md#database-and-internal-access). |
-| `GATEWAY_ENV` | `local` / `staging` / `production`. In non-`local` envs, startup refuses to boot if `DIRECTORY_API_KEY` is blank or still the built-in dev default. |
+| `DIRECTORY_API_KEY` | The gateway's **one internal** team-tracking key, scoped `identifiers:read`, plus `people:read` for email login. Follow the [directory-pinned provisioning procedure](docs/DEPLOYMENT.md#database-and-internal-access). |
+| `LOGIN_STATUS_PER_MINUTE` | Status/issuer requests per consumer per minute; default 600, range 1–10000. |
+| `EDGE_REQUESTS_PER_MINUTE` | Pre-authentication requests per IP per minute; default 1200, range 120–20000. Must exceed the status quota by at least 120. |
+| `EMAIL_LOGIN_ENABLED` | `false` by default. Enable after provisioning private verification and directory access. |
+| `VERIFICATION_BASE_URL` | Private verification URL; local default `http://localhost:8003`. |
+| `VERIFICATION_API_KEY` | A distinct scoped `vf_` key; blank/dev values are refused outside local mode when login is enabled. |
+| `GATEWAY_ENV` | `local` / `staging` / `production`; determines the attested login issuer. In non-`local` envs, startup refuses to boot if `DIRECTORY_API_KEY` is blank or still the built-in dev default. |
 | `TRUST_PROXY_HEADERS` | Trust a single valid `X-Real-IP` supplied by an ingress that overwrites that header. **Set this to `true` behind Railway's public edge.** `X-Forwarded-For` is ignored. Missing/invalid/duplicate `X-Real-IP` falls back to the socket peer. Leave `false` for direct/private-network callers. |
 
 **There is deliberately no `API_KEY`.** Every other service in this repo carries
@@ -82,6 +86,14 @@ has neither justification: its keys are issued straight into the database by
 `gateway-keys`, and it is the only service exposed to the internet. Setting
 `API_KEY` here does nothing — `src/api/auth.py` passes `get_env_key=lambda:
 None`, and `tests/test_auth.py` pins that it stays that way.
+
+## Email login
+
+The compute backend can request and confirm codes for an active person’s registered
+primary email. Misty owns code delivery, verification, challenges, and abuse limits.
+The compute backend owns its sessions and must check current eligibility. See the
+[API and integration contract](docs/API.md#email-login) and
+[enablement steps](docs/DEPLOYMENT.md#enable-email-login).
 
 ## The resolver endpoint
 
@@ -143,12 +155,15 @@ id itself.
 
 ### Rate limiting
 
+This section describes the resolver and shared flood guard; email login has
+[additional durable quotas](docs/API.md#limits-and-failures).
+
 Two layers, because they defend different things:
 
 | Layer | Where | Limit | Keyed on |
 |---|---|---|---|
 | Per-consumer quota | Router dependency, **after** auth | 60 / 60s | `AuthedKey.name` — an issued key |
-| Flood guard | Middleware, **in front of** auth | 120 / 60s | Client IP (health routes exempt) |
+| Flood guard | Middleware, **in front of** auth | `EDGE_REQUESTS_PER_MINUTE` (default 1200 / 60s) | Client IP (health routes exempt) |
 
 The quota is the one a consumer notices. It runs after `require_api_key`, so it
 can only ever be keyed on the name of a key we issued — the set is bounded by
@@ -197,7 +212,9 @@ for recording an operator name with `--actor` and preserving revocation history.
 
 Scopes recognized today:
 
-- `resolve:discord` — the only external-facing scope, and the only one to issue.
+- `resolve:discord` — Discord resolution.
+- `auth:email` — start and confirm email login.
+- `auth:status` — environment issuer and active-person status for compute sessions.
 
 `platform_auth` also treats `admin` as a wildcard that satisfies every scope
 check. The CLI rejects `admin`, unknown scopes, and missing scopes. There is no bootstrap path that
@@ -226,7 +243,7 @@ gateway/
 │   │   └── routers/resolve.py `GET /v1/resolve/discord/{github_login}`
 │   │
 │   ├── directory/http_client.py  HTTP DirectoryClient — calls team-tracking with DIRECTORY_API_KEY
-│   ├── storage/               StorageAdapter implementations (in-memory + Postgres) for the gateway's own api_keys table
+│   ├── storage/               StorageAdapter implementations (in-memory + Postgres) for keys, login challenges, and abuse counters
 │   ├── cli.py                 gateway-keys CLI (issue / list / revoke external keys)
 │   └── config.py               Settings (DATABASE_URL, DIRECTORY_*, GATEWAY_ENV, TRUST_PROXY_HEADERS)
 │
@@ -245,7 +262,7 @@ uv run pytest --ignore=tests/test_postgres_adapter.py
 ```
 
 For the full suite, start the local Compose Postgres and create a separate,
-disposable `gateway_test` database. The adapter tests clear its key table:
+disposable `gateway_test` database. The adapter tests clear its key and login tables:
 
 ```bash
 docker compose up -d postgres
@@ -257,11 +274,12 @@ DATABASE_URL="$GATEWAY_TEST_DATABASE_URL" uv run alembic upgrade head
 RUN_PG_TESTS=1 uv run pytest
 ```
 
-From the repo root, verify the actual HTTP integration with the current directory:
+From the repo root, verify the actual HTTP integration with the current directory and verification service:
 
 ```bash
 docker build -f services/team-tracking/Dockerfile -t team-tracking:ci .
 docker build -f services/gateway/Dockerfile -t gateway:ci .
+docker build -f services/verification/Dockerfile -t verification:ci .
 python3 services/gateway/tests/smoke_stack.py
 ```
 
@@ -285,12 +303,12 @@ The health endpoints are documented in [API.md](docs/API.md#health). Railway use
 
 ## Status
 
-Public gateway with its own `api_keys` registry (migration 001), one internal
-team-tracking key for outbound calls, and one endpoint:
-`GET /v1/resolve/discord/{github_login}`. Rate-limited (60 req/min/key, plus a
-per-IP flood guard) and audit-logged. Every caller must present a key issued by
-`gateway-keys` — there is no env-bootstrap admin path. Built on `packages/auth`
-(`platform_auth`) — no auth logic is reimplemented here.
+Public gateway with external keys and durable login state (migration002).
+The resolver and optional active-member email login use explicit scopes, private
+HTTP, quotas, and audit logging. Every caller presents an issued `gw_` key;
+there is no bootstrap admin path. Code delivery and checking remain in Misty's
+private verification service. Enabling and connecting compute requires the
+[deployment procedure](docs/DEPLOYMENT.md#enable-email-login).
 
 **Not implemented (by design):**
 

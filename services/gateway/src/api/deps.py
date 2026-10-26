@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 from contracts.directory import DirectoryClient
 from contracts.storage import StorageAdapter
+from contracts.login import VerificationClient
 from src.config import get_settings
 
 
@@ -38,12 +39,17 @@ def get_storage() -> StorageAdapter:
 async def lifespan(app: FastAPI):
     app.state.directory = None
     app.state.directory_lock = Lock()
+    app.state.verification = None
+    app.state.verification_lock = Lock()
     try:
         yield
     finally:
         if app.state.directory is not None:
             await run_in_threadpool(app.state.directory.close)
             app.state.directory = None
+        if app.state.verification is not None:
+            await run_in_threadpool(app.state.verification.close)
+            app.state.verification = None
 
 
 def get_directory(request: Request) -> DirectoryClient:
@@ -53,3 +59,16 @@ def get_directory(request: Request) -> DirectoryClient:
         if request.app.state.directory is None:
             request.app.state.directory = _build_directory()
         return request.app.state.directory
+
+
+def get_verification(request: Request) -> VerificationClient:
+    from src.verification.http_client import HttpVerificationClient
+
+    with request.app.state.verification_lock:
+        if request.app.state.verification is None:
+            settings = get_settings()
+            request.app.state.verification = HttpVerificationClient(
+                settings.verification_base_url,
+                settings.verification_api_key.get_secret_value(),
+            )
+        return request.app.state.verification
