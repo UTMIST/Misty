@@ -1,18 +1,24 @@
-# UTMIST Ops Platform
+# Misty: UTMIST Internal Operations Platform
 
-Misty is UTMIST's operations platform: seven Python HTTP services, a Discord
-frontend and a shared authentication library. It connects the team directory,
-document catalog, Google sharing and meeting records through authenticated APIs.
+Misty is a Discord-based assistant for UTMIST, connecting UTMIST's team directory,
+Google document access, and meeting notes. Team members can chat with her on Discord
+to find teammates, transcribe meetings, and search for documentation.
 
-**[Misty user guide](https://github.com/UTMIST/Misty/wiki)**: setup, teams,
-document sharing, conversations and meetings for members and administrators.
-User-facing changes are announced in [releases](https://github.com/UTMIST/Misty/releases),
-with the wiki updated for the released behavior.
+Misty tracks team memberships and syncs Discord profiles with Google Drive
+permissions so that team resources are shared with the right members.
 
-This repository's documentation is for developers and operators. It describes
-implementation contracts, local development, testing, deployment and recovery.
+## For users
 
-## Start developing
+- **[Misty user guide](https://github.com/UTMIST/Misty/wiki)**: setup, teams,
+  document sharing, conversations and meetings for members and administrators.
+- **[Releases](https://github.com/UTMIST/Misty/releases)**: user-facing changes and
+  release updates.
+
+## For developers
+
+This repository's documentation is for developers and operators building and
+running Misty. It describes implementation contracts, local development,
+testing, deployment and recovery.
 
 | Task | Start here |
 |---|---|
