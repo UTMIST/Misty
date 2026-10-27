@@ -436,8 +436,9 @@ is the workflow around them.
    required. PR workflows also check ownership/labels and PR size; the
    [zone check](../.github/workflows/pr-zone-check.yml) warns when a PR spans
    multiple zones, and [review notifications](../.github/workflows/discord-pr-notify.yml)
-   notify Discord. [Blocked/ready automation](../.github/workflows/blocked-ready-automation.yml)
-   runs on issue events, not PR events; see its [current limits](ONBOARDING.md#getting-work).
+   notify Discord. [Board reconciliation](../.github/workflows/project-board.yml)
+   follows issue/PR/review events and repairs missed changes on a schedule;
+   see the [settings, closing-link policy and activation steps](../.github/PROJECT-BOARD.md).
 
    > **`services/meeting` went to staging with no CI coverage at all** — no test
    > job, and `docker-build` skipped its image. Both are now wired up
