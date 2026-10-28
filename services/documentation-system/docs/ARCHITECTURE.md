@@ -200,6 +200,15 @@ connector reads that list before any export/download. documentation-system then 
 through Team Tracking's fail-closed, membership-synced Google Group lookup. It never
 infers Google Group membership from an ordinary Team Tracking membership.
 
+Scheduled refresh shares an in-memory identity cache across the documents in one
+`refresh-due` request. It caches successful and unmapped results by normalized email,
+separately for users and groups, and discards them before the next batch. Directory
+errors are not cached. Each file still supplies fresh Google permissions; permission
+IDs, roles, inheritance and expiration are evaluated separately for each file. This
+avoids repeating directory HTTP lookups for shared audiences without retaining
+identity or group-sync decisions across batches. Ingest and individual refetches
+continue to resolve identities independently.
+
 Unknown/external emails, unmapped/legacy groups, domain-wide shares, and `anyone` shares
 produce warnings but no grant. This deliberately means a broadly shared file can remain
 absent from the catalog's source-backed audience until an explicit supported mapping

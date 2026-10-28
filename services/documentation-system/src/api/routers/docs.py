@@ -37,6 +37,7 @@ from src.source_access import (
     GOOGLE_ACCESS_ORIGIN,
     GOOGLE_SOURCE_IDS,
     SourceAccessUnavailable,
+    SourceIdentityCache,
     resolve_google_permissions,
     source_grant_expiry,
 )
@@ -301,6 +302,8 @@ def refresh_due_source_access(
         and doc.source_id in fetch_enabled
         and _source_access_due(doc, due_before)
     ][:limit]
+    # Share identity results only within this request, never across hourly runs.
+    identity_cache = SourceIdentityCache()
     refreshed = 0
     failed = 0
     index_failed = 0
@@ -313,6 +316,7 @@ def refresh_due_source_access(
                 directory=directory,
                 actor=actor,
                 source_access_max_age_hours=settings.source_access_max_age_hours,
+                identity_cache=identity_cache,
             )
         except (FetchError, SourceAccessUnavailable):
             _record_failed_refetch(doc, storage=storage, actor=actor)
@@ -486,6 +490,7 @@ def _refetch_doc_source(
     directory: DirectoryClient,
     actor: str,
     source_access_max_age_hours: int,
+    identity_cache: SourceIdentityCache | None = None,
 ) -> Doc:
     if doc.purged_at:
         raise FetchError("document was permanently purged")
@@ -501,7 +506,9 @@ def _refetch_doc_source(
     if doc.source_id in GOOGLE_SOURCE_IDS:
         if result.permissions is None:
             raise SourceAccessUnavailable("connector omitted Google source ACL")
-        resolved = resolve_google_permissions(result.permissions, directory)
+        resolved = resolve_google_permissions(
+            result.permissions, directory, identity_cache=identity_cache
+        )
         storage.replace_source_grants(
             doc.id,
             origin=GOOGLE_ACCESS_ORIGIN,

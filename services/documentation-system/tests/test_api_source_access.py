@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -9,6 +10,7 @@ from src.api.app import create_app
 from src.api.deps import get_directory, get_fetchers, get_storage
 from src.api.hashing import generate_key
 from src.api.routers import docs as docs_router
+from src.directory.http_client import HttpDirectoryClient
 from src.storage.in_memory import InMemoryStorageAdapter
 from tests.conftest import build_seed_sources
 
@@ -186,6 +188,170 @@ def test_scheduled_refresh_skips_fetch_disabled_sources_before_applying_limit(ct
     assert store.get_doc_content(UUID(disabled["id"])) is None
     assert store.get_doc(UUID(disabled["id"])).source_access_attempted_at is None
     assert client.post("/docs/source-access/refresh-due", headers=ADMIN).json()["attempted"] == 0
+
+
+def _due_docs(ctx, count):
+    client, store, fetchers, _ = ctx
+    doc_ids = []
+    old = datetime.now(timezone.utc) - timedelta(hours=25)
+    for number in range(count):
+        response = client.post(
+            "/docs",
+            headers=ADMIN,
+            json={"url": f"https://docs.google.com/document/d/cached-{number}/edit"},
+        )
+        assert response.status_code == 201
+        doc_id = UUID(response.json()["doc"]["id"])
+        store.update_doc(
+            doc_id,
+            {"source_access_synced_at": old, "source_access_attempted_at": old},
+            actor="test",
+        )
+        doc_ids.append(doc_id)
+    fetchers.calls.clear()
+    return doc_ids
+
+
+def test_scheduled_refresh_caches_identity_results_only_within_batch(ctx, monkeypatch):
+    from collections import Counter
+
+    client, store, fetchers, _ = ctx
+    doc_ids = _due_docs(ctx, 10)
+    people = {"alice@example.com": P1}
+    alternate_people = {"alternate@mail.utoronto.ca": P2}
+    groups = {"alice@example.com": T1}
+    requests = []
+
+    def directory_request(request):
+        path = request.url.path
+        requests.append(path)
+        for prefix, identities in [
+            ("/people/by-email/", people),
+            ("/people/by-identifier/email/", alternate_people),
+            ("/teams/by-synced-google-group/", groups),
+        ]:
+            if path.startswith(prefix):
+                identity = identities.get(path.removeprefix(prefix))
+                return (
+                    httpx.Response(200, json={"id": str(identity)})
+                    if identity
+                    else httpx.Response(404)
+                )
+        pytest.fail("unexpected directory request")
+
+    def fetch(source_id, url):
+        fetchers.calls.append((source_id, url))
+        # A different file's empty ACL must still revoke its previous access.
+        if "cached-9/" in url:
+            return _result(None)
+        permissions = [
+            SourcePermission(
+                permission_id=f"{url}-{kind}-{email}",
+                principal_type=kind,
+                principal=email.upper(),
+                role="reader",
+            )
+            for kind, email in [
+                ("user", "alice@example.com"),
+                ("user", "alternate@mail.utoronto.ca"),
+                ("user", "unknown@example.com"),
+                # Same email, separate user/group identity namespaces.
+                ("group", "alice@example.com"),
+                ("group", "unmapped@googlegroups.com"),
+            ]
+        ]
+        return FetchResult(title="Private", content="new content", permissions=permissions)
+
+    monkeypatch.setattr(fetchers, "fetch_for", fetch)
+    with httpx.Client(transport=httpx.MockTransport(directory_request)) as http:
+        directory = HttpDirectoryClient("http://directory.test", "offline-key", client=http)
+        client.app.dependency_overrides[get_directory] = lambda: directory
+        response = client.post("/docs/source-access/refresh-due?limit=10", headers=ADMIN)
+        assert response.status_code == 200
+        assert response.json() == {"attempted": 10, "refreshed": 10, "failed": 0, "index_failed": 0}
+        assert len(fetchers.calls) == 10
+        # Seven HTTP lookups instead of seven per document (63).
+        assert len(requests) == 7
+        assert set(Counter(requests).values()) == {1}
+        for doc_id in doc_ids[:-1]:
+            grants = store.list_grants(doc_id)
+            assert {grant.grantee_id for grant in grants} == {P1, P2, T1}
+            assert all(store.get_doc(doc_id).url in grant.source_permission_id for grant in grants)
+        assert store.list_grants(doc_ids[-1]) == []
+
+        # Neither successful nor negative results survive into another batch.
+        people.clear()
+        people["unknown@example.com"] = P2
+        alternate_people.clear()
+        groups.clear()
+        old = datetime.now(timezone.utc) - timedelta(hours=25)
+        for doc_id in doc_ids:
+            store.update_doc(
+                doc_id,
+                {"source_access_synced_at": old, "source_access_attempted_at": old},
+                actor="test",
+            )
+        requests.clear()
+        response = client.post("/docs/source-access/refresh-due?limit=10", headers=ADMIN)
+        assert response.status_code == 200 and response.json()["refreshed"] == 10
+        assert len(requests) == 7
+        assert set(Counter(requests).values()) == {1}
+        assert len(fetchers.calls) == 20
+        for doc_id in doc_ids[:-1]:
+            assert [grant.grantee_id for grant in store.list_grants(doc_id)] == [P2]
+        assert store.list_grants(doc_ids[-1]) == []
+
+
+@pytest.mark.parametrize("principal_type", ["user", "group"])
+@pytest.mark.parametrize("failure", ["http", "timeout"])
+def test_scheduled_refresh_does_not_cache_directory_outages(
+    ctx, monkeypatch, principal_type, failure
+):
+    client, store, fetchers, _ = ctx
+    doc_ids = _due_docs(ctx, 2)
+    original_grants = {doc_id: store.list_grants(doc_id) for doc_id in doc_ids}
+    fetchers.result = FetchResult(
+        title="Private",
+        content="new content",
+        permissions=[
+            SourcePermission(
+                permission_id="known",
+                principal_type="user",
+                principal="alice@example.com",
+                role="reader",
+            ),
+            SourcePermission(
+                permission_id="flaky",
+                principal_type=principal_type,
+                principal="flaky@example.com",
+                role="reader",
+            ),
+        ],
+    )
+    attempts = []
+
+    def directory_request(request):
+        if request.url.path.endswith("alice@example.com"):
+            return httpx.Response(200, json={"id": str(P1)})
+        attempts.append(request.url.path)
+        if len(attempts) == 1:
+            if failure == "timeout":
+                raise httpx.ReadTimeout("offline timeout")
+            return httpx.Response(503)
+        return httpx.Response(200, json={"id": str(P2 if principal_type == "user" else T1)})
+
+    with httpx.Client(transport=httpx.MockTransport(directory_request)) as http:
+        directory = HttpDirectoryClient("http://directory.test", "offline-key", client=http)
+        client.app.dependency_overrides[get_directory] = lambda: directory
+        response = client.post("/docs/source-access/refresh-due", headers=ADMIN)
+    assert response.status_code == 200
+    assert response.json() == {"attempted": 2, "refreshed": 1, "failed": 1, "index_failed": 0}
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    failed_doc = next(
+        doc_id for doc_id in doc_ids if store.get_doc_content(doc_id) == "old content"
+    )
+    assert store.list_grants(failed_doc) == original_grants[failed_doc]
+    assert len(fetchers.calls) == 2
 
 
 def test_hourly_schedule_refreshes_delayed_document_without_hourly_downloads(ctx, monkeypatch):
