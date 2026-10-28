@@ -647,6 +647,12 @@ same hourly drain; run until `attempted` is less than `limit`. See the
 [refresh schedule](DEPLOYMENT.md#source-access-refresh-schedule). Disabled sources are skipped
 before applying the batch limit; neither their content nor ACL is fetched automatically.
 
+Within a batch, repeated identity lookups reuse the same successful or unmapped
+directory result. The cache is discarded after the request, and directory failures
+are never cached. Each file's Google permissions are fetched independently. See
+[source ACL reconciliation](ARCHITECTURE.md#source-acl-reconciliation) for cache scope
+and grant handling.
+
 Source grants expire after `SOURCE_ACCESS_MAX_AGE_HOURS` (48 by default). A failed refresh
 does not erase a last-known-good grant immediately, but an extended connector, directory,
 or scheduler outage eventually makes it unusable. Manual grants remain independent and do
