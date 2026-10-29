@@ -118,8 +118,9 @@ failure counts. Incomplete runs and runner/monitor failures still exit nonzero.
 It discovers no new documents. See the
 [refresh schedule](docs/DEPLOYMENT.md#source-access-refresh-schedule) for limits,
 exit codes, and the separate Railway cron config. Migration `011` adds the shared
-runner guard: overlapping runners fail before sending a start heartbeat. A crashed
-or incomplete run requires the documented operator recovery before another run.
+runner guard: overlapping runners fail before sending a start heartbeat. Exhausting
+the time budget releases the runner's own guard while reporting an incomplete run;
+other uncertain failures require the documented operator recovery before another run.
 
 | CLI environment variable | Default | Purpose |
 |---|---|---|

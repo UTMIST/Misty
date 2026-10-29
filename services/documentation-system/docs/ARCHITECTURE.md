@@ -240,9 +240,15 @@ Before its first heartbeat, the runner acquires the database's singleton
 drain and final heartbeat, across containers and API restarts. A conflicting
 runner exits nonzero and sends only `/fail`; it cannot replace the active start
 or send a misleading success. Run IDs alone only correlate Healthchecks durations.
-The guard has no TTL: after a crash or uncertain completion, admitting a new run
-could overlap work still running in the API. An operator must confirm quiescence
-before releasing that exact ID. The bounded refresh endpoint remains independently
+The guard has no TTL. Time-budget exhaustion is an explicit release exception:
+the runner reports failure but releases its exact owner even if its last API request
+has not finished. Each completed document commits its own progress; a disconnected
+refresh caller starts no further documents after the current one finishes. A new
+run skips documents with recent sync/attempt timestamps, while untouched rows stay
+due. Immediate replacement can still overlap in-flight work, so the final log's
+`guard_released` flag does not establish API quiescence. Other crashes or uncertain
+outcomes require an operator to confirm quiescence before releasing that exact ID.
+The bounded refresh endpoint remains independently
 callable; direct API clients must use the same guard protocol for an entire drain.
 Each catalog database must have its own heartbeat check.
 
@@ -927,7 +933,10 @@ indexing and cleanup failure counts. Pending or terminal failures and incomplete
 cleanup are not successful recovery. The runner preserves these outcomes in its
 warning summary while a drained run exits `0` and sends a completion heartbeat.
 Known work failures release the run guard after that heartbeat, while transport
-or monitoring uncertainty retains it and produces a nonzero exit.
+or monitoring uncertainty retains it and produces a nonzero exit, except that
+time-budget exhaustion releases the owner even during an outstanding meeting retry.
+Meeting retries retain their existing persistence/reconciliation state machine;
+they are not forcibly cancelled mid-operation.
 
 Meeting content is fetched with the writer OAuth identity in initial ingest,
 refetch and scheduled refresh. An ambiguous owner 404 follows the nondestructive
