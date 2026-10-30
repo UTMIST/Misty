@@ -58,6 +58,7 @@ The other four are internal-facing: **[llm](services/llm/README.md)** (`POST /ch
 ### As an operator
 
 - **Deploy is `git push`.** Merge to `staging` → Railway rebuilds and deploys staging automatically. Promote via a `staging → main` PR for production. No separate CD system.
+- **Version the platform release.** [`VERSION`](VERSION) holds the release candidate number; immutable `v*` tags identify verified production releases. See the [release guide](docs/RELEASING.md) for the 1.0.0 baseline and promotion/publication steps.
 - **Roll back is `git revert`** + push. For migrations, follow the [migration-specific recovery guidance](docs/DEPLOYMENT-HISTORY.md#redeploy-and-rollback); downgrade does not necessarily restore cleaned-up data.
 - **Manage API keys.** Three different storage models, by design:
   - **team-tracking, documentation-system, gateway** — issued into separate `api_keys` tables via each service’s key CLI. Gateway accepts issued `gw_` keys only; it has no bootstrap env key. Scoped, revocable, per-consumer, argon2-hashed at rest.
