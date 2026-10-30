@@ -1334,3 +1334,131 @@ test('failed page delivery cannot unlock confirmation and navigation does not re
   assert.match(JSON.stringify(expired.replies), /expired/);
   assert.equal(f.executed(), 0);
 });
+
+async function researchedMemberBatch(searchCount) {
+  const f = fixture();
+  f.message.guildId = 'guild';
+  const admin = { id: 'admin', active: true, access_level: 'admin' };
+  const users = Array.from({ length: 25 }, (_, i) => String(100 + i));
+  const added = [];
+  f.ctx.directory = {
+    getPersonByDiscordId: async (id) =>
+      id === 'owner' ? admin : { id, display_name: `Member ${id}` },
+    getTeamBySlug: async () => ({ id: 'team', slug: 'infra', label: 'Infrastructure' }),
+    listMemberships: async () => [],
+    createMembership: async (membership) => {
+      added.push(membership.personId);
+      return membership;
+    },
+  };
+  f.ctx.teamService = createTeamService({ directory: f.ctx.directory });
+  let reads = 0;
+  let evidenceVisible = true;
+  f.ctx.docClient.searchDocs = async ({ query }) => {
+    reads++;
+    return evidenceVisible
+      ? [
+          {
+            doc_id: query,
+            title: 'Onboarding',
+            text: 'Instructions',
+            url: 'https://example.test/onboarding',
+          },
+        ]
+      : [];
+  };
+  let modelCalls = 0;
+  f.ctx.llmClient.chat = async () => ({
+    stop_reason: 'tool_use',
+    usage: { output_tokens: 100 },
+    content_blocks:
+      ++modelCalls === 1
+        ? Array.from({ length: searchCount }, (_, i) => ({
+            type: 'tool_use',
+            id: `search-${i}`,
+            name: 'search_documents',
+            input: { query: `onboarding-${i}` },
+          }))
+        : [
+            {
+              type: 'tool_use',
+              id: 'add',
+              name: 'team_add',
+              input: { user: users, team: 'infra' },
+            },
+          ],
+  });
+  const result = await f.ctx.toolExecutor.run({
+    messages: [{ role: 'user', content: 'Read onboarding, then add all 25 mentioned members.' }],
+    principal: { person: admin },
+    context: { guildId: 'guild', channelId: 'thread' },
+    request: { discordUserId: 'owner', discordGuildId: 'guild', sourceChannelId: 'thread' },
+  });
+  assert.equal(result.outcome, 'action');
+  await sendHelperReply(f.send, result, { message: f.message, appContext: f.ctx });
+  let page = button(buttonId(f.publicMessages, 'Review privately'));
+  await f.handlers.interactionCreate(page);
+  let pages = 1;
+  while (buttonId(page.replies, 'Next')) {
+    const next = button(buttonId(page.replies, 'Next'));
+    next.deferUpdate = async () => {
+      next.deferred = true;
+    };
+    await f.handlers.interactionCreate(next);
+    page = next;
+    assert.ok(++pages < 10);
+  }
+  const confirmId = buttonId(page.replies, 'Confirm');
+  assert.ok(confirmId, 'the complete researched request can be reviewed');
+  return {
+    ...f,
+    added,
+    users,
+    confirmId,
+    reads: () => reads,
+    revokeEvidence: () => {
+      evidenceVisible = false;
+    },
+  };
+}
+
+for (const searchCount of [1, 4]) {
+  test(`${searchCount} document searches followed by 25 additions complete and deliver every receipt`, async () => {
+    const f = await researchedMemberBatch(searchCount);
+    assert.deepEqual(f.added, []);
+    const confirmed = button(f.confirmId);
+    await Promise.all([
+      f.handlers.interactionCreate(confirmed),
+      ...Array.from({ length: 100 }, () => f.handlers.interactionCreate(button(f.confirmId))),
+    ]);
+    assert.deepEqual(f.added, f.users);
+    for (const id of f.users)
+      assert.match(JSON.stringify(confirmed.replies), new RegExp(`Added.*Member ${id}`));
+    assert.ok(f.reads() > 32, 'fresh evidence checks are retained through result delivery');
+    assert.doesNotMatch(JSON.stringify(f.publicMessages), /Member|Instructions/);
+  });
+}
+
+test('revoked document evidence still blocks the entire researched member batch before writes', async () => {
+  const f = await researchedMemberBatch(1);
+  f.revokeEvidence();
+  const confirmed = button(f.confirmId);
+  await f.handlers.interactionCreate(confirmed);
+  assert.deepEqual(f.added, []);
+  assert.match(JSON.stringify(confirmed.replies), /expired|permissions changed/);
+});
+
+test('extended review cannot start a researched batch without capacity for all its checks', async () => {
+  const f = await researchedMemberBatch(1);
+  const reviewId = buttonId(f.publicMessages, 'Review privately');
+  while (f.reads() < 450) {
+    const review = button(reviewId);
+    await f.handlers.interactionCreate(review);
+    assert.ok(buttonId(review.replies, 'Confirm'));
+  }
+  const confirmed = button(f.confirmId);
+  await f.handlers.interactionCreate(confirmed);
+  assert.deepEqual(f.added, []);
+  assert.match(JSON.stringify(confirmed.replies), /Nothing was changed.*separate requests/);
+  assert.ok(f.reads() <= 512);
+});

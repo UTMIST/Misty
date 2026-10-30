@@ -59,6 +59,7 @@ for (const failure of ['revocation', 'read budget']) {
     const executor = createToolExecutor({
       registry,
       maxDocumentRequests: 4,
+      maxActionDocumentRequests: 4,
       llmClient: scriptedLlm([
         {
           stop_reason: 'tool_use',
@@ -665,6 +666,9 @@ for (const limits of [
   { maxToolCalls: 1.5 },
   { maxDocumentRequests: Infinity },
   { maxDocumentRequests: -1 },
+  { maxActionDocumentRequests: -1 },
+  { maxActionDocumentRequests: Infinity },
+  { maxActionDocumentRequests: 1.5 },
   { maxDurationMs: 0 },
   { maxDurationMs: 2147483648 },
 ]) {
@@ -737,4 +741,45 @@ test('document lookups do not consume the terminal command action allowance', as
   }).run(base);
   assert.equal(result.outcome, OUTCOME.ACTION);
   assert.equal(result.action.actions.length, 25);
+});
+
+test('insufficient action revalidation capacity rejects the whole batch before its first write', async () => {
+  const written = [];
+  const registry = registryWith(async (_input, { readDocument }) => {
+    await readDocument('doc', async () => true);
+    return { content: 'Evidence', revalidate: (read) => read('doc', async () => true) };
+  });
+  registry.terminalTools.add('command');
+  registry.handlers.set('command', async ({ id }) => ({
+    action: {
+      userId: 'u',
+      summary: `Action ${id}`,
+      check: async () => {},
+      execute: async () => {
+        written.push(id);
+        return { content: 'Done' };
+      },
+    },
+  }));
+  const result = await createToolExecutor({
+    registry,
+    maxActionDocumentRequests: 10,
+    llmClient: scriptedLlm([
+      {
+        stop_reason: 'tool_use',
+        usage: { output_tokens: 100 },
+        content_blocks: [toolUse('read', 'search_documents', {})],
+      },
+      {
+        stop_reason: 'tool_use',
+        usage: { output_tokens: 100 },
+        content_blocks: Array.from({ length: 5 }, (_, id) =>
+          toolUse(String(id), 'command', { id }),
+        ),
+      },
+    ]),
+  }).run(base);
+  assert.equal(result.outcome, OUTCOME.ACTION);
+  await assert.rejects(result.action.execute(), /Nothing was changed/);
+  assert.deepEqual(written, []);
 });

@@ -4,6 +4,13 @@ import { checkOnce } from './helperChecks.js';
 const ACTION_TTL_MS = 120000;
 export const MAX_HELPER_ACTIONS = 25;
 export class PendingActionsFull extends Error {}
+export class ActionBudgetExceeded extends Error {
+  constructor() {
+    super(
+      'I could not start the full request. Nothing was changed. Ask for document research and the changes in separate requests.',
+    );
+  }
+}
 
 /** One review and single-use claim for every command proposed in a tool batch. */
 export function combineHelperActions(actions) {

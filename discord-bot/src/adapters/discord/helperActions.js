@@ -1,7 +1,7 @@
 import { MessageFlags } from 'discord.js';
 import { safeReply } from './interactions.js';
 import { chunkForDiscord, sendDiscordMessage } from './messages.js';
-import { PendingActionsFull } from '../../helperActions.js';
+import { ActionBudgetExceeded, PendingActionsFull } from '../../helperActions.js';
 
 const ACTION_FAILED =
   'I could not complete or deliver this action. I have not retried it. Check the current state before requesting it again.';
@@ -181,7 +181,7 @@ export async function presentHelperAction(message, send, action, appContext) {
     if (token) appContext.helperActions.take(token, action.userId);
     await send({
       content:
-        error instanceof PendingActionsFull
+        error instanceof PendingActionsFull || error instanceof ActionBudgetExceeded
           ? error.message
           : executionStarted
             ? ACTION_FAILED
@@ -245,16 +245,16 @@ export async function handleHelperActionInteraction(interaction, appContext) {
       content:
         'Open the private review and read every page before confirming. Nothing was changed.',
     });
+  // Claim before authorization I/O too: concurrent clicks must not spend the
+  // winner's evidence-read capacity. Failed checks still consume this action.
+  if (!appContext.helperActions.take(token, userId))
+    return reply({ content: 'This request is expired or already used.' });
   const validation = new Map();
   try {
     await action.check(validation);
   } catch {
-    appContext.helperActions.take(token, userId);
     return reply({ content: 'This request expired or your permissions changed. Ask again.' });
   }
-  // Single use, including failures. Concurrent clicks cannot execute twice.
-  if (!appContext.helperActions.take(token, userId))
-    return reply({ content: 'This request is expired or already used.' });
   try {
     const payload = await action.execute(validation);
     const privateDelivered = await deliverResult(
@@ -266,9 +266,9 @@ export async function handleHelperActionInteraction(interaction, appContext) {
     // Discord deferred an ephemeral reply even when every result was public.
     if (!privateDelivered && action.sendPublic)
       await reply({ content: 'Posted the result in the channel.' });
-  } catch {
+  } catch (error) {
     await reply({
-      content: ACTION_FAILED,
+      content: error instanceof ActionBudgetExceeded ? error.message : ACTION_FAILED,
     });
   }
 }
