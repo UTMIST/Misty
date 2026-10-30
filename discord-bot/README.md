@@ -500,6 +500,11 @@ Navigation never executes an action. Short previews retain their existing flow.
 Oversized proposals are rejected in full; Misty must ask to split the request
 instead of silently selecting a subset. Long text replies and completed command
 results continue across Discord messages without a four-member display cutoff.
+Document research can precede a full member batch. Terminal proposals have a
+larger bounded allowance for the fresh evidence checks needed during review,
+execution and result delivery. Repeated reviews spend that allowance; if too
+little remains to start the whole batch, Misty reports that nothing was changed
+and asks for research and changes in separate requests.
 Commands run sequentially and report each result while access and expiry checks
 still permit delivery; they are not an atomic transaction. If a later action
 loses permission, earlier results are still delivered when their own checks

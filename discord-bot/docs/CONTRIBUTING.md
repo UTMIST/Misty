@@ -234,8 +234,21 @@ visibility. The rules the loop enforces:
   An oversized batch is rejected before executing any of it, and unknown or
   failed calls still spend capacity. All document reads must pass through the
   executor's `readDocument` gate: initial reads and revalidation share a limit
-  of 32 HTTP attempts per answer, including every Discord message part.
-  Failures do not refund attempts. A two-minute deadline covers generation
+  of 32 HTTP attempts during generation and text-answer delivery. After a
+  complete terminal proposal passes its final evidence check, the cumulative
+  ceiling becomes 512 attempts for review, execution and result delivery.
+  The existing counter is retained; no attempts are refunded and no failed
+  check is revived. This allowance never enables another model call. It covers
+  fresh reads for up to four evidence lookups across 25 effects and their replies,
+  with room for private review and pagination.
+  Before execution, recheck the full proposal and require remaining capacity
+  for `(3 × action count + 1) × evidence lookups per pass`: one check per effect,
+  private/public receipts, and a preflight pass. Insufficient capacity rejects
+  the whole batch before any write and produces an explicit no-changes reply.
+  Long/multipart results still obey the cumulative ceiling. The action token is
+  consumed before confirmation authorization I/O, so concurrent duplicate clicks
+  cannot spend the successful click's read capacity.
+  A two-minute deadline covers generation
   through text-answer delivery checks, aborts in-flight HTTP requests, and prevents
   further work. Terminal command actions use the pending deadline below without
   resetting document-read capacity. An already accepted backend operation may
@@ -339,7 +352,8 @@ visibility. The rules the loop enforces:
   shared by storage, command authorization and executor checks. A non-confirm
   fallback starts its window when its button is delivered. Reopening or paging
   a preview never extends that window. Prior evidence, spent read capacity, revocation and
-  failures remain in force; only the deadline changes after generation ends.
+  failures remain in force. The read ceiling changes once at terminal handoff
+  as described above; presentation changes only the deadline.
   Start recording resolves current voice state at
   confirmation; stop and Q&A bind the original active session. Meeting Q&A uses
   the exact recording text channel, while channel settings use a thread's parent.
@@ -479,12 +493,12 @@ This change stays in the bot zone; it requires no backend or slash-command chang
 | --- | --- |
 | `src/commandTools.js` | Accept and validate complete member arrays, reuse individual command authorization/preparation, and tell the model to propose every requested action together. |
 | `src/toolRegistry.js` | Retain private action-count metadata for validation before provider lookups. |
-| `src/toolExecutor.js` | Separate the 25-action allowance from document calls, reject oversized expanded batches, flatten prepared actions, and allocate enough output tokens for longer proposals. |
-| `src/helperActions.js` | Flatten and bound combined proposals while preserving sequential execution and per-result checks. |
-| `src/adapters/discord/helperActions.js` | Page long private previews, track successful page delivery, and enforce review completion before a single-use confirmation. |
+| `src/toolExecutor.js` | Separate the 25-action allowance from document calls, reject oversized expanded batches, flatten prepared actions, allocate enough output tokens, and admit terminal execution against its bounded evidence-read allowance. |
+| `src/helperActions.js` | Flatten and bound combined proposals while preserving sequential execution and per-result checks; identify budget admission failures that guarantee no changes. |
+| `src/adapters/discord/helperActions.js` | Page private previews, enforce complete review, claim confirmation before authorization I/O, and render safe no-changes budget failures. |
 | `test/commandTools.test.js` | Cover member-array validation, argument pinning, and stopping later commands after a bulk execution failure. |
-| `test/helperActions.test.js` | Exercise full member additions through the executor/router/service and Discord review, plus privacy, duplicate clicks, failed page delivery and expiry. |
-| `test/toolExecutor.test.js` | Cover expanded-action admission and independent document capacity; supply explicit model usage in evidence tests to keep them independent of the larger token allocation. |
+| `test/helperActions.test.js` | Exercise member additions through search, executor/router/service, paginated review and every result; cover revocation, repeated review, duplicate clicks, failed page delivery and expiry. |
+| `test/toolExecutor.test.js` | Cover expanded-action and evidence-budget admission, independent document capacity, and retained spent reads; supply explicit model usage in evidence tests. |
 | `README.md`, `docs/CONTRIBUTING.md` | Document the limits, review behavior and implementation responsibilities. |
 
 ## Checklist before you push
