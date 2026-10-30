@@ -60,8 +60,16 @@ for (const failure of ['revocation', 'read budget']) {
       registry,
       maxDocumentRequests: 4,
       llmClient: scriptedLlm([
-        { stop_reason: 'tool_use', content_blocks: [toolUse('a', 'search_documents', {})] },
-        { stop_reason: 'tool_use', content_blocks: [toolUse('b', 'command', {})] },
+        {
+          stop_reason: 'tool_use',
+          usage: { output_tokens: 100 },
+          content_blocks: [toolUse('a', 'search_documents', {})],
+        },
+        {
+          stop_reason: 'tool_use',
+          usage: { output_tokens: 100 },
+          content_blocks: [toolUse('b', 'command', {})],
+        },
       ]),
     });
     const result = await executor.run(base);
@@ -165,6 +173,7 @@ for (const revokeAt of ['generation', 'delivery']) {
           if (modelCalls < 3)
             return {
               stop_reason: 'tool_use',
+              usage: { output_tokens: 100 },
               content_blocks: [
                 toolUse(String(modelCalls), modelCalls === 1 ? 'search_documents' : 'command', {}),
               ],
@@ -346,7 +355,7 @@ test('returns the final answer when the model stops without tools', async () => 
 test('runs a tool round, binds the executor context, replays blocks verbatim', async () => {
   const blocks = [toolUse('t1', 'search_documents', { query: 'q' })];
   const llm = scriptedLlm([
-    { content: '', stop_reason: 'tool_use', content_blocks: blocks },
+    { content: '', stop_reason: 'tool_use', usage: { output_tokens: 100 }, content_blocks: blocks },
     { content: 'final', stop_reason: 'end_turn' },
   ]);
   let handlerCtx;
@@ -445,6 +454,7 @@ test('citations dedupe across rounds by doc_id', async () => {
       content: '',
       stop_reason: 'tool_use',
       content_blocks: [toolUse('t2', 'search_documents', {})],
+      usage: { output_tokens: 100 },
     },
     { content: 'done', stop_reason: 'end_turn' },
   ]);
@@ -662,3 +672,69 @@ for (const limits of [
     assert.throws(() => createToolExecutor({ llmClient: {}, registry: {}, ...limits }), RangeError);
   });
 }
+
+test('oversized expanded command batches are refused before any preparation', async () => {
+  let preparations = 0;
+  const registry = buildToolRegistry([
+    {
+      name: 'commands',
+      llmSafe: true,
+      tools: [
+        {
+          definition: { name: 'team_add', input_schema: {} },
+          terminal: true,
+          actionCount: (input) => input.user.length,
+          run: async () => {
+            preparations++;
+            return { action: { userId: 'u', check: async () => {} } };
+          },
+        },
+      ],
+    },
+  ]);
+  const result = await createToolExecutor({
+    registry,
+    llmClient: scriptedLlm([
+      {
+        stop_reason: 'tool_use',
+        usage: { output_tokens: 100 },
+        content_blocks: [
+          toolUse('a', 'team_add', { user: Array(13).fill('101') }),
+          toolUse('b', 'team_add', { user: Array(13).fill('202') }),
+        ],
+      },
+    ]),
+  }).run(base);
+  assert.equal(result.outcome, OUTCOME.EXHAUSTED);
+  assert.equal(preparations, 0);
+});
+
+test('document lookups do not consume the terminal command action allowance', async () => {
+  const registry = registryWith(async () => ({
+    content: 'Evidence',
+    revalidate: async () => true,
+  }));
+  registry.terminalTools.add('command');
+  registry.handlers.set('command', async () => ({
+    action: { userId: 'u', summary: 'Action', check: async () => {} },
+  }));
+  const result = await createToolExecutor({
+    registry,
+    llmClient: scriptedLlm([
+      {
+        stop_reason: 'tool_use',
+        usage: { output_tokens: 100 },
+        content_blocks: Array.from({ length: 4 }, (_, i) =>
+          toolUse(String(i), 'search_documents', {}),
+        ),
+      },
+      {
+        stop_reason: 'tool_use',
+        usage: { output_tokens: 100 },
+        content_blocks: Array.from({ length: 25 }, (_, i) => toolUse(String(i + 4), 'command', {})),
+      },
+    ]),
+  }).run(base);
+  assert.equal(result.outcome, OUTCOME.ACTION);
+  assert.equal(result.action.actions.length, 25);
+});

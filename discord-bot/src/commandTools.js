@@ -2,6 +2,7 @@ import { commands } from './commands/index.js';
 import { authorizeCommand, dispatch } from './router.js';
 import { renderActionSummary } from './messages/helperActions.js';
 import { checkOnce } from './helperChecks.js';
+import { combineHelperActions, MAX_HELPER_ACTIONS } from './helperActions.js';
 
 export const llmSafe = true;
 
@@ -95,24 +96,77 @@ export function createCommandTools({ appContext }) {
     const command = commands.get(commandName);
     const operation = subcommand ? command.subcommands.find((s) => s.name === subcommand) : command;
     const name = [commandName, subcommand].filter(Boolean).join('_').replaceAll('-', '_');
+    const bulkMembers = commandName === 'team' && ['add', 'remove'].includes(subcommand);
     const delivery = PUBLIC_READS.has(name)
       ? 'Replies publicly in server conversations'
       : commandName === 'record'
         ? 'Recording status and successful changes may be announced only in the meeting origin channel; other results are private'
         : 'Delivers a private result';
-    return {
+    const tool = {
       terminal: true,
+      actionCount: (input) => (bulkMembers && Array.isArray(input?.user) ? input.user.length : 1),
       definition: {
         name,
-        description: `${operation.description}. Authenticates the requesting user. ${delivery}${confirm ? ' after private user confirmation' : ''}. Include all requested actions in the same tool-call response (one call per member for team changes, at most four calls total including lookups). Finish any document searches or reads in earlier tool rounds; never mix them with command calls in the same response. Prepared batches end the assistant turn; command results are not returned to the model. If every preparation fails, explain the errors or ask for missing details without further tool calls.`,
+        description: `${operation.description}. Authenticates the requesting user. ${delivery}${confirm ? ' after private user confirmation' : ''}. Include ALL requested actions in the same tool-call response, up to ${MAX_HELPER_ACTIONS} actions total, separately from the four document-tool calls allowed. ${bulkMembers ? 'For multiple members with the same team and options, pass EVERY mentioned member ID as an array in user; do not stop after the first member. ' : ''}If the full request exceeds the action limit or lacks required details, ask the user to split or clarify it; never propose only a subset. Finish any document searches or reads in earlier tool rounds; never mix them with command calls in the same response. Prepared batches end the assistant turn; command results are not returned to the model. If every preparation fails, explain the errors or ask for missing details without further tool calls.`,
         input_schema: {
           type: 'object',
           additionalProperties: false,
-          properties: Object.fromEntries(operation.options.map((o) => [o.name, optionSchema(o)])),
+          properties: Object.fromEntries(
+            operation.options.map((o) => [
+              o.name,
+              bulkMembers && o.name === 'user'
+                ? {
+                    anyOf: [
+                      optionSchema(o),
+                      {
+                        type: 'array',
+                        minItems: 1,
+                        maxItems: MAX_HELPER_ACTIONS,
+                        uniqueItems: true,
+                        items: optionSchema(o),
+                      },
+                    ],
+                    description:
+                      'One Discord user ID, or ALL explicitly mentioned member IDs for this team change.',
+                  }
+                : optionSchema(o),
+            ]),
+          ),
           required: operation.options.filter((o) => o.required).map((o) => o.name),
         },
       },
       async run(input, { request, principal, withDeadline = (fn) => fn() }) {
+        if (bulkMembers && Array.isArray(input?.user)) {
+          let members;
+          try {
+            if (
+              !input.user.length ||
+              input.user.length > MAX_HELPER_ACTIONS ||
+              new Set(input.user).size !== input.user.length ||
+              JSON.stringify(input).length > 4000
+            ) {
+              throw new Error(`Supply 1–${MAX_HELPER_ACTIONS} distinct member IDs.`);
+            }
+            // Validate and copy the entire list before any authorization/label I/O.
+            members = input.user.map((user) => {
+              const member = { ...input, user };
+              validatedOptions(member, operation.options);
+              return member;
+            });
+          } catch (error) {
+            return { is_error: true, content: { error: error.message } };
+          }
+          const actions = [];
+          for (const member of members) {
+            const result = await tool.run(member, { request, principal, withDeadline });
+            if (result.is_error || !result.action) return result;
+            actions.push(result.action);
+          }
+          return {
+            content: { status: 'confirmation_required' },
+            action: combineHelperActions(actions),
+          };
+        }
         let options;
         try {
           options = validatedOptions(input, operation.options);
@@ -231,5 +285,6 @@ export function createCommandTools({ appContext }) {
         };
       },
     };
+    return tool;
   });
 }

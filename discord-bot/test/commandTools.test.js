@@ -315,3 +315,66 @@ test('verification is excluded and the complete tool catalog fits the LLM servic
     false,
   );
 });
+
+for (const name of ['team_add', 'team_remove']) {
+  test(`${name} validates the entire member list before any directory lookup`, async () => {
+    for (const user of [[], ['101', 'bad-id'], ['101', '101'], Array(26).fill('101')]) {
+      const f = fixture('admin');
+      const result = await tool(f, name, { user, team: 'infra' });
+      assert.equal(result.is_error, true);
+      assert.equal(result.action, undefined);
+      assert.equal(f.calls.length, 0);
+    }
+  });
+
+  test(`${name} prepares every member with pinned arguments and keeps labels out of model results`, async () => {
+    const f = fixture('admin');
+    const user = ['101', '202', '303', '404', '505'];
+    const result = await tool(f, name, { user, team: 'infra' });
+    assert.ok(result.action);
+    user[0] = '999';
+    for (const id of ['101', '202', '303', '404', '505'])
+      assert.ok(result.action.summary.includes(id));
+    assert.ok(!result.action.summary.includes('999'));
+    assert.equal(result.action.confirm, true);
+    assert.doesNotMatch(JSON.stringify(result.content), /Alex|Infrastructure/);
+  });
+}
+
+test('a failure inside a bulk command stops subsequent commands and retains earlier receipts', async () => {
+  const f = fixture('admin');
+  const ended = [];
+  f.ctx.directory.listMemberships = async ({ personId }) => [{ id: personId }];
+  const identify = f.ctx.directory.getPersonByDiscordId;
+  f.ctx.directory.getPersonByDiscordId = async (id) =>
+    id === f.request.discordUserId ? identify(id) : { id, display_name: `Member ${id}` };
+  f.ctx.directory.endMembership = async (id) => {
+    ended.push(id);
+    if (id === '202') throw new Error('Uncertain write');
+  };
+  f.ctx.llmClient.chat = async () => ({
+    stop_reason: 'tool_use',
+    usage: { output_tokens: 100 },
+    content_blocks: [
+      {
+        type: 'tool_use',
+        id: 'a',
+        name: 'team_remove',
+        input: { user: ['101', '202'], team: 'infra' },
+      },
+      { type: 'tool_use', id: 'b', name: 'team_remove', input: { user: '303', team: 'infra' } },
+    ],
+  });
+  const { action } = await f.ctx.toolExecutor.run({
+    messages: [{ role: 'user', content: 'Remove all three' }],
+    request: f.request,
+    principal: f.principal,
+  });
+  const result = await action.execute();
+  assert.deepEqual(ended, ['101', '202']);
+  assert.match(result.replies[0].content, /Removed.*Member 101/);
+  assert.equal(typeof result.replies[0].check, 'function');
+  assert.equal(result.replies[1].safeFailure, true);
+  assert.match(result.replies[1].content, /Action 2.*remaining actions were not run/);
+  assert.equal(result.replies.length, 2);
+});

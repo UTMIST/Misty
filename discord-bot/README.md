@@ -448,8 +448,10 @@ for replay, cost limits, revalidation tradeoffs, and offline coverage.
 
 With helper tools enabled, ask `@Misty show my teams`, `@Misty show the robotics
 roster`, or `@Misty remove @Alex and @Sam from infrastructure`. Misty prepares
-all command calls in the same model response for one review, within the shared
-limit of four tool calls per request (including document lookups). The same
+all command calls in the same model response for one review, up to 25 actions
+per request. Team additions and removals accept all explicitly mentioned members
+with the same team/options in one tool call. Each member counts as one action;
+document lookups have a separate four-call allowance. The same
 tools work in DMs where the underlying command does not need a server or channel.
 
 | Capability | Available actions |
@@ -492,6 +494,12 @@ show the directory names, Discord mentions and team label/slug. If an optional
 name lookup fails, the preview still identifies the member by mention and the
 team by slug. A multi-action
 request lists every proposed action; one confirmation approves the whole list.
+Long previews have **Previous** and **Next** buttons with a page counter.
+Read every page to unlock **Confirm**, which approves all pages together.
+Navigation never executes an action. Short previews retain their existing flow.
+Oversized proposals are rejected in full; Misty must ask to split the request
+instead of silently selecting a subset. Long text replies and completed command
+results continue across Discord messages without a four-member display cutoff.
 Commands run sequentially and report each result while access and expiry checks
 still permit delivery; they are not an atomic transaction. If a later action
 loses permission, earlier results are still delivered when their own checks
@@ -504,9 +512,10 @@ and others fail, the entire proposal is withheld and Misty explains that nothing
 was changed. If every command fails preparation, Misty can explain the sanitized
 errors or ask for missing details. No further tools run until the user submits a
 new request. Only the requester can confirm. The confirmation window lasts two
-minutes from the first successful private preview; generation time does not
+minutes from the first successful private review page; generation time does not
 shorten it, and reopening
-the preview does not extend it. Access changes or exhausted evidence checks can
+the preview or changing pages does not extend it. Access changes or exhausted
+evidence checks can
 still block an action. Unopened actions expire after two minutes. Actions are
 single-use and disappear on restart. A batch occupies one pending slot. There
 can be at most eight pending actions per user and 500 per process. Capacity is
