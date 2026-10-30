@@ -226,23 +226,41 @@ visibility. The rules the loop enforces:
   History stops at the triggering message, so a later message cannot replace
   the authenticated requester's question. No document results or generated
   answers are cached for model replay.
-- **Bounded retrieval work.** At most four tool calls total across four rounds.
+- **Bounded retrieval work.** At most four document/unknown tool calls across
+  four tool rounds. A terminal command batch has a separate allowance of 25
+  actions, counting each member in a bulk team change. Registry-only
+  `actionCount` metadata lets the executor reject oversized expanded batches
+  before any preparation lookup; it also bounds the actual prepared actions.
   An oversized batch is rejected before executing any of it, and unknown or
   failed calls still spend capacity. All document reads must pass through the
   executor's `readDocument` gate: initial reads and revalidation share a limit
-  of 32 HTTP attempts per answer, including every Discord message part.
-  Failures do not refund attempts. A two-minute deadline covers generation
+  of 32 HTTP attempts during generation and text-answer delivery. After a
+  complete terminal proposal passes its final evidence check, the cumulative
+  ceiling becomes 512 attempts for review, execution and result delivery.
+  The existing counter is retained; no attempts are refunded and no failed
+  check is revived. This allowance never enables another model call. It covers
+  fresh reads for up to four evidence lookups across 25 effects and their replies,
+  with room for private review and pagination.
+  Before execution, recheck the full proposal and require remaining capacity
+  for `(3 × action count + 1) × evidence lookups per pass`: one check per effect,
+  private/public receipts, and a preflight pass. Insufficient capacity rejects
+  the whole batch before any write and produces an explicit no-changes reply.
+  Long/multipart results still obey the cumulative ceiling. The action token is
+  consumed before confirmation authorization I/O, so concurrent duplicate clicks
+  cannot spend the successful click's read capacity.
+  A two-minute deadline covers generation
   through text-answer delivery checks, aborts in-flight HTTP requests, and prevents
   further work. Terminal command actions use the pending deadline below without
   resetting document-read capacity. An already accepted backend operation may
   still finish. Exhaustion
   produces a safe fallback; it never skips an access check to send an answer.
 - **Bounded model output.** At most five model calls, with
-  at most 1,024 output tokens per call and an 8,000-token cumulative ceiling.
+  at most 4,096 output tokens per call and an 8,000-token cumulative ceiling.
   Each call requests the smaller of its per-call cap and remaining budget;
   absent/invalid usage reserves the requested allocation. Exhaustion stops
-  before more tool work. The default round limit makes the effective output
-  maximum 5,120 tokens. These are output-token limits, not a dollar-spend cap:
+  before more tool work. The larger per-call allocation permits complete bulk
+  proposals and long answers; it does not reset the cumulative budget.
+  These are output-token limits, not a dollar-spend cap:
   input tokens and the bounded search embeddings for access checks also cost.
   With the [result byte limits](../README.md#helper-document-tools), four searches
   add at most 240 KiB of serialized result content to the final transcript.
@@ -258,7 +276,7 @@ visibility. The rules the loop enforces:
   replayed, retried automatically, or used to execute tool calls. A valid
   `tool_use` response may instead return a terminal `ACTION`: the bot handles
   it directly without another model call. Every action in the batch is prepared
-  before handoff, within the existing tool-call budget. Any failed call withholds
+  before handoff, within the command-action budget. Any failed call withholds
   the entire proposal. A partially prepared batch returns `INCOMPLETE_ACTION`
   without replaying private previews. When every command fails preparation,
   only sanitized tool errors return for one final explanation or clarification.
@@ -276,8 +294,18 @@ visibility. The rules the loop enforces:
   during preparation. Optional preview name lookups fall back to mentions and
   slugs on provider errors; they still respect the overall turn deadline.
 - **Writes require private confirmation.** A prepared command has not executed.
-  The Discord adapter sends the full argument/destination preview before its
-  buttons; failed preview delivery cannot expose a working confirmation UI.
+  The Discord adapter sends a short argument/destination preview before its
+  confirmation buttons. Long previews use requester-only Previous/Next buttons
+  and a page counter; confirmation is offered only after every page has been
+  delivered successfully. The server checks that state too, so a forged confirm
+  or a jump to the last page cannot approve unseen pages. Each navigation checks
+  authorization again and edits the private review message. Failed delivery does
+  not mark a page reviewed. One confirmation approves the entire proposal.
+  `team_add` and `team_remove` accept a single `user` ID or an array of 1–25
+  distinct IDs with shared team/options. Validate and copy every member before
+  any lookup, then prepare through the existing individual-command path.
+  Flatten these proposals before execution so a failure stops all later actions
+  and every completed result retains its individual delivery check.
   Every write requires the same Discord author to confirm the complete list.
   The batch rechecks every action before the first execution, then each command
   checks its authorization again. Commands execute sequentially with separate
@@ -320,11 +348,12 @@ visibility. The rules the loop enforces:
   identity, evidence and source lookups only within one validation step. Every
   operation and every message part starts a fresh step; permission decisions
   are never cached across them. Admission gives delivery two minutes;
-  the first successful private confirmation starts a fresh two-minute window
+  the first successful private review page starts a fresh two-minute window
   shared by storage, command authorization and executor checks. A non-confirm
-  fallback starts its window when its button is delivered. Reopening a preview
-  never extends that window. Prior evidence, spent read capacity, revocation and
-  failures remain in force; only the deadline changes after generation ends.
+  fallback starts its window when its button is delivered. Reopening or paging
+  a preview never extends that window. Prior evidence, spent read capacity, revocation and
+  failures remain in force. The read ceiling changes once at terminal handoff
+  as described above; presentation changes only the deadline.
   Start recording resolves current voice state at
   confirmation; stop and Q&A bind the original active session. Meeting Q&A uses
   the exact recording text channel, while channel settings use a thread's parent.
@@ -455,6 +484,22 @@ Staging acceptance must still exercise real mentions/DMs, closed DMs, a member
 denied an admin tool, a revoked pending action, and recording start/stop before
 activation. The flag remains off by default; this code does not alter a deployed
 environment's setting.
+
+### Bulk-action and paginated-review implementation audit
+
+This change stays in the bot zone; it requires no backend or slash-command changes.
+
+| Files | Why changed |
+| --- | --- |
+| `src/commandTools.js` | Accept and validate complete member arrays, reuse individual command authorization/preparation, and tell the model to propose every requested action together. |
+| `src/toolRegistry.js` | Retain private action-count metadata for validation before provider lookups. |
+| `src/toolExecutor.js` | Separate the 25-action allowance from document calls, reject oversized expanded batches, flatten prepared actions, allocate enough output tokens, and admit terminal execution against its bounded evidence-read allowance. |
+| `src/helperActions.js` | Flatten and bound combined proposals while preserving sequential execution and per-result checks; identify budget admission failures that guarantee no changes. |
+| `src/adapters/discord/helperActions.js` | Page private previews, enforce complete review, claim confirmation before authorization I/O, and render safe no-changes budget failures. |
+| `test/commandTools.test.js` | Cover member-array validation, argument pinning, and stopping later commands after a bulk execution failure. |
+| `test/helperActions.test.js` | Exercise member additions through search, executor/router/service, paginated review and every result; cover revocation, repeated review, duplicate clicks, failed page delivery and expiry. |
+| `test/toolExecutor.test.js` | Cover expanded-action and evidence-budget admission, independent document capacity, and retained spent reads; supply explicit model usage in evidence tests. |
+| `README.md`, `docs/CONTRIBUTING.md` | Document the limits, review behavior and implementation responsibilities. |
 
 ## Checklist before you push
 

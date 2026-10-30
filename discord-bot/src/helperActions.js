@@ -2,15 +2,26 @@ import { randomBytes } from 'node:crypto';
 import { checkOnce } from './helperChecks.js';
 
 const ACTION_TTL_MS = 120000;
+export const MAX_HELPER_ACTIONS = 25;
 export class PendingActionsFull extends Error {}
+export class ActionBudgetExceeded extends Error {
+  constructor() {
+    super(
+      'I could not start the full request. Nothing was changed. Ask for document research and the changes in separate requests.',
+    );
+  }
+}
 
 /** One review and single-use claim for every command proposed in a tool batch. */
 export function combineHelperActions(actions) {
+  actions = actions.flatMap((action) => action.actions ?? [action]);
+  if (actions.length > MAX_HELPER_ACTIONS) throw new Error('Too many proposed actions.');
   if (actions.length === 1) return actions[0];
   if (actions.some((action) => action.userId !== actions[0].userId)) {
     throw new Error('Actions must belong to the same requester.');
   }
   const batch = {
+    actions,
     userId: actions[0].userId,
     confirm: actions.some((action) => action.confirm),
     publicRead: actions.every((action) => action.publicRead && !action.confirm),

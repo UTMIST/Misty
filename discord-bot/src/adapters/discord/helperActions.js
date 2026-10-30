@@ -1,7 +1,7 @@
 import { MessageFlags } from 'discord.js';
 import { safeReply } from './interactions.js';
-import { sendDiscordMessage } from './messages.js';
-import { PendingActionsFull } from '../../helperActions.js';
+import { chunkForDiscord, sendDiscordMessage } from './messages.js';
+import { ActionBudgetExceeded, PendingActionsFull } from '../../helperActions.js';
 
 const ACTION_FAILED =
   'I could not complete or deliver this action. I have not retried it. Check the current state before requesting it again.';
@@ -32,6 +32,8 @@ function privatePayload(payload) {
 
 async function preview(action, token, send) {
   await action.check();
+  action.reviewPages ??= { pages: chunkForDiscord(action.summary), shown: new Set() };
+  if (action.reviewPages.pages.length > 1) return previewPage(action, token, 0, send);
   // Send the complete preview before the buttons, even when it spans messages.
   await send({
     content: `Review your request:\n\n${action.summary}`,
@@ -43,6 +45,34 @@ async function preview(action, token, send) {
     components: buttons(token, true),
     allowedMentions: { parse: [] },
   });
+  action.reviewComplete = true;
+}
+
+async function previewPage(action, token, index, send) {
+  const state = action.reviewPages;
+  if (!state || !Number.isSafeInteger(index) || index < 0 || index >= state.pages.length)
+    throw new Error('Invalid review page');
+  await action.check();
+  const complete = state.pages.every((_, i) => i === index || state.shown.has(i));
+  const navigation = [];
+  for (const [label, page] of [
+    ['Previous', index - 1],
+    ['Next', index + 1],
+  ]) {
+    if (page >= 0 && page < state.pages.length)
+      navigation.push({ type: 2, style: 2, label, custom_id: `helper:page:${token}:${page}` });
+  }
+  const controls = buttons(token, true)[0].components.filter(
+    (button) => complete || button.label !== 'Confirm',
+  );
+  await send({
+    content: `Review your request — page ${index + 1} of ${state.pages.length}.\n${complete ? 'Confirm approves the entire request, across all pages.' : 'Read every page to unlock confirmation of the entire request.'}\nNothing has changed yet. This request expires two minutes after the first private review.`,
+    embeds: [{ description: state.pages[index] }],
+    components: [{ type: 1, components: [...navigation, ...controls] }],
+    allowedMentions: { parse: [] },
+  });
+  state.shown.add(index);
+  action.reviewComplete = state.pages.every((_, i) => state.shown.has(i));
 }
 
 async function deliverResult(payload, sendPrivate, sendPublic, defaultCheck) {
@@ -151,7 +181,7 @@ export async function presentHelperAction(message, send, action, appContext) {
     if (token) appContext.helperActions.take(token, action.userId);
     await send({
       content:
-        error instanceof PendingActionsFull
+        error instanceof PendingActionsFull || error instanceof ActionBudgetExceeded
           ? error.message
           : executionStarted
             ? ACTION_FAILED
@@ -162,17 +192,35 @@ export async function presentHelperAction(message, send, action, appContext) {
 }
 
 export async function handleHelperActionInteraction(interaction, appContext) {
-  const match = /^helper:(review|confirm|cancel):([A-Za-z0-9_-]{24})$/.exec(
+  const match = /^helper:(review|confirm|cancel|page):([A-Za-z0-9_-]{24})(?::([0-9]{1,3}))?$/.exec(
     interaction.customId ?? '',
   );
   if (!match) return;
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  const reply = (payload) => safeReply(interaction, privatePayload(payload));
-  const [, verb, token] = match;
+  const [, verb, token, page] = match;
   const userId = interaction.user.id;
   const action = appContext.helperActions?.get(token, userId);
+  if (verb === 'page' && action?.confirm) {
+    await interaction.deferUpdate();
+    try {
+      await previewPage(action, token, Number(page), async (payload) => {
+        await action.check();
+        if (appContext.helperActions.get(token, userId) !== action) throw new Error('Expired');
+        await interaction.editReply(payload);
+      });
+    } catch {
+      await interaction.followUp({
+        content: 'This request expired or your permissions changed. Ask again.',
+        flags: MessageFlags.Ephemeral,
+        allowedMentions: { parse: [] },
+      });
+    }
+    return;
+  }
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const reply = (payload) => safeReply(interaction, privatePayload(payload));
   if (!action)
     return reply({ content: 'This request is expired, already used, or belongs to another user.' });
+  if (verb === 'page') return reply({ content: 'This request has no review pages.' });
   const sendPrivate = async (payload, check = action.check) => {
     const delivered = await safeReply(interaction, privatePayload(payload), {
       beforeSend: check,
@@ -192,16 +240,21 @@ export async function handleHelperActionInteraction(interaction, appContext) {
     }
     return;
   }
+  if (action.confirm && !action.reviewComplete)
+    return reply({
+      content:
+        'Open the private review and read every page before confirming. Nothing was changed.',
+    });
+  // Claim before authorization I/O too: concurrent clicks must not spend the
+  // winner's evidence-read capacity. Failed checks still consume this action.
+  if (!appContext.helperActions.take(token, userId))
+    return reply({ content: 'This request is expired or already used.' });
   const validation = new Map();
   try {
     await action.check(validation);
   } catch {
-    appContext.helperActions.take(token, userId);
     return reply({ content: 'This request expired or your permissions changed. Ask again.' });
   }
-  // Single use, including failures. Concurrent clicks cannot execute twice.
-  if (!appContext.helperActions.take(token, userId))
-    return reply({ content: 'This request is expired or already used.' });
   try {
     const payload = await action.execute(validation);
     const privateDelivered = await deliverResult(
@@ -213,9 +266,9 @@ export async function handleHelperActionInteraction(interaction, appContext) {
     // Discord deferred an ephemeral reply even when every result was public.
     if (!privateDelivered && action.sendPublic)
       await reply({ content: 'Posted the result in the channel.' });
-  } catch {
+  } catch (error) {
     await reply({
-      content: ACTION_FAILED,
+      content: error instanceof ActionBudgetExceeded ? error.message : ACTION_FAILED,
     });
   }
 }
