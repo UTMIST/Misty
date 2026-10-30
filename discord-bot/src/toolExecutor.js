@@ -21,7 +21,7 @@
 // call and before publication; the surface checks again at each send boundary.
 // Callback errors fail closed. These callbacks are never sent to the model.
 
-import { combineHelperActions } from './helperActions.js';
+import { combineHelperActions, MAX_HELPER_ACTIONS } from './helperActions.js';
 import { checkOnce } from './helperChecks.js';
 
 const PREPARATION_CLARIFICATION =
@@ -29,7 +29,7 @@ const PREPARATION_CLARIFICATION =
 
 export const DEFAULT_MAX_TOOL_ROUNDS = 4;
 export const DEFAULT_MAX_OUTPUT_TOKENS = 8000;
-export const DEFAULT_PER_CALL_MAX_TOKENS = 1024;
+export const DEFAULT_PER_CALL_MAX_TOKENS = 4096;
 export const DEFAULT_MAX_TOOL_CALLS = 4;
 export const DEFAULT_MAX_DOCUMENT_REQUESTS = 32;
 export const DEFAULT_MAX_DURATION_MS = 120000;
@@ -217,18 +217,26 @@ export function createToolExecutor({
         if (clarifyPreparation) return { outcome: OUTCOME.INCOMPLETE_ACTION };
         const calls = toolUseBlocks(res.content_blocks);
         if (!calls.length) return { outcome: OUTCOME.EMPTY };
+        const commandBatch = calls.some((call) => registry.terminalTools?.has(call.name));
+        const proposedActions = commandBatch
+          ? calls.reduce(
+              (count, call) => count + (registry.actionCounts?.get(call.name)?.(call.input) ?? 1),
+              0,
+            )
+          : 0;
 
         // The model wants tools but we've spent our budget: stop rather than
         // start another round we can't afford.
         if (
           round >= maxToolRounds ||
           outputTokens >= maxOutputTokens ||
-          calls.length > maxToolCalls - toolCalls
+          calls.length > (commandBatch ? MAX_HELPER_ACTIONS : maxToolCalls - toolCalls) ||
+          proposedActions > MAX_HELPER_ACTIONS
         ) {
           return { outcome: OUTCOME.EXHAUSTED };
         }
         // Reject oversized batches before executing any of their calls.
-        toolCalls += calls.length;
+        if (!commandBatch) toolCalls += calls.length;
 
         // A terminal command cannot consume document results from this same
         // response. Reject the incompatible batch before any provider work;
@@ -267,7 +275,8 @@ export function createToolExecutor({
               withDeadline,
             });
             if (out?.action) {
-              actions.push(out.action);
+              actions.push(...(out.action.actions ?? [out.action]));
+              if (actions.length > MAX_HELPER_ACTIONS) return { outcome: OUTCOME.EXHAUSTED };
               continue;
             }
             if (typeof out?.revalidate === 'function') checks.push(out.revalidate);

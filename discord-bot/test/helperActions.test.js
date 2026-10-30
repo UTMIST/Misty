@@ -1191,3 +1191,146 @@ test('recording status is withheld if the session changes before publication', a
   );
   assert.equal(f.originMessages.length, 0);
 });
+
+for (const [count, bulk] of [
+  [4, true],
+  [25, true],
+  [25, false],
+]) {
+  test(`${count} member additions (${bulk ? 'bulk' : 'individual'} calls) review and execute the complete list once`, async () => {
+    const f = fixture();
+    f.message.guildId = 'guild';
+    const admin = { id: 'admin', active: true, access_level: 'admin' };
+    const users = Array.from({ length: count }, (_, i) => String(100 + i));
+    const added = [];
+    f.ctx.directory = {
+      getPersonByDiscordId: async (id) =>
+        id === 'owner' ? admin : { id, display_name: `Member ${id}` },
+      getTeamBySlug: async () => ({ id: 'team', slug: 'infra', label: 'Infrastructure' }),
+      listMemberships: async () => [],
+      createMembership: async (membership) => {
+        added.push(membership.personId);
+        return membership;
+      },
+    };
+    f.ctx.teamService = createTeamService({ directory: f.ctx.directory });
+    let modelCalls = 0;
+    f.ctx.llmClient.chat = async () => {
+      assert.equal(++modelCalls, 1);
+      return {
+        stop_reason: 'tool_use',
+        usage: { output_tokens: 2000 },
+        content_blocks: (bulk ? [users] : users).map((user, i) => ({
+          type: 'tool_use',
+          id: String(i),
+          name: 'team_add',
+          input: { user, team: 'infra' },
+        })),
+      };
+    };
+    const result = await f.ctx.toolExecutor.run({
+      messages: [
+        { role: 'user', content: `Add ${users.map((id) => `<@${id}>`).join(' ')} to infra` },
+      ],
+      principal: { person: admin },
+      request: { discordUserId: 'owner', discordGuildId: 'guild', sourceChannelId: 'thread' },
+    });
+    assert.equal(result.outcome, 'action');
+    await sendHelperReply(f.send, result, { message: f.message, appContext: f.ctx });
+    let page = button(buttonId(f.publicMessages, 'Review privately'));
+    await f.handlers.interactionCreate(page);
+    const previews = [...page.replies];
+    while (buttonId(page.replies, 'Next')) {
+      assert.equal(buttonId(page.replies, 'Confirm'), undefined);
+      const next = button(buttonId(page.replies, 'Next'));
+      next.deferUpdate = async () => {
+        next.deferred = true;
+      };
+      await f.handlers.interactionCreate(next);
+      page = next;
+      previews.push(...page.replies);
+      assert.ok(previews.length < 30, 'pagination makes progress');
+    }
+    for (const id of users) assert.match(JSON.stringify(previews), new RegExp(`Member ${id}`));
+    assert.deepEqual(added, []);
+    const confirmId = buttonId(page.replies, 'Confirm');
+    assert.ok(confirmId);
+    const confirmed = button(confirmId);
+    await Promise.all([
+      f.handlers.interactionCreate(confirmed),
+      f.handlers.interactionCreate(button(confirmId)),
+    ]);
+    assert.deepEqual(added, users);
+    for (const id of users)
+      assert.match(JSON.stringify(confirmed.replies), new RegExp(`Added.*Member ${id}`));
+    assert.doesNotMatch(JSON.stringify(f.publicMessages), /Member|Infrastructure/);
+    assert.equal(modelCalls, 1);
+  });
+}
+
+test('long reviews require every page, reject other users and recheck permissions on navigation', async () => {
+  const f = fixture();
+  f.message.guildId = 'guild';
+  f.action.summary = 'Private member details.\n'.repeat(250);
+  await sendHelperReply(f.send, { action: f.action }, { message: f.message, appContext: f.ctx });
+  const reviewId = buttonId(f.publicMessages, 'Review privately');
+  const review = button(reviewId);
+  await f.handlers.interactionCreate(review);
+  const nextId = buttonId(review.replies, 'Next');
+  assert.ok(nextId);
+  assert.equal(buttonId(review.replies, 'Confirm'), undefined);
+  const early = button(reviewId.replace(':review:', ':confirm:'));
+  await f.handlers.interactionCreate(early);
+  assert.equal(f.executed(), 0);
+  assert.match(JSON.stringify(early.replies), /every page/);
+  const intruder = button(nextId, 'intruder');
+  await f.handlers.interactionCreate(intruder);
+  assert.doesNotMatch(JSON.stringify(intruder.replies), /Private member/);
+  f.revoke();
+  const next = button(nextId);
+  next.deferUpdate = async () => {
+    next.deferred = true;
+  };
+  await f.handlers.interactionCreate(next);
+  assert.doesNotMatch(JSON.stringify(next.replies), /Private member/);
+  assert.equal(f.executed(), 0);
+});
+
+test('failed page delivery cannot unlock confirmation and navigation does not renew expiry', async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const f = fixture();
+  f.action.summary = 'Private details.\n'.repeat(180);
+  await sendHelperReply(f.send, { action: f.action }, { message: f.message, appContext: f.ctx });
+  const nextId = buttonId(f.privateMessages, 'Next');
+  assert.ok(nextId, 'DM reviews use the same pagination');
+  const failed = button(nextId);
+  failed.deferUpdate = async () => {
+    failed.deferred = true;
+  };
+  failed.editReply = async () => {
+    throw new Error('Delivery failed');
+  };
+  await f.handlers.interactionCreate(failed);
+  const confirmId = nextId.replace(/:page:/, ':confirm:').replace(/:[0-9]+$/, '');
+  await f.handlers.interactionCreate(button(confirmId));
+  assert.equal(f.executed(), 0);
+  now += 60000;
+  const next = button(nextId);
+  next.deferUpdate = async () => {
+    next.deferred = true;
+  };
+  await f.handlers.interactionCreate(next);
+  assert.ok(buttonId(next.replies, 'Confirm'));
+  const previous = button(buttonId(next.replies, 'Previous'));
+  previous.deferUpdate = async () => {
+    previous.deferred = true;
+  };
+  await f.handlers.interactionCreate(previous);
+  assert.match(JSON.stringify(previous.replies), /page 1 of 2/);
+  now += 60000;
+  const expired = button(confirmId);
+  await f.handlers.interactionCreate(expired);
+  assert.match(JSON.stringify(expired.replies), /expired/);
+  assert.equal(f.executed(), 0);
+});
