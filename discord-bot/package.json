@@ -32,7 +32,7 @@
     "ws": "^8.21.1"
   },
   "overrides": {
-    "undici": "^6.29.0"
+    "undici": "^6.29.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
