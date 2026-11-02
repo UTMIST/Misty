@@ -114,9 +114,14 @@ test('/help command detail filters subcommands by caller access level', async ()
       ]),
     },
   });
-  const subcommands = payload.embeds[0].fields[0].value;
+  const subcommands = payload.embeds[0].fields.find((field) => field.name === 'Subcommands').value;
   assert.match(subcommands, /list/);
   assert.doesNotMatch(subcommands, /create/);
+  const memberHelp = payload.embeds[0].fields.find(
+    (field) => field.name === 'Member changes in chat',
+  ).value;
+  assert.match(memberHelp, /name.*email/);
+  assert.match(memberHelp, /private preview and confirmation/);
 });
 
 test('/help reports unknown and unauthorized command names without leaking them', async () => {

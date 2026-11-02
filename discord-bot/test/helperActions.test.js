@@ -86,19 +86,25 @@ function buttonId(messages, label) {
     .find((b) => b.label === label)?.custom_id;
 }
 
-test('two removals share a descriptive private thread confirmation and execute once', async () => {
+test('mixed mention and name/email removals share private review and execute once', async () => {
   const f = fixture();
   f.message.guildId = 'guild';
   f.message.author.createDM = async () => assert.fail('Thread actions must not open a DM');
   const admin = { id: 'admin', active: true, access_level: 'admin' };
   const people = {
-    101: { id: 'p1', display_name: 'Alex' },
-    202: { id: 'p2', display_name: 'Sam' },
+    101: { id: 'p1', display_name: 'Alex', primary_email: 'alex@example.org', active: true },
+    202: { id: 'p2', display_name: 'Sam', primary_email: 'sam@example.org', active: true },
   };
   const active = new Set(['p1', 'p2']);
   const ended = [];
   f.ctx.directory = {
     getPersonByDiscordId: async (id) => (id === 'owner' ? admin : people[id]),
+    searchPeople: async (query) => {
+      assert.deepEqual(query, { name: 'sam', email: 'sam@example.org' });
+      return { matches: [people[202]], has_more: false, needs_disambiguation: false };
+    },
+    getPerson: async (id) => Object.values(people).find((person) => person.id === id),
+    getTeam: async () => ({ id: 'team', slug: 'infra', label: 'Infrastructure' }),
     getTeamBySlug: async () => ({ id: 'team', slug: 'infra', label: 'Infrastructure' }),
     listMemberships: async ({ personId }) => (active.has(personId) ? [{ id: personId }] : []),
     endMembership: async (id) => {
@@ -112,16 +118,16 @@ test('two removals share a descriptive private thread confirmation and execute o
     assert.equal(++modelCalls, 1, 'private action results must not be replayed');
     return {
       stop_reason: 'tool_use',
-      content_blocks: ['101', '202'].map((user) => ({
+      content_blocks: ['101', { name: 'Sam', email: 'sam@example.org' }].map((user, index) => ({
         type: 'tool_use',
-        id: user,
+        id: String(index),
         name: 'team_remove',
         input: { user, team: 'infra' },
       })),
     };
   };
   const result = await f.ctx.toolExecutor.run({
-    messages: [{ role: 'user', content: 'Remove <@101> and <@202> from infra' }],
+    messages: [{ role: 'user', content: 'Remove <@101> and Sam (sam@example.org) from infra' }],
     principal: { person: admin },
     request: { discordUserId: 'owner', discordGuildId: 'guild', sourceChannelId: 'thread' },
   });
@@ -131,7 +137,10 @@ test('two removals share a descriptive private thread confirmation and execute o
   await sendHelperReply(f.send, result, { message: f.message, appContext: f.ctx });
   assert.equal(active.size, 2);
   assert.equal(f.privateMessages.length, 0);
-  assert.doesNotMatch(JSON.stringify(f.publicMessages), /Alex|Sam|Infrastructure/);
+  assert.doesNotMatch(
+    JSON.stringify(f.publicMessages),
+    /Alex|Sam|Infrastructure|example.org|p1|p2/,
+  );
   const reviewId = buttonId(f.publicMessages, 'Review privately');
   assert.ok(reviewId);
   const intruder = button(reviewId, 'intruder');
@@ -148,6 +157,10 @@ test('two removals share a descriptive private thread confirmation and execute o
   assert.equal(active.size, 2);
   const confirmId = buttonId(review.replies, 'Confirm');
   assert.ok(confirmId);
+  const forgedConfirmation = button(confirmId, 'intruder');
+  await f.handlers.interactionCreate(forgedConfirmation);
+  assert.equal(active.size, 2);
+  assert.doesNotMatch(JSON.stringify(forgedConfirmation.replies), /Alex|Sam|example.org/);
   const confirmed = button(confirmId);
   await Promise.all([
     f.handlers.interactionCreate(confirmed),
@@ -172,6 +185,8 @@ test('an unexpected removal failure stops later writes and reports partial resul
   f.ctx.directory = {
     getPersonByDiscordId: async (id) =>
       id === 'owner' ? admin : { id, display_name: `Member ${id}` },
+    getPerson: async (id) => ({ id, display_name: `Member ${id}` }),
+    getTeam: async () => ({ id: 'team', slug: 'infra', label: 'Infrastructure' }),
     getTeamBySlug: async () => ({ id: 'team', slug: 'infra', label: 'Infrastructure' }),
     listMemberships: async ({ personId }) => [{ id: personId }],
     endMembership: async (id) => {
@@ -1089,6 +1104,8 @@ for (const operation of ['start', 'stop', 'qna']) {
       throw new Error('Sensitive backend detail');
     };
     f.ctx.directory.getTeamBySlug = async () => ({ id: 'team', slug: 'infra' });
+    f.ctx.directory.getPerson = async () => f.person;
+    f.ctx.directory.getTeam = async () => ({ id: 'team', slug: 'infra' });
     f.ctx.directory.listMemberships = async () => [{ id: 'membership' }];
     f.ctx.directory.endMembership = async () => executions.push('remove');
     f.ctx.teamService = createTeamService({ directory: f.ctx.directory });
@@ -1206,6 +1223,8 @@ for (const [count, bulk] of [
     f.ctx.directory = {
       getPersonByDiscordId: async (id) =>
         id === 'owner' ? admin : { id, display_name: `Member ${id}` },
+      getPerson: async (id) => ({ id, display_name: `Member ${id}` }),
+      getTeam: async () => ({ id: 'team', slug: 'infra', label: 'Infrastructure' }),
       getTeamBySlug: async () => ({ id: 'team', slug: 'infra', label: 'Infrastructure' }),
       listMemberships: async () => [],
       createMembership: async (membership) => {
@@ -1344,6 +1363,8 @@ async function researchedMemberBatch(searchCount) {
   f.ctx.directory = {
     getPersonByDiscordId: async (id) =>
       id === 'owner' ? admin : { id, display_name: `Member ${id}` },
+    getPerson: async (id) => ({ id, display_name: `Member ${id}` }),
+    getTeam: async () => ({ id: 'team', slug: 'infra', label: 'Infrastructure' }),
     getTeamBySlug: async () => ({ id: 'team', slug: 'infra', label: 'Infrastructure' }),
     listMemberships: async () => [],
     createMembership: async (membership) => {

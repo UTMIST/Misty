@@ -124,8 +124,11 @@ export default defineCommand({
       async handler({ options, principal, ctx }) {
         const caller = principal?.person;
         const args = {
-          discordSnowflake: options.user.id,
+          ...(options.user.personId
+            ? { personId: options.user.personId }
+            : { discordSnowflake: options.user.id }),
           teamSlug: options.team,
+          ...(options.teamId && { teamId: options.teamId }),
         };
         if (options.role !== null && options.role !== undefined) args.roleKindId = options.role;
         if (options.team_admin !== null && options.team_admin !== undefined) {
@@ -152,7 +155,13 @@ export default defineCommand({
       async handler({ options, principal, ctx }) {
         const caller = principal?.person;
         const result = await ctx.teamService.removeMember(
-          { discordSnowflake: options.user.id, teamSlug: options.team },
+          {
+            ...(options.user.personId
+              ? { personId: options.user.personId }
+              : { discordSnowflake: options.user.id }),
+            teamSlug: options.team,
+            ...(options.teamId && { teamId: options.teamId }),
+          },
           { caller },
         );
         return renderRemoveMemberResult(result);

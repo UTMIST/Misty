@@ -112,6 +112,43 @@ export function createDirectoryClient({ baseUrl, apiKey, fetchImpl = fetch }) {
       return getByPath(`/people/by-identifier/discord/${encodeURIComponent(snowflake)}`);
     },
 
+    async searchPeople({ name, email }, { signal } = {}) {
+      const resp = await send('/people/search', {
+        method: 'POST',
+        body: JSON.stringify({ name, email, active_only: true, limit: 5 }),
+        signal,
+      });
+      if (!resp.ok) throw new DirectoryUnavailable(`directory returned ${resp.status}`);
+      const body = await parseJson(resp);
+      if (
+        !body ||
+        !Array.isArray(body.matches) ||
+        body.matches.length > 5 ||
+        typeof body.has_more !== 'boolean' ||
+        typeof body.needs_disambiguation !== 'boolean' ||
+        body.matches.some(
+          (p) =>
+            !p ||
+            typeof p.id !== 'string' ||
+            !p.id ||
+            typeof p.display_name !== 'string' ||
+            typeof p.primary_email !== 'string' ||
+            typeof p.active !== 'boolean',
+        )
+      )
+        throw new DirectoryUnavailable('malformed directory search response');
+      return {
+        matches: body.matches.map(({ id, display_name, primary_email, active }) => ({
+          id,
+          display_name,
+          primary_email,
+          active,
+        })),
+        has_more: body.has_more,
+        needs_disambiguation: body.needs_disambiguation,
+      };
+    },
+
     async listIdentifiers(personId) {
       const resp = await send(`/people/${encodeURIComponent(personId)}/identifiers`);
       if (resp.status === 404) return [];

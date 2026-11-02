@@ -54,6 +54,13 @@ export function buildHelpEmbed(commands, { shared = false } = {}) {
  */
 export function buildCommandDetailEmbed(command, { shared = false } = {}) {
   const fields = [];
+  if (command.name === 'team') {
+    fields.push({
+      name: 'Member changes in chat',
+      value:
+        'With helper tools enabled, ask Misty to add/remove members by mention, full directory name, exact email, or name and email together. Unlinked directory members are supported. Ambiguous names need more detail. All targets must resolve before a private preview and confirmation; slash commands still use user mentions.',
+    });
+  }
   if (command.options.length > 0) {
     fields.push({ name: 'Options', value: command.options.map(formatOption).join('\n') });
   }
