@@ -40,12 +40,14 @@ export function renderActionSummary({
   const teamLabel = teamSlug
     ? `${team?.label ? `**${text(team.label)}** ` : ''}(${text(teamSlug)})`
     : null;
-  const membership = commandName === 'team' && ['add', 'remove'].includes(subcommand);
+  const membership = commandName === 'team' && ['add', 'remove', 'update'].includes(subcommand);
   const heading = membership
-    ? `${subcommand === 'remove' ? 'Remove' : 'Add'} ${userLabel} ${subcommand === 'remove' ? 'from' : 'to'} ${teamLabel}.`
+    ? `${subcommand === 'remove' ? 'Remove' : subcommand === 'update' ? 'Update' : 'Add'} ${userLabel} ${subcommand === 'remove' ? 'from' : 'to'} ${teamLabel}.`
     : `**${text(operation.description.replace(/ \(admin\)$/, ''))}**`;
   const args = Object.entries(options).flatMap(([key, value]) => {
     if (membership && ['user', 'team', 'teamId'].includes(key)) return [];
+    if (subcommand === 'update' && key.startsWith('expected')) return [];
+    if (subcommand === 'update' && ['role', 'team_admin'].includes(key)) return [];
     const label = text(key.replaceAll('_', ' '));
     const definition = operation.options.find((option) => option.name === key);
     const rendered =
@@ -58,6 +60,12 @@ export function renderActionSummary({
   });
   return [
     heading,
+    ...(subcommand === 'update'
+      ? [
+          `Team role: ${text(options.expectedRoleKindId)} → ${text(options.role ?? options.expectedRoleKindId)}`,
+          `Team-admin flag: ${options.expectedIsTeamAdmin ? 'yes' : 'no'} → ${options.team_admin === undefined ? (options.expectedIsTeamAdmin ? 'yes' : 'no') : options.team_admin ? 'yes' : 'no'}`,
+        ]
+      : []),
     ...args,
     request.discordGuildId
       ? `Requested in: <#${request.sourceChannelId ?? request.discordChannelId}> · ${text(request.guildLabel ?? request.discordGuildId)}`

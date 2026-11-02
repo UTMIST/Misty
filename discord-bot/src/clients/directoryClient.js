@@ -266,6 +266,20 @@ export function createDirectoryClient({ baseUrl, apiKey, fetchImpl = fetch }) {
       throw new DirectoryUnavailable(`directory returned ${resp.status}`);
     },
 
+    async updateMembership(membershipId, patch) {
+      const resp = await send(`/memberships/${encodeURIComponent(membershipId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      });
+      if (resp.status === 200) return parseJson(resp);
+      if (resp.status === 404) return null;
+      if (resp.status === 400) {
+        const body = await resp.json().catch(() => ({}));
+        throw new MembershipInvalid(body.detail ?? 'membership invalid');
+      }
+      throw new DirectoryUnavailable(`directory returned ${resp.status}`);
+    },
+
     async listMemberships({ teamId, personId, activeOnly, asOf, isTeamAdmin } = {}) {
       const qs = new URLSearchParams();
       if (teamId) qs.set('team_id', teamId);

@@ -250,6 +250,7 @@ and skips them.
 - `/team list [active_only:<bool>]` (linked) — list teams (default active only).
 - `/team rename slug:<> new_label:<>` (admin) — rename a team.
 - `/team add user:<@mention> team:<slug> [role:<...>] [team_admin:<bool>]` (admin) — add a member. The mentioned user must have already run `/link`.
+- `/team update user:<@mention> team:<slug> [role:<...>] [team_admin:<bool>]` (admin) — update an active member's team role and/or team-admin flag without ending the membership.
 - `/team remove user:<@mention> team:<slug>` (admin) — soft-end a membership as of today.
 - `/team roster team:<slug> [as_of:<YYYY-MM-DD>]` (linked) — show a team's current roster.
 - `/team google-status team:<slug>` (admin) — show the team's managed Google Group sync status. Settings failures offer automatic retry and a manual recovery fallback.
@@ -871,7 +872,7 @@ tested against a mocked directory client. discord.js handlers are kept thin.
 Discord role sync, `/unlink`, and any bot-side persistence. (Email verification is
 now implemented — `/link` + `/verify-code` via the verification service.)
 
-Team archive/unarchive, `/team info`, editing role/team-admin on existing memberships, team-admin delegation authority, dynamic role_kinds fetch for slash choices.
+Team archive/unarchive, `/team info`, team-admin delegation authority, dynamic role_kinds fetch for slash choices.
 
 ## Durable meeting records
 

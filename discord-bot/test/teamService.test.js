@@ -428,6 +428,117 @@ test('removeMember returns DIRECTORY_DOWN on outage during team lookup', async (
   assert.equal(res.outcome, 'DIRECTORY_DOWN');
 });
 
+test('updateMember patches only changed fields and preserves membership continuity', async () => {
+  const person = { id: 'p1', display_name: 'A' };
+  const team = { id: 't1', slug: 'ml', label: 'ML' };
+  const membership = {
+    id: 'm1',
+    person_id: 'p1',
+    team_id: 't1',
+    role_kind_id: 'member',
+    is_team_admin: false,
+    started_at: '2026-01-01',
+  };
+  let patch;
+  const svc = createTeamService({
+    directory: mkDir({
+      getPersonByDiscordId: async () => person,
+      getTeamBySlug: async () => team,
+      listMemberships: async () => [membership],
+      updateMembership: async (id, value) => {
+        assert.equal(id, 'm1');
+        patch = value;
+        return { ...membership, ...value };
+      },
+    }),
+    now: () => '2026-07-01',
+  });
+  const res = await svc.updateMember(
+    { discordSnowflake: '123', teamSlug: 'ml', roleKindId: 'lead', isTeamAdmin: true },
+    { caller: admin },
+  );
+  assert.equal(res.outcome, 'UPDATED');
+  assert.deepEqual(patch, { role_kind_id: 'lead', is_team_admin: true });
+  assert.equal(res.updated.id, 'm1');
+  assert.equal(res.updated.started_at, '2026-01-01');
+});
+
+test('updateMember returns NOOP when requested values are unchanged', async () => {
+  let updated = false;
+  const membership = { id: 'm1', role_kind_id: 'lead', is_team_admin: true };
+  const svc = createTeamService({
+    directory: mkDir({
+      getPersonByDiscordId: async () => ({ id: 'p1', display_name: 'A' }),
+      getTeamBySlug: async () => ({ id: 't1', slug: 'ml', label: 'ML' }),
+      listMemberships: async () => [membership],
+      updateMembership: async () => {
+        updated = true;
+        return membership;
+      },
+    }),
+  });
+  const res = await svc.updateMember(
+    { discordSnowflake: '123', teamSlug: 'ml', roleKindId: 'lead', isTeamAdmin: true },
+    { caller: admin },
+  );
+  assert.equal(res.outcome, 'NOOP');
+  assert.equal(updated, false);
+});
+
+test('updateMember supports role-only and flag-only patches', async () => {
+  for (const [request, expectedPatch] of [
+    [{ roleKindId: 'lead' }, { role_kind_id: 'lead' }],
+    [{ isTeamAdmin: true }, { is_team_admin: true }],
+  ]) {
+    let patch;
+    const svc = createTeamService({
+      directory: mkDir({
+        getPersonByDiscordId: async () => ({ id: 'p1', display_name: 'A' }),
+        getTeamBySlug: async () => ({ id: 't1', slug: 'ml', label: 'ML' }),
+        listMemberships: async () => [{ id: 'm1', role_kind_id: 'member', is_team_admin: false }],
+        updateMembership: async (_id, value) => {
+          patch = value;
+          return { id: 'm1', role_kind_id: 'member', is_team_admin: false, ...value };
+        },
+      }),
+    });
+    const res = await svc.updateMember(
+      { discordSnowflake: '123', teamSlug: 'ml', ...request },
+      { caller: admin },
+    );
+    assert.equal(res.outcome, 'UPDATED');
+    assert.deepEqual(patch, expectedPatch);
+  }
+});
+
+test('updateMember rejects a stale membership before patching', async () => {
+  let updated = false;
+  const svc = createTeamService({
+    directory: mkDir({
+      getPersonByDiscordId: async () => ({ id: 'p1', display_name: 'A' }),
+      getTeamBySlug: async () => ({ id: 't1', slug: 'ml', label: 'ML' }),
+      listMemberships: async () => [{ id: 'm2', role_kind_id: 'lead', is_team_admin: false }],
+      updateMembership: async () => {
+        updated = true;
+        return {};
+      },
+    }),
+  });
+  const res = await svc.updateMember(
+    {
+      discordSnowflake: '123',
+      teamSlug: 'ml',
+      roleKindId: 'executive',
+      expectedMembershipId: 'm1',
+      expectedRoleKindId: 'member',
+      expectedIsTeamAdmin: false,
+    },
+    { caller: admin },
+  );
+  assert.equal(res.outcome, 'STALE_MEMBERSHIP');
+  assert.equal(updated, false);
+});
+
 test('getRoster returns TEAM_NOT_FOUND when slug does not resolve', async () => {
   const svc = createTeamService({
     directory: mkDir({ getTeamBySlug: async () => null }),

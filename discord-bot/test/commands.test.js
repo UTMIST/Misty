@@ -217,6 +217,7 @@ test('/team is stable and its subcommands carry per-subcommand auth', () => {
   const authFor = (name) => teamCmd.subcommands.find((s) => s.name === name).auth;
   assert.equal(authFor('create'), 'admin');
   assert.equal(authFor('add'), 'admin');
+  assert.equal(authFor('update'), 'admin');
   assert.equal(authFor('remove'), 'admin');
   assert.equal(authFor('rename'), 'admin');
   assert.equal(authFor('google-status'), 'admin');
@@ -420,6 +421,49 @@ test('/team add omits role/team_admin when not provided', async () => {
   });
   assert.equal(seen.roleKindId, undefined);
   assert.equal(seen.isTeamAdmin, undefined);
+});
+
+test('/team update dispatches role, flag, and bound membership state', async () => {
+  let seen = null;
+  const ctx = {
+    teamService: {
+      updateMember: async (args) => {
+        seen = args;
+        return {
+          outcome: 'UPDATED',
+          person: { display_name: 'Alex' },
+          team: { label: 'ML' },
+          updated: { role_kind_id: 'lead', is_team_admin: true },
+        };
+      },
+    },
+  };
+  const payload = await teamCmd.handler({
+    subcommand: 'update',
+    options: {
+      user: { personId: 'p1' },
+      team: 'ml',
+      teamId: 't1',
+      role: 'lead',
+      team_admin: true,
+      expectedMembershipId: 'm1',
+      expectedRoleKindId: 'member',
+      expectedIsTeamAdmin: false,
+    },
+    principal: { person: { access_level: 'admin' } },
+    ctx,
+  });
+  assert.deepEqual(seen, {
+    personId: 'p1',
+    teamSlug: 'ml',
+    teamId: 't1',
+    roleKindId: 'lead',
+    isTeamAdmin: true,
+    expectedMembershipId: 'm1',
+    expectedRoleKindId: 'member',
+    expectedIsTeamAdmin: false,
+  });
+  assert.match(payload.content, /Alex/);
 });
 
 test('/team remove dispatches removeMember using the mentioned user snowflake', async () => {

@@ -6,6 +6,7 @@ import {
   renderRenameTeamResult,
   renderAddMemberResult,
   renderRemoveMemberResult,
+  renderUpdateMemberResult,
   renderRosterResult,
   renderGoogleGroupStatusResult,
   renderGoogleGroupSyncResult,
@@ -136,6 +137,58 @@ export default defineCommand({
         }
         const result = await ctx.teamService.addMember(args, { caller });
         return renderAddMemberResult(result);
+      },
+    },
+    {
+      name: 'update',
+      description: 'Update an existing team membership (admin)',
+      auth: 'admin',
+      options: [
+        { name: 'user', type: 'user', required: true, description: 'Discord user' },
+        {
+          name: 'team',
+          type: 'string',
+          required: true,
+          description: 'Team slug',
+          autocomplete: allTeamsAutocomplete,
+        },
+        {
+          name: 'role',
+          type: 'string',
+          required: false,
+          description: 'New team role',
+          choices: ROLE_CHOICES,
+        },
+        {
+          name: 'team_admin',
+          type: 'boolean',
+          required: false,
+          description: 'Set team-admin flag',
+        },
+      ],
+      async handler({ options, principal, ctx }) {
+        const caller = principal?.person;
+        const args = {
+          ...(options.user.personId
+            ? { personId: options.user.personId }
+            : { discordSnowflake: options.user.id }),
+          teamSlug: options.team,
+          ...(options.teamId && { teamId: options.teamId }),
+          ...(options.role !== null && options.role !== undefined && { roleKindId: options.role }),
+          ...(options.team_admin !== null &&
+            options.team_admin !== undefined && { isTeamAdmin: options.team_admin }),
+          ...(options.expectedMembershipId && {
+            expectedMembershipId: options.expectedMembershipId,
+          }),
+          ...(options.expectedRoleKindId !== undefined && {
+            expectedRoleKindId: options.expectedRoleKindId,
+          }),
+          ...(options.expectedIsTeamAdmin !== undefined && {
+            expectedIsTeamAdmin: options.expectedIsTeamAdmin,
+          }),
+        };
+        const result = await ctx.teamService.updateMember(args, { caller });
+        return renderUpdateMemberResult(result);
       },
     },
     {

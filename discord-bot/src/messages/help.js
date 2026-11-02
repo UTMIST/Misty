@@ -58,7 +58,7 @@ export function buildCommandDetailEmbed(command, { shared = false } = {}) {
     fields.push({
       name: 'Member changes in chat',
       value:
-        'With helper tools enabled, ask Misty to add/remove members by mention, full directory name, exact email, or name and email together. Unlinked directory members are supported. Ambiguous names need more detail. All targets must resolve before a private preview and confirmation; slash commands still use user mentions.',
+        'With helper tools enabled, ask Misty to add, update, or remove members by mention, full directory name, exact email, or name and email together. Unlinked directory members are supported. Ambiguous names need more detail. All targets and memberships must resolve before a private preview and confirmation; slash commands still use user mentions.',
     });
   }
   if (command.options.length > 0) {

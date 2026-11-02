@@ -394,6 +394,33 @@ test('createMembership omits optional fields when not provided', async () => {
   assert.equal('is_team_admin' in sent, false);
 });
 
+test('updateMembership patches the membership and returns the response', async () => {
+  const fetchImpl = fakeFetch([
+    {
+      status: 200,
+      body: { id: 'm1', role_kind_id: 'lead', is_team_admin: true },
+    },
+  ]);
+  const client = createDirectoryClient({ baseUrl: BASE, apiKey: KEY, fetchImpl });
+  const result = await client.updateMembership('m1', {
+    role_kind_id: 'lead',
+    is_team_admin: true,
+  });
+  assert.equal(result.id, 'm1');
+  assert.equal(fetchImpl.calls[0].opts.method, 'PATCH');
+  assert.match(fetchImpl.calls[0].url, /\/memberships\/m1$/);
+  assert.deepEqual(JSON.parse(fetchImpl.calls[0].opts.body), {
+    role_kind_id: 'lead',
+    is_team_admin: true,
+  });
+});
+
+test('updateMembership returns null for a missing membership', async () => {
+  const fetchImpl = fakeFetch([{ status: 404, body: { detail: 'not found' } }]);
+  const client = createDirectoryClient({ baseUrl: BASE, apiKey: KEY, fetchImpl });
+  assert.equal(await client.updateMembership('missing', { is_team_admin: true }), null);
+});
+
 test('createMembership throws MembershipInvalid on 400', async () => {
   const fetchImpl = fakeFetch([
     { status: 400, body: { detail: 'active membership already exists' } },

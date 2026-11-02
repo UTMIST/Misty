@@ -148,6 +148,72 @@ export function createTeamService({
     }
   }
 
+  async function updateMember(
+    {
+      discordSnowflake,
+      personId,
+      reference,
+      teamSlug,
+      teamId,
+      roleKindId,
+      isTeamAdmin,
+      expectedMembershipId,
+      expectedRoleKindId,
+      expectedIsTeamAdmin,
+    },
+    _opts,
+  ) {
+    try {
+      const person = await resolvePersonTarget(directory, {
+        personId,
+        discordSnowflake,
+        reference,
+      });
+      const team = teamId
+        ? await directory.getTeam(teamId)
+        : await directory.getTeamBySlug(teamSlug);
+      if (!team || team.active === false) return { outcome: 'TEAM_NOT_FOUND' };
+      const active = await directory.listMemberships({
+        teamId: team.id,
+        personId: person.id,
+        activeOnly: true,
+        asOf: now(),
+      });
+      if (active.length === 0) return { outcome: 'NOT_ON_TEAM', person, team };
+      if (active.length !== 1) {
+        return { outcome: 'MEMBERSHIP_AMBIGUOUS', person, team };
+      }
+      const membership = active[0];
+      if (
+        (expectedMembershipId !== undefined && membership.id !== expectedMembershipId) ||
+        (expectedRoleKindId !== undefined && membership.role_kind_id !== expectedRoleKindId) ||
+        (expectedIsTeamAdmin !== undefined && membership.is_team_admin !== expectedIsTeamAdmin)
+      ) {
+        return { outcome: 'STALE_MEMBERSHIP', person, team, membership };
+      }
+      const patch = {};
+      if (roleKindId !== undefined && roleKindId !== membership.role_kind_id) {
+        patch.role_kind_id = roleKindId;
+      }
+      if (isTeamAdmin !== undefined && isTeamAdmin !== membership.is_team_admin) {
+        patch.is_team_admin = isTeamAdmin;
+      }
+      if (Object.keys(patch).length === 0) {
+        return { outcome: 'NOOP', person, team, membership };
+      }
+      const updated = await directory.updateMembership(membership.id, patch);
+      if (!updated) return { outcome: 'STALE_MEMBERSHIP', person, team, membership };
+      return { outcome: 'UPDATED', person, team, membership, updated };
+    } catch (e) {
+      if (e instanceof PersonResolutionError) return { outcome: e.outcome };
+      if (e instanceof MembershipInvalid) {
+        return { outcome: 'MEMBERSHIP_INVALID', detail: e.detail };
+      }
+      if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
+      throw e;
+    }
+  }
+
   async function getRoster({ teamSlug, asOf }, _opts) {
     try {
       const team = await directory.getTeamBySlug(teamSlug);
@@ -230,6 +296,7 @@ export function createTeamService({
     renameTeam,
     addMember,
     removeMember,
+    updateMember,
     getRoster,
     getMyTeams,
     getGoogleGroupStatus,

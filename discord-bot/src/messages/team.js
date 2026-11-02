@@ -229,6 +229,42 @@ export function renderRemoveMemberResult(result) {
   return { content, ephemeral: true };
 }
 
+export function renderUpdateMemberResult(result) {
+  const describe = (membership) =>
+    `${membership.role_kind_id} / team-admin: ${membership.is_team_admin ? 'yes' : 'no'}`;
+  const content = (() => {
+    switch (result.outcome) {
+      case 'UPDATED':
+        return `✅ Updated **${result.person.display_name}** on **${result.team.label}**: ${describe(result.updated)}.`;
+      case 'NOOP':
+        return `No changes were needed: **${result.person.display_name}** already has ${describe(result.membership)} on **${result.team.label}**.`;
+      case 'USER_NOT_LINKED':
+        return USER_NOT_LINKED_MSG;
+      case 'PERSON_NOT_FOUND':
+        return 'No active directory member matched. Check the name and email.';
+      case 'PERSON_AMBIGUOUS':
+        return 'More detail is needed. Supply the full name and exact email together.';
+      case 'PERSON_INACTIVE':
+        return 'That directory member is inactive. Nothing was changed.';
+      case 'TEAM_NOT_FOUND':
+        return "There's no team with that slug.";
+      case 'NOT_ON_TEAM':
+        return `**${result.person.display_name}** is not on **${result.team.label}**.`;
+      case 'MEMBERSHIP_AMBIGUOUS':
+        return `**${result.person.display_name}** has an ambiguous active membership on **${result.team.label}**. Nothing was changed.`;
+      case 'STALE_MEMBERSHIP':
+        return 'That membership changed or ended since the request was prepared. Nothing was changed; ask again for a fresh preview.';
+      case 'MEMBERSHIP_INVALID':
+        return `The directory rejected that membership update: ${result.detail}`;
+      case 'DIRECTORY_DOWN':
+        return DIRECTORY_DOWN_MSG;
+      default:
+        return FALLBACK;
+    }
+  })();
+  return { content, ephemeral: true };
+}
+
 export function renderRosterResult(result) {
   const content = (() => {
     switch (result.outcome) {

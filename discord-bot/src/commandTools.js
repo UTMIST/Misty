@@ -26,6 +26,7 @@ const OPERATIONS = [
   ['team', 'create', true],
   ['team', 'rename', true],
   ['team', 'add', true],
+  ['team', 'update', true],
   ['team', 'remove', true],
   ['seed', null, true],
   ['team', 'google-status'],
@@ -219,6 +220,7 @@ export function createCommandTools({ appContext }) {
         let expiresAt = Date.now() + 120000;
         let target;
         let targetTeam;
+        let membership;
         const intent = Object.freeze({
           surface: 'discord',
           commandName,
@@ -266,6 +268,26 @@ export function createCommandTools({ appContext }) {
                   'The selected member or team changed. Ask again for a fresh preview.',
                 );
               }
+              if (membership) {
+                const currentMemberships = await appContext.directory.listMemberships({
+                  teamId: targetTeam.id,
+                  personId: target.id,
+                  activeOnly: true,
+                  asOf: new Date().toISOString().slice(0, 10),
+                });
+                const currentMembership = currentMemberships.find(
+                  (candidate) => candidate.id === membership.id,
+                );
+                if (
+                  !currentMembership ||
+                  currentMembership.role_kind_id !== membership.role_kind_id ||
+                  currentMembership.is_team_admin !== membership.is_team_admin
+                ) {
+                  throw new Error(
+                    'The selected membership changed or ended. Ask again for a fresh preview.',
+                  );
+                }
+              }
             }
             return result.principal;
           });
@@ -298,6 +320,34 @@ export function createCommandTools({ appContext }) {
               }),
               teamId: team.id,
             });
+            if (subcommand === 'update') {
+              const memberships = await withDeadline(() =>
+                appContext.directory.listMemberships({
+                  teamId: team.id,
+                  personId: person.id,
+                  activeOnly: true,
+                  asOf: new Date().toISOString().slice(0, 10),
+                }),
+              );
+              if (memberships.length !== 1) {
+                return {
+                  is_error: true,
+                  content: {
+                    error:
+                      memberships.length === 0
+                        ? 'That member is not currently on the selected team.'
+                        : 'That member has an ambiguous active membership on the selected team.',
+                  },
+                };
+              }
+              membership = Object.freeze(memberships[0]);
+              options = Object.freeze({
+                ...options,
+                expectedMembershipId: membership.id,
+                expectedRoleKindId: membership.role_kind_id,
+                expectedIsTeamAdmin: membership.is_team_admin,
+              });
+            }
           } catch (error) {
             return {
               is_error: true,
