@@ -209,7 +209,8 @@ export async function handleHelperActionInteraction(interaction, appContext) {
       });
     } catch {
       await interaction.followUp({
-        content: 'This request expired or your permissions changed. Ask again.',
+        content:
+          'This request expired, its details changed, or your permissions changed. Ask again for a fresh preview.',
         flags: MessageFlags.Ephemeral,
         allowedMentions: { parse: [] },
       });
@@ -236,7 +237,10 @@ export async function handleHelperActionInteraction(interaction, appContext) {
       await preview(action, token, sendPrivate);
       appContext.helperActions.presented(token, userId);
     } catch {
-      await reply({ content: 'This request expired or your permissions changed. Ask again.' });
+      await reply({
+        content:
+          'This request expired, its details changed, or your permissions changed. Ask again for a fresh preview.',
+      });
     }
     return;
   }
@@ -253,7 +257,10 @@ export async function handleHelperActionInteraction(interaction, appContext) {
   try {
     await action.check(validation);
   } catch {
-    return reply({ content: 'This request expired or your permissions changed. Ask again.' });
+    return reply({
+      content:
+        'This request expired, its details changed, or your permissions changed. Ask again for a fresh preview.',
+    });
   }
   try {
     const payload = await action.execute(validation);
