@@ -4,7 +4,7 @@ from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 
 AccessLevel = Literal["member", "admin", "superuser"]
@@ -110,6 +110,50 @@ class PersonUpdate(BaseModel):
     @classmethod
     def normalize_email(cls, v: str | None) -> str | None:
         return _normalize_email(v) if v is not None else None
+
+
+class PersonSearch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    email: str | None = Field(default=None, min_length=1, max_length=320)
+    active_only: bool = True
+    limit: int = Field(default=5, ge=1, le=10, strict=True)
+
+    @field_validator("name", "email")
+    @classmethod
+    def normalize_filter(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().lower()
+        if not value or "\x00" in value:
+            raise ValueError("search filter must be nonblank and contain no NUL")
+        return value
+
+    @model_validator(mode="after")
+    def require_filter(self) -> "PersonSearch":
+        if self.name is None and self.email is None:
+            raise ValueError("provide name or email")
+        return self
+
+
+class PersonSearchMatch(BaseModel):
+    """Only the fields needed to distinguish directory candidates."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    id: UUID
+    display_name: str
+    primary_email: str
+    active: bool
+
+
+class PersonSearchResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    matches: list[PersonSearchMatch]
+    has_more: bool
+    needs_disambiguation: bool
 
 
 class TeamCreate(BaseModel):
