@@ -18,6 +18,9 @@ from contracts.types import (
     PersonIdentifier,
     PersonIdentifierCreate,
     PersonIdentifierUpdate,
+    PersonSearch,
+    PersonSearchMatch,
+    PersonSearchResult,
     PersonUpdate,
     Provider,
     RoleKind,
@@ -225,6 +228,34 @@ class PostgresStorageAdapter:
                 select(people).where(people.c.primary_email == primary_email)
             ).one_or_none()
         return _person_row_to_model(row) if row else None
+
+    def search_people(self, query: PersonSearch) -> PersonSearchResult:
+        stmt = select(people.c.id, people.c.display_name, people.c.primary_email, people.c.active)
+        if query.active_only:
+            stmt = stmt.where(people.c.active.is_(True))
+        if query.name is not None:
+            # strpos is literal: %, _ and backslashes are not LIKE wildcards.
+            stmt = stmt.where(func.strpos(func.lower(people.c.display_name), query.name) > 0)
+        if query.email is not None:
+            alternate = (
+                select(person_identifiers.c.id)
+                .where(
+                    person_identifiers.c.person_id == people.c.id,
+                    person_identifiers.c.provider == "email",
+                    person_identifiers.c.external_id == query.email,
+                )
+                .exists()
+            )
+            stmt = stmt.where(or_(people.c.primary_email == query.email, alternate))
+        # C collation makes ordering independent of the database's locale.
+        stmt = stmt.order_by(func.lower(people.c.display_name).collate("C"), people.c.id)
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt.limit(query.limit + 1)).all()
+        return PersonSearchResult(
+            matches=[PersonSearchMatch.model_validate(row) for row in rows[: query.limit]],
+            has_more=len(rows) > query.limit,
+            needs_disambiguation=len(rows) > 1,
+        )
 
     def list_people(self, *, active_only: bool = False) -> list[Person]:
         stmt = select(people)

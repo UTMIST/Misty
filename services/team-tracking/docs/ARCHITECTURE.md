@@ -45,6 +45,15 @@ Both implement `StorageAdapter`; the app picks one at the wiring point.
 
 Having two adapters behind one Protocol is the payoff of the boundary: fast, deterministic tests against the in-memory adapter, plus a smaller integration suite (`tests/test_postgres_adapter.py`) that replays the same behavioral assertions against real Postgres to catch anything dict-land can't model (real FK enforcement, `citext`, unique constraints).
 
+Bounded [person search](API.md#post-peoplesearch) is a separate read contract
+from roster listing and primary-email identity lookup. It returns a minimal
+candidate projection and detects ambiguity with one extra row beyond the
+requested limit. Postgres applies all filters and an `EXISTS` alternate-email
+check before ordering and `LIMIT`, so identifiers cannot duplicate candidates
+or consume the bound. No total-count query, fuzzy ranking, identity store, or
+migration is needed. Email filters require identifier read access as well as
+people read access. A POST body keeps the filters out of URL audit logs.
+
 ### SQLAlchemy Core, not the ORM
 
 The Postgres adapter uses **SQLAlchemy Core** — `Table` objects and SQL expression constructs — not the ORM. There are no mapped classes, no session/identity-map, no lazy loading. Each method is an explicit `select`/`insert`/`update`/`delete` against the tables in `src/storage/schema.py`, and the result is hand-converted to a Pydantic model. The reasons:
