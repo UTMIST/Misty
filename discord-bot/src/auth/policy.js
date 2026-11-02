@@ -16,6 +16,7 @@ export function rankOf(level) {
 
 export function authorize(policy, principal) {
   if (policy === 'public') return { ok: true };
+  if (principal?.person?.active === false) return { ok: false, reason: 'not_linked' };
   if (policy === 'linked') {
     return principal ? { ok: true } : { ok: false, reason: 'not_linked' };
   }

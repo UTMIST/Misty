@@ -365,7 +365,8 @@ The bot's gate is its authentication/authorization layer — the Discord-side
 parallel to team-tracking's scoped-key auth.
 
 - **Principal** (`src/auth/principal.js`) — the authenticated subject, `{ person }`
-  in v1. Extension point for roles/memberships later.
+  in v1. Inactive directory people resolve as anonymous and cannot use protected
+  commands or autocomplete. Extension point for roles/memberships later.
 - **Policy** (`src/auth/policy.js`) — each command declares `auth: 'public' | 'linked'`
   (default `'linked'`, fail-secure). Extends to role/team-admin policies without
   touching handlers.
