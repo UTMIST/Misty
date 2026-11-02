@@ -447,12 +447,31 @@ for replay, cost limits, revalidation tradeoffs, and offline coverage.
 ### Commands through mentions and DMs
 
 With helper tools enabled, ask `@Misty show my teams`, `@Misty show the robotics
-roster`, or `@Misty remove @Alex and @Sam from infrastructure`. Misty prepares
+roster`, `@Misty add Alex Chen to research`, or
+`@Misty remove @Alex and Sam Lee (sam@example.org) from infrastructure`. Misty prepares
 all command calls in the same model response for one review, up to 25 actions
-per request. Team additions and removals accept all explicitly mentioned members
-with the same team/options in one tool call. Each member counts as one action;
+per request. Team additions and removals accept mentions, directory names, exact
+primary/registered alternate emails, or a name and email together, including
+active directory members without Discord links. A bulk request may mix these
+references with the same team/options in one tool call. Each member counts as one action;
 document lookups have a separate four-call allowance. The same
 tools work in DMs where the underlying command does not need a server or channel.
+
+Person lookup uses the directory's bounded search endpoint (at most five
+candidates), never a full-directory download. Names match case-insensitive
+literal substrings; email addresses match exactly after trimming and lowercasing.
+When both are supplied, the same person must match both. Missing, inactive,
+ambiguous or truncated matches require clarification; Misty never picks the first
+candidate. Use a more specific name or an explicit mention; for email-based
+clarification, send the full name and exact email together to Misty in a DM.
+Candidates and email details are not sent to the model or shared channel.
+All requested targets must resolve, and references selecting the same member/team
+are rejected together. No resolvable subset is submitted automatically.
+Slash commands and the playground retain their existing mention-based options;
+name/email targets are available through helper chat when its tools are enabled.
+Lookup never creates, links or reactivates accounts. The bot's directory key needs
+`people:read` and, for email filters, `identifiers:read` (already in its documented
+scope set). Deploy the directory search API from #359 before enabling this path.
 
 | Capability | Available actions |
 | --- | --- |
@@ -490,9 +509,12 @@ private response (or a private acknowledgement is delivered for a DM request). A
 result-delivery failure never reruns the action.
 Every write, including recording start/stop, first shows its arguments and
 destination in a private preview with **Confirm** and **Cancel**. Member changes
-show the directory names, Discord mentions and team label/slug. If an optional
-name lookup fails, the preview still identifies the member by mention and the
-team by slug. A multi-action
+show each member's directory name, primary email and stable person ID, any
+supplied Discord mention, and the team label/slug. Member and team lookups must
+succeed before a proposal is offered. Confirmation uses the bound person/team
+IDs and rechecks active status and the displayed identity/team fields; it never
+reruns a partial-name query or follows a changed Discord link to another person.
+Changed or unavailable targets require a fresh request. A multi-action
 request lists every proposed action; one confirmation approves the whole list.
 Long previews have **Previous** and **Next** buttons with a page counter.
 Read every page to unlock **Confirm**, which approves all pages together.
@@ -789,6 +811,7 @@ local `.env`. The directory must be non-production and the key must include
 | `src/helperFlow.js` | Shared helper-bot authorization and answer handling used by Discord and the web playground. |
 | `src/toolExecutor.js` | Bounded document tool loop, requester revalidation, and terminal command-action handoff. |
 | `src/commandTools.js` | Explicit command-tool allowlist, strict arguments, current-user authorization, and private action previews. |
+| `src/services/personResolver.js` | Shared bounded name/email/mention resolution and stable person lookup for team actions. |
 | `src/helperActions.js` | Bounded, expiring, single-use actions bound to their requester. |
 | `src/helperChecks.js` | Share duplicate authorization work within one validation step; never cache across operations or messages. |
 | `src/registerCommands.js` | Slash-command registration (global by default; testing-guild only when `beta = true`). Runs as Railway's persistent-environment `preDeployCommand`; ephemeral PR copies use the [preview override](../docs/pr-previews.md#automatic-railway-pr-environments). `npm run register` runs it locally. |

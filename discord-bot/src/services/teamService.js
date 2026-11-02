@@ -6,6 +6,7 @@ import {
   GoogleGroupsNotConfigured,
   GoogleGroupSyncConflict,
 } from '../clients/directoryClient.js';
+import { resolvePersonTarget, PersonResolutionError } from './personResolver.js';
 
 export const llmSafe = true;
 
@@ -74,12 +75,20 @@ export function createTeamService({
     }
   }
 
-  async function addMember({ discordSnowflake, teamSlug, roleKindId, isTeamAdmin }, _opts) {
+  async function addMember(
+    { discordSnowflake, personId, reference, teamSlug, teamId, roleKindId, isTeamAdmin },
+    _opts,
+  ) {
     try {
-      const person = await directory.getPersonByDiscordId(discordSnowflake);
-      if (!person) return { outcome: 'USER_NOT_LINKED' };
-      const team = await directory.getTeamBySlug(teamSlug);
-      if (!team) return { outcome: 'TEAM_NOT_FOUND' };
+      const person = await resolvePersonTarget(directory, {
+        personId,
+        discordSnowflake,
+        reference,
+      });
+      const team = teamId
+        ? await directory.getTeam(teamId)
+        : await directory.getTeamBySlug(teamSlug);
+      if (!team || team.active === false) return { outcome: 'TEAM_NOT_FOUND' };
       const existing = await directory.listMemberships({
         teamId: team.id,
         personId: person.id,
@@ -107,17 +116,23 @@ export function createTeamService({
         throw e;
       }
     } catch (e) {
+      if (e instanceof PersonResolutionError) return { outcome: e.outcome };
       if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
       throw e;
     }
   }
 
-  async function removeMember({ discordSnowflake, teamSlug }, _opts) {
+  async function removeMember({ discordSnowflake, personId, reference, teamSlug, teamId }, _opts) {
     try {
-      const person = await directory.getPersonByDiscordId(discordSnowflake);
-      if (!person) return { outcome: 'USER_NOT_LINKED' };
-      const team = await directory.getTeamBySlug(teamSlug);
-      if (!team) return { outcome: 'TEAM_NOT_FOUND' };
+      const person = await resolvePersonTarget(directory, {
+        personId,
+        discordSnowflake,
+        reference,
+      });
+      const team = teamId
+        ? await directory.getTeam(teamId)
+        : await directory.getTeamBySlug(teamSlug);
+      if (!team || team.active === false) return { outcome: 'TEAM_NOT_FOUND' };
       const active = await directory.listMemberships({
         teamId: team.id,
         personId: person.id,
@@ -127,6 +142,7 @@ export function createTeamService({
       await directory.endMembership(active[0].id, now());
       return { outcome: 'REMOVED', person, team };
     } catch (e) {
+      if (e instanceof PersonResolutionError) return { outcome: e.outcome };
       if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
       throw e;
     }

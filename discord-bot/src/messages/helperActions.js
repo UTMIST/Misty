@@ -30,9 +30,11 @@ export function renderActionSummary({
   people,
   team,
 }) {
-  const member = options.user && people[options.user.id];
+  const member = options.user && people[options.user.personId ?? options.user.id];
   const userLabel = options.user
-    ? `${member?.display_name ? `**${text(member.display_name)}** ` : ''}(<@${options.user.id}>)`
+    ? options.user.personId
+      ? `**${text(member.display_name)}**${member.primary_email ? ` (${text(member.primary_email)})` : ''} · person ID: ${text(options.user.personId)}${options.user.id ? ` (<@${options.user.id}>)` : ''}`
+      : `${member?.display_name ? `**${text(member.display_name)}** ` : ''}(<@${options.user.id}>)`
     : null;
   const teamSlug = options.team ?? (commandName === 'team' ? options.slug : null);
   const teamLabel = teamSlug
@@ -43,7 +45,7 @@ export function renderActionSummary({
     ? `${subcommand === 'remove' ? 'Remove' : 'Add'} ${userLabel} ${subcommand === 'remove' ? 'from' : 'to'} ${teamLabel}.`
     : `**${text(operation.description.replace(/ \(admin\)$/, ''))}**`;
   const args = Object.entries(options).flatMap(([key, value]) => {
-    if (membership && ['user', 'team'].includes(key)) return [];
+    if (membership && ['user', 'team', 'teamId'].includes(key)) return [];
     const label = text(key.replaceAll('_', ' '));
     const definition = operation.options.find((option) => option.name === key);
     const rendered =

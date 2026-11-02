@@ -25,7 +25,7 @@ import { ActionBudgetExceeded, combineHelperActions, MAX_HELPER_ACTIONS } from '
 import { checkOnce } from './helperChecks.js';
 
 const PREPARATION_CLARIFICATION =
-  "All command preparations failed. Nothing was changed. Explain the tool errors or ask for the missing details; for an invalid user ID ask for an explicit member mention, and for an unavailable action suggest checking command access with /help privately. Do not infer the requester's role or disclose account details. Do not call any tools or retry a subset of the request. The user must clarify or submit a new request before any action can be prepared.";
+  "All command preparations failed. Nothing was changed. Explain the sanitized tool errors or ask for missing details. For unresolved or ambiguous members, ask for a more specific name or explicit mention. If email details are needed, direct the requester to DM Misty with the full name and exact email; never request or repeat email details in shared replies. Never list directory candidates, guess an ID, or retry a resolvable subset. For unavailable actions suggest checking command access with /help privately. Do not infer the requester's role or disclose account details. Do not call any tools. The user must clarify or submit a new request before any action can be prepared.";
 
 export const DEFAULT_MAX_TOOL_ROUNDS = 4;
 export const DEFAULT_MAX_OUTPUT_TOKENS = 8000;
@@ -328,7 +328,12 @@ export function createToolExecutor({
               return check?.(validation);
             };
           }
-          const action = combineHelperActions(actions);
+          let action;
+          try {
+            action = combineHelperActions(actions);
+          } catch {
+            return { outcome: OUTCOME.INCOMPLETE_ACTION, reason: 'duplicate_targets' };
+          }
           const execute = action.execute;
           action.execute = async (validation = new Map()) => {
             await action.check(validation);

@@ -3,6 +3,11 @@ import { authorizeCommand, dispatch } from './router.js';
 import { renderActionSummary } from './messages/helperActions.js';
 import { checkOnce } from './helperChecks.js';
 import { combineHelperActions, MAX_HELPER_ACTIONS } from './helperActions.js';
+import {
+  resolvePersonTarget,
+  validatePersonReference,
+  PersonResolutionError,
+} from './services/personResolver.js';
 
 export const llmSafe = true;
 
@@ -55,7 +60,24 @@ function optionSchema(option) {
   };
 }
 
-function validatedOptions(input, options) {
+const personReferenceSchema = {
+  anyOf: [
+    { type: 'string', pattern: '^[0-9]{1,20}$', minLength: 1, maxLength: 20 },
+    {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        name: { type: 'string', minLength: 1, maxLength: 200 },
+        email: { type: 'string', minLength: 1, maxLength: 320 },
+      },
+      anyOf: [{ required: ['name'] }, { required: ['email'] }],
+    },
+  ],
+  description:
+    'An explicit Discord mention ID, or {name, email} with either or both filters. Never invent an ID. Use both name and email to clarify an ambiguous name.',
+};
+
+function validatedOptions(input, options, personTargets = false) {
   if (
     !input ||
     typeof input !== 'object' ||
@@ -72,6 +94,10 @@ function validatedOptions(input, options) {
     const value = input[option.name];
     if (value === undefined) {
       if (option.required) throw new Error(`Missing ${option.name}.`);
+      continue;
+    }
+    if (personTargets && option.name === 'user') {
+      result.user = validatePersonReference(value);
       continue;
     }
     const schema = optionSchema(option);
@@ -107,7 +133,7 @@ export function createCommandTools({ appContext }) {
       actionCount: (input) => (bulkMembers && Array.isArray(input?.user) ? input.user.length : 1),
       definition: {
         name,
-        description: `${operation.description}. Authenticates the requesting user. ${delivery}${confirm ? ' after private user confirmation' : ''}. Include ALL requested actions in the same tool-call response, up to ${MAX_HELPER_ACTIONS} actions total, separately from the four document-tool calls allowed. ${bulkMembers ? 'For multiple members with the same team and options, pass EVERY mentioned member ID as an array in user; do not stop after the first member. ' : ''}If the full request exceeds the action limit or lacks required details, ask the user to split or clarify it; never propose only a subset. Finish any document searches or reads in earlier tool rounds; never mix them with command calls in the same response. Prepared batches end the assistant turn; command results are not returned to the model. If every preparation fails, explain the errors or ask for missing details without further tool calls.`,
+        description: `${operation.description}. Authenticates the requesting user. ${delivery}${confirm ? ' after private user confirmation' : ''}. Include ALL requested actions in the same tool-call response, up to ${MAX_HELPER_ACTIONS} actions total, separately from the four document-tool calls allowed. ${bulkMembers ? 'Accepts directory names, exact primary/registered alternate emails, combined name/email references, and explicit mention IDs, including people without Discord links. Pass EVERY requested member as an array in user for a bulk change; mixed references are allowed. Resolution is private and bounded; no candidates or email details are returned to the model. Ambiguous, missing, conflicting or duplicate targets withhold the entire proposal. Ask for more detail without listing candidates or guessing. ' : ''}If the full request exceeds the action limit or lacks required details, ask the user to split or clarify it; never propose only a subset. Finish any document searches or reads in earlier tool rounds; never mix them with command calls in the same response. Prepared batches end the assistant turn; command results are not returned to the model. If every preparation fails, explain the errors or ask for missing details without further tool calls.`,
         input_schema: {
           type: 'object',
           additionalProperties: false,
@@ -117,17 +143,17 @@ export function createCommandTools({ appContext }) {
               bulkMembers && o.name === 'user'
                 ? {
                     anyOf: [
-                      optionSchema(o),
+                      personReferenceSchema,
                       {
                         type: 'array',
                         minItems: 1,
                         maxItems: MAX_HELPER_ACTIONS,
                         uniqueItems: true,
-                        items: optionSchema(o),
+                        items: personReferenceSchema,
                       },
                     ],
                     description:
-                      'One Discord user ID, or ALL explicitly mentioned member IDs for this team change.',
+                      'One person reference, or ALL requested person references for this team change.',
                   }
                 : optionSchema(o),
             ]),
@@ -142,17 +168,21 @@ export function createCommandTools({ appContext }) {
             if (
               !input.user.length ||
               input.user.length > MAX_HELPER_ACTIONS ||
-              new Set(input.user).size !== input.user.length ||
               JSON.stringify(input).length > 4000
             ) {
-              throw new Error(`Supply 1–${MAX_HELPER_ACTIONS} distinct member IDs.`);
+              throw new Error(`Supply 1–${MAX_HELPER_ACTIONS} distinct member references.`);
             }
             // Validate and copy the entire list before any authorization/label I/O.
             members = input.user.map((user) => {
               const member = { ...input, user };
-              validatedOptions(member, operation.options);
+              validatedOptions(member, operation.options, true);
               return member;
             });
+            const normalized = members.map((member) =>
+              JSON.stringify(validatePersonReference(member.user)),
+            );
+            if (new Set(normalized).size !== normalized.length)
+              throw new Error('Duplicate member references. Nothing was changed.');
           } catch (error) {
             return { is_error: true, content: { error: error.message } };
           }
@@ -162,14 +192,24 @@ export function createCommandTools({ appContext }) {
             if (result.is_error || !result.action) return result;
             actions.push(result.action);
           }
-          return {
-            content: { status: 'confirmation_required' },
-            action: combineHelperActions(actions),
-          };
+          try {
+            return {
+              content: { status: 'confirmation_required' },
+              action: combineHelperActions(actions),
+            };
+          } catch {
+            return {
+              is_error: true,
+              content: {
+                error:
+                  'Multiple references select the same member and team. Nothing was changed; clarify the complete request.',
+              },
+            };
+          }
         }
         let options;
         try {
-          options = validatedOptions(input, operation.options);
+          options = validatedOptions(input, operation.options, bulkMembers);
         } catch (error) {
           return { is_error: true, content: { error: error.message } };
         }
@@ -177,11 +217,15 @@ export function createCommandTools({ appContext }) {
           return { is_error: true, content: { error: 'Authenticated requester is required.' } };
         }
         let expiresAt = Date.now() + 120000;
+        let target;
+        let targetTeam;
         const intent = Object.freeze({
           surface: 'discord',
           commandName,
           subcommand,
-          options,
+          get options() {
+            return options;
+          },
           discordUserId: request.discordUserId,
           discordHandle: request.discordHandle,
           discordGuildId: request.discordGuildId,
@@ -203,6 +247,26 @@ export function createCommandTools({ appContext }) {
             if (request.checkSurface)
               await checkOnce(checks, request.checkSurface, request.checkSurface);
             if (Date.now() >= intent.expiresAt) throw new Error('This action expired. Ask again.');
+            if (target) {
+              const currentPerson = await appContext.directory.getPerson(target.id);
+              const currentTeam = await appContext.directory.getTeam(targetTeam.id);
+              if (
+                !currentPerson ||
+                currentPerson.id !== target.id ||
+                currentPerson.active === false ||
+                currentPerson.display_name !== target.display_name ||
+                currentPerson.primary_email !== target.primary_email ||
+                !currentTeam ||
+                currentTeam.id !== targetTeam.id ||
+                currentTeam.active === false ||
+                currentTeam.slug !== targetTeam.slug ||
+                currentTeam.label !== targetTeam.label
+              ) {
+                throw new Error(
+                  'The selected member or team changed. Ask again for a fresh preview.',
+                );
+              }
+            }
             return result.principal;
           });
         try {
@@ -212,6 +276,39 @@ export function createCommandTools({ appContext }) {
             is_error: true,
             content: { error: 'This action is not available to your account.' },
           };
+        }
+        if (bulkMembers) {
+          try {
+            const person = await withDeadline(() =>
+              resolvePersonTarget(appContext.directory, { reference: options.user }),
+            );
+            const team = await withDeadline(() => appContext.directory.getTeamBySlug(options.team));
+            if (!team || team.active === false) throw new Error('team unavailable');
+            target = Object.freeze({
+              id: person.id,
+              display_name: person.display_name,
+              primary_email: person.primary_email,
+            });
+            targetTeam = Object.freeze({ id: team.id, slug: team.slug, label: team.label });
+            options = Object.freeze({
+              ...options,
+              user: Object.freeze({
+                ...(options.user.id && { id: options.user.id }),
+                personId: person.id,
+              }),
+              teamId: team.id,
+            });
+          } catch (error) {
+            return {
+              is_error: true,
+              content: {
+                error:
+                  error instanceof PersonResolutionError
+                    ? error.message
+                    : 'The member or team could not be verified. Nothing was changed. Try again or clarify the complete request.',
+              },
+            };
+          }
         }
         // No model data can override the author, guild, channel or meeting target.
         const runMeeting = request.runMeeting;
@@ -227,6 +324,7 @@ export function createCommandTools({ appContext }) {
         // Resolve display labels only after authorization, without performing a write.
         // The preview and execution both use the frozen, validated options.
         const people = {};
+        if (target) people[target.id] = target;
         const readLabel = (read) =>
           withDeadline(async () => {
             try {
@@ -236,20 +334,24 @@ export function createCommandTools({ appContext }) {
             }
           });
         for (const option of operation.options) {
-          if (option.type === 'user' && options[option.name]) {
+          if (!target && option.type === 'user' && options[option.name]) {
             const id = options[option.name].id;
             people[id] = await readLabel(() => appContext.directory.getPersonByDiscordId(id));
           }
         }
         const teamSlug = options.team ?? (commandName === 'team' ? options.slug : null);
         const team =
-          teamSlug && !(commandName === 'team' && subcommand === 'create')
+          targetTeam ??
+          (teamSlug && !(commandName === 'team' && subcommand === 'create')
             ? await readLabel(() => appContext.directory.getTeamBySlug(teamSlug))
-            : null;
+            : null);
         const action = {
           userId: intent.discordUserId,
           confirm,
           publicRead,
+          ...(target && {
+            membershipTarget: Object.freeze({ personId: target.id, teamId: targetTeam.id }),
+          }),
           summary: renderActionSummary({
             commandName,
             subcommand,

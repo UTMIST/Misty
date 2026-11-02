@@ -170,7 +170,7 @@ for (const failure of ['invalid member', 'authorization failure']) {
       });
       const clarification =
         failure === 'invalid member'
-          ? 'Please mention each person to add and include the team. Nothing was changed.'
+          ? 'Supply a full name and exact email together, or mention each person, and include the team. Nothing was changed.'
           : 'Use /help privately to check command access or ask an admin. Nothing was changed.';
       let modelCalls = 0;
       ctx.llmClient.chat = async (args) => {
@@ -194,7 +194,7 @@ for (const failure of ['invalid member', 'authorization failure']) {
         assert.ok(errors.every((result) => result.is_error));
         assert.match(
           JSON.stringify(errors),
-          failure === 'invalid member' ? /Invalid user/ : /not available/,
+          failure === 'invalid member' ? /mention ID or a name\/email reference/ : /not available/,
         );
         assert.match(args.system, /Nothing was changed/);
         return { stop_reason: 'end_turn', content: clarification };
