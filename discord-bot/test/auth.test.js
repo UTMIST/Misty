@@ -15,6 +15,20 @@ test('resolvePrincipal returns null when unlinked', async () => {
   assert.equal(principal, null);
 });
 
+test('resolvePrincipal treats an inactive person as anonymous', async () => {
+  const principal = await resolvePrincipal(
+    {
+      getPersonByDiscordId: async () => ({
+        id: 'retired',
+        active: false,
+        access_level: 'superuser',
+      }),
+    },
+    '123',
+  );
+  assert.equal(principal, null);
+});
+
 test('resolvePrincipal propagates DirectoryUnavailable', async () => {
   await assert.rejects(
     () =>
@@ -38,6 +52,15 @@ test('authorize public is always ok', () => {
 test('authorize linked requires a principal', () => {
   assert.deepEqual(authorize('linked', { person: {} }), { ok: true });
   assert.deepEqual(authorize('linked', null), { ok: false, reason: 'not_linked' });
+});
+
+test('authorize denies an inactive principal for every protected policy', () => {
+  for (const policy of ['linked', 'admin', 'superuser']) {
+    assert.deepEqual(authorize(policy, { person: { active: false, access_level: 'superuser' } }), {
+      ok: false,
+      reason: 'not_linked',
+    });
+  }
 });
 
 test('authorize denies unknown policy (fail closed)', () => {
