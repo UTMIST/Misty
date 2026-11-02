@@ -6,6 +6,7 @@ import {
   renderRenameTeamResult,
   renderAddMemberResult,
   renderRemoveMemberResult,
+  renderUpdateMemberResult,
   renderRosterResult,
   renderGoogleGroupStatusResult,
   renderGoogleGroupSyncResult,
@@ -165,6 +166,53 @@ export default defineCommand({
           { caller },
         );
         return renderRemoveMemberResult(result);
+      },
+    },
+    {
+      name: 'update',
+      description: 'Update an existing team role or team-admin flag (admin)',
+      auth: 'admin',
+      options: [
+        { name: 'user', type: 'user', required: true, description: 'Discord user' },
+        {
+          name: 'team',
+          type: 'string',
+          required: true,
+          description: 'Team slug',
+          autocomplete: allTeamsAutocomplete,
+        },
+        {
+          name: 'role',
+          type: 'string',
+          required: false,
+          description: 'New team role (not global access)',
+          choices: ROLE_CHOICES,
+        },
+        {
+          name: 'team_admin',
+          type: 'boolean',
+          required: false,
+          description: 'New team-admin flag (not global admin)',
+        },
+      ],
+      async handler({ options, ctx }) {
+        const result = await ctx.teamService.updateMember({
+          personId: options.user.personId,
+          discordSnowflake: options.user.id,
+          teamSlug: options.team,
+          teamId: options.teamId,
+          roleKindId: options.role ?? undefined,
+          isTeamAdmin: options.team_admin ?? undefined,
+          expectedMembership: options.expectedMembership,
+          beforeWrite: options.beforeMembershipWrite,
+        });
+        if (options.expectedMembership && result.outcome === 'UPDATE_UNCERTAIN') {
+          throw new Error(
+            'Membership update result is uncertain. Check current state before asking again.',
+          );
+        }
+        if (result.membership) options.onMembershipUpdated?.(result.membership);
+        return renderUpdateMemberResult(result);
       },
     },
     {

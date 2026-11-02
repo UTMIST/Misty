@@ -250,6 +250,7 @@ and skips them.
 - `/team list [active_only:<bool>]` (linked) — list teams (default active only).
 - `/team rename slug:<> new_label:<>` (admin) — rename a team.
 - `/team add user:<@mention> team:<slug> [role:<...>] [team_admin:<bool>]` (admin) — add a member. The mentioned user must have already run `/link`.
+- `/team update user:<@mention> team:<slug> [role:<...>] [team_admin:<bool>]` (admin) — update an existing membership without removing/re-adding it. Supply at least one field; global access is unchanged.
 - `/team remove user:<@mention> team:<slug>` (admin) — soft-end a membership as of today.
 - `/team roster team:<slug> [as_of:<YYYY-MM-DD>]` (linked) — show a team's current roster.
 - `/team google-status team:<slug>` (admin) — show the team's managed Google Group sync status. Settings failures offer automatic retry and a manual recovery fallback.
@@ -477,7 +478,7 @@ scope set). Deploy the directory search API from #359 before enabling this path.
 | --- | --- |
 | Directory and help | List teams, view a roster, my teams, who am I, help, bug-report link |
 | Documents | List, add, remove; search and read use the retrieval rules below |
-| Team administration | Create, rename, add/remove members, seed a person |
+| Team administration | Create, rename, add/remove members, update team roles/flags, seed a person |
 | Google Groups | View sync status, request a sync |
 | Channel access | Show, set, append, clear the current channel's team access |
 | Helper limits | Show or change request limits |
@@ -888,3 +889,25 @@ Moving the bot to another voice channel ends a saved recording immediately;
 start a new recording there to use its audience. `save:false` recordings continue
 to follow moves.
 See [setup and recovery](../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).
+
+### Updating existing team memberships (#362)
+
+With helper tools enabled, ask “make Alex Chen a lead on research” or “remove
+Alex’s team-admin flag on research.” Name/email resolution follows the
+[person lookup rules](#commands-through-mentions-and-dms). The private preview
+shows the current and proposed team role and flag. These are team properties;
+they do not grant global admin access. Global admins/superusers can perform the
+operation; a team-admin flag alone is insufficient.
+
+Confirmation pins the exact membership ID, original start/end dates, role,
+flag and update timestamp. Changed, missing or ambiguous memberships require a
+fresh request. Unchanged values cause no write. If a PATCH response is lost,
+Misty stops later helper actions and asks you to check the current state; it
+does not retry the uncertain write. PATCH changes only requested
+fields and preserves the directory-owned Google Group sync path. The read and
+PATCH are separate requests: this API does not provide atomic compare-and-swap,
+so a concurrent edit after the final check can still race with the write.
+
+This adds `/team update` to normal command registration; deployment's existing
+pre-deploy registration handles it. Existing `memberships:read/write` scopes
+suffice. Deploy #360's resolver before this dependent change.

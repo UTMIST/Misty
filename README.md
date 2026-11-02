@@ -40,7 +40,7 @@ There are currently no beta commands.
 ### As an admin (in Discord)
 
 - **`/seed`** — create a new person in the directory (member / admin / superuser). Requires admin+. Stable (visible globally). You can only grant a level at or below your own. An existing person is rejected; `/seed` does not promote them.
-- **`/team create`**, **`/team add`**, **`/team remove`**, **`/team rename`** — the write subcommands are admin-gated. Stable (visible globally).
+- **`/team create`**, **`/team add`**, **`/team remove`**, **`/team update`**, **`/team rename`** — the write subcommands are admin-gated. Stable (visible globally).
 - **`/channel-access`** — show, set, append, or clear which teams' documents Misty may use when answering in the current channel (subcommands: `show`, `set`, `append`, `clear`). Admin-only. `set` replaces the list; `append` unions onto it. Threads inherit the parent channel's scope. Drive access stays personal.
 
 ### As a developer / integration builder

@@ -29,6 +29,7 @@ export function renderActionSummary({
   request,
   people,
   team,
+  membership: currentMembership,
 }) {
   const member = options.user && people[options.user.personId ?? options.user.id];
   const userLabel = options.user
@@ -40,10 +41,12 @@ export function renderActionSummary({
   const teamLabel = teamSlug
     ? `${team?.label ? `**${text(team.label)}** ` : ''}(${text(teamSlug)})`
     : null;
-  const membership = commandName === 'team' && ['add', 'remove'].includes(subcommand);
-  const heading = membership
-    ? `${subcommand === 'remove' ? 'Remove' : 'Add'} ${userLabel} ${subcommand === 'remove' ? 'from' : 'to'} ${teamLabel}.`
-    : `**${text(operation.description.replace(/ \(admin\)$/, ''))}**`;
+  const membership = commandName === 'team' && ['add', 'remove', 'update'].includes(subcommand);
+  const heading = currentMembership
+    ? `Update ${userLabel} on ${teamLabel}.\nTeam role: ${text(currentMembership.role_kind_id)} → ${text(options.role ?? currentMembership.role_kind_id)}\nTeam-admin flag: ${currentMembership.is_team_admin} → ${options.team_admin ?? currentMembership.is_team_admin}\nGlobal access level is unchanged.`
+    : membership
+      ? `${subcommand === 'remove' ? 'Remove' : 'Add'} ${userLabel} ${subcommand === 'remove' ? 'from' : 'to'} ${teamLabel}.`
+      : `**${text(operation.description.replace(/ \(admin\)$/, ''))}**`;
   const args = Object.entries(options).flatMap(([key, value]) => {
     if (membership && ['user', 'team', 'teamId'].includes(key)) return [];
     const label = text(key.replaceAll('_', ' '));

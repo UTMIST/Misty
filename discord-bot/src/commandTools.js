@@ -9,6 +9,8 @@ import {
   PersonResolutionError,
 } from './services/personResolver.js';
 
+import { MembershipStateChanged } from './services/teamService.js';
+
 export const llmSafe = true;
 
 // Deliberate allowlist. Adding a slash command never automatically gives the
@@ -27,6 +29,7 @@ const OPERATIONS = [
   ['team', 'rename', true],
   ['team', 'add', true],
   ['team', 'remove', true],
+  ['team', 'update', true],
   ['seed', null, true],
   ['team', 'google-status'],
   ['team', 'google-sync', true],
@@ -122,7 +125,7 @@ export function createCommandTools({ appContext }) {
     const command = commands.get(commandName);
     const operation = subcommand ? command.subcommands.find((s) => s.name === subcommand) : command;
     const name = [commandName, subcommand].filter(Boolean).join('_').replaceAll('-', '_');
-    const bulkMembers = commandName === 'team' && ['add', 'remove'].includes(subcommand);
+    const bulkMembers = commandName === 'team' && ['add', 'remove', 'update'].includes(subcommand);
     const delivery = PUBLIC_READS.has(name)
       ? 'Replies publicly in server conversations'
       : commandName === 'record'
@@ -213,12 +216,24 @@ export function createCommandTools({ appContext }) {
         } catch (error) {
           return { is_error: true, content: { error: error.message } };
         }
+        if (
+          subcommand === 'update' &&
+          commandName === 'team' &&
+          options.role === undefined &&
+          options.team_admin === undefined
+        ) {
+          return {
+            is_error: true,
+            content: { error: 'Supply a team role or team-admin flag to update.' },
+          };
+        }
         if (!request?.discordUserId || !principal?.person?.id) {
           return { is_error: true, content: { error: 'Authenticated requester is required.' } };
         }
         let expiresAt = Date.now() + 120000;
         let target;
         let targetTeam;
+        let targetMembership;
         const intent = Object.freeze({
           surface: 'discord',
           commandName,
@@ -267,6 +282,8 @@ export function createCommandTools({ appContext }) {
                 );
               }
             }
+            if (targetMembership) await appContext.teamService.checkMemberUpdate(targetMembership);
+            if (Date.now() >= intent.expiresAt) throw new Error('This action expired. Ask again.');
             return result.principal;
           });
         try {
@@ -284,6 +301,15 @@ export function createCommandTools({ appContext }) {
             );
             const team = await withDeadline(() => appContext.directory.getTeamBySlug(options.team));
             if (!team || team.active === false) throw new Error('team unavailable');
+            if (subcommand === 'update') {
+              const prepared = await withDeadline(() =>
+                appContext.teamService.prepareMemberUpdate({
+                  personId: person.id,
+                  teamId: team.id,
+                }),
+              );
+              targetMembership = prepared.membership;
+            }
             target = Object.freeze({
               id: person.id,
               display_name: person.display_name,
@@ -303,7 +329,7 @@ export function createCommandTools({ appContext }) {
               is_error: true,
               content: {
                 error:
-                  error instanceof PersonResolutionError
+                  error instanceof PersonResolutionError || error instanceof MembershipStateChanged
                     ? error.message
                     : 'The member or team could not be verified. Nothing was changed. Try again or clarify the complete request.',
               },
@@ -360,6 +386,7 @@ export function createCommandTools({ appContext }) {
             request,
             people,
             team,
+            membership: targetMembership,
           }),
           check,
           setExpiresAt(value) {
@@ -371,7 +398,20 @@ export function createCommandTools({ appContext }) {
               if (!runMeeting) return { content: 'Use this action in a server channel.' };
               return runMeeting({ commandName, subcommand, options }, checks);
             }
-            const payload = await dispatch(intent, { commands, appContext, checks });
+            const executionIntent = targetMembership
+              ? {
+                  ...intent,
+                  options: {
+                    ...options,
+                    expectedMembership: targetMembership,
+                    beforeMembershipWrite: () => action.check(new Map()),
+                    onMembershipUpdated: (membership) => {
+                      targetMembership = Object.freeze({ ...membership });
+                    },
+                  },
+                }
+              : intent;
+            const payload = await dispatch(executionIntent, { commands, appContext, checks });
             return publicRead ? { ...payload, publicReply: { payload } } : payload;
           },
         };

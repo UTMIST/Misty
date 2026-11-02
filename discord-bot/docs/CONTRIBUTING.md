@@ -581,3 +581,35 @@ read-only person tool, slash option, configuration setting or automatic linking.
 >   `src/web/public/` is served to the page, so `process` and `Buffer` genuinely don't
 >   exist there and ESLint is configured to say so. Layer a browser block on top of a
 >   `**/*.js` node block and flat config merges them, handing browser files both sets.
+
+### Membership update implementation (#362)
+
+`team_update` reuses person resolution and private confirmations. Its membership
+snapshot is rechecked before execution; successful writes replace that snapshot
+with the returned record so receipt delivery does not reject our own change.
+Do not reselect a replacement membership or implement updates as end/create.
+A transport failure after PATCH starts is an uncertain write: helper dispatch
+throws to stop the batch, while slash replies ask the user to check current
+state. Read outages and explicit validation rejections remain ordinary results.
+After the service finishes its final membership lookup, helper updates run a
+fresh action check immediately before PATCH. Check expiry after asynchronous
+reads too; cached earlier authorization cannot cover time spent in those reads.
+The regression suite exhausts all 112 supported role/flag transitions and
+advances a controlled clock during the final lookup to test expiry.
+
+Changed-file rationale:
+
+- `src/clients/directoryClient.js`: expose the existing membership PATCH endpoint.
+- `src/services/teamService.js`: resolve one current membership, compare its
+  snapshot, omit unchanged fields and normalize failures without retries.
+- `src/commands/team.js`: declare the admin-only update command and dispatch it.
+- `src/commandTools.js`: prepare exact membership targets and revalidate them.
+- `src/messages/helperActions.js`, `src/messages/team.js`: render private
+  before/after previews and update/no-op/failure results.
+- `src/adapters/discord/helperActions.js`: explain changed pending details.
+- `src/messages/help.js`, `README.md`, root `README.md`: document the new operation.
+- `test/membershipUpdate.test.js`: exercise continuity, partial updates, no-op,
+  stale state, denial, errors and the client request contract.
+- This contributing section records the snapshot and delivery convention.
+
+The root command-list update deliberately spans the root documentation zone.
