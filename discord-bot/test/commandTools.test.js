@@ -10,7 +10,13 @@ function fixture(level = 'member') {
   ctx.directory = {
     async getPersonByDiscordId(id) {
       calls.push(['identify', id]);
-      return person;
+      return id === '111111111111111111' ? person : { id, display_name: 'Alex', active: true };
+    },
+    async getPerson(id) {
+      return this.getPersonByDiscordId(id);
+    },
+    async getTeam(id) {
+      return { id, slug: 'infra', label: 'Infrastructure' };
     },
     async listTeams() {
       calls.push(['list']);
@@ -223,7 +229,7 @@ test('member previews escape labels while keeping the exact member, team and thr
   assert.doesNotMatch(JSON.stringify(result.content), /Sam|Infrastructure/);
 });
 
-test('optional preview labels fall back to the member mention and team slug on lookup failure', async () => {
+test('unverifiable member/team labels withhold membership writes without backend detail', async () => {
   const f = fixture('admin');
   const identify = f.ctx.directory.getPersonByDiscordId;
   f.ctx.directory.getPersonByDiscordId = async (id) => {
@@ -234,10 +240,9 @@ test('optional preview labels fall back to the member mention and team slug on l
     throw new Error('Sensitive team detail');
   };
   const result = await tool(f, 'team_remove', { user: '123', team: 'infra' });
-  assert.ok(result.action);
-  assert.match(result.action.summary, /<@123>/);
-  assert.match(result.action.summary, /infra/);
-  assert.doesNotMatch(result.action.summary, /Sensitive/);
+  assert.equal(result.action, undefined);
+  assert.equal(result.is_error, true);
+  assert.doesNotMatch(JSON.stringify(result.content), /Sensitive/);
   assert.equal(
     f.calls.some((call) => call[0] === 'update'),
     false,
