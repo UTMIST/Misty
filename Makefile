@@ -34,7 +34,7 @@ BOT_DIR := discord-bot
 PG_SUITE := tests/test_postgres_adapter.py
 
 .DEFAULT_GOAL := help
-.PHONY: help install test test-full test-readiness lint format check check-node labels clean-pyc
+.PHONY: help install test test-full test-readiness test-promotion lint format check check-node labels clean-pyc
 
 help: ## Show this help
 	@echo 'UTMIST ops platform'
@@ -76,7 +76,7 @@ install: ## Install every dependency (uv workspace + bot)
 	uv sync --extra dev
 	cd $(BOT_DIR) && npm ci
 
-test: test-readiness ## Fast suites only — no Docker, external network, or credentials (see test-full)
+test: test-readiness test-promotion ## Fast suites only — no Docker, external network, or credentials (see test-full)
 	@set -e; for d in $(PY_DIRS); do \
 	  echo "==> $$d"; \
 	  ( cd $$d && uv run pytest -q --ignore=$(PG_SUITE) ); \
@@ -85,7 +85,7 @@ test: test-readiness ## Fast suites only — no Docker, external network, or cre
 	@$(MAKE) --no-print-directory check-node
 	@cd $(BOT_DIR) && npm test
 
-test-full: test-readiness ## Collect all suites; DB opt-ins/setup still required (docs/DEVELOPMENT.md)
+test-full: test-readiness test-promotion ## Collect all suites; DB opt-ins/setup still required (docs/DEVELOPMENT.md)
 	@echo "Requires each DB-backed service's Postgres up and migrated."
 	@echo "See docs/DEVELOPMENT.md — note documentation-system and verification both bind 5434."
 	@set -e; for d in $(PY_DIRS); do \
@@ -100,6 +100,9 @@ test-readiness: check-node ## Readiness checker regressions (fakes and a local H
 	node --check scripts/readiness-checker.js
 	node --check scripts/readiness-checker.test.js
 	node --test scripts/readiness-checker.test.js
+
+test-promotion: check-node ## Promotion/sync regressions (local Git repositories and fake GitHub)
+	node --test .github/scripts/promotion.test.cjs
 
 lint: ## Check lint + formatting everywhere (read-only — same gates as CI)
 	@set -e; for d in $(PY_DIRS); do \
