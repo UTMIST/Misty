@@ -31,6 +31,13 @@ export class MembershipInvalid extends Error {
   }
 }
 
+export class MembershipUpdateUncertain extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'MembershipUpdateUncertain';
+  }
+}
+
 export class AlreadyLinked extends Error {
   constructor(detail) {
     super(detail);
@@ -267,17 +274,27 @@ export function createDirectoryClient({ baseUrl, apiKey, fetchImpl = fetch }) {
     },
 
     async updateMembership(membershipId, patch) {
-      const resp = await send(`/memberships/${encodeURIComponent(membershipId)}`, {
-        method: 'PATCH',
-        body: JSON.stringify(patch),
-      });
-      if (resp.status === 200) return parseJson(resp);
-      if (resp.status === 404) return null;
-      if (resp.status === 400) {
-        const body = await resp.json().catch(() => ({}));
-        throw new MembershipInvalid(body.detail ?? 'membership invalid');
+      try {
+        const resp = await send(`/memberships/${encodeURIComponent(membershipId)}`, {
+          method: 'PATCH',
+          body: JSON.stringify(patch),
+        });
+        if (resp.status === 200) return parseJson(resp);
+        if (resp.status === 404) return null;
+        if (resp.status === 400) {
+          const body = await resp.json().catch(() => ({}));
+          throw new MembershipInvalid(body.detail ?? 'membership invalid');
+        }
+        throw new MembershipUpdateUncertain(`directory returned ${resp.status}`);
+      } catch (error) {
+        if (error instanceof MembershipInvalid || error instanceof MembershipUpdateUncertain) {
+          throw error;
+        }
+        if (error instanceof DirectoryUnavailable) {
+          throw new MembershipUpdateUncertain('membership update response was unavailable');
+        }
+        throw error;
       }
-      throw new DirectoryUnavailable(`directory returned ${resp.status}`);
     },
 
     async listMemberships({ teamId, personId, activeOnly, asOf, isTeamAdmin } = {}) {

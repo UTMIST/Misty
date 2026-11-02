@@ -187,8 +187,17 @@ export default defineCommand({
             expectedIsTeamAdmin: options.expectedIsTeamAdmin,
           }),
         };
-        const result = await ctx.teamService.updateMember(args, { caller });
-        return renderUpdateMemberResult(result);
+        const result = await ctx.teamService.updateMember(args, {
+          caller,
+          beforeWrite: ctx.beforeWrite,
+        });
+        const reply = renderUpdateMemberResult(result);
+        if (result.outcome === 'UPDATE_UNCERTAIN' && ctx.helperExecution) {
+          const error = new Error(reply.content);
+          error.stopBatch = true;
+          throw error;
+        }
+        return reply;
       },
     },
     {

@@ -123,7 +123,7 @@ export function createCommandTools({ appContext }) {
     const command = commands.get(commandName);
     const operation = subcommand ? command.subcommands.find((s) => s.name === subcommand) : command;
     const name = [commandName, subcommand].filter(Boolean).join('_').replaceAll('-', '_');
-    const bulkMembers = commandName === 'team' && ['add', 'remove'].includes(subcommand);
+    const bulkMembers = commandName === 'team' && ['add', 'remove', 'update'].includes(subcommand);
     const delivery = PUBLIC_READS.has(name)
       ? 'Replies publicly in server conversations'
       : commandName === 'record'
@@ -421,7 +421,12 @@ export function createCommandTools({ appContext }) {
               if (!runMeeting) return { content: 'Use this action in a server channel.' };
               return runMeeting({ commandName, subcommand, options }, checks);
             }
-            const payload = await dispatch(intent, { commands, appContext, checks });
+            const payload = await dispatch(intent, {
+              commands,
+              appContext,
+              checks,
+              beforeWrite: () => action.check(new Map()),
+            });
             return publicRead ? { ...payload, publicReply: { payload } } : payload;
           },
         };

@@ -2,6 +2,7 @@ import {
   TeamExists,
   TeamNotFound,
   MembershipInvalid,
+  MembershipUpdateUncertain,
   DirectoryUnavailable,
   GoogleGroupsNotConfigured,
   GoogleGroupSyncConflict,
@@ -161,17 +162,18 @@ export function createTeamService({
       expectedRoleKindId,
       expectedIsTeamAdmin,
     },
-    _opts,
+    { beforeWrite } = {},
   ) {
+    let person;
+    let team;
+    let membership;
     try {
-      const person = await resolvePersonTarget(directory, {
+      person = await resolvePersonTarget(directory, {
         personId,
         discordSnowflake,
         reference,
       });
-      const team = teamId
-        ? await directory.getTeam(teamId)
-        : await directory.getTeamBySlug(teamSlug);
+      team = teamId ? await directory.getTeam(teamId) : await directory.getTeamBySlug(teamSlug);
       if (!team || team.active === false) return { outcome: 'TEAM_NOT_FOUND' };
       const active = await directory.listMemberships({
         teamId: team.id,
@@ -183,7 +185,7 @@ export function createTeamService({
       if (active.length !== 1) {
         return { outcome: 'MEMBERSHIP_AMBIGUOUS', person, team };
       }
-      const membership = active[0];
+      membership = active[0];
       if (
         (expectedMembershipId !== undefined && membership.id !== expectedMembershipId) ||
         (expectedRoleKindId !== undefined && membership.role_kind_id !== expectedRoleKindId) ||
@@ -201,13 +203,25 @@ export function createTeamService({
       if (Object.keys(patch).length === 0) {
         return { outcome: 'NOOP', person, team, membership };
       }
-      const updated = await directory.updateMembership(membership.id, patch);
+      await beforeWrite?.();
+      let updated;
+      try {
+        updated = await directory.updateMembership(membership.id, patch);
+      } catch (error) {
+        if (error instanceof DirectoryUnavailable) {
+          return { outcome: 'UPDATE_UNCERTAIN', person, team, membership };
+        }
+        throw error;
+      }
       if (!updated) return { outcome: 'STALE_MEMBERSHIP', person, team, membership };
       return { outcome: 'UPDATED', person, team, membership, updated };
     } catch (e) {
       if (e instanceof PersonResolutionError) return { outcome: e.outcome };
       if (e instanceof MembershipInvalid) {
         return { outcome: 'MEMBERSHIP_INVALID', detail: e.detail };
+      }
+      if (e instanceof MembershipUpdateUncertain) {
+        return { outcome: 'UPDATE_UNCERTAIN', person, team, membership };
       }
       if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
       throw e;

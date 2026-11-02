@@ -48,12 +48,14 @@ export function combineHelperActions(actions) {
           const beforeEffect = new Map();
           await action.check(beforeEffect);
           replies.push({ ...(await action.execute(beforeEffect)), check: action.check });
-        } catch {
+        } catch (error) {
           replies.push({
             // This content-free failure receipt is safe even when authorization
             // was lost. Successful payloads keep their own delivery checks.
             safeFailure: true,
-            content: `Action ${index + 1} could not be completed. Earlier actions may have completed; remaining actions were not run. Check the current state before asking again.`,
+            content: error?.stopBatch
+              ? error.message
+              : `Action ${index + 1} could not be completed. Earlier actions may have completed; remaining actions were not run. Check the current state before asking again.`,
           });
           break;
         }

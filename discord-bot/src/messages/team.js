@@ -256,6 +256,8 @@ export function renderUpdateMemberResult(result) {
         return 'That membership changed or ended since the request was prepared. Nothing was changed; ask again for a fresh preview.';
       case 'MEMBERSHIP_INVALID':
         return `The directory rejected that membership update: ${result.detail}`;
+      case 'UPDATE_UNCERTAIN':
+        return 'The membership update may have been applied, but its response was lost. Check the current membership before retrying.';
       case 'DIRECTORY_DOWN':
         return DIRECTORY_DOWN_MSG;
       default:

@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createAppContext } from '../src/context.js';
 import { createTeamService } from '../src/services/teamService.js';
+import { DirectoryUnavailable } from '../src/clients/directoryClient.js';
+import { combineHelperActions } from '../src/helperActions.js';
 
 function fixture(level = 'member') {
   const ctx = createAppContext({ helperToolsEnabled: true });
@@ -140,11 +142,107 @@ test('admin write requires confirmation and rechecks privileges before executing
     false,
   );
   f.setPerson({ ...f.principal.person, access_level: 'member' });
-  await assert.rejects(result.action.execute(), /permission|authorized|access/i);
+  await assert.rejects(result.action.execute(), /failed|permission|authorized|access/i);
   assert.equal(
     f.calls.some((c) => c[0] === 'update'),
     false,
   );
+});
+
+test('team update prepares name/email targets and rejects a replaced membership', async () => {
+  const f = fixture('admin');
+  const target = {
+    id: 'target',
+    display_name: 'Target',
+    primary_email: 'target@example.org',
+    active: true,
+  };
+  let memberships = [
+    { id: 'm1', person_id: target.id, team_id: 't1', role_kind_id: 'member', is_team_admin: false },
+  ];
+  f.ctx.directory.searchPeople = async () => ({
+    matches: [target],
+    has_more: false,
+    needs_disambiguation: false,
+  });
+  f.ctx.directory.getPerson = async (id) => (id === target.id ? target : f.principal.person);
+  f.ctx.directory.listMemberships = async () => memberships;
+  f.ctx.directory.updateMembership = async () => {
+    throw new Error('must not patch a replaced membership');
+  };
+  f.ctx.teamService = createTeamService({ directory: f.ctx.directory });
+
+  const result = await tool(f, 'team_update', {
+    user: { name: 'Target', email: 'target@example.org' },
+    team: 'infra',
+    role: 'lead',
+  });
+  assert.ok(result.action);
+  assert.match(result.action.summary, /Team role: member.*lead/);
+  assert.match(result.action.summary, /Team-admin flag: no.*no/);
+
+  memberships = [
+    { id: 'm2', person_id: target.id, team_id: 't1', role_kind_id: 'member', is_team_admin: false },
+  ];
+  await assert.rejects(result.action.execute(), /changed or ended|fresh preview/i);
+});
+
+test('team update rechecks authorization immediately before PATCH', async () => {
+  const f = fixture('admin');
+  const target = {
+    id: 'target',
+    display_name: 'Target',
+    primary_email: 'target@example.org',
+    active: true,
+  };
+  let memberships = [
+    { id: 'm1', person_id: target.id, team_id: 't1', role_kind_id: 'member', is_team_admin: false },
+  ];
+  let patched = false;
+  let membershipReads = 0;
+  const identify = f.ctx.directory.getPersonByDiscordId;
+  f.ctx.directory.getPerson = async (id) => (id === target.id ? target : f.principal.person);
+  f.ctx.directory.getPersonByDiscordId = async (id) => (id === '123' ? target : identify(id));
+  f.ctx.directory.listMemberships = async ({ personId }) => {
+    if (personId === target.id) {
+      membershipReads++;
+      if (membershipReads >= 3) f.setPerson({ ...f.principal.person, access_level: 'member' });
+      return memberships;
+    }
+    return [];
+  };
+  f.ctx.directory.updateMembership = async () => {
+    patched = true;
+    return memberships[0];
+  };
+  f.ctx.teamService = createTeamService({ directory: f.ctx.directory });
+
+  const result = await tool(f, 'team_update', {
+    user: '123',
+    team: 'infra',
+    role: 'lead',
+  });
+  await assert.rejects(result.action.execute(), /failed|permission|authorized|access/i);
+  assert.equal(patched, false);
+});
+
+test('an uncertain team update stops later helper actions', async () => {
+  const f = fixture('admin');
+  const membership = { id: 'm1', role_kind_id: 'member', is_team_admin: false };
+  f.ctx.directory.listMemberships = async () => [membership];
+  f.ctx.directory.updateMembership = async () => {
+    throw new DirectoryUnavailable('lost response');
+  };
+  f.ctx.teamService = createTeamService({ directory: f.ctx.directory });
+  const first = await tool(f, 'team_update', { user: '123', team: 'infra', role: 'lead' });
+  const second = await tool(f, 'team_rename', {
+    slug: 'infra',
+    new_label: 'Changed',
+  });
+  const combined = combineHelperActions([first.action, second.action]);
+  const result = await combined.execute();
+  assert.equal(result.replies.length, 1);
+  assert.match(result.replies[0].content, /response was lost|check the current membership/i);
 });
 
 test('all tools including help reject unlinked, inactive and relinked requesters', async () => {

@@ -82,7 +82,10 @@ export async function authorizeCommand(intent, { commands, appContext, checks = 
 }
 
 /** Dispatch through the shared policy check; unknown commands return null. */
-export async function dispatch(intent, { commands, appContext, checks = new Map() }) {
+export async function dispatch(
+  intent,
+  { commands, appContext, checks = new Map(), beforeWrite = null },
+) {
   if (!commands.has(intent.commandName)) return null;
   const { command, principal, error } = await authorizeCommand(intent, {
     commands,
@@ -101,7 +104,13 @@ export async function dispatch(intent, { commands, appContext, checks = new Map(
       options: intent.options ?? {},
       subcommand: intent.subcommand ?? null,
       principal,
-      ctx: { ...appContext, commands: availableCommands, sharedHelp: intent.sharedHelp === true },
+      ctx: {
+        ...appContext,
+        commands: availableCommands,
+        sharedHelp: intent.sharedHelp === true,
+        beforeWrite,
+        helperExecution: intent.requireLinked === true,
+      },
       discordUserId: intent.discordUserId,
       discordHandle: intent.discordHandle,
       discordGuildId: intent.discordGuildId ?? null,
@@ -113,6 +122,7 @@ export async function dispatch(intent, { commands, appContext, checks = new Map(
       console.error(`Helper command ${intent.commandName} failed`);
       // Let the pending action stop the batch; do not turn an unexpected
       // execution failure into an ordinary result or expose backend details.
+      if (err?.stopBatch) throw err;
       throw new Error('Helper command failed');
     }
     console.error(`Command ${intent.commandName} failed:`, err);

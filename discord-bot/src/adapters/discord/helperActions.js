@@ -181,7 +181,9 @@ export async function presentHelperAction(message, send, action, appContext) {
     if (token) appContext.helperActions.take(token, action.userId);
     await send({
       content:
-        error instanceof PendingActionsFull || error instanceof ActionBudgetExceeded
+        error instanceof PendingActionsFull ||
+        error instanceof ActionBudgetExceeded ||
+        error?.stopBatch
           ? error.message
           : executionStarted
             ? ACTION_FAILED
@@ -268,7 +270,8 @@ export async function handleHelperActionInteraction(interaction, appContext) {
       await reply({ content: 'Posted the result in the channel.' });
   } catch (error) {
     await reply({
-      content: error instanceof ActionBudgetExceeded ? error.message : ACTION_FAILED,
+      content:
+        error instanceof ActionBudgetExceeded || error?.stopBatch ? error.message : ACTION_FAILED,
     });
   }
 }
