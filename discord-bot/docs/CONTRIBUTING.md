@@ -501,6 +501,55 @@ This change stays in the bot zone; it requires no backend or slash-command chang
 | `test/toolExecutor.test.js` | Cover expanded-action and evidence-budget admission, independent document capacity, and retained spent reads; supply explicit model usage in evidence tests. |
 | `README.md`, `docs/CONTRIBUTING.md` | Document the limits, review behavior and implementation responsibilities. |
 
+### Person target resolution (#360)
+
+Team helper tools accept mention snowflakes or `{name, email}` references (either
+filter is optional, but one is required), singly or in mixed arrays. The shared
+`services/personResolver.js` resolves them through the directory search contract
+from #359; it must not call `listPeople` or expose directory candidates as model
+tool results. A missing/ambiguous/truncated result returns a static clarification,
+including when the search supplies one candidate plus `has_more=true`.
+Email-based clarification directs the requester to a new DM request; do not
+solicit or repeat email details in a shared-channel clarification.
+
+Only the requester sees the actual member name, primary email, stable ID and
+team in the private preview. Candidate lists never enter tool/model history.
+Stable IDs come from the authenticated directory response, never model-supplied
+`personId`/selection fields. Preparation first passes the shared router policy,
+then pins person and team IDs. Fresh checks before execution and each result
+part require the same active records and displayed fields; execution does not
+repeat discovery. Slash/playground user options remain compatible and team
+services use the same resolver for existing mentions and bound IDs.
+
+Resolve the complete bulk proposal before offering it. Repeated references to
+one person/team, including across separate tool calls, withhold the whole batch.
+Keep the existing action count, complete-review, original requester, expiry and
+single-use rules. Eligibility checks are observations before separate backend
+writes, not a cross-service transaction.
+
+This change stays in the bot zone and requires #359's directory endpoint, with
+the existing `people:read` and `identifiers:read` scopes. It adds no model-visible
+read-only person tool, slash option, configuration setting or automatic linking.
+
+| Files | Why changed |
+| --- | --- |
+| `src/clients/directoryClient.js` | Consume bounded active-person search and validate/project its response. |
+| `src/services/personResolver.js` | Validate references, share resolution and fail safely on no match, ambiguity or inactive records. |
+| `src/services/teamService.js` | Reuse resolution and accept stable person/team IDs for writes. |
+| `src/commands/team.js` | Forward internally bound IDs while preserving slash/playground mention arguments. |
+| `src/commandTools.js` | Accept mixed references, authorize discovery, bind immutable targets and recheck private previews. |
+| `src/messages/helperActions.js` | Show actual person identity and team privately without fabricating Discord mentions. |
+| `src/helperActions.js` | Reject duplicate person/team targets across a combined proposal. |
+| `src/toolExecutor.js` | Withhold duplicate batches and request safe clarification without executable retries. |
+| `src/messages/team.js` | Render safe target-resolution failures for team services. |
+| `src/messages/help.js` | Explain chat target forms and private confirmation in team help. |
+| `test/personResolver.test.js` | Cover name/email/mention resolution, forged selections, mixed bulk requests, stale targets, authorization and stable execution. |
+| `test/directoryClient.test.js` | Verify the bounded request and malformed/denied search handling. |
+| `test/commandTools.test.js` | Model distinct target records and require verified membership previews. |
+| `test/helperActions.test.js` | Exercise mixed references through real private review/confirmation, retain bulk and partial-failure coverage. |
+| `test/help-command.test.js`, `test/helperFlow.test.js` | Verify updated member help and safe name/email clarification without action retries. |
+| `README.md`, `docs/CONTRIBUTING.md` | Document user flows, dependency, privacy, bounds, revalidation and file rationale. |
+
 ## Checklist before you push
 
 - [ ] Command is registered in `commands/index.js`.

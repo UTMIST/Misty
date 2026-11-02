@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
+from person_search_contract import check_person_search_contract
 from contracts.types import (
     PendingGroupChange,
     PersonCreate,
@@ -29,6 +30,10 @@ def adapter(clean_db: Engine) -> PostgresStorageAdapter:
 
 def test_readiness_query(adapter):
     assert adapter.is_ready() is True
+
+
+def test_person_search_contract(adapter):
+    check_person_search_contract(adapter)
 
 
 def test_create_and_get_person(adapter):

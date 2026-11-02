@@ -182,6 +182,12 @@ export function renderAddMemberResult(result) {
         return `✅ Added **${result.person.display_name}** to **${result.team.label}**.`;
       case 'USER_NOT_LINKED':
         return USER_NOT_LINKED_MSG;
+      case 'PERSON_NOT_FOUND':
+        return 'No active directory member matched. Check the name and email.';
+      case 'PERSON_AMBIGUOUS':
+        return 'More detail is needed. Supply the full name and exact email together.';
+      case 'PERSON_INACTIVE':
+        return 'That directory member is inactive. Nothing was changed.';
       case 'TEAM_NOT_FOUND':
         return "There's no team with that slug.";
       case 'ALREADY_ON_TEAM':
@@ -204,6 +210,12 @@ export function renderRemoveMemberResult(result) {
         return `✅ Removed **${result.person.display_name}** from **${result.team.label}**.`;
       case 'USER_NOT_LINKED':
         return "That user hasn't linked their directory account, so they aren't on any team.";
+      case 'PERSON_NOT_FOUND':
+        return 'No active directory member matched. Check the name and email.';
+      case 'PERSON_AMBIGUOUS':
+        return 'More detail is needed. Supply the full name and exact email together.';
+      case 'PERSON_INACTIVE':
+        return 'That directory member is inactive. Nothing was changed.';
       case 'TEAM_NOT_FOUND':
         return "There's no team with that slug.";
       case 'NOT_ON_TEAM':

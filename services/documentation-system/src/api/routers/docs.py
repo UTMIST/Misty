@@ -2,7 +2,8 @@ from datetime import datetime, timedelta, timezone
 from typing import get_args
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from anyio import from_thread
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from contracts.directory import DirectoryClient, DirectoryUnavailable
@@ -280,6 +281,7 @@ def release_source_refresh_run(
 
 @router.post("/source-access/refresh-due", response_model=SourceAccessRefreshResult)
 def refresh_due_source_access(
+    request: Request,
     limit: int = Query(default=10, ge=1, le=100),
     storage: StorageAdapter = Depends(get_storage),
     fetchers: FetcherRegistry = Depends(get_fetchers),
@@ -307,7 +309,12 @@ def refresh_due_source_access(
     refreshed = 0
     failed = 0
     index_failed = 0
+    attempted = 0
     for doc in due:
+        # A client timeout closes its connection but cannot interrupt a worker
+        # already fetching/writing a document. Stop before the next document.
+        if from_thread.run(request.is_disconnected):
+            break
         try:
             _refetch_doc_source(
                 doc,
@@ -325,8 +332,9 @@ def refresh_due_source_access(
             refreshed += 1
             outcome = index_doc(doc.id, storage=storage, embedder=embedder, target=target)
             index_failed += outcome.status == "failed"
+        attempted += 1
     return SourceAccessRefreshResult(
-        attempted=len(due), refreshed=refreshed, failed=failed, index_failed=index_failed
+        attempted=attempted, refreshed=refreshed, failed=failed, index_failed=index_failed
     )
 
 

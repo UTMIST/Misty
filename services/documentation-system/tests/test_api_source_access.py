@@ -354,6 +354,142 @@ def test_scheduled_refresh_does_not_cache_directory_outages(
     assert len(fetchers.calls) == 2
 
 
+def test_runner_budget_release_preserves_progress_while_api_request_finishes(
+    ctx, monkeypatch, capsys
+):
+    from concurrent.futures import ThreadPoolExecutor
+    import json
+    from threading import Event
+    from types import SimpleNamespace
+
+    from pydantic import SecretStr
+
+    from src import source_refresh
+    from src.source_refresh import DocsApiClient
+    from tests.test_api_indexing import _key
+
+    client, store, fetchers, _ = ctx
+    doc_ids = _due_docs(ctx, 4)
+    old_docs = {doc_id: store.get_doc(doc_id) for doc_id in doc_ids}
+    clock = [0.0]
+    monkeypatch.setattr(source_refresh, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.delenv("SOURCE_REFRESH_MONITOR_URL", raising=False)
+    headers = _key(store, "docs:write")
+    monkeypatch.setenv("DOCS_API_KEY", headers["X-API-Key"])
+    entered, finish_request = Event(), Event()
+    original_request = client.request
+    post_count = []
+    current_request = [None]
+    disconnected_request = [None]
+
+    async def is_disconnected(request):
+        current_request[0] = request
+        return request is disconnected_request[0]
+
+    monkeypatch.setattr(docs_router.Request, "is_disconnected", is_disconnected)
+
+    def fetch(source_id, url):
+        fetchers.calls.append((source_id, url))
+        if len(fetchers.calls) == 3:
+            entered.set()
+            assert finish_request.wait(10)
+        return _result("bob@example.com", content="completed content")
+
+    monkeypatch.setattr(fetchers, "fetch_for", fetch)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = []
+
+        def request(method, url, **kwargs):
+            if method == "POST" and url.endswith(source_refresh.REFRESH_PATH):
+                post_count.append(True)
+                if len(post_count) == 2:
+                    pending.append(executor.submit(original_request, method, url, **kwargs))
+                    assert entered.wait(10)
+                    disconnected_request[0] = current_request[0]
+                    clock[0] = 10.0
+                    raise httpx.ReadTimeout("offline timeout while API is still working")
+            return original_request(method, url, **kwargs)
+
+        monkeypatch.setattr(client, "request", request)
+        api = DocsApiClient(
+            base_url="http://testserver", api_key=SecretStr(headers["X-API-Key"]), client=client
+        )
+        monkeypatch.setattr(source_refresh, "DocsApiClient", lambda **kwargs: api)
+        try:
+            assert source_refresh.main(["--batch-size", "2", "--max-seconds", "10"]) == 2
+            summary = json.loads(capsys.readouterr().out.splitlines()[-1])
+            assert summary["budget_exhausted"] and summary["guard_released"]
+            assert summary["attempted"] == summary["refreshed"] == 2
+            assert not summary["drained"] and not pending[0].done()
+            completed = [
+                doc_id for doc_id in doc_ids if store.get_doc_content(doc_id) == "completed content"
+            ]
+            assert len(completed) == 2
+            for doc_id in doc_ids:
+                current = store.get_doc(doc_id)
+                if doc_id in completed:
+                    assert (
+                        current.source_access_synced_at > old_docs[doc_id].source_access_synced_at
+                    )
+                else:
+                    assert current == old_docs[doc_id]
+            # Another owner can acquire while the old API request is still blocked.
+            probe = f"/docs/source-access/refresh-runs/{uuid4()}"
+            assert client.post(probe, headers=headers).status_code == 200
+            assert client.delete(probe, headers=headers).status_code == 200
+        finally:
+            finish_request.set()
+            for future in pending:
+                response = future.result(timeout=10)
+                assert response.status_code == 200
+                assert response.json() == {
+                    "attempted": 1,
+                    "refreshed": 1,
+                    "failed": 0,
+                    "index_failed": 0,
+                }
+
+    # The late batch committed only its own document. The next run fetches the
+    # remaining document, not any of the already completed ones.
+    assert source_refresh.main(["--batch-size", "2"]) == 0
+    assert len(fetchers.calls) == 4
+    assert all(store.get_doc_content(doc_id) == "completed content" for doc_id in doc_ids)
+
+
+@pytest.mark.asyncio
+async def test_refresh_stops_on_asgi_disconnect_without_touching_remaining_docs(ctx, fake_embedder):
+    from functools import partial
+
+    from anyio import to_thread
+
+    _, store, fetchers, _ = ctx
+    doc_ids = _due_docs(ctx, 3)
+    old_docs = {doc_id: store.get_doc(doc_id) for doc_id in doc_ids}
+    messages = iter([{"type": "http.request", "body": b""}, {"type": "http.disconnect"}])
+
+    async def receive():
+        return next(messages)
+
+    request = docs_router.Request({"type": "http"}, receive)
+    result = await to_thread.run_sync(
+        partial(
+            docs_router.refresh_due_source_access,
+            request=request,
+            limit=10,
+            storage=store,
+            fetchers=fetchers,
+            directory=FakeDirectory(),
+            embedder=fake_embedder,
+            target=None,
+            actor="scheduler",
+        )
+    )
+    assert result.model_dump() == {"attempted": 1, "refreshed": 1, "failed": 0, "index_failed": 0}
+    assert len(fetchers.calls) == 1
+    untouched = [doc_id for doc_id in doc_ids if store.get_doc(doc_id) == old_docs[doc_id]]
+    assert len(untouched) == 2
+
+
 def test_hourly_schedule_refreshes_delayed_document_without_hourly_downloads(ctx, monkeypatch):
     client, store, fetchers, obo = ctx
     doc = client.post(

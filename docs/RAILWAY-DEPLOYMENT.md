@@ -259,7 +259,10 @@ The dedicated staging `doc-source-refresh` cron uses
 revision as documentation-system. Its staging command uses `--meeting-records`
 and an hourly schedule, so its key needs both `docs:write` and `meetings:write`,
 without database or Google credentials. Apply the current API migration head first: the runner acquires a persistent guard through HTTP before heartbeats,
-so a duplicate cannot mask a stuck run. Set `DOCS_BASE_URL`,
+so a duplicate cannot mask a stuck run. Deploy documentation-system's refresh
+disconnect handling before the runner's automatic time-budget guard release;
+see the [timeout recovery contract](../services/documentation-system/docs/DEPLOYMENT.md#recovery-credential-rotation-and-disablerollback).
+Set `DOCS_BASE_URL`,
 `DOCS_API_KEY`, and the secret `SOURCE_REFRESH_MONITOR_URL` on that service only.
 The config disables migrations, HTTP healthchecks, failure restarts, and PR-preview
 schedules; production remains disabled. Review/merge precedes deployment, and manual

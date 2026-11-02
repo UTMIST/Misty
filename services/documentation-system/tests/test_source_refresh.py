@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import httpx
@@ -145,6 +146,87 @@ def test_time_budget_prevents_next_post_and_caps_timeouts(monkeypatch):
     assert requests[0].extensions["timeout"]["read"] == 10
     assert requests[1].extensions["timeout"]["read"] == 8
     assert report.attempted == 2 and report.exit_code == 2
+    assert report.budget_exhausted
+
+
+@pytest.mark.parametrize(
+    "fault,released",
+    [("budget", True), ("timeout", True), ("early_timeout", False), ("http", False)],
+)
+def test_cli_releases_only_owned_guard_on_time_budget_exhaustion(
+    monkeypatch, capsys, fault, released
+):
+    clock = [0.0]
+    monkeypatch.setattr(source_refresh, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setenv("DOCS_API_KEY", "offline-key")
+    monkeypatch.setenv("SOURCE_REFRESH_MONITOR_URL", "https://monitor.test/private-token")
+    events = []
+    monkeypatch.setattr(RunMonitor, "ping", lambda self, event: events.append(event) or True)
+    reply = httpx.Response(503) if fault == "http" else httpx.ReadTimeout("private details")
+    with api([counts(2), reply]) as (client, requests):
+        refresh = client.refresh_batch
+        batches = []
+
+        def timed_refresh(**kwargs):
+            if not batches:
+                batches.append(True)
+                result = refresh(**kwargs)
+                clock[0] = 10.0 if fault == "budget" else 5.0
+                return result
+            clock[0] = 6.0 if fault == "early_timeout" else 10.0
+            return refresh(**kwargs)
+
+        monkeypatch.setattr(client, "refresh_batch", timed_refresh)
+        monkeypatch.setattr(source_refresh, "DocsApiClient", lambda **kwargs: client)
+        assert main(["--batch-size", "2", "--max-seconds", "10"]) == 2
+    finish = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert finish["budget_exhausted"] is released
+    assert finish["guard_released"] is released
+    assert not finish["drained"] and finish["outcome"] == "failed"
+    assert (finish["batches"], finish["attempted"], finish["refreshed"]) == (1, 2, 2)
+    assert events == ["start", "fail"]
+    releases = [request for request in requests if request.method == "DELETE"]
+    assert len(releases) == int(released)
+    if releases:
+        assert releases[0].url.path.endswith(finish["run_id"])
+    assert sum(request.url.path == source_refresh.REFRESH_PATH for request in requests) == (
+        1 if fault == "budget" else 2
+    )
+
+
+@pytest.mark.parametrize("phase", ["refresh", "meeting"])
+@pytest.mark.parametrize("monitor_ok", [True, False])
+def test_budget_timeout_releases_guard_even_when_monitor_fails(
+    monkeypatch, capsys, phase, monitor_ok
+):
+    clock = [0.0]
+    monkeypatch.setattr(source_refresh, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setenv("DOCS_API_KEY", "offline-key")
+    monkeypatch.setenv("SOURCE_REFRESH_MONITOR_URL", "https://monitor.test/private-token")
+    events = []
+
+    def ping(self, event):
+        events.append(event)
+        return monitor_ok
+
+    monkeypatch.setattr(RunMonitor, "ping", ping)
+    with api([counts()], scopes=["docs:write", "meetings:write"]) as (client, requests):
+
+        def timeout(**kwargs):
+            clock[0] = 10.0
+            raise source_refresh.RefreshTimeout("offline timeout")
+
+        monkeypatch.setattr(
+            client, "refresh_batch" if phase == "refresh" else "retry_meetings", timeout
+        )
+        monkeypatch.setattr(source_refresh, "DocsApiClient", lambda **kwargs: client)
+        assert main(["--max-seconds", "10", "--meeting-records"]) == 2
+    finish = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert finish["budget_exhausted"] and finish["guard_released"]
+    assert finish["drained"] is (phase == "meeting")
+    assert finish["monitor_failed"] is not monitor_ok
+    assert requests[-1].method == "DELETE"
+    assert events == ["start", "fail"]
 
 
 @pytest.mark.parametrize(

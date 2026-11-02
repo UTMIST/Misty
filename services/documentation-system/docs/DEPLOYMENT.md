@@ -624,6 +624,11 @@ or meeting-item failures. Those failures produce `level=warning` and
 `outcome=completed`. Exit `2` and `outcome=failed` mean configuration/auth/HTTP/response
 failure, an exhausted budget, or a conflicting runner. An unacknowledged monitor
 ping also exits `2`; `drained` still records whether the API work completed.
+`budget_exhausted=true` identifies a time-budget stop, and `guard_released=true`
+confirms acknowledged deletion of this runner's guard. Budget exhaustion still
+exits `2` and sends a failure heartbeat, but attempts guard release even if an API
+request is still finishing or heartbeat delivery failed. Earlier HTTP timeouts,
+other HTTP/response errors and batch-limit exhaustion retain the guard.
 Previously completed batch counts remain in the
 summary after an HTTP failure. `index_failed` requires the normal `POST /docs/index`
 recovery workflow and its separately scoped key; the refresh runner does not re-index
@@ -723,11 +728,23 @@ No destination is installed by this repository change.
 
 ### Recovery, credential rotation and disable/rollback
 
-The guard remains held through the final acknowledged heartbeat. A completed drain
-(including counted document/index failures) releases it; a crash, incomplete drain,
-API error or uncertain heartbeat leaves it held for inspection. It has no automatic
-expiry because a timed-out request can still be doing work in the API. If admission
-or release times out, inspect ownership: the request may have committed.
+The guard remains held through the final heartbeat attempt. A completed drain
+(including counted document/index failures) releases it. Time-budget exhaustion
+also releases the runner's exact owner, even when the last API request has not
+finished or the heartbeat failed. This is explicit cleanup, not automatic expiry.
+Other crashes, incomplete drains, API errors or uncertain heartbeats leave it held
+for inspection. If admission or release times out, inspect ownership: the request
+may have committed.
+
+On caller disconnection, document refresh finishes its current document and stops
+before starting another. Completed documents retain their committed content,
+grants and sync/attempt timestamps; untouched documents remain due for the next
+hourly invocation. The runner's counters contain acknowledged batches only, so a
+late API completion can commit more progress than its final summary reports.
+Meeting retries continue their existing state-machine behavior. A released guard
+can admit another runner while old work is still in flight; avoid immediate manual
+replays of the timed-out POST. Deploy the API's between-document disconnect checks
+before the updated runner, then verify a scheduled run and its release log.
 
 To recover a stranded guard, stop the old runner and confirm all its API requests
 and monitor deliveries have finished or failed. Find its UUID in `event=acquire`
@@ -746,7 +763,7 @@ an API schema rollback; ordinary cron disablement does not require a DB downgrad
 | Symptom | Operator action |
 |---|---|
 | Admission `409` / overlapping runner | Inspect the existing owner and duplicate schedules. The rejected runner has sent `/fail` without replacing the original heartbeat start. Do not release a live owner; use the recovery procedure above only after quiescence. |
-| `exit_code=2`, API connection/HTTP failure | Restore the API/network/key. Retain confirmed counts. For a timed-out POST, inspect the API's sanitized audit log and wait until the request is known to have finished before starting another run; never immediately replay it. |
+| `exit_code=2`, API connection/HTTP failure | Restore the API/network/key. Retain confirmed counts. For a timed-out POST, inspect the API's sanitized audit log; never immediately replay it. When `budget_exhausted=true` and `guard_released=true`, the next scheduled invocation can resume due work without manual guard deletion. Other uncertain failures retain the guard for recovery. |
 | `drained=true`, `failed>0` | Inspect sanitized API/connector/directory status. Failed documents retain their previous grants until expiry and wait for the next eligibility window; successful/later documents still advance. After restoring the dependency, let the next eligible refresh run or use the documented operator refetch flow. |
 | `index_failed>0` | Restore the llm/index dependency, then use a separate `docs:index` key with `POST /docs/index`, paging `after: next_after` until null. Verify no failed results and a subsequent empty stale-only pass. Refresh alone will not retry a now-fresh document's index. |
 | `drained=false`, budget exhausted | Inspect backlog and durations; reduce batch size or increase bounded limits only with enough margin before the next hour. Do not add replicas or another scheduler. |

@@ -12,6 +12,9 @@ from contracts.types import (
     PersonIdentifier,
     PersonIdentifierCreate,
     PersonIdentifierUpdate,
+    PersonSearch,
+    PersonSearchMatch,
+    PersonSearchResult,
     PersonUpdate,
     Provider,
     RoleKind,
@@ -117,6 +120,32 @@ class InMemoryStorageAdapter:
         if active_only:
             people = [p for p in people if p.active]
         return people
+
+    def search_people(self, query: PersonSearch) -> PersonSearchResult:
+        email_people = {
+            identifier.person_id
+            for identifier in self._identifiers.values()
+            if identifier.provider == "email" and identifier.external_id == query.email
+        }
+        matches = sorted(
+            (
+                person
+                for person in self._people.values()
+                if (not query.active_only or person.active)
+                and (query.name is None or query.name in person.display_name.lower())
+                and (
+                    query.email is None
+                    or person.primary_email == query.email
+                    or person.id in email_people
+                )
+            ),
+            key=lambda person: (person.display_name.lower(), person.id),
+        )
+        return PersonSearchResult(
+            matches=[PersonSearchMatch.model_validate(p) for p in matches[: query.limit]],
+            has_more=len(matches) > query.limit,
+            needs_disambiguation=len(matches) > 1,
+        )
 
     def update_person(self, person_id: UUID, payload: PersonUpdate, *, actor: str) -> Person | None:
         existing = self._people.get(person_id)
