@@ -245,7 +245,31 @@ and skips them.
   to be linked; the auth layer handles the "not linked" case.
 - `/seed email:<> name:<> [level:member|admin|superuser]` (admin) — add a member to
   the directory. Gated to admins; you can only grant a level at or below your own
-  (`superuser` > `admin` > `member`). The bot's directory key needs `people:write`.
+  (`superuser` > `admin` > `member`). Creating a person above `member` needs
+  `people:elevate` on the bot's directory key, in addition to `people:write`.
+- `/promote user:<@mention> level:admin|superuser` (admin) — raise an existing
+  member's **global** access level. You can promote only another active person whose
+  current level is below yours, up to your own level (see the table below).
+  Demotions, self-promotion and changes to peers/superiors are refused. With helper
+  tools enabled, ask Misty by mention, full directory name or exact email; Misty
+  shows a private current → requested preview and waits for your confirmation.
+  Needs `people:write` and `people:elevate` on the bot's directory key (both are in
+  the documented key scopes); plain `people:write` cannot change access levels.
+
+  | Caller | Target now | Allowed promotion |
+  | --- | --- | --- |
+  | member | any | none |
+  | admin | member | admin |
+  | admin | admin or superuser | none |
+  | superuser | member | admin or superuser |
+  | superuser | admin | superuser |
+  | superuser | superuser | none |
+
+  **Global access level vs team roles.** `member < admin < superuser` is one
+  directory-wide level per person and gates bot commands. Team roles
+  (`member/lead/director/executive`) and the team-admin flag belong to one team
+  membership and are changed with `/team update`. Neither command changes the
+  other, and neither touches Discord guild roles.
 - `/team create slug:<> label:<> [description:<>]` (admin) — create a team.
 - `/team list [active_only:<bool>]` (linked) — list teams (default active only).
 - `/team rename slug:<> new_label:<>` (admin) — rename a team.
