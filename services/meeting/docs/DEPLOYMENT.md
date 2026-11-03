@@ -90,14 +90,16 @@ Nothing is ever written to disk, so there's no volume to provision and no cleanu
 
 ## Rollback
 
-`git revert` + push. No local schema or migration. Completed records already accepted by documentation-system remain catalog-owned; reverting meeting does not undo them.
+Use the platform's [revert-PR procedure](../../../docs/RAILWAY-DEPLOYMENT.md#redeploy-and-rollback).
+There is no local schema or migration. Completed records already accepted by
+documentation-system remain catalog-owned; reverting meeting does not undo them.
 
 The same in-flight caveat applies: a rollback is a restart, and a restart drops active meetings and unaccepted record hand-offs.
 
 ## AWS Transcribe operational notes
 
 - **One open stream per active speaker, for the whole meeting.** A 20-person call with everyone talking means up to 20 concurrent streams. Check the account's concurrent-stream quota before a large meeting — exceeding it fails the stream open, not the whole session.
-- **Transcribe ends sessions on its own** (idle timeout, and a hard 4 h cap). The wrapper reopens on the next audio and offsets the new session's word times. This is unit-tested against a fake but **never observed against a real timeout** — a genuinely long meeting is the first real test of it.
+- **Transcribe ends sessions on its own** (idle timeout, and a hard 4 h cap). The wrapper reopens on the next audio and offsets the new session's word times. Verify this with the [live checklist](../README.md#live-verification) when changing audio handling; offline tests use fakes.
 - **`MAX_MEETING_MS` defaults to 4 h**, matching Transcribe's cap. Past it, the session stops accepting audio. It's a backstop for a forgotten recording, not the normal path — normal ends are `/record stop` or auto-stop when the voice channel empties.
 - **Cost scales with audio duration, once.** Audio is sent to Transcribe exactly once and never replayed, so polling `/transcript` costs nothing. If you see cost scaling with poll frequency, something has reintroduced the replay design — see [ARCHITECTURE.md](ARCHITECTURE.md#the-cost-bug-that-shaped-the-design).
 
@@ -117,7 +119,7 @@ Worth stating plainly, because it's a recording service:
 - **`/stop` hangs ~5 seconds then returns a short transcript.** The client never sent `{"end_of_audio": true}`, so the drain barrier timed out. Check the bot's voice surface — a warning is logged on this path.
 - **Minutes come back as `(minutes unavailable: LLM service error)`.** This is the symptom of an `llm` problem — **not** an error status. `LlmUnavailable` is caught in `pipeline/minutes.py` and degrades to placeholder minutes, so `/stop` still returns **200** with a PDF; only the summary/decisions/action-items are empty. Don't go looking for a 502. Check `LLM_BASE_URL` resolves on the private network, that meeting's `LLM_API_KEY` is in llm's `CONSUMER_KEYS` with the `chat` scope, and the `LLM unavailable, returning placeholder minutes` warning in the logs.
 - **Transcript is empty but audio was flowing.** Usually AWS credentials or region — Transcribe stream opens fail silently from the client's perspective. Check the logs for stream-open errors.
-- **Speakers' words are interleaved at wrong times.** Timeline anchoring. The 200 ms gap tolerance is unverified against live audio; see [ARCHITECTURE.md → Live-verify caveats](ARCHITECTURE.md#live-verify-caveats).
+- **Speakers' words are interleaved at wrong times.** Check timeline anchoring with realistic audio pacing and silence gaps; see the [live verification checklist](../README.md#live-verification).
 - **Everything green but `/record` says "not configured".** That's the *bot*, not this service — `MEETING_BASE_URL` is unset on the discord-bot.
 
 ## Durable record hand-off

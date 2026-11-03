@@ -1,9 +1,29 @@
-# Misty releases
+# Misty releases and the user wiki
 
 Misty has one platform release number in [`VERSION`](../VERSION). A release
 covers the repository snapshot promoted through `staging → main`. Individual
 services and scheduled runners can deploy separately; record their actual
 commit SHAs and deployment IDs when verifying a rollout.
+
+This guide is for maintainers shipping Misty. Developers and operators use the
+documentation in this repository. Members and Misty administrators use the
+[published user guide](https://github.com/UTMIST/Misty/wiki), which lives in the
+separate `UTMIST/Misty.wiki` Git repository.
+
+## Where documentation belongs
+
+| Content | Location | When to update |
+|---|---|---|
+| API contracts, architecture, configuration, tests and recovery | This repository's root and service docs | In the implementation PR |
+| Member/admin walkthroughs, command examples, screenshots and diagrams | The separate GitHub wiki repository | Prepare alongside the feature; publish with its release |
+| What changed, setup needed and known limitations | [GitHub Releases](https://github.com/UTMIST/Misty/releases) | For each user-facing release |
+| Test results, deployment observations and release decisions | Feature or promotion PR | While reviewing and verifying that change |
+
+Keep repository docs current with the code on their branch. Keep the published
+wiki aligned with the released behavior available to users, including any
+activation requirements. A merge to `staging` does not publish wiki changes.
+Link users to the wiki from the root README; keep user walkthroughs and their
+assets in the wiki repository rather than duplicating them here.
 
 ## Version policy
 
@@ -35,11 +55,13 @@ diagnostics and automated release publication are separate follow-up work.
 
 ## Stable baseline and first patch
 
-The [1.0.0 baseline](DEPLOYMENT-HISTORY.md#2026-10-23--100-stable-baseline-pr-319-completed-by-322)
-is the completed October promotion. That historical commit predates `VERSION`.
-Backfill `v1.0.0` at its recorded final production SHA (also given in the
-publication instructions below), not today's branch tip. The history records
-the intended mapping and acceptance limitations, not proof that a tag exists.
+The retrospective **1.0.0** baseline is the completed October promotion:
+[PR #319](https://github.com/UTMIST/Misty/pull/319), followed by the fixture
+correction in [#322](https://github.com/UTMIST/Misty/pull/322). The rollout record
+identifies `172aa5a9278639aeac060002985438ae2ba5bce3` as the final production
+source revision. It predates `VERSION`. Backfill `v1.0.0` at that exact commit,
+not today's branch tip. This mapping neither proves that a tag exists nor closes
+the remaining acceptance work recorded in #319.
 
 `VERSION` now prepares **`1.0.1`**, the first tracked patch after the baseline.
 It collects the Groups, discovery and source-refresh warning fixes already
@@ -50,26 +72,109 @@ promotions each receive a fresh version.
 
 ## Prepare and verify a release
 
-1. Choose the version and change `VERSION` through a PR into `staging`. Use
-   the highest bump required by the changes since the last release. A revert
-   is a new release too; never lower `VERSION` to roll back code.
-2. Include release notes in the `staging → main` PR: features, fixes, breaking
+1. Compare the candidate with the previous release tag and choose the highest
+   version bump required by its changes. Change `VERSION` through a PR into
+   `staging`. A revert is a new release too; never lower `VERSION` to roll back.
+2. Include release notes in the `staging` → `main` PR: features, fixes, breaking
    changes, migrations/recovery constraints, configuration and deployment
    order. Explicitly say when no migrations or new configuration are required.
-3. Validate the exact staging candidate and require green promotion CI. If
+3. Prepare the affected wiki pages in a separate checkout. Include their page
+   list, base revision and a reviewable diff in the promotion PR. Draft notes
+   around what users can do, required setup and known limitations; keep live
+   meeting Q&A marked **in progress** until that status is deliberately changed.
+4. Validate the exact staging candidate and require green promotion CI. If
    staging advances, validate the new candidate before merging. Follow the
    [deployment runbook](RAILWAY-DEPLOYMENT.md) for configuration, backups and
    stateful meeting/bot rollout precautions.
-4. Merge `staging → main` through the existing reviewed flow. **Merging still
-   triggers deployment.** Record the resulting main merge SHA; it differs
-   from the staging SHA. Tagging or publishing a release is not a deploy step.
-5. Verify production at that source revision, including service readiness,
-   migrations, Discord registration and relevant smoke checks. Record the
-   actual revision/deployment ID of scheduled runners as well: a code merge
-   alone does not prove they updated. Keep evidence sanitized.
-6. Publish the tag and GitHub Release using the exact verified main SHA below.
-   If verification fails, retain the failure evidence and fix or revert via
-   staging; do not publish the candidate as a verified release.
+5. Merge `staging` → `main` through the reviewed flow. **Merging still triggers
+   deployment.** Record the resulting main merge SHA; it differs from the staging
+   SHA. Tagging or publishing a release is not a deploy step.
+6. Verify production at that source revision: service readiness, migrations,
+   Discord registration and the affected member/admin journeys. Record scheduled
+   runners' actual revisions and deployment IDs too; a merge does not prove
+   they updated. Offline tests do not establish live Google, AWS or Discord
+   acceptance. Keep evidence sanitized and describe features as available only
+   when their release configuration supports them.
+7. Publish the reviewed wiki changes, tag and GitHub Release using the exact
+   verified main SHA through the procedures below. If verification fails, retain
+   the failure evidence and fix or revert via staging; do not publish the
+   candidate as a verified release.
+
+## Prepare wiki changes
+
+Use a separate checkout so unreleased user guidance cannot become a second
+documentation tree in the application repository:
+
+```sh
+# Run from the directory where you keep repositories.
+git clone https://github.com/UTMIST/Misty.wiki.git Misty.wiki
+cd Misty.wiki
+git switch -c release-guide-updates
+git rev-parse HEAD
+```
+
+For an existing checkout, inspect `git status` and preserve pending work before
+fetching updates or switching branches. The wiki's default branch is independent
+of the application's `main` and `staging`; inspect its remote HEAD rather than
+assuming they use the same name. GitHub wiki edits have their own publication
+workflow and are not deployed by the application's Railway configuration.
+
+Edit the affected pages and assets in this checkout. Preserve the member path
+(getting started → teams → documents, conversations and meetings) and the admin
+path (people and teams → Google sharing → channel and meeting setup). Explain
+what happens in Discord and in connected tools, including delayed sync or
+processing. Use the bot's [command reference](../discord-bot/README.md#commands)
+and service API docs to check names, options, permissions and failure behavior.
+
+Keep page names and anchors stable where possible, and update `_Sidebar.md`
+when navigation changes. Use full wiki page URLs for links between pages and
+`https://raw.githubusercontent.com/wiki/UTMIST/Misty/assets/` for hosted assets.
+Check that every link and asset resolves in the published wiki context.
+
+Preserve accessible examples: Mermaid flows need text descriptions, images need
+alt text, and illustrated replies need nearby text equivalents. Keep the existing
+reply graphics at 420 pixels wide, linked to their full-resolution PNGs. Use
+fictional accounts and content. Edit the SVG source and export its matching PNG;
+on macOS, from the wiki checkout:
+
+```sh
+for visual in assets/*.svg; do
+    sips -s format png "$visual" --out "${visual%.svg}.png"
+done
+```
+
+On other platforms, use a vector image renderer. Inspect exports for clipping
+and readability before publishing. Review new files as well as the tracked diff:
+
+```sh
+git status --short
+git diff --check
+git diff
+```
+
+Keep the draft local until release publication. Preserve any edits made directly
+in the wiki since the checkout's base revision; fetch and reconcile those changes
+before pushing. Never force-push over another maintainer's wiki work.
+
+## Publish with the release
+
+1. Merge the approved promotion and verify production using the deployment
+   runbook. Check feature activation and dependencies before claiming availability.
+2. Publish the reviewed wiki changes to its default branch. Record the resulting
+   wiki commit in the release PR. A wiki push is public immediately, so publish
+   the pages when their described behavior is available in the release.
+3. Check Home, sidebar links, changed anchors, images, expanded examples and
+   diagrams on desktop and mobile. Verify the support links and setup steps.
+4. Follow [Tag and publish manually](#tag-and-publish-manually) to create the
+   GitHub release and its tag for the exact verified `main` revision.
+   Publish the prepared user-facing notes with links to the affected wiki pages,
+   then use that release URL in the announcement. Record the code and wiki
+   revisions together so the published documentation can be traced to the release.
+
+The wiki remains a living guide to the current release. Keep historical changes
+in release notes and Git history rather than adding dated audit pages or version
+copies of every guide. If a rollback changes what users can do, restore the
+matching guidance and amend the release notes as part of the rollback.
 
 ## Tag and publish manually
 
@@ -114,7 +219,7 @@ recreating or moving the tag is unnecessary. The
 documents these publication options.
 
 A tag identifies source code, not database state. Rollback follows the
-[migration-specific recovery guidance](DEPLOYMENT-HISTORY.md#redeploy-and-rollback).
+[migration-specific recovery guidance](RAILWAY-DEPLOYMENT.md#redeploy-and-rollback).
 
 ## CI and local checks
 

@@ -123,7 +123,7 @@ When a contributor steps away, whoever holds admin should:
   [gateway](../services/gateway/docs/DEPLOYMENT.md).
 - **Rotate any `CONSUMER_KEYS` entry they held** for `llm`, `meeting`, or
   `connectors`. These have no revoke command: drop the entry from the JSON array
-  and redeploy. See [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md).
+  and redeploy. See [the key-storage model](ARCHITECTURE.md#shared-architectural-conventions).
 - **Remove them from Railway, Neon, AWS, and the GitHub repo.**
 - **Retire their directory record** — `active=false`, memberships closed with
   `ended_at`. Never hard-delete; the audit history has to stay readable.
@@ -139,4 +139,4 @@ routine offboarding step.
 - [`ONBOARDING.md`](ONBOARDING.md) — joining the team: zones, getting work, PR norms
 - [`DEVELOPMENT.md`](DEVELOPMENT.md) — what each variable does, and local setup
 - [`RAILWAY-DEPLOYMENT.md`](RAILWAY-DEPLOYMENT.md) — the deploy/operate runbook
-- [`DEPLOYMENT-HISTORY.md`](DEPLOYMENT-HISTORY.md) — why key storage differs per service
+- [Shared conventions](ARCHITECTURE.md#shared-architectural-conventions) — why key storage differs per service
