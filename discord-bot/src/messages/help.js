@@ -58,7 +58,14 @@ export function buildCommandDetailEmbed(command, { shared = false } = {}) {
     fields.push({
       name: 'Member changes in chat',
       value:
-        'With helper tools enabled, ask Misty to add/remove members by mention, full directory name, exact email, or name and email together. Unlinked directory members are supported. Ambiguous names need more detail. All targets must resolve before a private preview and confirmation; slash commands still use user mentions.',
+        'With helper tools enabled, ask Misty to add/remove members or update their team role and team-admin flag by mention, full directory name, exact email, or name and email together. Unlinked directory members are supported. Ambiguous names need more detail. All targets must resolve before a private preview and confirmation; slash commands still use user mentions.',
+    });
+  }
+  if (command.name === 'promote') {
+    fields.push({
+      name: 'Global access, not team roles',
+      value:
+        'Raises the directory-wide level (member < admin < superuser). You can promote only another active person below your level, up to your own level; no demotions. With helper tools enabled, ask Misty by mention, full name or exact email and confirm the private preview. Team roles use /team update.',
     });
   }
   if (command.options.length > 0) {

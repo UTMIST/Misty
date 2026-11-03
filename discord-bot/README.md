@@ -245,11 +245,36 @@ and skips them.
   to be linked; the auth layer handles the "not linked" case.
 - `/seed email:<> name:<> [level:member|admin|superuser]` (admin) — add a member to
   the directory. Gated to admins; you can only grant a level at or below your own
-  (`superuser` > `admin` > `member`). The bot's directory key needs `people:write`.
+  (`superuser` > `admin` > `member`). Creating a person above `member` needs
+  `people:elevate` on the bot's directory key, in addition to `people:write`.
+- `/promote user:<@mention> level:admin|superuser` (admin) — raise an existing
+  member's **global** access level. You can promote only another active person whose
+  current level is below yours, up to your own level (see the table below).
+  Demotions, self-promotion and changes to peers/superiors are refused. With helper
+  tools enabled, ask Misty by mention, full directory name or exact email; Misty
+  shows a private current → requested preview and waits for your confirmation.
+  Needs `people:write` and `people:elevate` on the bot's directory key (both are in
+  the documented key scopes); plain `people:write` cannot change access levels.
+
+  | Caller | Target now | Allowed promotion |
+  | --- | --- | --- |
+  | member | any | none |
+  | admin | member | admin |
+  | admin | admin or superuser | none |
+  | superuser | member | admin or superuser |
+  | superuser | admin | superuser |
+  | superuser | superuser | none |
+
+  **Global access level vs team roles.** `member < admin < superuser` is one
+  directory-wide level per person and gates bot commands. Team roles
+  (`member/lead/director/executive`) and the team-admin flag belong to one team
+  membership and are changed with `/team update`. Neither command changes the
+  other, and neither touches Discord guild roles.
 - `/team create slug:<> label:<> [description:<>]` (admin) — create a team.
 - `/team list [active_only:<bool>]` (linked) — list teams (default active only).
 - `/team rename slug:<> new_label:<>` (admin) — rename a team.
 - `/team add user:<@mention> team:<slug> [role:<...>] [team_admin:<bool>]` (admin) — add a member. The mentioned user must have already run `/link`.
+- `/team update user:<@mention> team:<slug> [role:<...>] [team_admin:<bool>]` (admin) — update an existing membership without removing/re-adding it. Supply at least one field; global access is unchanged.
 - `/team remove user:<@mention> team:<slug>` (admin) — soft-end a membership as of today.
 - `/team roster team:<slug> [as_of:<YYYY-MM-DD>]` (linked) — show a team's current roster.
 - `/team google-status team:<slug>` (admin) — show the team's managed Google Group sync status. Settings failures offer automatic retry and a manual recovery fallback.
@@ -365,7 +390,8 @@ The bot's gate is its authentication/authorization layer — the Discord-side
 parallel to team-tracking's scoped-key auth.
 
 - **Principal** (`src/auth/principal.js`) — the authenticated subject, `{ person }`
-  in v1. Extension point for roles/memberships later.
+  in v1. Inactive directory people resolve as anonymous and cannot use protected
+  commands or autocomplete. Extension point for roles/memberships later.
 - **Policy** (`src/auth/policy.js`) — each command declares `auth: 'public' | 'linked'`
   (default `'linked'`, fail-secure). Extends to role/team-admin policies without
   touching handlers.
@@ -477,7 +503,7 @@ scope set). Deploy the directory search API from #359 before enabling this path.
 | --- | --- |
 | Directory and help | List teams, view a roster, my teams, who am I, help, bug-report link |
 | Documents | List, add, remove; search and read use the retrieval rules below |
-| Team administration | Create, rename, add/remove members, seed a person |
+| Team administration | Create, rename, add/remove members, update team roles/flags, seed a person |
 | Google Groups | View sync status, request a sync |
 | Channel access | Show, set, append, clear the current channel's team access |
 | Helper limits | Show or change request limits |
@@ -888,3 +914,25 @@ Moving the bot to another voice channel ends a saved recording immediately;
 start a new recording there to use its audience. `save:false` recordings continue
 to follow moves.
 See [setup and recovery](../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).
+
+### Updating existing team memberships (#362)
+
+With helper tools enabled, ask “make Alex Chen a lead on research” or “remove
+Alex’s team-admin flag on research.” Name/email resolution follows the
+[person lookup rules](#commands-through-mentions-and-dms). The private preview
+shows the current and proposed team role and flag. These are team properties;
+they do not grant global admin access. Global admins/superusers can perform the
+operation; a team-admin flag alone is insufficient.
+
+Confirmation pins the exact membership ID, original start/end dates, role,
+flag and update timestamp. Changed, missing or ambiguous memberships require a
+fresh request. Unchanged values cause no write. If a PATCH response is lost,
+Misty stops later helper actions and asks you to check the current state; it
+does not retry the uncertain write. PATCH changes only requested
+fields and preserves the directory-owned Google Group sync path. The read and
+PATCH are separate requests: this API does not provide atomic compare-and-swap,
+so a concurrent edit after the final check can still race with the write.
+
+This adds `/team update` to normal command registration; deployment's existing
+pre-deploy registration handles it. Existing `memberships:read/write` scopes
+suffice. Deploy #360's resolver before this dependent change.

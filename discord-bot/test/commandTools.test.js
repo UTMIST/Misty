@@ -147,6 +147,18 @@ test('admin write requires confirmation and rechecks privileges before executing
   );
 });
 
+test('retirement after preparation blocks a confirmed helper write', async () => {
+  const f = fixture('admin');
+  const result = await tool(f, 'team_rename', { slug: 'infra', new_label: 'Changed' });
+  assert.equal(result.action.confirm, true);
+  f.setPerson({ ...f.principal.person, active: false });
+  await assert.rejects(result.action.execute(), /no longer authorize/i);
+  assert.equal(
+    f.calls.some((call) => call[0] === 'update'),
+    false,
+  );
+});
+
 test('all tools including help reject unlinked, inactive and relinked requesters', async () => {
   for (const person of [null, { id: 'p1', active: false }, { id: 'other', active: true }]) {
     const f = fixture();

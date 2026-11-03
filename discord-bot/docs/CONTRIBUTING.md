@@ -12,6 +12,7 @@ installing dependencies.
 - **`router.js` is the single Policy Enforcement Point.** Authenticate → authorize → dispatch, in one place. **Handlers never re-implement auth.** If you find yourself checking `access_level` inside a handler, use the declarative `auth` field instead.
 - **`commands/index.js` is the single source of truth for the command set.** It's consumed by both the router (dispatch) and `registerCommands.js` (Discord registration). Adding a command is one import plus one map entry.
 - **Auth policies fail closed.** `public` / `linked` / `admin` / `superuser`, evaluated in `auth/policy.js`. An unknown policy denies.
+- **Inactive people are anonymous.** Principal resolution does not authenticate a retired account. Protected commands and autocomplete require an active person; public commands can still run anonymously.
 - **Reply rendering lives in `src/messages/`, grouped by feature.** Commands import their renderers directly (for example, `messages/team.js`); keep them pure and surface-neutral. Discord interaction conversion, mentions, recording, and voice events live in `src/adapters/discord/` — see the [README architecture map](../README.md#architecture).
 - **Replies default to ephemeral.** Bot replies carry personal directory and team information. `ephemeral: false` is an explicit, deliberate choice.
 - **Service clients degrade, they don't crash.** Every backend call goes through a client (`clients/directoryClient.js`, `clients/docClient.js`, …) that normalizes failures. A directory outage produces "temporarily unavailable", not a stack trace in a channel.
@@ -581,3 +582,79 @@ read-only person tool, slash option, configuration setting or automatic linking.
 >   `src/web/public/` is served to the page, so `process` and `Buffer` genuinely don't
 >   exist there and ESLint is configured to say so. Layer a browser block on top of a
 >   `**/*.js` node block and flat config merges them, handing browser files both sets.
+
+### Membership update implementation (#362)
+
+`team_update` reuses person resolution and private confirmations. Its membership
+snapshot is rechecked before execution; successful writes replace that snapshot
+with the returned record so receipt delivery does not reject our own change.
+Do not reselect a replacement membership or implement updates as end/create.
+A transport failure after PATCH starts is an uncertain write: helper dispatch
+throws to stop the batch, while slash replies ask the user to check current
+state. Read outages and explicit validation rejections remain ordinary results.
+After the service finishes its final membership lookup, helper updates run a
+fresh action check immediately before PATCH. Check expiry after asynchronous
+reads too; cached earlier authorization cannot cover time spent in those reads.
+The regression suite exhausts all 112 supported role/flag transitions and
+advances a controlled clock during the final lookup to test expiry.
+
+Changed-file rationale:
+
+- `src/clients/directoryClient.js`: expose the existing membership PATCH endpoint.
+- `src/services/teamService.js`: resolve one current membership, compare its
+  snapshot, omit unchanged fields and normalize failures without retries.
+- `src/commands/team.js`: declare the admin-only update command and dispatch it.
+- `src/commandTools.js`: prepare exact membership targets and revalidate them.
+- `src/messages/helperActions.js`, `src/messages/team.js`: render private
+  before/after previews and update/no-op/failure results.
+- `src/adapters/discord/helperActions.js`: explain changed pending details.
+- `src/messages/help.js`, `README.md`, root `README.md`: document the new operation.
+- `test/membershipUpdate.test.js`: exercise continuity, partial updates, no-op,
+  stale state, denial, errors and the client request contract.
+- This contributing section records the snapshot and delivery convention.
+
+The root command-list update deliberately spans the root documentation zone.
+
+### Promotion implementation (#361)
+
+`/promote` and the `promote` helper tool change only a person's global
+`access_level` through `PATCH /people/{id}`. The directory gates that field on
+`people:elevate` but does not know the human caller, so the bot enforces the
+hierarchy in `promotionDecision` (`src/auth/policy.js`): caller admin+, target
+currently below the caller, destination above the target and at most the caller.
+Unknown levels are `INVALID_LEVEL`; do not reuse `rankOf`, which defaults to member.
+
+The caller is always the router's freshly authenticated principal. A name/email
+reference resolves through the minimal `PersonSearchMatch`, which has no
+`access_level` or `updated_at`, so preparation then re-reads the full person by
+the resolved ID. Preparation pins a snapshot of the target (`id`, name, email,
+`active`, `access_level`, `updated_at`); every action check re-reads both people
+and reruns the policy, and a fresh action check runs immediately before the
+PATCH. After a confirmed write, receipt checks recheck only the requester, so our
+own promotion does not make delivery fail. Success is reported only when the response matches the requested
+level. 401/403 mean the key was refused, so nothing changed; 400/409/422 are a
+directory rejection. A transport failure or malformed response after the PATCH
+starts (including a `200` whose body is not a person object, such as `null`) is
+uncertain, never "not found", so it also stops later batch actions. Only a real
+`404` means not found. An uncertain write is never retried, the same convention
+as #362.
+
+Remaining limitation: the final read and the PATCH are separate requests. Closing
+that window needs a conditional write in team-tracking, which is a separate
+service change.
+
+Changed-file rationale:
+
+- `src/auth/policy.js`: the shared promotion policy.
+- `src/clients/directoryClient.js`: the access-level-only PATCH and its errors.
+- `src/services/promotionService.js`: resolve, snapshot, recheck and write.
+- `src/commands/promote.js`, `src/commands/index.js`, `src/context.js`: declare
+  and wire the admin-only command and service.
+- `src/commandTools.js`, `src/helperActions.js`: allowlist the helper tool, bind
+  the resolved person, recheck before effects and reject duplicate targets.
+- `src/messages/helperActions.js`, `src/messages/people.js`: private preview and
+  outcome messages.
+- `src/messages/help.js`, `README.md`, root `README.md`: document the command,
+  the promotion table, global versus team roles and the required scopes.
+- `test/promotion.test.js`: the full policy matrix on helper and slash paths,
+  stale state, forged arguments, scope, outage and client contract.

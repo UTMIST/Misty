@@ -229,6 +229,21 @@ export function renderRemoveMemberResult(result) {
   return { content, ephemeral: true };
 }
 
+export function renderUpdateMemberResult(result) {
+  const messages = {
+    UPDATE_UNCERTAIN:
+      'The update may have completed, but its result could not be confirmed. Check the current membership before asking again. It was not retried.',
+    UPDATED: 'Updated the existing team membership. Global access is unchanged.',
+    UNCHANGED: 'The requested team role and flag already match. Nothing was changed.',
+    UPDATE_REQUIRED: 'Supply a team role or team-admin flag to update.',
+    MEMBERSHIP_INVALID: 'The directory rejected the role or team-admin flag. Nothing was changed.',
+    MEMBERSHIP_CHANGED:
+      'The member, team, or membership is missing, inactive, ambiguous, or changed. Check the roster and ask again for a fresh preview.',
+    DIRECTORY_DOWN: DIRECTORY_DOWN_MSG,
+  };
+  return { content: messages[result.outcome] ?? FALLBACK, ephemeral: true };
+}
+
 export function renderRosterResult(result) {
   const content = (() => {
     switch (result.outcome) {
