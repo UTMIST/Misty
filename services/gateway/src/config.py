@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The built-in dev secret for the gateway's OUTBOUND team-tracking key. Only
@@ -11,7 +11,7 @@ DEFAULT_DEV_API_KEY = "dev-api-key-change-me"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     database_url: str = "postgresql+psycopg://gateway:dev_password@localhost:5435/gateway"
 
@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # src/api/deps.py building the outbound header) call .get_secret_value().
     directory_base_url: str = "http://localhost:8000"
     directory_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
+    email_login_enabled: bool = False
+    verification_base_url: str = "http://localhost:8003"
+    verification_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
 
     gateway_env: Literal["local", "staging", "production"] = "local"
 
@@ -36,6 +39,16 @@ class Settings(BaseSettings):
     # edge. X-Forwarded-For is ignored. Keep false for direct access or internal
     # callers, whose headers are not sanitized by Railway's public edge.
     trust_proxy_headers: bool = False
+    login_status_per_minute: int = Field(default=600, ge=1, le=10000)
+    edge_requests_per_minute: int = Field(default=1200, ge=120, le=20000)
+
+    @model_validator(mode="after")
+    def status_capacity_has_edge_headroom(self):
+        if self.edge_requests_per_minute < self.login_status_per_minute + 120:
+            raise ValueError(
+                "EDGE_REQUESTS_PER_MINUTE must exceed LOGIN_STATUS_PER_MINUTE by at least 120"
+            )
+        return self
 
 
 @lru_cache(maxsize=1)
@@ -60,6 +73,12 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
     secret = settings.directory_api_key.get_secret_value().strip()
     if not secret or secret == DEFAULT_DEV_API_KEY:
         insecure.append("DIRECTORY_API_KEY")
+    if settings.email_login_enabled:
+        verification_secret = settings.verification_api_key.get_secret_value().strip()
+        if not verification_secret or verification_secret == DEFAULT_DEV_API_KEY:
+            insecure.append("VERIFICATION_API_KEY")
+        if not settings.verification_base_url.strip():
+            insecure.append("VERIFICATION_BASE_URL")
     if insecure:
         raise RuntimeError(
             f"Refusing to start in gateway_env={settings.gateway_env!r}: "

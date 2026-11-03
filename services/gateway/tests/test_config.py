@@ -62,3 +62,36 @@ def test_directory_key_is_redacted_in_repr():
     assert "super-secret-value" not in repr(s)
     assert "super-secret-value" not in str(s.directory_api_key)
     assert s.directory_api_key.get_secret_value() == "super-secret-value"
+
+
+@pytest.mark.parametrize("value", ["", " ", DEFAULT_DEV_API_KEY])
+def test_enabled_email_login_needs_real_verification_key(value):
+    with pytest.raises(RuntimeError, match="VERIFICATION_API_KEY"):
+        verify_production_secrets(_settings(email_login_enabled=True, verification_api_key=value))
+
+
+def test_verification_key_is_redacted():
+    settings = _settings(verification_api_key="test-private-key")
+    assert "test-private-key" not in repr(settings)
+    assert settings.verification_api_key.get_secret_value() == "test-private-key"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"login_status_per_minute": 0},
+        {"edge_requests_per_minute": 0},
+        {"login_status_per_minute": 600, "edge_requests_per_minute": 600},
+        {"login_status_per_minute": 10001, "edge_requests_per_minute": 20000},
+    ],
+)
+def test_status_capacity_requires_bounded_limits_and_edge_headroom(overrides):
+    with pytest.raises(ValueError):
+        _settings(**overrides)
+
+
+def test_invalid_capacity_does_not_print_configured_credentials():
+    with pytest.raises(ValueError) as exc:
+        Settings(_env_file=None, directory_api_key="Z", edge_requests_per_minute=120)
+    assert "input_value=" not in str(exc.value)
+    assert "Z" not in str(exc.value)

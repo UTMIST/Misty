@@ -10,6 +10,7 @@ from src.api.deps import get_directory, get_storage
 from src.storage.postgres import PostgresStorageAdapter
 from src.storage.schema import api_keys
 from storage_cases import StorageCases
+from login_storage_cases import LoginStorageCases
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_PG_TESTS") != "1", reason="set RUN_PG_TESTS=1 to run Postgres tests"
@@ -26,13 +27,29 @@ def engine():
 
 @pytest.fixture
 def adapter(engine):
+    from src.storage.schema import login_challenges, login_limits
+
     with engine.begin() as conn:
         conn.execute(delete(api_keys))
+        conn.execute(delete(login_challenges))
+        conn.execute(delete(login_limits))
     return PostgresStorageAdapter(engine)
 
 
 class TestPostgresStorage(StorageCases):
     pass
+
+
+class TestPostgresLoginStorage(LoginStorageCases):
+    pass
+
+
+def test_login_quotas_survive_a_new_adapter(engine, adapter):
+    from login_storage_cases import challenge
+
+    assert adapter.reserve_login(challenge())
+    restarted = PostgresStorageAdapter(engine)
+    assert not restarted.reserve_login(challenge())
 
 
 def test_repeated_revocation_preserves_audit_metadata(adapter, engine):

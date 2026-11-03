@@ -1,13 +1,17 @@
 import logging
-from datetime import datetime, timezone
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import delete, insert, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from contracts.types import ApiKey
-from src.storage.schema import api_keys
+from contracts.login import LoginChallenge
+from src import login_policy as policy
+from src.storage.schema import api_keys, login_challenges, login_limits
 
 logger = logging.getLogger("gateway.storage")
 
@@ -43,11 +47,126 @@ class PostgresStorageAdapter:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
 
+    @contextmanager
+    def _login_transaction(self):
+        # One short cross-process lock for this low-volume public auth boundary.
+        # Never hold it across HTTP. All login writes go through this lock.
+        with self._engine.begin() as conn:
+            conn.execute(text("SELECT pg_advisory_xact_lock(71329002)"))
+            yield conn
+
+    def _spend(self, conn, limits: list[policy.Limit], now: datetime) -> bool:
+        rows = {
+            r.bucket: r
+            for r in conn.execute(
+                select(login_limits).where(login_limits.c.bucket.in_([x[0] for x in limits]))
+            )
+        }
+        for bucket, maximum, _ in limits:
+            row = rows.get(bucket)
+            if row is not None and row.expires_at > now and row.count >= maximum:
+                return False
+        for bucket, _, seconds in limits:
+            row = rows.get(bucket)
+            live = row is not None and row.expires_at > now
+            values = dict(
+                bucket=bucket,
+                count=row.count + 1 if live else 1,
+                expires_at=row.expires_at if live else now + timedelta(seconds=seconds),
+            )
+            conn.execute(
+                pg_insert(login_limits)
+                .values(**values)
+                .on_conflict_do_update(index_elements=[login_limits.c.bucket], set_=values)
+            )
+        return True
+
+    def allow_login_request(self, owner, operation, client_ip, now, *, status_limit=600):
+        with self._login_transaction() as conn:
+            conn.execute(delete(login_challenges).where(login_challenges.c.expires_at <= now))
+            conn.execute(delete(login_limits).where(login_limits.c.expires_at <= now))
+            return self._spend(
+                conn,
+                policy.request_limits(owner, operation, client_ip, status_limit=status_limit),
+                now,
+            )
+
+    def reserve_login(self, challenge: LoginChallenge) -> bool:
+        with self._login_transaction() as conn:
+            if not self._spend(conn, policy.send_limits(challenge.email), challenge.created_at):
+                return False
+            conn.execute(insert(login_challenges).values(**challenge.model_dump()))
+            return True
+
+    def activate_login(self, challenge_id, person_id, now):
+        with self._login_transaction() as conn:
+            item = conn.execute(
+                select(login_challenges).where(
+                    login_challenges.c.id == challenge_id,
+                    login_challenges.c.expires_at > now,
+                    login_challenges.c.redeemed.is_(False),
+                )
+            ).one_or_none()
+            if item is None:
+                return False
+            return (
+                conn.execute(
+                    update(login_challenges)
+                    .where(
+                        login_challenges.c.id == challenge_id,
+                        login_challenges.c.expires_at > now,
+                        login_challenges.c.redeemed.is_(False),
+                    )
+                    .values(person_id=person_id)
+                ).rowcount
+                == 1
+            )
+
+    def admit_login_attempt(self, challenge_id, owner, now):
+        with self._login_transaction() as conn:
+            row = conn.execute(
+                select(login_challenges).where(
+                    login_challenges.c.id == challenge_id,
+                    login_challenges.c.owner == owner,
+                    login_challenges.c.expires_at > now,
+                    login_challenges.c.redeemed.is_(False),
+                    login_challenges.c.attempts < policy.MAX_ATTEMPTS,
+                )
+            ).one_or_none()
+            if row is None:
+                return None
+            updated = conn.execute(
+                update(login_challenges)
+                .where(login_challenges.c.id == challenge_id)
+                .values(attempts=login_challenges.c.attempts + 1)
+                .returning(login_challenges)
+            ).one()
+            return LoginChallenge.model_validate(updated._mapping)
+
+    def redeem_login(self, challenge_id, owner, now):
+        with self._login_transaction() as conn:
+            return (
+                conn.execute(
+                    update(login_challenges)
+                    .where(
+                        login_challenges.c.id == challenge_id,
+                        login_challenges.c.owner == owner,
+                        login_challenges.c.expires_at > now,
+                        login_challenges.c.redeemed.is_(False),
+                        login_challenges.c.person_id.is_not(None),
+                    )
+                    .values(redeemed=True)
+                ).rowcount
+                == 1
+            )
+
     def is_ready(self) -> bool:
         try:
             with self._engine.connect() as conn:
                 # Authentication needs the migrated key table, not just a live server.
                 conn.execute(select(api_keys.c.id).limit(1))
+                conn.execute(select(login_challenges.c.id).limit(1))
+                conn.execute(select(login_limits.c.bucket).limit(1))
         except SQLAlchemyError:
             return False
         return True

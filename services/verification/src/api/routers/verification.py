@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from math import ceil
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -38,7 +39,12 @@ def request_code(
     now = _now()
     recent = storage.latest_unconsumed_for_email(payload.email)
     if recent is not None and (now - recent.created_at) < RATE_LIMIT_WINDOW:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="rate_limited")
+        remaining = RATE_LIMIT_WINDOW - (now - recent.created_at)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="rate_limited",
+            headers={"Retry-After": str(max(1, ceil(remaining.total_seconds())))},
+        )
 
     code = generate_code()
     # Send before persisting: if delivery fails we neither store an unsendable

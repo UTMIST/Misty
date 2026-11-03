@@ -206,19 +206,17 @@ describes how it applies them concretely.
   current heads rather than pinning a deployment to an old revision. For
   cleanup/rollback exceptions, follow the service deployment guide. `llm`,
   `meeting`, and `connectors` have no schema.
-- **Three auth storage models.** The convention is scoped, argon2-hashed keys
+- **Two auth storage models.** The convention is scoped, argon2-hashed keys
   behind `platform_auth`'s `ApiKeyStore` protocol — but where they *live* varies
   with how many consumers a service has:
   - **team-tracking, documentation-system, gateway** — separate `api_keys`
     tables, minted/revoked with each service’s CLI. Gateway accepts only issued
     `gw_` keys and has no inbound bootstrap env key.
-  - **`llm`, `meeting`, `connectors`** — no table. Keys are seeded at boot from
-    a `CONSUMER_KEYS` JSON array env var, so their "mint" CLIs only *print* a key
-    and its JSON entry. Adding or revoking one is a variable edit plus a
+  - **`llm`, `meeting`, `connectors`, `verification`** — no key table. Keys are seeded at boot from
+    a `CONSUMER_KEYS` JSON array env var, with argon2 hashes and scoped consumer identities. Services with "mint" CLIs
+    only print a key and its JSON entry; verification uses the shared generator. Adding or revoking one is a variable edit plus a
     redeploy, and a malformed `CONSUMER_KEYS` fails the deploy at boot by design.
-  - **`verification`** — a `NullApiKeyStore`: no per-consumer keys exist, and
-    only the bootstrap `API_KEY` env var authenticates. It has exactly one
-    consumer (the bot), so issuing keys would be ceremony without benefit.
+
 
   The protocol is what makes this vary cleanly — each service picks a store, and
   no route code changes.
@@ -245,8 +243,9 @@ callers go through a gateway at all.
   Callers outside the org's trust boundary (a GitHub Action, a future third-party
   integration) never get a team-tracking key. Instead they hold a key issued by the
   gateway's own external registry (`gateway-keys`, scoped e.g. `resolve:discord`), and
-  the gateway holds exactly **one** internal team-tracking key
-  (`identifiers:read`) for its own outbound calls. It composes and curates — it never
+  the gateway holds its own internal team-tracking key
+  (`identifiers:read`, plus `people:read` for login) and a separate private
+  verification key when email login is enabled. It composes and curates — it never
   passes an internal response straight through — and adds the protections an
   externally-facing surface needs that internal services don't: a public Railway
   domain, per-key rate limiting behind a per-IP flood guard, and audit logging of
@@ -262,7 +261,7 @@ callers go through a gateway at all.
   every caller must present an issued, scoped key. When adding an
   externally-reachable service, copy that, not the internal shim.
 
-The gateway's first (and so far only) endpoint is the resolver,
+The gateway's first endpoint is the resolver,
 `GET /v1/resolve/discord/{github_login}` — it turns a GitHub login into the Discord id
 linked to the same person in the directory, and nothing else. It is a working
 example for future gateway operations; no current integration consumes it.
@@ -271,10 +270,11 @@ but do not call the resolver or ping reviewers' Discord accounts. New external
 use cases get new narrow endpoints on the gateway, not broader access to
 team-tracking itself.
 
-The compute platform will use the same per-consumer gateway contract when its
-required operations are defined. The [gateway architecture](../services/gateway/docs/ARCHITECTURE.md#future-compute-platform-access)
-describes how to add access while preserving service-owned databases and access
-checks; the current permission grants only the Discord resolver.
+The compute platform can use the [email-login contract](../services/gateway/docs/API.md#email-login)
+with `auth:email` and `auth:status`. Misty handles eligibility, delivery, code
+verification, and abuse limits; compute owns its sessions and permissions. The
+[gateway architecture](../services/gateway/docs/ARCHITECTURE.md#future-compute-platform-access)
+describes adding further operations without sharing databases or internal keys.
 
 ## Why the directory is built first
 

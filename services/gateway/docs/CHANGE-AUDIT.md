@@ -1,5 +1,8 @@
 # Gateway integration audit
 
+The original PR65 record below is historical. The email-login extension and its
+current file rationale are recorded at the end of this document.
+
 [PR #65](https://github.com/UTMIST/Misty/pull/65) adds the external HTTP entry point
 and its first curated read operation. The PR records the tested staging revision
 and verification results.
@@ -93,3 +96,128 @@ Railway inspection found no existing gateway service in the Misty project. The
 [deployment runbook](DEPLOYMENT.md) specifies its separate database, scoped
 internal key, public HTTPS domain, and consumer-key provisioning. This audit
 records local verification; it does not assert a live deployment.
+
+
+## Email-login extension
+
+Misty now provides scoped server-to-server email login for active directory
+members. This intentionally touches gateway, private verification authentication,
+and the platform documentation/CI that describe their boundary. Compute sessions
+and deployment are separate integration steps. Existing Discord code replay is
+preserved; gateway login redemption is atomic and single-use.
+
+This change is opt-in (`EMAIL_LOGIN_ENABLED=false`). Gateway migration002 adds
+login challenges and durable quota windows without modifying existing key rows.
+Delivery happens after generic202; failed replacement delivery preserves the old
+challenge. Confirmation checks code ownership, the original person/email, current
+active state, consumer binding, expiry, and atomic redemption. Unknown/inactive
+challenges take the same verification call path to avoid an outage-status oracle.
+
+### File rationale for this extension
+
+Paths are repository-relative; grouped paths all share the stated purpose.
+
+| Files | Necessity |
+|---|---|
+| `services/gateway/contracts/login.py` | Strict request/response models, secret-wrapped submitted codes, challenge state, private verification protocol/errors. |
+| `services/gateway/contracts/directory.py`, `services/gateway/contracts/storage.py` | Add scoped lookup and atomic login-state contracts before adapter implementations. |
+| `services/gateway/src/login_policy.py` | Centralize send/guess/request windows and normalized email/IP bucket identities. |
+| `services/gateway/src/storage/schema.py`, `services/gateway/migrations/versions/002_email_login.py` | Define and reversibly migrate gateway-owned challenge and quota tables/indexes. |
+| `services/gateway/src/storage/in_memory.py`, `services/gateway/src/storage/postgres.py` | Equivalent synchronized admission, activation, cleanup and single-use redemption; readiness includes the new schema. |
+| `services/gateway/src/api/routers/email_login.py` | Implement start, confirm, issuer/status, active-member checks and post-response private delivery. |
+| `services/gateway/src/api/app.py`, `services/gateway/src/api/middleware.py` | Register routes, sanitize validation/upstream errors, bound body size, prevent response caching. |
+| `services/gateway/src/api/deps.py` | Own and close a lazily constructed private verification HTTP pool. |
+| `services/gateway/src/directory/http_client.py` | Use existing authenticated directory email/person lookup routes. |
+| `services/gateway/src/verification/__init__.py`, `services/gateway/src/verification/http_client.py` | Package the private verification client and sanitize provider/transport failures. |
+| `services/gateway/src/config.py`, `services/gateway/src/cli.py` | Add the opt-in feature, redacted internal credential/boot validation, and two external scopes. |
+| `services/gateway/tests/test_email_login.py`, `services/gateway/tests/test_verification.py` | Prove HTTP eligibility, replay/concurrency, generic responses, scope ordering, failure masking, independent challenge budgets, issuer attestation and private client contract. |
+| `services/gateway/tests/login_storage_cases.py`, `services/gateway/tests/test_login_storage.py`, `services/gateway/tests/test_postgres_adapter.py` | Exercise the same quotas, expiry, races, independent challenge and redemption semantics against both adapters, plus persistence across adapter recreation. |
+| `services/gateway/tests/test_config.py` | Check the new secret is redacted and required when non-local login is enabled. |
+| `services/gateway/tests/smoke_stack.py`, `.github/workflows/ci.yml` | Verify real gateway → directory/verification HTTP using disposable DBs, scoped keys, a fake sender and test-container-only deterministic codes; build verification before this check. |
+| `services/verification/src/config.py`, `services/verification/src/api/deps.py`, `services/verification/src/api/app.py` | Support a separate scoped gateway identity through config-backed keys and boot validation. |
+| `services/verification/src/storage/null_keys.py` (removed) | Remove the unused adapter that rejected all scoped keys. |
+| `services/verification/tests/conftest.py`, `services/verification/tests/test_consumer_auth.py` | Isolate cached key configuration and prove scoped auth, denial without scope, and malformed-config boot rejection. |
+| `services/gateway/.env.example`, `services/gateway/README.md`, `services/gateway/docs/API.md`, `services/gateway/docs/ARCHITECTURE.md`, `services/gateway/docs/CONTRIBUTING.md`, `services/gateway/docs/DEPLOYMENT.md` | Document new settings, API/session handoff, storage/trust decisions, tests, provisioning and rollback. |
+| `services/verification/.env.example`, `services/verification/README.md`, `services/verification/docs/API.md`, `services/verification/docs/ARCHITECTURE.md`, `services/verification/docs/DEPLOYMENT.md` | Replace obsolete bootstrap-only descriptions and document scoped keys plus retention needs of per-login subjects. |
+| `AGENTS.md`, `README.md`, `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `docs/RAILWAY-DEPLOYMENT.md`, `packages/auth/README.md` | Keep schema heads, service ownership, key-storage descriptions and platform enablement instructions consistent. |
+| `services/gateway/docs/CHANGE-AUDIT.md` | Record the intentional cross-zone scope, file rationale, verification and integration boundary. |
+
+### Verification boundary
+
+Run gateway and verification full suites with separate disposable databases,
+Ruff lint/format checks, migration002 downgrade/upgrade with existing key rows,
+the three-service Docker HTTP smoke, and the isolated gateway wheel import check.
+No live mail provider is used. These checks do not establish live Railway
+configuration, real mailbox delivery, or compute session integration.
+
+Verified locally: both full service suites with disposable Postgres, Ruff lint
+and format checks, migration002 round trip preserving external keys, all three
+container builds and the HTTP smoke, and isolated gateway wheel/CLI imports.
+Independent review findings were fixed and retested. The test runner reports an
+existing Starlette/httpx deprecation warning; no checks failed. A separate local
+browser check of the companion compute integration also passed against the real
+gateway, directory and verification containers with disposable databases and a
+fake mail sender. It covered login, rejection, replay, preserved compute identity,
+and retirement after the status cache expires. No live deployment or real email
+delivery was performed as part of these checks.
+
+### Security hardening verification
+
+The gateway uses three attempts per independent challenge and five deliveries
+per mailbox issuance window. A different challenge cannot exhaust or invalidate
+a member's delivered code. Send quotas remain shared to bound mail abuse; see
+[the limits and window trade-off](API.md#limits-and-failures). Successful responses
+include the environment issuer, and the scoped issuer endpoint supports compute's
+startup and database pinning checks.
+
+The mailbox-lockout and resend regressions failed on the previous implementation
+and passed after the fix. Shared storage tests verify the three-attempt cap,
+mailbox-wide delivery budget across applications, expiry and atomic redemption
+in both memory and disposable Postgres. Repository checks, migration round trip,
+Ruff gates, rebuilt gateway image and real private-HTTP/browser integration passed.
+No live configuration was changed. The companion compute PR contains the CLI
+origin/redirect and revocation fixes, explicit account migration, issuer checks,
+and dependency/runtime updates.
+
+
+### Independent audit follow-up: delivery and capacity
+
+Addresses the reproduced cross-consumer cooldown and resend-boundary failures,
+and the fixed status-capacity ceiling. Verification preserves its shared mailbox
+throttle and now tells authenticated callers the remaining cooldown. Gateway
+retries only that explicit pre-send refusal, once, asynchronously, using the same
+challenge and reservation. It rechecks eligibility/expiry and never retries an
+ambiguous failure. Repeated throttling or process loss may still prevent delivery.
+
+Status and pre-authentication IP budgets are now configured together, with bounded
+values and mandatory headroom. The defaults budget roughly 300 continuously active
+compute identities with the existing 30-second cache; this is quota sizing, not a
+throughput benchmark. Increasing the edge budget also permits more authentication
+work, so operators must monitor load. Invalid settings omit input values from
+error text to protect configured credentials.
+
+File rationale for the follow-up (paths relative to `services/gateway`):
+
+| Files | Reason |
+|---|---|
+| `contracts/login.py`, `src/verification/http_client.py`, `src/api/routers/email_login.py` | Represent and validate a known pre-send throttle; defer one retry without occupying a worker thread or charging again. |
+| `contracts/storage.py`, `src/login_policy.py`, `src/storage/in_memory.py`, `src/storage/postgres.py` | Apply the configured status budget with the same durable semantics in both adapters. |
+| `src/config.py`, `src/api/app.py`, `.env.example` | Validate and wire paired capacity settings and hide configuration inputs in startup errors. |
+| `tests/test_email_login.py`, `tests/test_verification.py`, `tests/test_config.py`, `tests/login_storage_cases.py` | Regress delayed delivery, bounded retries, expiry/retirement, unsafe retry responses, capacity enforcement and credential-safe errors. |
+| `tests/test_health.py` | Verify probe availability after exhausting the configured edge budget. |
+| `tests/smoke_stack.py` | Reproduce both cooldown collisions through real gateway/directory/verification HTTP and disposable Postgres, retaining fake mail only. |
+| `README.md`, `docs/API.md`, `docs/ARCHITECTURE.md`, `docs/DEPLOYMENT.md`, `docs/CHANGE-AUDIT.md` | Document the retry contract, limits, rollout order, file rationale and verification. |
+| `/services/verification/src/api/routers/verification.py`, `/services/verification/tests/test_request_code.py` | Return a rounded-up pre-send `Retry-After` and verify cross-consumer suppression followed by successful delivery. |
+| `/services/verification/README.md`, `/services/verification/docs/API.md`, `/services/verification/docs/ARCHITECTURE.md` | Explain the new response header while retaining the shared mailbox protection and unchanged confirm state machine. |
+| `/AGENTS.md`, `/docs/RAILWAY-DEPLOYMENT.md` | Record paired quota sizing and verification-before-gateway rollout. |
+
+The delivery and capacity regressions failed before the changes and pass after
+them. Both complete service suites passed against disposable Postgres, including
+migration round trips and source-path assertions. The Docker HTTP regression
+passed both previously failing delivery scenarios and verified one reservation
+per challenge, independent redemption and retirement. Repository `make check`
+and service Ruff gates passed. No real emails or live configuration were used.
+
+Other audit observations about quota exhaustion, shared NATs, credential blast
+radius and live ingress are operational risks, not claims removed by these fixes.
+The companion compute change separately revokes Misty sessions on local rollback.

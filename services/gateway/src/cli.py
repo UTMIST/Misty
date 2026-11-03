@@ -81,7 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
     subs = p.add_subparsers(dest="cmd", required=True)
     pi = subs.add_parser("issue")
     pi.add_argument("--name", required=True)
-    pi.add_argument("--scopes", nargs="+", required=True, choices=["resolve:discord"])
+    pi.add_argument(
+        "--scopes",
+        nargs="+",
+        required=True,
+        choices=["resolve:discord", "auth:email", "auth:status"],
+    )
     pi.set_defaults(func=cmd_issue)
     pl = subs.add_parser("list")
     pl.add_argument("--active-only", action="store_true")

@@ -327,8 +327,6 @@ jobs:
         run: docker build -f services/gateway/Dockerfile -t gateway:ci .
       - name: Smoke-test gateway image (imports incl. contracts/ resolve at boot)
         run: docker run --rm gateway:ci python -c "import src.api.app"
-      - name: Verify gateway against the current directory over HTTP
-        run: python3 services/gateway/tests/smoke_stack.py
       - name: Build discord-bot image
         run: docker build -t discord-bot:ci ./discord-bot
       - name: Smoke-test discord-bot image (source parses)
@@ -337,6 +335,8 @@ jobs:
         run: docker build -f services/verification/Dockerfile -t verification:ci .
       - name: Smoke-test verification image (imports incl. contracts/ resolve at boot)
         run: docker run --rm verification:ci python -c "import src.api.app"
+      - name: Verify gateway against directory and verification over HTTP
+        run: python3 services/gateway/tests/smoke_stack.py
       - name: Build meeting image
         run: docker build -f services/meeting/Dockerfile -t meeting:ci .
       - name: Smoke-test meeting image (imports incl. PyAV/ffmpeg resolve at boot)
