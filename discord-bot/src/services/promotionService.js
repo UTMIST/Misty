@@ -51,7 +51,11 @@ export function createPromotionService({ directory }) {
   }
 
   async function preparePromotion({ caller, personId, discordSnowflake, reference, level }) {
-    const person = await resolvePersonTarget(directory, { personId, discordSnowflake, reference });
+    let person = await resolvePersonTarget(directory, { personId, discordSnowflake, reference });
+    // Name/email search returns only a minimal match (no access_level or
+    // updated_at), so re-read the full record by its stable ID.
+    if (!personId && !discordSnowflake && !reference?.id)
+      person = await resolvePersonTarget(directory, { personId: person.id });
     const outcome = evaluate(caller, person, level);
     if (outcome !== 'ALLOWED') throw rejectionFor(outcome);
     return Object.freeze(Object.fromEntries(SNAPSHOT_FIELDS.map((key) => [key, person[key]])));

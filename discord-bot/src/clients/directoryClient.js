@@ -275,7 +275,13 @@ export function createDirectoryClient({ baseUrl, apiKey, fetchImpl = fetch }) {
         method: 'PATCH',
         body: JSON.stringify({ access_level: accessLevel }),
       });
-      if (resp.status === 200) return parseJson(resp);
+      if (resp.status === 200) {
+        // A 200 may have committed, so a malformed body is uncertain, never a 404.
+        const body = await parseJson(resp);
+        if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.id !== 'string')
+          throw new DirectoryUnavailable('malformed directory person response');
+        return body;
+      }
       if (resp.status === 404) return null;
       // 401/403 mean the key was refused before any write, so nothing changed.
       if (resp.status === 401 || resp.status === 403)

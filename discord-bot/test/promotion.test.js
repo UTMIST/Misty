@@ -55,7 +55,17 @@ function fixture({ callerLevel = 'admin', targetLevel = 'member' } = {}) {
         (p) =>
           (!name || p.display_name.toLowerCase() === name) && (!email || p.primary_email === email),
       );
-      return { matches, has_more: false, needs_disambiguation: false };
+      // Mirror the real PersonSearchMatch projection: no access_level or updated_at.
+      return {
+        matches: matches.map(({ id, display_name, primary_email, active }) => ({
+          id,
+          display_name,
+          primary_email,
+          active,
+        })),
+        has_more: false,
+        needs_disambiguation: false,
+      };
     },
     updatePersonAccessLevel: async (id, level) => {
       writes.push({ id, level });
@@ -436,6 +446,61 @@ test('refused keys and rejections are definite; malformed success is uncertain',
   }
 });
 
+test('name, email and combined references promote via the real minimal search response', async () => {
+  for (const user of [
+    { name: 'Alex' },
+    { email: 'alex@example.org' },
+    { name: 'Alex', email: 'alex@example.org' },
+  ]) {
+    const f = fixture({ callerLevel: 'superuser' });
+    f.ctx.directory.searchPeople = createDirectoryClient({
+      baseUrl: 'http://directory',
+      apiKey: 'test',
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            matches: [{ ...f.target }],
+            has_more: false,
+            needs_disambiguation: false,
+          }),
+          { status: 200 },
+        ),
+    }).searchPeople;
+    const { action } = await f.prepare({ user });
+    const reply = await action.execute();
+    assert.match(reply.content, /Promoted/, JSON.stringify(user));
+    assert.deepEqual(f.writes, [{ id: 'p', level: 'admin' }]);
+  }
+});
+
+test('a committed write answered with 200 null is uncertain and stops the batch', async () => {
+  const f = fixture();
+  f.ctx.directory.updatePersonAccessLevel = async (id, level) => {
+    // Commit the write, then return a malformed success body.
+    f.people[id].access_level = level;
+    return createDirectoryClient({
+      baseUrl: 'http://directory',
+      apiKey: 'test',
+      fetchImpl: async () => new Response('null', { status: 200 }),
+    }).updatePersonAccessLevel(id, level);
+  };
+  const slash = await f.slash();
+  assert.match(slash.content, /may have completed/);
+  assert.doesNotMatch(slash.content, /No active directory member/);
+
+  const g = fixture();
+  g.ctx.directory.updatePersonAccessLevel = createDirectoryClient({
+    baseUrl: 'http://directory',
+    apiKey: 'test',
+    fetchImpl: async () => new Response('null', { status: 200 }),
+  }).updatePersonAccessLevel;
+  const { action } = await g.prepare();
+  const later = { userId: '111', summary: 'Later', check: async () => {}, execute: assert.fail };
+  const result = await combineHelperActions([action, later]).execute();
+  assert.equal(result.replies.length, 1);
+  assert.equal(result.replies[0].safeFailure, true);
+});
+
 test('the success reply escapes markdown and mentions in names', () => {
   const { content } = renderPromoteResult({
     outcome: 'PROMOTED',
@@ -530,6 +595,16 @@ test('directory PATCH sends only access_level and normalizes statuses', async ()
       name: 'PersonUpdateInvalid',
     });
   await assert.rejects(client(503).updatePersonAccessLevel('p', 'admin'), DirectoryUnavailable);
+  for (const malformed of ['null', '[]', '{}', '"ok"'])
+    await assert.rejects(
+      createDirectoryClient({
+        baseUrl: 'http://directory',
+        apiKey: 'test',
+        fetchImpl: async () => new Response(malformed, { status: 200 }),
+      }).updatePersonAccessLevel('p', 'admin'),
+      DirectoryUnavailable,
+      malformed,
+    );
 });
 
 test('help detail distinguishes global access from team roles', async () => {
