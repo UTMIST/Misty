@@ -1,0 +1,72 @@
+name: Production promotion
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Open a promotion PR, or retry the history sync
+        type: choice
+        options: [promote, sync]
+        default: promote
+        required: true
+
+permissions:
+  contents: read
+
+# A release and its sync must finish together. Each run reconciles current refs,
+# so a newer queued run safely replaces an older pending run.
+concurrency:
+  group: production-promotion
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.repository == 'UTMIST/Misty' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    # Configure this environment to allow ONLY main, and keep the private key
+    # here, never in repository-wide secrets. See docs/DEVELOPMENT.md.
+    environment: release
+    steps:
+      - name: Check release bot configuration
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$CLIENT_ID" || -z "$PRIVATE_KEY" ]]; then
+            echo "::error::Configure the release GitHub App and main-only release environment. See docs/DEVELOPMENT.md#production-promotion."
+            exit 1
+          fi
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        id: bot
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Explicitly limited to this repository; revoked at job completion.
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-actions: read
+          permission-workflows: write
+      - uses: actions/checkout@v4
+        with:
+          # Use the trusted main event commit; never execute sync/staging code.
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Prepare promotion or sync release history
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          RELEASE_BOT: ${{ steps.bot.outputs.app-slug }}
+          OPERATION: ${{ github.event_name == 'push' && 'sync' || inputs.operation }}
+        run: |
+          gh auth setup-git
+          git config user.name "${RELEASE_BOT}[bot]"
+          bot_id=$(gh api "users/${RELEASE_BOT}[bot]" --jq .id)
+          git config user.email "${bot_id}+${RELEASE_BOT}[bot]@users.noreply.github.com"
+          node .github/scripts/promotion.cjs "$OPERATION"

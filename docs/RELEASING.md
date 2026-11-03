@@ -78,6 +78,9 @@ promotions each receive a fresh version.
 2. Include release notes in the `staging` → `main` PR: features, fixes, breaking
    changes, migrations/recovery constraints, configuration and deployment
    order. Explicitly say when no migrations or new configuration are required.
+   Once the [production promotion workflow](DEVELOPMENT.md#production-promotion)
+   is active on `main`, use it to open or reuse this PR and reconcile release
+   history. Its first activation uses the normal reviewed promotion process.
 3. Prepare the affected wiki pages in a separate checkout. Include their page
    list, base revision and a reviewable diff in the promotion PR. Draft notes
    around what users can do, required setup and known limitations; keep live
