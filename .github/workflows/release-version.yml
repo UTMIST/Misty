@@ -1,0 +1,41 @@
+name: Release version
+
+on:
+  pull_request:
+    branches: [staging, main]
+  push:
+    branches: [staging, main]
+  merge_group:
+    types: [checks_requested]
+    branches: [staging]
+
+permissions:
+  contents: read
+
+jobs:
+  release-version:
+    runs-on: ubuntu-latest
+    steps:
+      # Keep the event's merge/queue ref. Full history also fetches all tags.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Test release version guard
+        run: node --test scripts/check-release-version.test.mjs
+      - name: Validate release version
+        env:
+          RELEASE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          RELEASE_PROMOTION: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' }}
+        run: |
+          args=()
+          if [[ -n "$RELEASE_BASE_SHA" ]]; then
+            args+=(--base "$RELEASE_BASE_SHA")
+          fi
+          if [[ "$RELEASE_PROMOTION" == 'true' ]]; then
+            args+=(--promotion)
+          fi
+          node scripts/check-release-version.mjs "${args[@]}"

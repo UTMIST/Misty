@@ -187,6 +187,22 @@ Set `PORT=8000` (or whatever you like) as an **explicit** Railway variable on an
 
 ## Release log
 
+For current version selection and publication, see [Misty releases](RELEASING.md).
+
+### 2026-10-23 — 1.0.0 stable baseline (PR #319, completed by #322)
+
+[Promotion #319](https://github.com/UTMIST/Misty/pull/319) shipped document
+retrieval/helper tools, Google discovery and source refresh, managed team
+Groups, meeting persistence and live Q&A. The rollout record identifies
+`172aa5a9278639aeac060002985438ae2ba5bce3` as the final production source
+revision after [#322](https://github.com/UTMIST/Misty/pull/322) corrected a
+test fixture. Completion was October 24 UTC / October 23 Toronto.
+
+This completed rollout is the retrospective **1.0.0** baseline. The version
+assignment does not claim the tag is already published or close the remaining
+acceptance work recorded in #319. Later fix promotions are collected into the
+first tracked patch, **1.0.1**; see the release guide for its scope.
+
 ### 2026-08-09 — staging → production promotion (PR #189)
 
 Merge commit `f692b0b`, **96 commits** spanning Aug 1 → Aug 9, promoting

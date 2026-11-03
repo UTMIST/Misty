@@ -77,6 +77,10 @@ Violating any of these is a bug even if tests pass.
 
 - **Keep a PR inside one CODEOWNERS zone.** `pr-zone-check.yml` warns (non-blocking) when a PR spans multiple zones. [`docs/CODE-OWNERSHIP.md`](docs/CODE-OWNERSHIP.md) is the zone list and what each one covers — note that editing *this* file puts a PR in `root`. If a change genuinely spans zones — a protocol change touching both `meeting` and `discord-bot` — that's fine, but it should be deliberate, not incidental.
 - **Open PRs into `staging`.** Green CI is required.
+- **Platform releases use root `VERSION`, not package/OpenAPI versions.**
+  Ordinary feature PRs can keep it unchanged; a `staging → main` promotion
+  needs a fresh version. Follow [the release guide](docs/RELEASING.md) and run
+  `make test-release` when changing release tooling. Never move a release tag.
 - **Keep required staging checks compatible with `merge_group`.** CI supports
   a staging merge queue; enforcement is a separate GitHub setting. Follow the
   [rollout guide](docs/DEVELOPMENT.md#merge-queue-on-staging) before enabling it.
