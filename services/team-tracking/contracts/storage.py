@@ -13,6 +13,8 @@ from contracts.types import (
     PersonIdentifier,
     PersonIdentifierCreate,
     PersonIdentifierUpdate,
+    PersonSearch,
+    PersonSearchResult,
     PersonUpdate,
     Provider,
     RoleKind,
@@ -53,6 +55,20 @@ class StorageAdapter(Protocol):
     def list_people(self, *, active_only: bool = False) -> list[Person]:
         """List every person. To fetch people for a specific team, use
         `list_memberships(team_id=...)` and resolve `person_id` values."""
+        ...
+
+    def search_people(self, query: PersonSearch) -> PersonSearchResult:
+        """Bounded candidates, active-only by default; no identity mutation.
+
+        Name is a case-insensitive literal substring of display_name. Email is
+        an exact normalized primary_email or registered provider='email' match.
+        Query filters are stripped/lowercased by PersonSearch and combined with
+        AND on the same person; identifier matches never duplicate a person.
+        Order by lower(display_name) (code-point order), then UUID ascending.
+        Return at most query.limit candidates; has_more reports overflow and
+        needs_disambiguation reports multiple matches, even with limit=1.
+        A candidate is not an attested identity; callers must resolve ambiguity.
+        """
         ...
 
     def update_person(

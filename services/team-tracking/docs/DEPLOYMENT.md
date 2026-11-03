@@ -86,7 +86,7 @@ TT_DATABASE_URL="<team-tracking Neon branch>" \
 
 | Scope | Grants |
 |---|---|
-| `people:read` | GET /people, GET /people/{id} |
+| `people:read` | GET /people, GET /people/{id}, GET /people/by-email/{email}, POST /people/search (email filters also need `identifiers:read`) |
 | `people:write` | POST /people, PATCH /people/{id} |
 | `people:elevate` | Additional scope for non-`member` creation and any non-null `access_level` in PATCH; see [access-level rules](../README.md#behavior-notes) |
 | `teams:read` | GET /teams, GET /teams/{id}, GET /teams/by-slug/{slug} |
@@ -95,7 +95,7 @@ TT_DATABASE_URL="<team-tracking Neon branch>" \
 | `memberships:read` | GET /memberships, GET /memberships/{id} |
 | `memberships:write` | POST /memberships, PATCH /memberships/{id}, POST /memberships/{id}/end |
 | `providers:read` | GET /providers, GET /providers/{id} |
-| `identifiers:read` | GET /people/by-identifier/{provider}/{external_id}, GET /people/{id}/identifiers |
+| `identifiers:read` | GET /people/by-identifier/{provider}/{external_id}, GET /people/{id}/identifiers; additional scope for email filters in POST /people/search |
 | `identifiers:write` | POST / PATCH / DELETE /people/{id}/identifiers[/{provider}] |
 | `channels:read` | GET /channels/{guild_id}/{channel_id}/teams |
 | `channels:write` | PUT / DELETE /channels/{guild_id}/{channel_id}/teams, POST .../teams/append |

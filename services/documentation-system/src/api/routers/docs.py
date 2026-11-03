@@ -2,7 +2,8 @@ from datetime import datetime, timedelta, timezone
 from typing import get_args
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from anyio import from_thread
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from contracts.directory import DirectoryClient, DirectoryUnavailable
@@ -37,6 +38,7 @@ from src.source_access import (
     GOOGLE_ACCESS_ORIGIN,
     GOOGLE_SOURCE_IDS,
     SourceAccessUnavailable,
+    SourceIdentityCache,
     resolve_google_permissions,
     source_grant_expiry,
 )
@@ -279,6 +281,7 @@ def release_source_refresh_run(
 
 @router.post("/source-access/refresh-due", response_model=SourceAccessRefreshResult)
 def refresh_due_source_access(
+    request: Request,
     limit: int = Query(default=10, ge=1, le=100),
     storage: StorageAdapter = Depends(get_storage),
     fetchers: FetcherRegistry = Depends(get_fetchers),
@@ -301,10 +304,17 @@ def refresh_due_source_access(
         and doc.source_id in fetch_enabled
         and _source_access_due(doc, due_before)
     ][:limit]
+    # Share identity results only within this request, never across hourly runs.
+    identity_cache = SourceIdentityCache()
     refreshed = 0
     failed = 0
     index_failed = 0
+    attempted = 0
     for doc in due:
+        # A client timeout closes its connection but cannot interrupt a worker
+        # already fetching/writing a document. Stop before the next document.
+        if from_thread.run(request.is_disconnected):
+            break
         try:
             _refetch_doc_source(
                 doc,
@@ -313,6 +323,7 @@ def refresh_due_source_access(
                 directory=directory,
                 actor=actor,
                 source_access_max_age_hours=settings.source_access_max_age_hours,
+                identity_cache=identity_cache,
             )
         except (FetchError, SourceAccessUnavailable):
             _record_failed_refetch(doc, storage=storage, actor=actor)
@@ -321,8 +332,9 @@ def refresh_due_source_access(
             refreshed += 1
             outcome = index_doc(doc.id, storage=storage, embedder=embedder, target=target)
             index_failed += outcome.status == "failed"
+        attempted += 1
     return SourceAccessRefreshResult(
-        attempted=len(due), refreshed=refreshed, failed=failed, index_failed=index_failed
+        attempted=attempted, refreshed=refreshed, failed=failed, index_failed=index_failed
     )
 
 
@@ -486,6 +498,7 @@ def _refetch_doc_source(
     directory: DirectoryClient,
     actor: str,
     source_access_max_age_hours: int,
+    identity_cache: SourceIdentityCache | None = None,
 ) -> Doc:
     if doc.purged_at:
         raise FetchError("document was permanently purged")
@@ -501,7 +514,9 @@ def _refetch_doc_source(
     if doc.source_id in GOOGLE_SOURCE_IDS:
         if result.permissions is None:
             raise SourceAccessUnavailable("connector omitted Google source ACL")
-        resolved = resolve_google_permissions(result.permissions, directory)
+        resolved = resolve_google_permissions(
+            result.permissions, directory, identity_cache=identity_cache
+        )
         storage.replace_source_grants(
             doc.id,
             origin=GOOGLE_ACCESS_ORIGIN,

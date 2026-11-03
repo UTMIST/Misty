@@ -249,11 +249,36 @@ and skips them.
   to be linked; the auth layer handles the "not linked" case.
 - `/seed email:<> name:<> [level:member|admin|superuser]` (admin) — add a member to
   the directory. Gated to admins; you can only grant a level at or below your own
-  (`superuser` > `admin` > `member`). The bot's directory key needs `people:write`.
+  (`superuser` > `admin` > `member`). Creating a person above `member` needs
+  `people:elevate` on the bot's directory key, in addition to `people:write`.
+- `/promote user:<@mention> level:admin|superuser` (admin) — raise an existing
+  member's **global** access level. You can promote only another active person whose
+  current level is below yours, up to your own level (see the table below).
+  Demotions, self-promotion and changes to peers/superiors are refused. With helper
+  tools enabled, ask Misty by mention, full directory name or exact email; Misty
+  shows a private current → requested preview and waits for your confirmation.
+  Needs `people:write` and `people:elevate` on the bot's directory key (both are in
+  the documented key scopes); plain `people:write` cannot change access levels.
+
+  | Caller | Target now | Allowed promotion |
+  | --- | --- | --- |
+  | member | any | none |
+  | admin | member | admin |
+  | admin | admin or superuser | none |
+  | superuser | member | admin or superuser |
+  | superuser | admin | superuser |
+  | superuser | superuser | none |
+
+  **Global access level vs team roles.** `member < admin < superuser` is one
+  directory-wide level per person and gates bot commands. Team roles
+  (`member/lead/director/executive`) and the team-admin flag belong to one team
+  membership and are changed with `/team update`. Neither command changes the
+  other, and neither touches Discord guild roles.
 - `/team create slug:<> label:<> [description:<>]` (admin) — create a team.
 - `/team list [active_only:<bool>]` (linked) — list teams (default active only).
 - `/team rename slug:<> new_label:<>` (admin) — rename a team.
 - `/team add user:<@mention> team:<slug> [role:<...>] [team_admin:<bool>]` (admin) — add a member. The mentioned user must have already run `/link`.
+- `/team update user:<@mention> team:<slug> [role:<...>] [team_admin:<bool>]` (admin) — update an existing membership without removing/re-adding it. Supply at least one field; global access is unchanged.
 - `/team remove user:<@mention> team:<slug>` (admin) — soft-end a membership as of today.
 - `/team roster team:<slug> [as_of:<YYYY-MM-DD>]` (linked) — show a team's current roster.
 - `/team google-status team:<slug>` (admin) — show the team's managed Google Group sync status. Settings failures offer automatic retry and a manual recovery fallback.
@@ -368,7 +393,8 @@ The bot's gate is its authentication/authorization layer — the Discord-side
 parallel to team-tracking's scoped-key auth.
 
 - **Principal** (`src/auth/principal.js`) — the authenticated subject, `{ person }`
-  in v1. Extension point for roles/memberships later.
+  in v1. Inactive directory people resolve as anonymous and cannot use protected
+  commands or autocomplete. Extension point for roles/memberships later.
 - **Policy** (`src/auth/policy.js`) — each command declares `auth: 'public' | 'linked'`
   (default `'linked'`, fail-secure). Extends to role/team-admin policies without
   touching handlers.
@@ -450,16 +476,37 @@ for replay, cost limits, revalidation tradeoffs, and offline coverage.
 ### Commands through mentions and DMs
 
 With helper tools enabled, ask `@Misty show my teams`, `@Misty show the robotics
-roster`, or `@Misty remove @Alex and @Sam from infrastructure`. Misty prepares
-all command calls in the same model response for one review, within the shared
-limit of four tool calls per request (including document lookups). The same
+roster`, `@Misty add Alex Chen to research`, or
+`@Misty remove @Alex and Sam Lee (sam@example.org) from infrastructure`. Misty prepares
+all command calls in the same model response for one review, up to 25 actions
+per request. Team additions and removals accept mentions, directory names, exact
+primary/registered alternate emails, or a name and email together, including
+active directory members without Discord links. A bulk request may mix these
+references with the same team/options in one tool call. Each member counts as one action;
+document lookups have a separate four-call allowance. The same
 tools work in DMs where the underlying command does not need a server or channel.
+
+Person lookup uses the directory's bounded search endpoint (at most five
+candidates), never a full-directory download. Names match case-insensitive
+literal substrings; email addresses match exactly after trimming and lowercasing.
+When both are supplied, the same person must match both. Missing, inactive,
+ambiguous or truncated matches require clarification; Misty never picks the first
+candidate. Use a more specific name or an explicit mention; for email-based
+clarification, send the full name and exact email together to Misty in a DM.
+Candidates and email details are not sent to the model or shared channel.
+All requested targets must resolve, and references selecting the same member/team
+are rejected together. No resolvable subset is submitted automatically.
+Slash commands and the playground retain their existing mention-based options;
+name/email targets are available through helper chat when its tools are enabled.
+Lookup never creates, links or reactivates accounts. The bot's directory key needs
+`people:read` and, for email filters, `identifiers:read` (already in its documented
+scope set). Deploy the directory search API from #359 before enabling this path.
 
 | Capability | Available actions |
 | --- | --- |
 | Directory and help | List teams, view a roster, my teams, who am I, help, bug-report link |
 | Documents | List, add, remove; search and read use the retrieval rules below |
-| Team administration | Create, rename, add/remove members, seed a person |
+| Team administration | Create, rename, add/remove members, update team roles/flags, seed a person |
 | Google Groups | View sync status, request a sync |
 | Channel access | Show, set, append, clear the current channel's team access |
 | Helper limits | Show or change request limits |
@@ -491,10 +538,24 @@ private response (or a private acknowledgement is delivered for a DM request). A
 result-delivery failure never reruns the action.
 Every write, including recording start/stop, first shows its arguments and
 destination in a private preview with **Confirm** and **Cancel**. Member changes
-show the directory names, Discord mentions and team label/slug. If an optional
-name lookup fails, the preview still identifies the member by mention and the
-team by slug. A multi-action
+show each member's directory name, primary email and stable person ID, any
+supplied Discord mention, and the team label/slug. Member and team lookups must
+succeed before a proposal is offered. Confirmation uses the bound person/team
+IDs and rechecks active status and the displayed identity/team fields; it never
+reruns a partial-name query or follows a changed Discord link to another person.
+Changed or unavailable targets require a fresh request. A multi-action
 request lists every proposed action; one confirmation approves the whole list.
+Long previews have **Previous** and **Next** buttons with a page counter.
+Read every page to unlock **Confirm**, which approves all pages together.
+Navigation never executes an action. Short previews retain their existing flow.
+Oversized proposals are rejected in full; Misty must ask to split the request
+instead of silently selecting a subset. Long text replies and completed command
+results continue across Discord messages without a four-member display cutoff.
+Document research can precede a full member batch. Terminal proposals have a
+larger bounded allowance for the fresh evidence checks needed during review,
+execution and result delivery. Repeated reviews spend that allowance; if too
+little remains to start the whole batch, Misty reports that nothing was changed
+and asks for research and changes in separate requests.
 Commands run sequentially and report each result while access and expiry checks
 still permit delivery; they are not an atomic transaction. If a later action
 loses permission, earlier results are still delivered when their own checks
@@ -507,9 +568,10 @@ and others fail, the entire proposal is withheld and Misty explains that nothing
 was changed. If every command fails preparation, Misty can explain the sanitized
 errors or ask for missing details. No further tools run until the user submits a
 new request. Only the requester can confirm. The confirmation window lasts two
-minutes from the first successful private preview; generation time does not
+minutes from the first successful private review page; generation time does not
 shorten it, and reopening
-the preview does not extend it. Access changes or exhausted evidence checks can
+the preview or changing pages does not extend it. Access changes or exhausted
+evidence checks can
 still block an action. Unopened actions expire after two minutes. Actions are
 single-use and disappear on restart. A batch occupies one pending slot. There
 can be at most eight pending actions per user and 500 per process. Capacity is
@@ -778,6 +840,7 @@ local `.env`. The directory must be non-production and the key must include
 | `src/helperFlow.js` | Shared helper-bot authorization and answer handling used by Discord and the web playground. |
 | `src/toolExecutor.js` | Bounded document tool loop, requester revalidation, and terminal command-action handoff. |
 | `src/commandTools.js` | Explicit command-tool allowlist, strict arguments, current-user authorization, and private action previews. |
+| `src/services/personResolver.js` | Shared bounded name/email/mention resolution and stable person lookup for team actions. |
 | `src/helperActions.js` | Bounded, expiring, single-use actions bound to their requester. |
 | `src/helperChecks.js` | Share duplicate authorization work within one validation step; never cache across operations or messages. |
 | `src/registerCommands.js` | Slash-command registration (global by default; testing-guild only when `beta = true`). Runs as Railway's persistent-environment `preDeployCommand`; ephemeral PR copies use the [preview override](../docs/pr-previews.md#automatic-railway-pr-environments). `npm run register` runs it locally. |
@@ -854,3 +917,25 @@ Moving the bot to another voice channel ends a saved recording immediately;
 start a new recording there to use its audience. `save:false` recordings continue
 to follow moves.
 See [setup and recovery](../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).
+
+### Updating existing team memberships (#362)
+
+With helper tools enabled, ask “make Alex Chen a lead on research” or “remove
+Alex’s team-admin flag on research.” Name/email resolution follows the
+[person lookup rules](#commands-through-mentions-and-dms). The private preview
+shows the current and proposed team role and flag. These are team properties;
+they do not grant global admin access. Global admins/superusers can perform the
+operation; a team-admin flag alone is insufficient.
+
+Confirmation pins the exact membership ID, original start/end dates, role,
+flag and update timestamp. Changed, missing or ambiguous memberships require a
+fresh request. Unchanged values cause no write. If a PATCH response is lost,
+Misty stops later helper actions and asks you to check the current state; it
+does not retry the uncertain write. PATCH changes only requested
+fields and preserves the directory-owned Google Group sync path. The read and
+PATCH are separate requests: this API does not provide atomic compare-and-swap,
+so a concurrent edit after the final check can still race with the write.
+
+This adds `/team update` to normal command registration; deployment's existing
+pre-deploy registration handles it. Existing `memberships:read/write` scopes
+suffice. Deploy #360's resolver before this dependent change.

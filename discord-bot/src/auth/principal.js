@@ -13,6 +13,6 @@
 // this principal as a strong identity assertion.
 export async function resolvePrincipal(directory, discordUserId) {
   const person = await directory.getPersonByDiscordId(discordUserId);
-  if (!person) return null;
+  if (!person || person.active === false) return null;
   return { person };
 }

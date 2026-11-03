@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import httpx
@@ -96,7 +97,7 @@ def test_empty_queue_succeeds_with_write_or_admin_scope(scopes):
 def test_document_and_index_failures_do_not_stop_batch_progress():
     with api([counts(2, failed=1, index_failed=1), counts()]) as (client, _):
         report = run_refresh(client, batch_size=2)
-    assert report.drained and report.exit_code == 1
+    assert report.drained and report.exit_code == 0 and report.has_warnings
     assert (report.failed, report.index_failed, report.batches) == (1, 1, 2)
 
 
@@ -145,6 +146,87 @@ def test_time_budget_prevents_next_post_and_caps_timeouts(monkeypatch):
     assert requests[0].extensions["timeout"]["read"] == 10
     assert requests[1].extensions["timeout"]["read"] == 8
     assert report.attempted == 2 and report.exit_code == 2
+    assert report.budget_exhausted
+
+
+@pytest.mark.parametrize(
+    "fault,released",
+    [("budget", True), ("timeout", True), ("early_timeout", False), ("http", False)],
+)
+def test_cli_releases_only_owned_guard_on_time_budget_exhaustion(
+    monkeypatch, capsys, fault, released
+):
+    clock = [0.0]
+    monkeypatch.setattr(source_refresh, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setenv("DOCS_API_KEY", "offline-key")
+    monkeypatch.setenv("SOURCE_REFRESH_MONITOR_URL", "https://monitor.test/private-token")
+    events = []
+    monkeypatch.setattr(RunMonitor, "ping", lambda self, event: events.append(event) or True)
+    reply = httpx.Response(503) if fault == "http" else httpx.ReadTimeout("private details")
+    with api([counts(2), reply]) as (client, requests):
+        refresh = client.refresh_batch
+        batches = []
+
+        def timed_refresh(**kwargs):
+            if not batches:
+                batches.append(True)
+                result = refresh(**kwargs)
+                clock[0] = 10.0 if fault == "budget" else 5.0
+                return result
+            clock[0] = 6.0 if fault == "early_timeout" else 10.0
+            return refresh(**kwargs)
+
+        monkeypatch.setattr(client, "refresh_batch", timed_refresh)
+        monkeypatch.setattr(source_refresh, "DocsApiClient", lambda **kwargs: client)
+        assert main(["--batch-size", "2", "--max-seconds", "10"]) == 2
+    finish = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert finish["budget_exhausted"] is released
+    assert finish["guard_released"] is released
+    assert not finish["drained"] and finish["outcome"] == "failed"
+    assert (finish["batches"], finish["attempted"], finish["refreshed"]) == (1, 2, 2)
+    assert events == ["start", "fail"]
+    releases = [request for request in requests if request.method == "DELETE"]
+    assert len(releases) == int(released)
+    if releases:
+        assert releases[0].url.path.endswith(finish["run_id"])
+    assert sum(request.url.path == source_refresh.REFRESH_PATH for request in requests) == (
+        1 if fault == "budget" else 2
+    )
+
+
+@pytest.mark.parametrize("phase", ["refresh", "meeting"])
+@pytest.mark.parametrize("monitor_ok", [True, False])
+def test_budget_timeout_releases_guard_even_when_monitor_fails(
+    monkeypatch, capsys, phase, monitor_ok
+):
+    clock = [0.0]
+    monkeypatch.setattr(source_refresh, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setenv("DOCS_API_KEY", "offline-key")
+    monkeypatch.setenv("SOURCE_REFRESH_MONITOR_URL", "https://monitor.test/private-token")
+    events = []
+
+    def ping(self, event):
+        events.append(event)
+        return monitor_ok
+
+    monkeypatch.setattr(RunMonitor, "ping", ping)
+    with api([counts()], scopes=["docs:write", "meetings:write"]) as (client, requests):
+
+        def timeout(**kwargs):
+            clock[0] = 10.0
+            raise source_refresh.RefreshTimeout("offline timeout")
+
+        monkeypatch.setattr(
+            client, "refresh_batch" if phase == "refresh" else "retry_meetings", timeout
+        )
+        monkeypatch.setattr(source_refresh, "DocsApiClient", lambda **kwargs: client)
+        assert main(["--max-seconds", "10", "--meeting-records"]) == 2
+    finish = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert finish["budget_exhausted"] and finish["guard_released"]
+    assert finish["drained"] is (phase == "meeting")
+    assert finish["monitor_failed"] is not monitor_ok
+    assert requests[-1].method == "DELETE"
+    assert events == ["start", "fail"]
 
 
 @pytest.mark.parametrize(
@@ -183,8 +265,8 @@ def test_cli_missing_key_fails_before_network(monkeypatch, capsys):
     assert "DOCS_API_KEY is not set" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("failed,index_failed,exit_code", [(0, 0, 0), (1, 0, 1), (0, 1, 1)])
-def test_cli_env_and_sanitized_summary(monkeypatch, capsys, failed, index_failed, exit_code):
+@pytest.mark.parametrize("failed,index_failed", [(0, 0), (1, 0), (0, 1)])
+def test_cli_env_and_sanitized_summary(monkeypatch, capsys, failed, index_failed):
     with api([counts(1, failed=failed, index_failed=index_failed)]) as (client, _):
         monkeypatch.setenv("DOCS_API_KEY", "offline-key")
         monkeypatch.setenv("DOCS_BASE_URL", "http://docs.test")
@@ -195,10 +277,63 @@ def test_cli_env_and_sanitized_summary(monkeypatch, capsys, failed, index_failed
             return client
 
         monkeypatch.setattr(source_refresh, "DocsApiClient", injected_client)
-        assert main([]) == exit_code
+        assert main([]) == 0
     output = capsys.readouterr()
-    assert f"failed={failed} index_failed={index_failed} drained=true" in output.out
+    finish = json.loads(output.out.splitlines()[-1])
+    assert (finish["failed"], finish["index_failed"], finish["drained"]) == (
+        failed,
+        index_failed,
+        True,
+    )
+    assert finish["level"] == ("warning" if failed or index_failed else "info")
+    assert finish["outcome"] == (
+        "completed_with_warnings" if failed or index_failed else "completed"
+    )
     assert "offline-key" not in output.out + output.err
+
+
+@pytest.mark.parametrize(
+    "failure", ["refresh", "index", "meeting_persistence", "meeting_index", "meeting_cleanup"]
+)
+def test_cli_drained_item_failures_warn_without_crashing(monkeypatch, capsys, failure):
+    from contracts.meeting import MeetingRetryResult
+
+    monkeypatch.setenv("DOCS_API_KEY", "offline-key")
+    monkeypatch.setenv("SOURCE_REFRESH_MONITOR_URL", "https://monitor.test/private-token")
+    events = []
+    monkeypatch.setattr(RunMonitor, "ping", lambda self, event: events.append(event) or True)
+    first = counts(2, failed=int(failure == "refresh"), index_failed=int(failure == "index"))
+    with api([first, counts(1)], scopes=["docs:write", "meetings:write"]) as (
+        client,
+        requests,
+    ):
+        meeting_failed = int(failure.startswith("meeting_"))
+        meetings = MeetingRetryResult(
+            attempted=1,
+            succeeded=1 - meeting_failed,
+            failed=meeting_failed,
+            persistence_failed=int(failure == "meeting_persistence"),
+            index_failed=int(failure == "meeting_index"),
+            cleanup_failed=int(failure == "meeting_cleanup"),
+        )
+        monkeypatch.setattr(client, "retry_meetings", lambda **kw: meetings)
+        monkeypatch.setattr(source_refresh, "DocsApiClient", lambda **kw: client)
+        assert main(["--batch-size", "2", "--require-monitor", "--meeting-records"]) == 0
+    assert events == ["start", "success"]
+    assert sum(r.url.path == source_refresh.REFRESH_PATH for r in requests) == 2
+    assert requests[-1].method == "DELETE"  # Known completion releases the run guard.
+    output = capsys.readouterr()
+    finish = json.loads(output.out.splitlines()[-1])
+    assert finish["level"] == "warning"
+    assert finish["outcome"] == "completed_with_warnings"
+    assert finish["exit_code"] == 0 and finish["drained"] is True
+    assert finish["attempted"] == 3 and finish["batches"] == 2
+    assert finish["failed"] == int(failure == "refresh")
+    assert finish["index_failed"] == int(failure == "index")
+    assert finish["meeting_failed"] == meeting_failed
+    assert finish["monitor_failed"] is False
+    assert "offline-key" not in output.out + output.err
+    assert "private-token" not in output.out + output.err
 
 
 def test_runner_advances_past_failed_documents_through_real_api(monkeypatch, fake_embedder):
@@ -265,7 +400,7 @@ def test_runner_advances_past_failed_documents_through_real_api(monkeypatch, fak
         report = run_refresh(client, batch_size=1, max_batches=5)
         assert (report.attempted, report.refreshed, report.failed) == (3, 2, 1)
         assert report.index_failed == 1
-        assert report.drained and report.exit_code == 1
+        assert report.drained and report.exit_code == 0 and report.has_warnings
         assert len(fetchers.calls) == 3
         assert all(doc.updated_by == "source-refresh-test" for doc in store.list_docs())
         assert run_refresh(client).attempted == 0
@@ -348,12 +483,12 @@ def test_monitor_rejects_invalid_url_without_disclosing_it(url):
     "reply,expected",
     [
         (counts(), 0),
-        (counts(1, failed=1), 1),
-        (counts(1, index_failed=1), 1),
+        (counts(1, failed=1), 0),
+        (counts(1, index_failed=1), 0),
         (httpx.ReadTimeout("private body"), 2),
     ],
 )
-def test_cli_signals_success_only_after_clean_drain(monkeypatch, capsys, reply, expected):
+def test_cli_signals_run_completion_after_drain(monkeypatch, capsys, reply, expected):
     events = []
     monkeypatch.setenv("DOCS_API_KEY", "offline-key")
     monkeypatch.setenv("SOURCE_REFRESH_MONITOR_URL", "https://monitor.test/private-token")
@@ -368,12 +503,18 @@ def test_cli_signals_success_only_after_clean_drain(monkeypatch, capsys, reply, 
         assert main(["--require-monitor"]) == expected
     assert events == ["start", "success" if expected == 0 else "fail"]
     output = capsys.readouterr()
-    assert f"exit_code={expected}" in output.out
+    finish = json.loads(output.out.splitlines()[-1])
+    assert finish["exit_code"] == expected
+    if expected:
+        assert finish["level"] == "error" and finish["outcome"] == "failed"
     assert all(secret not in output.out + output.err for secret in ["private", "offline-key"])
 
 
 @pytest.mark.parametrize("fail_event", ["start", "success"])
-def test_monitor_outage_never_replays_refresh_or_reports_success(monkeypatch, capsys, fail_event):
+@pytest.mark.parametrize("item_failed", [0, 1])
+def test_monitor_outage_never_replays_refresh_or_reports_success(
+    monkeypatch, capsys, fail_event, item_failed
+):
     events = []
     monkeypatch.setenv("DOCS_API_KEY", "offline-key")
     monkeypatch.setenv("SOURCE_REFRESH_MONITOR_URL", "https://monitor.test/private-token")
@@ -383,13 +524,16 @@ def test_monitor_outage_never_replays_refresh_or_reports_success(monkeypatch, ca
         return event != fail_event
 
     monkeypatch.setattr(RunMonitor, "ping", ping)
-    with api([counts()]) as (client, requests):
+    with api([counts(1, failed=item_failed)]) as (client, requests):
         monkeypatch.setattr(source_refresh, "DocsApiClient", lambda **kw: client)
         assert main([]) == 2
     assert sum(r.url.path == source_refresh.REFRESH_PATH for r in requests) == 1
     assert all(r.method != "DELETE" for r in requests)  # Delivery is uncertain; retain ownership.
     assert events == ["start", "fail" if fail_event == "start" else "success"]
-    assert "monitor_failed=true" in capsys.readouterr().out
+    finish = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert finish["monitor_failed"] is True
+    assert finish["failed"] == item_failed
+    assert finish["outcome"] == "failed" and finish["level"] == "error"
 
 
 def test_cron_requires_monitor_before_api_call(monkeypatch, capsys):

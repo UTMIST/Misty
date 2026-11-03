@@ -200,6 +200,15 @@ connector reads that list before any export/download. documentation-system then 
 through Team Tracking's fail-closed, membership-synced Google Group lookup. It never
 infers Google Group membership from an ordinary Team Tracking membership.
 
+Scheduled refresh shares an in-memory identity cache across the documents in one
+`refresh-due` request. It caches successful and unmapped results by normalized email,
+separately for users and groups, and discards them before the next batch. Directory
+errors are not cached. Each file still supplies fresh Google permissions; permission
+IDs, roles, inheritance and expiration are evaluated separately for each file. This
+avoids repeating directory HTTP lookups for shared audiences without retaining
+identity or group-sync decisions across batches. Ingest and individual refetches
+continue to resolve identities independently.
+
 Unknown/external emails, unmapped/legacy groups, domain-wide shares, and `anyone` shares
 produce warnings but no grant. This deliberately means a broadly shared file can remain
 absent from the catalog's source-backed audience until an explicit supported mapping
@@ -219,6 +228,8 @@ reconciliation. Ownership fields are attribution metadata and do not authorize a
 It keeps database/provider credentials in the API, checks its scoped key before
 refreshing, and never replays an ambiguous POST. Separate refresh and index failure
 counts preserve the distinction between source freshness and searchable content.
+After draining, handled item failures produce a structured warning and exit `0`;
+the successful heartbeat means the runner completed, not that every item refreshed.
 Railway failure notifications and independent start/finish heartbeat pings cover
 process failures and missing runs; monitoring failure does not undo or replay API
 work. Deployment, recovery and monitoring setup live in the
@@ -229,9 +240,15 @@ Before its first heartbeat, the runner acquires the database's singleton
 drain and final heartbeat, across containers and API restarts. A conflicting
 runner exits nonzero and sends only `/fail`; it cannot replace the active start
 or send a misleading success. Run IDs alone only correlate Healthchecks durations.
-The guard has no TTL: after a crash or uncertain completion, admitting a new run
-could overlap work still running in the API. An operator must confirm quiescence
-before releasing that exact ID. The bounded refresh endpoint remains independently
+The guard has no TTL. Time-budget exhaustion is an explicit release exception:
+the runner reports failure but releases its exact owner even if its last API request
+has not finished. Each completed document commits its own progress; a disconnected
+refresh caller starts no further documents after the current one finishes. A new
+run skips documents with recent sync/attempt timestamps, while untouched rows stay
+due. Immediate replacement can still overlap in-flight work, so the final log's
+`guard_released` flag does not establish API quiescence. Other crashes or uncertain
+outcomes require an operator to confirm quiescence before releasing that exact ID.
+The bounded refresh endpoint remains independently
 callable; direct API clients must use the same guard protocol for an entire drain.
 Each catalog database must have its own heartbeat check.
 
@@ -913,9 +930,13 @@ The removal marker retries version conflicts before proceeding.
 
 `retry-due` reports attempted/succeeded/failed meetings and separate persistence,
 indexing and cleanup failure counts. Pending or terminal failures and incomplete
-cleanup are not successful recovery. The runner includes these outcomes in its
-exit code, summary and heartbeat; known work failures release the run guard after
-the failure heartbeat, while transport or monitoring uncertainty retains it.
+cleanup are not successful recovery. The runner preserves these outcomes in its
+warning summary while a drained run exits `0` and sends a completion heartbeat.
+Known work failures release the run guard after that heartbeat, while transport
+or monitoring uncertainty retains it and produces a nonzero exit, except that
+time-budget exhaustion releases the owner even during an outstanding meeting retry.
+Meeting retries retain their existing persistence/reconciliation state machine;
+they are not forcibly cancelled mid-operation.
 
 Meeting content is fetched with the writer OAuth identity in initial ingest,
 refetch and scheduled refresh. An ambiguous owner 404 follows the nondestructive

@@ -184,6 +184,7 @@ The resource endpoints below require an `X-API-Key`; health, schema and interact
 |--------|------|-------|-------------|
 | POST | `/people` | `people:write` (+`people:elevate` for non-`member` `access_level`) | Create a person |
 | GET | `/people` | `people:read` | List people (`?active_only=`) |
+| POST | `/people/search` | `people:read` (+`identifiers:read` for email filters) | [Bounded name/email candidates](docs/API.md#post-peoplesearch), active by default |
 | GET | `/people/{id}` | `people:read` | Get one person |
 | PATCH | `/people/{id}` | `people:write` (+`people:elevate` for any non-null `access_level`) | Update a person |
 | GET | `/people/by-identifier/{provider}/{external_id}` | `identifiers:read` | Reverse lookup → Person |

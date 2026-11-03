@@ -6,8 +6,11 @@ import {
   GoogleGroupsNotConfigured,
   GoogleGroupSyncConflict,
 } from '../clients/directoryClient.js';
+import { resolvePersonTarget, PersonResolutionError } from './personResolver.js';
 
 export const llmSafe = true;
+
+export class MembershipStateChanged extends Error {}
 
 const isoDateToday = () => new Date().toISOString().slice(0, 10);
 
@@ -74,12 +77,20 @@ export function createTeamService({
     }
   }
 
-  async function addMember({ discordSnowflake, teamSlug, roleKindId, isTeamAdmin }, _opts) {
+  async function addMember(
+    { discordSnowflake, personId, reference, teamSlug, teamId, roleKindId, isTeamAdmin },
+    _opts,
+  ) {
     try {
-      const person = await directory.getPersonByDiscordId(discordSnowflake);
-      if (!person) return { outcome: 'USER_NOT_LINKED' };
-      const team = await directory.getTeamBySlug(teamSlug);
-      if (!team) return { outcome: 'TEAM_NOT_FOUND' };
+      const person = await resolvePersonTarget(directory, {
+        personId,
+        discordSnowflake,
+        reference,
+      });
+      const team = teamId
+        ? await directory.getTeam(teamId)
+        : await directory.getTeamBySlug(teamSlug);
+      if (!team || team.active === false) return { outcome: 'TEAM_NOT_FOUND' };
       const existing = await directory.listMemberships({
         teamId: team.id,
         personId: person.id,
@@ -107,17 +118,23 @@ export function createTeamService({
         throw e;
       }
     } catch (e) {
+      if (e instanceof PersonResolutionError) return { outcome: e.outcome };
       if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
       throw e;
     }
   }
 
-  async function removeMember({ discordSnowflake, teamSlug }, _opts) {
+  async function removeMember({ discordSnowflake, personId, reference, teamSlug, teamId }, _opts) {
     try {
-      const person = await directory.getPersonByDiscordId(discordSnowflake);
-      if (!person) return { outcome: 'USER_NOT_LINKED' };
-      const team = await directory.getTeamBySlug(teamSlug);
-      if (!team) return { outcome: 'TEAM_NOT_FOUND' };
+      const person = await resolvePersonTarget(directory, {
+        personId,
+        discordSnowflake,
+        reference,
+      });
+      const team = teamId
+        ? await directory.getTeam(teamId)
+        : await directory.getTeamBySlug(teamSlug);
+      if (!team || team.active === false) return { outcome: 'TEAM_NOT_FOUND' };
       const active = await directory.listMemberships({
         teamId: team.id,
         personId: person.id,
@@ -127,8 +144,99 @@ export function createTeamService({
       await directory.endMembership(active[0].id, now());
       return { outcome: 'REMOVED', person, team };
     } catch (e) {
+      if (e instanceof PersonResolutionError) return { outcome: e.outcome };
       if (e instanceof DirectoryUnavailable) return { outcome: 'DIRECTORY_DOWN' };
       throw e;
+    }
+  }
+
+  async function prepareMemberUpdate({ personId, discordSnowflake, reference, teamId, teamSlug }) {
+    const person = await resolvePersonTarget(directory, { personId, discordSnowflake, reference });
+    const team = teamId ? await directory.getTeam(teamId) : await directory.getTeamBySlug(teamSlug);
+    if (!team || team.active === false)
+      throw new MembershipStateChanged(
+        'The team is missing or inactive. Ask again for a fresh preview.',
+      );
+    const memberships = await directory.listMemberships({
+      personId: person.id,
+      teamId: team.id,
+      activeOnly: true,
+      asOf: now(),
+    });
+    if (
+      memberships.length !== 1 ||
+      memberships[0].started_at > now() ||
+      (memberships[0].ended_at !== null && memberships[0].ended_at <= now())
+    ) {
+      throw new MembershipStateChanged(
+        'There must be exactly one current membership. Check the roster and ask again.',
+      );
+    }
+    return { person, team, membership: Object.freeze({ ...memberships[0] }) };
+  }
+
+  async function checkMemberUpdate(expected) {
+    const { membership } = await prepareMemberUpdate({
+      personId: expected.person_id,
+      teamId: expected.team_id,
+    });
+    if (
+      [
+        'id',
+        'person_id',
+        'team_id',
+        'started_at',
+        'ended_at',
+        'role_kind_id',
+        'is_team_admin',
+        'updated_at',
+      ].some((key) => membership[key] !== expected[key])
+    ) {
+      throw new MembershipStateChanged('The membership changed. Ask again for a fresh preview.');
+    }
+    return membership;
+  }
+
+  async function updateMember({
+    personId,
+    discordSnowflake,
+    teamId,
+    teamSlug,
+    roleKindId,
+    isTeamAdmin,
+    expectedMembership,
+    beforeWrite,
+  }) {
+    if (roleKindId === undefined && isTeamAdmin === undefined)
+      return { outcome: 'UPDATE_REQUIRED' };
+    if (
+      (roleKindId !== undefined &&
+        !['executive', 'director', 'lead', 'member'].includes(roleKindId)) ||
+      (isTeamAdmin !== undefined && typeof isTeamAdmin !== 'boolean')
+    )
+      return { outcome: 'MEMBERSHIP_INVALID' };
+    let writeStarted = false;
+    try {
+      const current = expectedMembership
+        ? await checkMemberUpdate(expectedMembership)
+        : (await prepareMemberUpdate({ personId, discordSnowflake, teamId, teamSlug })).membership;
+      const changes = {};
+      if (roleKindId !== undefined && roleKindId !== current.role_kind_id)
+        changes.roleKindId = roleKindId;
+      if (isTeamAdmin !== undefined && isTeamAdmin !== current.is_team_admin)
+        changes.isTeamAdmin = isTeamAdmin;
+      if (!Object.keys(changes).length) return { outcome: 'UNCHANGED', membership: current };
+      await beforeWrite?.();
+      writeStarted = true;
+      const membership = await directory.updateMembership(current.id, changes);
+      return membership ? { outcome: 'UPDATED', membership } : { outcome: 'MEMBERSHIP_CHANGED' };
+    } catch (error) {
+      if (error instanceof DirectoryUnavailable)
+        return { outcome: writeStarted ? 'UPDATE_UNCERTAIN' : 'DIRECTORY_DOWN' };
+      if (error instanceof MembershipInvalid) return { outcome: 'MEMBERSHIP_INVALID' };
+      if (error instanceof MembershipStateChanged || error instanceof PersonResolutionError)
+        return { outcome: 'MEMBERSHIP_CHANGED' };
+      throw error;
     }
   }
 
@@ -213,6 +321,9 @@ export function createTeamService({
     listTeams,
     renameTeam,
     addMember,
+    prepareMemberUpdate,
+    checkMemberUpdate,
+    updateMember,
     removeMember,
     getRoster,
     getMyTeams,

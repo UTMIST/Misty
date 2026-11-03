@@ -571,8 +571,8 @@ waiting a second day and risking the 48-hour expiry.
 The defaults refresh after 24 hours and expire source-derived grants after 48 hours. A
 connector/directory failure retains the last complete grant set until its existing expiry;
 after that, source grants no longer authorize reads. Manual grants remain independent;
-ownership is metadata only and never authorizes access. Alert on a non-zero `failed`
-count or on the scheduler not completing for 24 hours.
+ownership is metadata only and never authorizes access. Review non-zero `failed`
+counts in warning summaries separately from runner-failure and missed-run alerts.
 
 Only Drive `user` permissions matching a primary/verified email and Drive `group`
 permissions matching an active, membership-synced Team Tracking mapping become grants.
@@ -616,15 +616,24 @@ POST may still finish in the API; the runner never immediately retries it. Faile
 document attempts are recorded by the API and become due again after the configured
 refresh interval. Per-document failures do not stop draining other batches.
 
-Output contains aggregate counts, nonsecret run UUIDs and sanitized errors. Exit `0`
-means the enabled phases drained and no refresh/index/meeting failures occurred;
-`1` means the queues were drained with failures; `2` means configuration/auth/HTTP/response
+The final JSON log contains aggregate counts, a nonsecret run UUID and sanitized
+errors. Exit `0` means the enabled queues drained, including handled refresh, index
+or meeting-item failures. Those failures produce `level=warning` and
+`outcome=completed_with_warnings`; a clean drain uses `level=info` and
+`outcome=completed`. Exit `2` and `outcome=failed` mean configuration/auth/HTTP/response
 failure, an exhausted budget, or a conflicting runner. An unacknowledged monitor
 ping also exits `2`; `drained` still records whether the API work completed.
+`budget_exhausted=true` identifies a time-budget stop, and `guard_released=true`
+confirms acknowledged deletion of this runner's guard. Budget exhaustion still
+exits `2` and sends a failure heartbeat, but attempts guard release even if an API
+request is still finishing or heartbeat delivery failed. Earlier HTTP timeouts,
+other HTTP/response errors and batch-limit exhaustion retain the guard.
 Previously completed batch counts remain in the
 summary after an HTTP failure. `index_failed` requires the normal `POST /docs/index`
 recovery workflow and its separately scoped key; the refresh runner does not re-index
-repeatedly. Alert on either nonzero exit and on no completed run for 24 hours.
+repeatedly. A completed run with warnings does not create a Railway crash or
+heartbeat failure; item failure counters remain visible for operator follow-up.
+Alert on nonzero exits and missing completed runs.
 
 ### Staging deployment and review gate
 
@@ -676,21 +685,24 @@ Use two independent signals, routed to the same operations destination:
    Railway webhooks are project-wide, so direct Discord delivery includes other
    services/environments. For staging-runner-only alerts, a receiver must filter
    the staging environment and runner service IDs. Test delivery and prove that
-   exits `1` and `2` generate the expected event during acceptance; a successful
+   exit `2` generates the expected event during acceptance, while a completed run
+   with handled item failures produces a warning without a crash; a successful
    deployment is not proof of a successful cron run. See
    [Railway webhooks](https://docs.railway.com/observability/webhooks).
 2. Create a Healthchecks-compatible check named `Misty staging source refresh`,
    scheduled `0 * * * *` in UTC with a **55-minute grace period**, and connect its
    notification integration. Store its base HTTPS ping URL as the secret
    `SOURCE_REFRESH_MONITOR_URL`. The runner sends empty `POST` pings to `/start`,
-   the base URL for a clean drain, or `/fail` for an incomplete/failed run, with a
+   the base URL for a completed drain (including handled item failures), or `/fail`
+   for an incomplete run or runner failure, with a
    per-run UUID. UUIDs correlate durations; [Healthchecks only times the most
    recently started run](https://healthchecks.io/docs/measuring_script_run_time/#alerting-logic-when-using-run-ids),
    so the database guard supplies overlap protection. It sends no catalog key,
    counts, document content or source URL to the monitor. The check detects a
    missing finish, a missed invocation, or a
    process killed before it can report; its alert fires before 24 hours without
-   a clean completed run. See the [ping API](https://healthchecks.io/docs/http_api/).
+   a completed run. It is a runner-liveness signal; inspect the structured warning
+   summary for item coverage gaps. See the [ping API](https://healthchecks.io/docs/http_api/).
 
 A start without completion for 55 minutes is a stuck-run incident. A second runner
 is rejected and reports failure immediately, so it cannot hide that incident with
@@ -715,11 +727,23 @@ No destination is installed by this repository change.
 
 ### Recovery, credential rotation and disable/rollback
 
-The guard remains held through the final acknowledged heartbeat. A completed drain
-(including counted document/index failures) releases it; a crash, incomplete drain,
-API error or uncertain heartbeat leaves it held for inspection. It has no automatic
-expiry because a timed-out request can still be doing work in the API. If admission
-or release times out, inspect ownership: the request may have committed.
+The guard remains held through the final heartbeat attempt. A completed drain
+(including counted document/index failures) releases it. Time-budget exhaustion
+also releases the runner's exact owner, even when the last API request has not
+finished or the heartbeat failed. This is explicit cleanup, not automatic expiry.
+Other crashes, incomplete drains, API errors or uncertain heartbeats leave it held
+for inspection. If admission or release times out, inspect ownership: the request
+may have committed.
+
+On caller disconnection, document refresh finishes its current document and stops
+before starting another. Completed documents retain their committed content,
+grants and sync/attempt timestamps; untouched documents remain due for the next
+hourly invocation. The runner's counters contain acknowledged batches only, so a
+late API completion can commit more progress than its final summary reports.
+Meeting retries continue their existing state-machine behavior. A released guard
+can admit another runner while old work is still in flight; avoid immediate manual
+replays of the timed-out POST. Deploy the API's between-document disconnect checks
+before the updated runner, then verify a scheduled run and its release log.
 
 To recover a stranded guard, stop the old runner and confirm all its API requests
 and monitor deliveries have finished or failed. Find its UUID in `event=acquire`
@@ -738,7 +762,7 @@ an API schema rollback; ordinary cron disablement does not require a DB downgrad
 | Symptom | Operator action |
 |---|---|
 | Admission `409` / overlapping runner | Inspect the existing owner and duplicate schedules. The rejected runner has sent `/fail` without replacing the original heartbeat start. Do not release a live owner; use the recovery procedure above only after quiescence. |
-| `exit_code=2`, API connection/HTTP failure | Restore the API/network/key. Retain confirmed counts. For a timed-out POST, inspect the API's sanitized audit log and wait until the request is known to have finished before starting another run; never immediately replay it. |
+| `exit_code=2`, API connection/HTTP failure | Restore the API/network/key. Retain confirmed counts. For a timed-out POST, inspect the API's sanitized audit log; never immediately replay it. When `budget_exhausted=true` and `guard_released=true`, the next scheduled invocation can resume due work without manual guard deletion. Other uncertain failures retain the guard for recovery. |
 | `drained=true`, `failed>0` | Inspect sanitized API/connector/directory status. Failed documents retain their previous grants until expiry and wait for the next eligibility window; successful/later documents still advance. After restoring the dependency, let the next eligible refresh run or use the documented operator refetch flow. |
 | `index_failed>0` | Restore the llm/index dependency, then use a separate `docs:index` key with `POST /docs/index`, paging `after: next_after` until null. Verify no failed results and a subsequent empty stale-only pass. Refresh alone will not retry a now-fresh document's index. |
 | `drained=false`, budget exhausted | Inspect backlog and durations; reduce batch size or increase bounded limits only with enough margin before the next hour. Do not add replicas or another scheduler. |
@@ -838,8 +862,9 @@ batch budgets and no direct DB or Google credentials. Production scheduling
 remains explicitly disabled in `railway.source-refresh.json` until rollout.
 Deploy the updated API before the runner: the new runner requires full meeting
 outcome counts and rejects an older attempted-only response. Meeting persistence,
-indexing and cleanup failures produce exit 1 and a failure heartbeat, with separate
-`meeting_*_failed` summary counts. API/transport uncertainty still produces exit 2.
+indexing and cleanup failures remain in the separate `meeting_*_failed` summary
+counts. A drained run logs a warning, exits `0` and sends a completion heartbeat;
+API/transport uncertainty still produces exit `2`.
 
 Recovery: inspect `GET /meeting-records?persistence_status=failed` or
 `persistence_status=inaccessible`; use privileged

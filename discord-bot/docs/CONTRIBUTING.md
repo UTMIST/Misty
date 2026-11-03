@@ -12,6 +12,7 @@ installing dependencies.
 - **`router.js` is the single Policy Enforcement Point.** Authenticate → authorize → dispatch, in one place. **Handlers never re-implement auth.** If you find yourself checking `access_level` inside a handler, use the declarative `auth` field instead.
 - **`commands/index.js` is the single source of truth for the command set.** It's consumed by both the router (dispatch) and `registerCommands.js` (Discord registration). Adding a command is one import plus one map entry.
 - **Auth policies fail closed.** `public` / `linked` / `admin` / `superuser`, evaluated in `auth/policy.js`. An unknown policy denies.
+- **Inactive people are anonymous.** Principal resolution does not authenticate a retired account. Protected commands and autocomplete require an active person; public commands can still run anonymously.
 - **Reply rendering lives in `src/messages/`, grouped by feature.** Commands import their renderers directly (for example, `messages/team.js`); keep them pure and surface-neutral. Discord interaction conversion, mentions, recording, and voice events live in `src/adapters/discord/` — see the [README architecture map](../README.md#architecture).
 - **Replies default to ephemeral.** Bot replies carry personal directory and team information. `ephemeral: false` is an explicit, deliberate choice.
 - **Service clients degrade, they don't crash.** Every backend call goes through a client (`clients/directoryClient.js`, `clients/docClient.js`, …) that normalizes failures. A directory outage produces "temporarily unavailable", not a stack trace in a channel.
@@ -111,7 +112,9 @@ Other modes: `npm run dev:web:plain` (web only, no scratch stack), `npm run dev:
    deploy — see
    [RAILWAY-DEPLOYMENT.md §5](../../docs/RAILWAY-DEPLOYMENT.md#5-register-discord-slash-commands).
 
-6. **Update the README's command list** and the root [`README.md`](../../README.md)'s "What you can do with it" section. Both enumerate the live commands, and a new command that isn't listed is invisible to users.
+6. **Update this service README's command list** and identify the affected user-guide
+   pages and release notes in the PR. The root README links to the separate wiki;
+   prepare its command walkthroughs through the [release guide](../../docs/RELEASING.md).
 
 ## Walkthrough: call a new backend service
 
@@ -226,23 +229,41 @@ visibility. The rules the loop enforces:
   History stops at the triggering message, so a later message cannot replace
   the authenticated requester's question. No document results or generated
   answers are cached for model replay.
-- **Bounded retrieval work.** At most four tool calls total across four rounds.
+- **Bounded retrieval work.** At most four document/unknown tool calls across
+  four tool rounds. A terminal command batch has a separate allowance of 25
+  actions, counting each member in a bulk team change. Registry-only
+  `actionCount` metadata lets the executor reject oversized expanded batches
+  before any preparation lookup; it also bounds the actual prepared actions.
   An oversized batch is rejected before executing any of it, and unknown or
   failed calls still spend capacity. All document reads must pass through the
   executor's `readDocument` gate: initial reads and revalidation share a limit
-  of 32 HTTP attempts per answer, including every Discord message part.
-  Failures do not refund attempts. A two-minute deadline covers generation
+  of 32 HTTP attempts during generation and text-answer delivery. After a
+  complete terminal proposal passes its final evidence check, the cumulative
+  ceiling becomes 512 attempts for review, execution and result delivery.
+  The existing counter is retained; no attempts are refunded and no failed
+  check is revived. This allowance never enables another model call. It covers
+  fresh reads for up to four evidence lookups across 25 effects and their replies,
+  with room for private review and pagination.
+  Before execution, recheck the full proposal and require remaining capacity
+  for `(3 × action count + 1) × evidence lookups per pass`: one check per effect,
+  private/public receipts, and a preflight pass. Insufficient capacity rejects
+  the whole batch before any write and produces an explicit no-changes reply.
+  Long/multipart results still obey the cumulative ceiling. The action token is
+  consumed before confirmation authorization I/O, so concurrent duplicate clicks
+  cannot spend the successful click's read capacity.
+  A two-minute deadline covers generation
   through text-answer delivery checks, aborts in-flight HTTP requests, and prevents
   further work. Terminal command actions use the pending deadline below without
   resetting document-read capacity. An already accepted backend operation may
   still finish. Exhaustion
   produces a safe fallback; it never skips an access check to send an answer.
 - **Bounded model output.** At most five model calls, with
-  at most 1,024 output tokens per call and an 8,000-token cumulative ceiling.
+  at most 4,096 output tokens per call and an 8,000-token cumulative ceiling.
   Each call requests the smaller of its per-call cap and remaining budget;
   absent/invalid usage reserves the requested allocation. Exhaustion stops
-  before more tool work. The default round limit makes the effective output
-  maximum 5,120 tokens. These are output-token limits, not a dollar-spend cap:
+  before more tool work. The larger per-call allocation permits complete bulk
+  proposals and long answers; it does not reset the cumulative budget.
+  These are output-token limits, not a dollar-spend cap:
   input tokens and the bounded search embeddings for access checks also cost.
   With the [result byte limits](../README.md#helper-document-tools), four searches
   add at most 240 KiB of serialized result content to the final transcript.
@@ -258,7 +279,7 @@ visibility. The rules the loop enforces:
   replayed, retried automatically, or used to execute tool calls. A valid
   `tool_use` response may instead return a terminal `ACTION`: the bot handles
   it directly without another model call. Every action in the batch is prepared
-  before handoff, within the existing tool-call budget. Any failed call withholds
+  before handoff, within the command-action budget. Any failed call withholds
   the entire proposal. A partially prepared batch returns `INCOMPLETE_ACTION`
   without replaying private previews. When every command fails preparation,
   only sanitized tool errors return for one final explanation or clarification.
@@ -276,8 +297,18 @@ visibility. The rules the loop enforces:
   during preparation. Optional preview name lookups fall back to mentions and
   slugs on provider errors; they still respect the overall turn deadline.
 - **Writes require private confirmation.** A prepared command has not executed.
-  The Discord adapter sends the full argument/destination preview before its
-  buttons; failed preview delivery cannot expose a working confirmation UI.
+  The Discord adapter sends a short argument/destination preview before its
+  confirmation buttons. Long previews use requester-only Previous/Next buttons
+  and a page counter; confirmation is offered only after every page has been
+  delivered successfully. The server checks that state too, so a forged confirm
+  or a jump to the last page cannot approve unseen pages. Each navigation checks
+  authorization again and edits the private review message. Failed delivery does
+  not mark a page reviewed. One confirmation approves the entire proposal.
+  `team_add` and `team_remove` accept a single `user` ID or an array of 1–25
+  distinct IDs with shared team/options. Validate and copy every member before
+  any lookup, then prepare through the existing individual-command path.
+  Flatten these proposals before execution so a failure stops all later actions
+  and every completed result retains its individual delivery check.
   Every write requires the same Discord author to confirm the complete list.
   The batch rechecks every action before the first execution, then each command
   checks its authorization again. Commands execute sequentially with separate
@@ -320,11 +351,12 @@ visibility. The rules the loop enforces:
   identity, evidence and source lookups only within one validation step. Every
   operation and every message part starts a fresh step; permission decisions
   are never cached across them. Admission gives delivery two minutes;
-  the first successful private confirmation starts a fresh two-minute window
+  the first successful private review page starts a fresh two-minute window
   shared by storage, command authorization and executor checks. A non-confirm
-  fallback starts its window when its button is delivered. Reopening a preview
-  never extends that window. Prior evidence, spent read capacity, revocation and
-  failures remain in force; only the deadline changes after generation ends.
+  fallback starts its window when its button is delivered. Reopening or paging
+  a preview never extends that window. Prior evidence, spent read capacity, revocation and
+  failures remain in force. The read ceiling changes once at terminal handoff
+  as described above; presentation changes only the deadline.
   Start recording resolves current voice state at
   confirmation; stop and Q&A bind the original active session. Meeting Q&A uses
   the exact recording text channel, while channel settings use a thread's parent.
@@ -388,6 +420,36 @@ denied an admin tool, a revoked pending action, and recording start/stop before
 activation. The flag remains off by default; this code does not alter a deployed
 environment's setting.
 
+### Person target resolution (#360)
+
+Team helper tools accept mention snowflakes or `{name, email}` references (either
+filter is optional, but one is required), singly or in mixed arrays. The shared
+`services/personResolver.js` resolves them through the directory search contract
+from #359; it must not call `listPeople` or expose directory candidates as model
+tool results. A missing/ambiguous/truncated result returns a static clarification,
+including when the search supplies one candidate plus `has_more=true`.
+Email-based clarification directs the requester to a new DM request; do not
+solicit or repeat email details in a shared-channel clarification.
+
+Only the requester sees the actual member name, primary email, stable ID and
+team in the private preview. Candidate lists never enter tool/model history.
+Stable IDs come from the authenticated directory response, never model-supplied
+`personId`/selection fields. Preparation first passes the shared router policy,
+then pins person and team IDs. Fresh checks before execution and each result
+part require the same active records and displayed fields; execution does not
+repeat discovery. Slash/playground user options remain compatible and team
+services use the same resolver for existing mentions and bound IDs.
+
+Resolve the complete bulk proposal before offering it. Repeated references to
+one person/team, including across separate tool calls, withhold the whole batch.
+Keep the existing action count, complete-review, original requester, expiry and
+single-use rules. Eligibility checks are observations before separate backend
+writes, not a cross-service transaction.
+
+This change stays in the bot zone and requires #359's directory endpoint, with
+the existing `people:read` and `identifiers:read` scopes. It adds no model-visible
+read-only person tool, slash option, configuration setting or automatic linking.
+
 ## Checklist before you push
 
 - [ ] Command is registered in `commands/index.js`.
@@ -397,7 +459,8 @@ environment's setting.
 - [ ] New backend calls go through a client that normalizes failures.
 - [ ] New config is in `src/config.js` **and** `.env.example`, with required-vs-optional chosen deliberately.
 - [ ] Tests cover the handler and the auth policy.
-- [ ] Command lists updated in this service's README and the root README.
+- [ ] Command list updated in this service's README; affected wiki pages and
+      release-note items identified in the PR.
 - [ ] `npm test` is clean.
 - [ ] `npm run lint` and `npm run format:check` are clean. Both gate CI, the same
       way `ruff check` / `ruff format --check` gate every Python service.
@@ -419,3 +482,46 @@ environment's setting.
 >   `src/web/public/` is served to the page, so `process` and `Buffer` genuinely don't
 >   exist there and ESLint is configured to say so. Layer a browser block on top of a
 >   `**/*.js` node block and flat config merges them, handing browser files both sets.
+
+### Membership update implementation (#362)
+
+`team_update` reuses person resolution and private confirmations. Its membership
+snapshot is rechecked before execution; successful writes replace that snapshot
+with the returned record so receipt delivery does not reject our own change.
+Do not reselect a replacement membership or implement updates as end/create.
+A transport failure after PATCH starts is an uncertain write: helper dispatch
+throws to stop the batch, while slash replies ask the user to check current
+state. Read outages and explicit validation rejections remain ordinary results.
+After the service finishes its final membership lookup, helper updates run a
+fresh action check immediately before PATCH. Check expiry after asynchronous
+reads too; cached earlier authorization cannot cover time spent in those reads.
+The regression suite covers all supported role/flag transitions and
+advances a controlled clock during the final lookup to test expiry.
+
+### Promotion implementation (#361)
+
+`/promote` and the `promote` helper tool change only a person's global
+`access_level` through `PATCH /people/{id}`. The directory gates that field on
+`people:elevate` but does not know the human caller, so the bot enforces the
+hierarchy in `promotionDecision` (`src/auth/policy.js`): caller admin+, target
+currently below the caller, destination above the target and at most the caller.
+Unknown levels are `INVALID_LEVEL`; do not reuse `rankOf`, which defaults to member.
+
+The caller is always the router's freshly authenticated principal. A name/email
+reference resolves through the minimal `PersonSearchMatch`, which has no
+`access_level` or `updated_at`, so preparation then re-reads the full person by
+the resolved ID. Preparation pins a snapshot of the target (`id`, name, email,
+`active`, `access_level`, `updated_at`); every action check re-reads both people
+and reruns the policy, and a fresh action check runs immediately before the
+PATCH. After a confirmed write, receipt checks recheck only the requester, so our
+own promotion does not make delivery fail. Success is reported only when the response matches the requested
+level. 401/403 mean the key was refused, so nothing changed; 400/409/422 are a
+directory rejection. A transport failure or malformed response after the PATCH
+starts (including a `200` whose body is not a person object, such as `null`) is
+uncertain, never "not found", so it also stops later batch actions. Only a real
+`404` means not found. An uncertain write is never retried, the same convention
+as #362.
+
+Remaining limitation: the final read and the PATCH are separate requests. Closing
+that window needs a conditional write in team-tracking, which is a separate
+service change.
