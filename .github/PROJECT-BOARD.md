@@ -23,7 +23,7 @@ See GitHub's [closing-link rules][closing] before changing the default branch.
 ## Native project settings
 
 These settings live in the project's **Workflows** UI, outside repository YAML.
-They were inspected and reconciled on 2026-10-26 (Toronto):
+Configure them as follows:
 
 | Workflow | Setting |
 | --- | --- |
@@ -50,10 +50,12 @@ and project state, so an older queued event cannot replay an old issue body or
 PR status. The scheduled pass repairs missed events and native relationship
 edits. Fork review events lack the project secret and use that scheduled pass.
 
-The new workflow replaces the old, manually disabled
-`blocked-ready-automation.yml`. Removing that file does not re-enable it.
-**The replacement must reach `staging` before it runs.** Native settings above
-are independent and already active.
+`project-board.yml` replaces `blocked-ready-automation.yml`; do not re-enable
+the retired workflow. **The replacement must reach `staging` before it runs.**
+A review event before installation reports a skip when both the workflow and
+reconciler are absent from the default-branch checkout. An installed workflow
+with a missing script still fails, as do missing scripts on non-review events.
+Native project settings operate independently.
 
 | Current evidence | Reconciled status |
 | --- | --- |
@@ -82,9 +84,9 @@ Only Status, `ready` and `blocked` are reconciled. Priorities, sizes, dates,
 assignees, descriptions and acceptance checkboxes are not rewritten. Historical
 archived closed cards stay archived; reopened cards are restored. Use the
 `on hold` label for deliberate deferrals, rather than relying on a manually
-placed Backlog card to override a linked PR. Existing deferrals were labeled
-during the audit. Native transitions can temporarily precede reconciliation;
-the scheduled pass restores this policy after missed or competing events.
+placed Backlog card to override a linked PR. Native transitions can temporarily
+precede reconciliation; the scheduled pass restores this policy after missed
+or competing events.
 
 ## Additional automation
 
@@ -175,7 +177,7 @@ After merging into `staging`:
 4. Dispatch **Review board exceptions** and **Check automation health** with
    `dry_run=true`; inspect their summaries before dispatching with `false`.
    Confirm the native report exclusion above. The `automation/report`,
-   `automation/health` and `no-issue-needed` labels were created during this audit.
+   `automation/health` and `no-issue-needed` labels must exist before activation.
 5. Dispatch **Check PR issue links** for an existing PR and **Record deployment
    evidence** with an existing GitHub deployment ID and `dry_run=true`. After
    review, replay that deployment with `false` or observe a real subsequent
@@ -183,25 +185,6 @@ After merging into `staging`:
 6. Verify scheduled board and weekly runs after their first scheduled execution.
    A local authenticated API preview does not test the Actions secret, hosted
    permissions, event delivery or the scheduler.
-
-The 2026-10-26 native-settings audit preceded publication of the repository
-changes. Hosted execution and credential validation remain rollout steps. A temporary live
-issue verified native auto-add → Backlog, Done → closed, reopened → Backlog,
-and closed → Done; the issue was then closed as not planned and archived.
-The local controller was also checked in read-only mode against the live API.
-Updating the held subtitle PR also proved native PR auto-add. Its existing
-review state initially put it In progress, so the explicit Backlog disposition
-was restored manually. Native rules do not understand `on hold`; enforcing
-that override automatically requires the replacement reconciler to be live.
-
-The additional 2026-10-26 read-only preview found approved PRs #317/#320,
-unassigned P1 issues #46/#82/#342, and epic #60 with closed direct sub-issues but
-unchecked acceptance. PR #331 produced a missing-link advisory. Production
-deployment `7323061607` resolved to PR #330 with Railway observations for
-documentation-system, doc-discover and doc-source-refresh. The health preview
-correctly reported the new workflows absent from GitHub before merge; its
-project probe used the local login, not the Actions secret. No preview reports
-or deployment comments were published.
 
 To pause repository reconciliation, disable **Sync project board** in Actions.
 Do not revive the retired workflow. Native automation remains separately
@@ -213,7 +196,7 @@ health monitor enabled to expose accidental disables; an intentional pause of
 watched workflows will remain a finding until restored or deliberately removed
 from its watched list. No pause should delete acceptance work or old evidence.
 
-## Verification and changed-file rationale
+## Verification
 
 Run `node --test .github/scripts/*.test.cjs` with Node 22,
 `node scripts/check-labels.mjs`, and Actionlint on the changed workflow YAML.
@@ -222,31 +205,10 @@ pagination, idempotence, archived history, dry-run writes and fail-closed reads.
 The additional suite covers report lifecycle and deduplication, advisory
 exceptions, schedule freshness, credential failure, epic cancellation, trusted
 deployment evidence and exact PR association. All tests use offline fakes.
-
-| File | Why it changes |
-| --- | --- |
-| `.github/scripts/project-board.cjs` | One current-state reconciliation policy and GitHub API boundary |
-| `.github/scripts/project-board.test.cjs` | Offline transition and orchestration regressions |
-| `.github/scripts/automation-common.cjs` | Shared safe report/comment updates, checklist parsing and completeness guards |
-| `.github/scripts/board-reports.cjs` | Workflow health inspection and the consolidated weekly exceptions/epic review |
-| `.github/scripts/pr-issue-check.cjs` | Read-only PR linking and full-scope closure advice |
-| `.github/scripts/deployment-evidence.cjs` | Associate trusted Railway deployment records with exact merged work |
-| `.github/scripts/automation.test.cjs` | Offline failure, reporting, advisory and deployment regressions |
-| `.github/workflows/project-board.yml` | Event, scheduled and manual execution with trusted code and explicit credential failures |
-| `.github/workflows/automation-health.yml` | Independent scheduled/completion-triggered inspection with repository-only incident writes |
-| `.github/workflows/pr-issue-check.yml` | Trusted-code advisory runs without PR comment churn |
-| `.github/workflows/deployment-evidence.yml` | Actual deployment events and manual evidence replay |
-| `.github/workflows/board-review.yml` | Weekly exceptions and epic review in one reusable issue |
-| `.github/workflows/blocked-ready-automation.yml` (removed) | Retire the disabled, conflicting Ready/Blocked writer and invalid option ID |
-| `.github/workflows/ci.yml` | Run the automation regression suite on PRs and merge groups |
-| `.github/PROJECT-BOARD.md` | Settings audit, operating policy, activation/rollback and validation limits |
-| `docs/ONBOARDING.md` | Explain readiness, holds and closing links without the retired workflow's promises |
-| `docs/DEVELOPMENT.md` | Link the actual issue/PR automation and rollout requirements |
-| `AGENTS.md` | Keep agent blocker/closure instructions consistent with the new policy |
-
-The changed-file table covers the complete cleanup. Publication is split into
-single-zone PRs for `.github`, `docs` and `root`. Merge the automation PR first,
-then its contributor-documentation and agent-guidance companions so their
-links resolve to the deployed runbook and workflow.
+The activation suite executes the workflow's actual script with fake runner
+boundaries, covering pre-installation reviews, active runs and visible failures
+for missing scripts or credentials. Hosted permissions and event delivery still
+need the rollout checks above; record that evidence in the implementation PR
+or issue.
 
 [closing]: https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/linking-a-pull-request-to-an-issue

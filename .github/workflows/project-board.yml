@@ -46,6 +46,16 @@ jobs:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         with:
           script: |
+            const { existsSync } = require('node:fs');
+            if (context.eventName === 'pull_request_review' &&
+                !existsSync('./.github/scripts/project-board.cjs') &&
+                !existsSync('./.github/workflows/project-board.yml')) {
+              core.notice('Board reconciliation is not installed on the default branch yet.');
+              await core.summary.addHeading('Project reconciliation not active')
+                .addRaw('Skipping this review event until the workflow and scripts reach the default branch.')
+                .write();
+              return;
+            }
             if (!process.env.PROJECTS_TOKEN) {
               throw new Error('PROJECTS_TOKEN is required; board synchronization is not active.');
             }
