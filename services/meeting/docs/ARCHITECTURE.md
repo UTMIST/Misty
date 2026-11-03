@@ -78,7 +78,7 @@ Two tuning constants govern how words become segments:
 
 `_MAX_SEGMENT_MS` was measured, not guessed: at 10 s, an interjection inside the first 10 s of someone's turn still sorted after their whole block, which is precisely the bug it exists to fix.
 
-> The 200 ms gap tolerance used for anchoring is reasoned from Discord's ~20 ms frame cadence but has **not** been measured against a live call. See [Live-verify caveats](#live-verify-caveats).
+> The 200 ms gap tolerance needs checking against realistic Discord audio pacing when audio handling changes. See [Live verification](#live-verification).
 
 ## The end-of-audio barrier
 
@@ -179,14 +179,11 @@ applies the same strict schema and citation validation. It does not repair
 truncation or extract answers from surrounding prose. Invalid responses are
 rejected without logging.
 
-## Live-verify caveats
+## Live verification
 
-Several integration assumptions are unit-tested against fakes but **not yet confirmed against real Discord audio or a real AWS account**:
-
-- **Speaker-timeline anchoring** — the 200 ms gap tolerance is reasoned from Discord's frame cadence, not measured on a live call.
-- **AWS session restarts** — Transcribe ends a streaming session on its own (idle timeout, 4 h cap). The wrapper reopens on the next audio and offsets the new session's word times by the audio already delivered. Tested against a fake, never observed against a real timeout.
-- **Concurrent stream limits** — one open Transcribe stream per active speaker, for the whole meeting. Check the account's concurrent-stream quota before a large meeting.
-- **Transcribe streaming generally** — the suite exercises `src/stt/transcribe.py` against a fake client only. Realistic audio pacing is needed to validate end-to-end.
+The offline suite validates timing and stream recovery against fakes. Real
+Discord pacing, AWS session restarts, and account quotas need the deployment
+checks in the [live verification checklist](../README.md#live-verification).
 
 ## Durable finalization hand-off
 

@@ -1,11 +1,10 @@
-# Ingestion-to-authorized-retrieval verification (#277)
+# Testing the document lifecycle
 
-Acceptance record for [#277](https://github.com/UTMIST/Misty/issues/277).
-Indexing (#175), retrieval (#176), and source-access reconciliation (#76) already
-meet at the catalog API. This change verifies that boundary without adding another
-indexer, grant model, scheduler, or consumer integration.
+Validate ingestion, indexing, source-access reconciliation and authorized retrieval
+as one flow. This guide describes reproducible checks; attach results to the PR
+or deployment being verified. For response semantics, use the [API contract](API.md#authorized-retrieval-post-search).
 
-## What the automated acceptance drives
+## Automated lifecycle coverage
 
 `tests/ingestion_retrieval_cases.py` is shared by the in-memory and Postgres suites.
 Only storage selection is overridden in the application. The normal dependency
@@ -21,7 +20,7 @@ teams, keys, document bodies, deterministic vectors and exact request/response
 exchanges. Its documents enter through `POST /docs`. For manual-only examples,
 a temporary mapped source share allows ingestion; a real refetch then reconciles
 that source share away. Only generated document UUIDs are substituted in expected
-responses. The fixture itself is unchanged.
+responses. Use the fixture as the shared contract when changing a consumer.
 
 | Acceptance | Evidence |
 |---|---|
@@ -35,7 +34,7 @@ responses. The fixture itself is unchanged.
 | Recovery and races | A later embedding batch can fail after earlier success without committing partial chunks. Index/storage failures retain one complete version. Revocation during embedding or failed re-indexing still applies immediately; a newer content fetch wins over a delayed index writer. Retries recover without duplicates. |
 | Postgres fault behavior | An injected INSERT failure after the real replacement DELETE rolls back the old set; `/docs/index` reports a safe failure and retries successfully. Real retrieval SQL failures return safe 503s for person/channel contexts and recover once the fault is removed. |
 
-## Accepted freshness and failure behavior
+## Freshness and failure behavior
 
 The [API contract](API.md#authorized-retrieval-post-search) defines returned chunk
 revisions and safe search errors. The
@@ -68,7 +67,7 @@ catalog response and logs the failure. Refresh-due counts `failed`/`index_failed
 failures, and is the retry path. See the existing
 [index API](API.md#post-docsindex--re-index-stored-content) for pagination and scopes.
 
-## Reproduce the checks
+## Run the checks
 
 From this service directory, using the repository lockfile:
 
@@ -101,11 +100,11 @@ When other worktrees are installed in the environment, pin and verify the `src`,
 `contracts` and `tests` import roots before collection, as required by
 [AGENTS.md](../../../AGENTS.md#gotchas-that-will-cost-you-an-hour).
 
-## Controlled staging/provider acceptance — pending
+## Controlled provider acceptance
 
-Before the October 23 go/no-go, attach the successful required CI run and staging
-deployment identifier, then
-perform controlled acceptance with synthetic source documents and test identities:
+After the required CI checks pass, validate the target deployment with approved
+synthetic source documents and test identities. Record the deployment revision
+and results in the release PR or rollout issue:
 
 1. Ingest one personal share and two separately group-shared files. Verify their
    real titles/source links and citations for the two test people and the configured
@@ -118,24 +117,6 @@ perform controlled acceptance with synthetic source documents and test identitie
 4. Confirm a source file is gone, verify removal, then exercise controlled transient
    fetch/embedding unavailability. Restore the dependency and drain `/docs/index`;
    verify complete replacement, current authorization and duplicate-free recovery.
-5. Record operator/date, results, exceptions and the release decision. Link #278's
-   bot/DM/channel acceptance separately; this service-level suite does not replace it.
-
-Automated implementation/checks are due October 21. Controlled provider/staging
-evidence must be recorded before the October 23 release decision; closing #175/#176
-alone does not satisfy that gate.
-
-## Changed-file rationale
-
-All paths belong to the `services/documentation-system` ownership zone.
-
-| File | Necessity |
-|---|---|
-| `tests/ingestion_retrieval_cases.py` | Shared real API lifecycle acceptance with deterministic external HTTP fixtures; prevents seeded-only retrieval coverage from hiding integration regressions. |
-| `tests/test_ingestion_retrieval.py` | Runs those cases in memory by default, without Docker or live providers. |
-| `tests/test_postgres_adapter.py` | Runs identical cases on real Postgres plus transaction rollback and actual retrieval SQL error checks; existing CI already selects this file. |
-| `docs/API.md` | Makes retained-version citations, current authorization and reconciliation freshness explicit for consumers. |
-| `docs/ARCHITECTURE.md` | Documents how lifecycle verification uses existing boundaries and distinguishes remaining release gates. |
-| `docs/DEPLOYMENT.md` | Links reproducible integration/recovery commands and the controlled staging acceptance gate. |
-| `README.md` | Exposes the integration test entry points and updates the deferred-work status. |
-| `docs/INGESTION-RETRIEVAL-AUDIT.md` | Records acceptance coverage, file rationale, commands, evidence and outstanding live release acceptance. |
+5. Record the operator, deployed revision, results, exceptions and release decision.
+   Also exercise the [bot's DM/channel flow](../../../discord-bot/README.md#channel-scope-and-activation);
+   service-level checks do not replace consumer acceptance.

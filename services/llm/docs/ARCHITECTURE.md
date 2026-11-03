@@ -142,7 +142,7 @@ The client still receives only the normalized 502 message.
 GPT-6.1 Sol always reasons: true/false map to medium/low effort. Responses requires
 at least 16 output tokens; smaller limits fail locally with 422. Reasoning shares
 the output budget with visible text. See the [API contract](API.md#thinking-and-continuation)
-and [migration record](OPENAI-MIGRATION.md).
+and [provider-switch procedure](DEPLOYMENT.md#switching-chat-to-openai).
 
 ## The two Bedrock chat providers
 
@@ -209,13 +209,12 @@ This is deliberate: passing corrupted error data through can itself raise a 500 
 log input-derived fields. The raw-body cap is checked after SDK HTTP buffering,
 not while downloading. See the rollout limits in [DEPLOYMENT.md](DEPLOYMENT.md).
 
-The initial audit exercised these paths with offline HTTP/SDK round trips and
-intercepted real HTTP transports. That broad suite was subsequently removed at the
-user's request. The retained `tests/test_tool_stop_reasons.py` now covers the review's
-empty-completion and truncation regressions with both real SDKs, plus router and
-request-validation controls; it does not replace the removed coverage. See the
-[audit record](TOOL-USE-AUDIT.md#test-cleanup). Botocore Stubber short-circuits before
-parsing and cannot alone verify the raw boundary.
+`tests/test_tool_stop_reasons.py` exercises empty completions and truncation
+through both Bedrock SDKs, plus router and request-validation controls. This is
+focused regression coverage, not an exhaustive raw-boundary suite. SDK/codec
+changes need offline HTTP-to-SDK round trips for the affected shapes; Botocore
+Stubber short-circuits before parsing and cannot alone verify that boundary.
+See [the transport checklist](CONTRIBUTING.md#changing-tool-use-transport).
 
 The consumer, not this service, owns tool allowlisting, argument-schema validation,
 actor and document permissions, actual execution, error results, iteration limits,

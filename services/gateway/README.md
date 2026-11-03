@@ -33,7 +33,8 @@ keys; anything reaching in from outside the org goes through the gateway instead
 
 See [API](docs/API.md), [architecture](docs/ARCHITECTURE.md),
 [contributing](docs/CONTRIBUTING.md), and the [deployment runbook](docs/DEPLOYMENT.md).
-The [integration audit](docs/CHANGE-AUDIT.md) records compatibility checks and file rationale.
+See [contribution checks](docs/CONTRIBUTING.md#before-pushing) for API, database,
+packaging and cross-service verification.
 
 ## Quick start
 

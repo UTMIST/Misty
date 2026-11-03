@@ -10,6 +10,7 @@ import {
 } from './services/personResolver.js';
 
 import { MembershipStateChanged } from './services/teamService.js';
+import { PromotionRejected } from './services/promotionService.js';
 
 export const llmSafe = true;
 
@@ -31,6 +32,7 @@ const OPERATIONS = [
   ['team', 'remove', true],
   ['team', 'update', true],
   ['seed', null, true],
+  ['promote', null, true],
   ['team', 'google-status'],
   ['team', 'google-sync', true],
   ['channel-access', 'show'],
@@ -126,6 +128,8 @@ export function createCommandTools({ appContext }) {
     const operation = subcommand ? command.subcommands.find((s) => s.name === subcommand) : command;
     const name = [commandName, subcommand].filter(Boolean).join('_').replaceAll('-', '_');
     const bulkMembers = commandName === 'team' && ['add', 'remove', 'update'].includes(subcommand);
+    const promotion = commandName === 'promote';
+    const personTarget = bulkMembers || promotion;
     const delivery = PUBLIC_READS.has(name)
       ? 'Replies publicly in server conversations'
       : commandName === 'record'
@@ -136,7 +140,7 @@ export function createCommandTools({ appContext }) {
       actionCount: (input) => (bulkMembers && Array.isArray(input?.user) ? input.user.length : 1),
       definition: {
         name,
-        description: `${operation.description}. Authenticates the requesting user. ${delivery}${confirm ? ' after private user confirmation' : ''}. Include ALL requested actions in the same tool-call response, up to ${MAX_HELPER_ACTIONS} actions total, separately from the four document-tool calls allowed. ${bulkMembers ? 'Accepts directory names, exact primary/registered alternate emails, combined name/email references, and explicit mention IDs, including people without Discord links. Pass EVERY requested member as an array in user for a bulk change; mixed references are allowed. Resolution is private and bounded; no candidates or email details are returned to the model. Ambiguous, missing, conflicting or duplicate targets withhold the entire proposal. Ask for more detail without listing candidates or guessing. ' : ''}If the full request exceeds the action limit or lacks required details, ask the user to split or clarify it; never propose only a subset. Finish any document searches or reads in earlier tool rounds; never mix them with command calls in the same response. Prepared batches end the assistant turn; command results are not returned to the model. If every preparation fails, explain the errors or ask for missing details without further tool calls.`,
+        description: `${operation.description}. Authenticates the requesting user. ${delivery}${confirm ? ' after private user confirmation' : ''}. Include ALL requested actions in the same tool-call response, up to ${MAX_HELPER_ACTIONS} actions total, separately from the four document-tool calls allowed. ${bulkMembers ? 'Accepts directory names, exact primary/registered alternate emails, combined name/email references, and explicit mention IDs, including people without Discord links. Pass EVERY requested member as an array in user for a bulk change; mixed references are allowed. Resolution is private and bounded; no candidates or email details are returned to the model. Ambiguous, missing, conflicting or duplicate targets withhold the entire proposal. Ask for more detail without listing candidates or guessing. ' : ''}${promotion ? 'Changes only the global access level (member < admin < superuser), never team roles or team-admin flags. Accepts a directory name, exact primary/registered alternate email, combined name/email reference, or explicit mention ID; call once per person. The requester is always the authenticated user; never supply their rank. Ambiguous, missing or ineligible targets withhold the proposal. Ask for more detail without listing candidates or guessing. ' : ''}If the full request exceeds the action limit or lacks required details, ask the user to split or clarify it; never propose only a subset. Finish any document searches or reads in earlier tool rounds; never mix them with command calls in the same response. Prepared batches end the assistant turn; command results are not returned to the model. If every preparation fails, explain the errors or ask for missing details without further tool calls.`,
         input_schema: {
           type: 'object',
           additionalProperties: false,
@@ -158,7 +162,9 @@ export function createCommandTools({ appContext }) {
                     description:
                       'One person reference, or ALL requested person references for this team change.',
                   }
-                : optionSchema(o),
+                : promotion && o.name === 'user'
+                  ? personReferenceSchema
+                  : optionSchema(o),
             ]),
           ),
           required: operation.options.filter((o) => o.required).map((o) => o.name),
@@ -212,7 +218,7 @@ export function createCommandTools({ appContext }) {
         }
         let options;
         try {
-          options = validatedOptions(input, operation.options, bulkMembers);
+          options = validatedOptions(input, operation.options, personTarget);
         } catch (error) {
           return { is_error: true, content: { error: error.message } };
         }
@@ -234,6 +240,8 @@ export function createCommandTools({ appContext }) {
         let target;
         let targetTeam;
         let targetMembership;
+        let promotionTarget;
+        let promotionApplied = false;
         const intent = Object.freeze({
           surface: 'discord',
           commandName,
@@ -283,11 +291,19 @@ export function createCommandTools({ appContext }) {
               }
             }
             if (targetMembership) await appContext.teamService.checkMemberUpdate(targetMembership);
+            // After a confirmed write, receipts recheck only the requester.
+            if (promotionTarget && !promotionApplied)
+              await appContext.promotionService.checkPromotion({
+                caller: result.principal.person,
+                expectedPerson: promotionTarget,
+                level: options.level,
+              });
             if (Date.now() >= intent.expiresAt) throw new Error('This action expired. Ask again.');
             return result.principal;
           });
+        let caller;
         try {
-          await withDeadline(() => check());
+          caller = (await withDeadline(() => check())).person;
         } catch {
           return {
             is_error: true,
@@ -336,6 +352,34 @@ export function createCommandTools({ appContext }) {
             };
           }
         }
+        if (promotion) {
+          try {
+            promotionTarget = await withDeadline(() =>
+              appContext.promotionService.preparePromotion({
+                caller,
+                reference: options.user,
+                level: options.level,
+              }),
+            );
+            options = Object.freeze({
+              ...options,
+              user: Object.freeze({
+                ...(options.user.id && { id: options.user.id }),
+                personId: promotionTarget.id,
+              }),
+            });
+          } catch (error) {
+            return {
+              is_error: true,
+              content: {
+                error:
+                  error instanceof PersonResolutionError || error instanceof PromotionRejected
+                    ? error.message
+                    : 'The member could not be verified. Nothing was changed. Try again or clarify the request.',
+              },
+            };
+          }
+        }
         // No model data can override the author, guild, channel or meeting target.
         const runMeeting = request.runMeeting;
         // Preparation decides whether to open a private interaction. The
@@ -351,6 +395,7 @@ export function createCommandTools({ appContext }) {
         // The preview and execution both use the frozen, validated options.
         const people = {};
         if (target) people[target.id] = target;
+        if (promotionTarget) people[promotionTarget.id] = promotionTarget;
         const readLabel = (read) =>
           withDeadline(async () => {
             try {
@@ -360,7 +405,7 @@ export function createCommandTools({ appContext }) {
             }
           });
         for (const option of operation.options) {
-          if (!target && option.type === 'user' && options[option.name]) {
+          if (!target && !promotionTarget && option.type === 'user' && options[option.name]) {
             const id = options[option.name].id;
             people[id] = await readLabel(() => appContext.directory.getPersonByDiscordId(id));
           }
@@ -378,6 +423,7 @@ export function createCommandTools({ appContext }) {
           ...(target && {
             membershipTarget: Object.freeze({ personId: target.id, teamId: targetTeam.id }),
           }),
+          ...(promotionTarget && { promotionTarget: promotionTarget.id }),
           summary: renderActionSummary({
             commandName,
             subcommand,
@@ -387,6 +433,7 @@ export function createCommandTools({ appContext }) {
             people,
             team,
             membership: targetMembership,
+            promotion: promotionTarget,
           }),
           check,
           setExpiresAt(value) {
@@ -410,7 +457,19 @@ export function createCommandTools({ appContext }) {
                     },
                   },
                 }
-              : intent;
+              : promotionTarget
+                ? {
+                    ...intent,
+                    options: {
+                      ...options,
+                      expectedPerson: promotionTarget,
+                      beforePersonWrite: () => action.check(new Map()),
+                      onPromoted: () => {
+                        promotionApplied = true;
+                      },
+                    },
+                  }
+                : intent;
             const payload = await dispatch(executionIntent, { commands, appContext, checks });
             return publicRead ? { ...payload, publicReply: { payload } } : payload;
           },

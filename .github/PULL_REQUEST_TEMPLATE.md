@@ -53,6 +53,14 @@ expected status, a command with the expected output, or the playground flow.
 - [ ] Read and followed the service's `docs/CONTRIBUTING.md` pre-push checklist.
 - [ ] Docs updated in this PR where the change makes them wrong — `API.md` for a new endpoint, the README config table **and** `.env.example` for a new setting, `ARCHITECTURE.md` for a new trade-off, `DEPLOYMENT.md` for a new variable or scope.
 
+- [ ] User-visible changes: listed affected wiki pages and release-note items below, or marked not applicable. Publish wiki changes with the release; see the [release guide](https://github.com/UTMIST/Misty/blob/staging/docs/RELEASING.md).
+
+## User documentation and release notes
+
+<!-- List affected pages in the separate GitHub wiki, the user-visible changes,
+and any setup or limitations the release notes need to explain. Use "Not applicable"
+for changes that do not affect users. Developer docs belong in this PR. -->
+
 ## Deployment notes
 
 <!--

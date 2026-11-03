@@ -71,6 +71,22 @@ export class GoogleGroupSyncConflict extends Error {
   }
 }
 
+export class AccessLevelChangeForbidden extends Error {
+  constructor(detail) {
+    super(detail);
+    this.name = 'AccessLevelChangeForbidden';
+    this.detail = detail;
+  }
+}
+
+export class PersonUpdateInvalid extends Error {
+  constructor(detail) {
+    super(detail);
+    this.name = 'PersonUpdateInvalid';
+    this.detail = detail;
+  }
+}
+
 export class ChannelTeamsInvalid extends Error {
   constructor(detail) {
     super(detail);
@@ -251,6 +267,28 @@ export function createDirectoryClient({ baseUrl, apiKey, fetchImpl = fetch }) {
 
     getPerson(personId) {
       return getByPath(`/people/${encodeURIComponent(personId)}`);
+    },
+
+    // Sends only access_level; the directory requires people:elevate for it.
+    async updatePersonAccessLevel(personId, accessLevel) {
+      const resp = await send(`/people/${encodeURIComponent(personId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ access_level: accessLevel }),
+      });
+      if (resp.status === 200) {
+        // A 200 may have committed, so a malformed body is uncertain, never a 404.
+        const body = await parseJson(resp);
+        if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.id !== 'string')
+          throw new DirectoryUnavailable('malformed directory person response');
+        return body;
+      }
+      if (resp.status === 404) return null;
+      // 401/403 mean the key was refused before any write, so nothing changed.
+      if (resp.status === 401 || resp.status === 403)
+        throw new AccessLevelChangeForbidden(`directory refused the key (${resp.status})`);
+      if (resp.status === 400 || resp.status === 409 || resp.status === 422)
+        throw new PersonUpdateInvalid('Invalid access-level update');
+      throw new DirectoryUnavailable(`directory returned ${resp.status}`);
     },
 
     async createMembership({ personId, teamId, roleKindId, isTeamAdmin }) {
