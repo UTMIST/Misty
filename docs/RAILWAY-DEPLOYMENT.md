@@ -62,9 +62,10 @@ feature branch  ──PR──▶  staging  ──PR──▶  main
 - CI supports a merge queue on `staging`; enable it only after the workflow
   support has landed. See the [rollout guide](DEVELOPMENT.md#merge-queue-on-staging).
 
-For user-facing releases, pair production promotion with the
-[release notes and wiki publication workflow](RELEASING.md). This runbook covers
-deployment and recovery; the wiki is published separately from its own repository.
+For release numbers, notes, the 1.0.0 baseline, tagging the verified main
+commit and publishing the separate user wiki, follow [Misty releases](RELEASING.md).
+Version checks do not verify a Railway rollout; retain per-service deployment
+evidence before publication. This runbook covers deployment and recovery.
 
 ## 1. Neon: databases + branches
 Create **four Neon projects** — `team-tracking`, `documentation-system`,

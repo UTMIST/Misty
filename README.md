@@ -33,6 +33,9 @@ testing, deployment and recovery.
 The platform runs on Railway with separate staging and production environments.
 Merges to `staging` deploy to staging; production changes arrive through a
 `staging` → `main` promotion PR. Each database-backed service owns its database.
+Root [`VERSION`](VERSION) identifies the platform release candidate; immutable
+`v*` tags identify verified production releases. Follow the
+[release guide](docs/RELEASING.md) for version selection and publication.
 
 ## The services
 
