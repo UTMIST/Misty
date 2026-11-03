@@ -441,8 +441,9 @@ in the separate wiki repository.
    required. PR workflows also check ownership/labels and PR size; the
    [zone check](../.github/workflows/pr-zone-check.yml) warns when a PR spans
    multiple zones, and [review notifications](../.github/workflows/discord-pr-notify.yml)
-   notify Discord. [Blocked/ready automation](../.github/workflows/blocked-ready-automation.yml)
-   runs on issue events, not PR events; see its [current limits](ONBOARDING.md#getting-work).
+   notify Discord. [Board reconciliation](../.github/workflows/project-board.yml)
+   follows issue/PR/review events and repairs missed changes on a schedule;
+   see the [settings, closing-link policy and activation steps](../.github/PROJECT-BOARD.md).
 
    Add test, lint and image-build coverage in the same PR as a new service.
    The [CI inventory](#continuous-integration) describes the current checks.
