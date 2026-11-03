@@ -122,9 +122,9 @@ export async function dispatch(intent, { commands, appContext, checks = new Map(
 
 // Autocomplete cannot be deferred and has a hard ~3s Discord budget, so the
 // principal lookup must not be allowed to consume it. Resolve with `null` after
-// this many ms; the resolver then runs promptly with an anonymous principal
-// (typically yielding no suggestions) rather than the whole autocomplete timing
-// out. Any directory call left in flight resolves harmlessly.
+// this many ms; protected autocomplete returns no suggestions, while public
+// autocomplete can run with an anonymous principal. Any directory call left in
+// flight resolves harmlessly.
 // NOTE: this timeout runs sequentially before command-specific autocomplete
 // budgets (e.g. doc.js's AUTOCOMPLETE_TIMEOUT_MS). Their sum must stay under
 // Discord's ~3s autocomplete window (doc-command.test.js enforces sum <= 2800).
@@ -167,10 +167,23 @@ export async function dispatchAutocomplete(intent, { commands, appContext }) {
   const option = activeOptions.find((o) => o.name === intent.focusedOption);
   if (!option || typeof option.autocomplete !== 'function') return [];
 
+  let policy;
+  try {
+    const activeSubcommand = intent.subcommand
+      ? command.subcommands.find((s) => s.name === intent.subcommand)
+      : null;
+    const rawAuth = activeSubcommand?.auth ?? command.auth;
+    const resolvedAuth = typeof rawAuth === 'function' ? rawAuth(intent) : rawAuth;
+    policy = resolvedAuth ?? 'linked';
+  } catch {
+    return [];
+  }
+
   const principal = await resolveWithTimeout(
     resolvePrincipal(appContext.directory, intent.discordUserId),
     PRINCIPAL_AUTOCOMPLETE_TIMEOUT_MS,
   );
+  if (!authorize(policy, principal).ok) return [];
 
   try {
     const suggestions = await option.autocomplete({

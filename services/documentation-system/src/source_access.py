@@ -1,7 +1,8 @@
 """Resolve source ACL evidence and reconcile derived document grants."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
 from contracts.directory import DirectoryClient, DirectoryUnavailable
 from contracts.fetcher import SourcePermission
@@ -21,8 +22,19 @@ class ResolvedSourceAccess:
     warnings: list[str]
 
 
+@dataclass
+class SourceIdentityCache:
+    """Identity results for one refresh batch; never cache ACLs or outages."""
+
+    people: dict[str, UUID | None] = field(default_factory=dict)
+    groups: dict[str, UUID | None] = field(default_factory=dict)
+
+
 def resolve_google_permissions(
-    permissions: list[SourcePermission], directory: DirectoryClient
+    permissions: list[SourcePermission],
+    directory: DirectoryClient,
+    *,
+    identity_cache: SourceIdentityCache | None = None,
 ) -> ResolvedSourceAccess:
     """Resolve Google ACL principals without inferring identities or membership.
 
@@ -46,7 +58,12 @@ def resolve_google_permissions(
             if permission.principal_type == "user":
                 if not principal:
                     raise SourceAccessUnavailable("source user permission omitted its email")
-                grantee_id = directory.get_person_id_by_verified_email(principal)
+                if identity_cache is not None and principal in identity_cache.people:
+                    grantee_id = identity_cache.people[principal]
+                else:
+                    grantee_id = directory.get_person_id_by_verified_email(principal)
+                    if identity_cache is not None:
+                        identity_cache.people[principal] = grantee_id
                 if grantee_id is None:
                     warnings.append("unmapped source user ignored")
                     continue
@@ -54,7 +71,12 @@ def resolve_google_permissions(
             elif permission.principal_type == "group":
                 if not principal:
                     raise SourceAccessUnavailable("source group permission omitted its email")
-                grantee_id = directory.get_team_id_by_synced_google_group(principal)
+                if identity_cache is not None and principal in identity_cache.groups:
+                    grantee_id = identity_cache.groups[principal]
+                else:
+                    grantee_id = directory.get_team_id_by_synced_google_group(principal)
+                    if identity_cache is not None:
+                        identity_cache.groups[principal] = grantee_id
                 if grantee_id is None:
                     warnings.append("unmapped or unsynchronized source group ignored")
                     continue

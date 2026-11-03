@@ -69,6 +69,18 @@ Other service-to-service dependencies include:
 - **`meeting` → `documentation-system`** for saved text handoff; the catalog
   owns durable meeting records and uses the connector's Google writer.
 
+## Hosting and releases
+
+Railway owns service builds and process management so rotating maintainers do not
+need to operate a host OS. Staging and production use separate environment
+configuration, Discord applications and database branches. Each database-backed
+service owns its own Neon database; no shared schema couples service releases.
+
+Feature PRs target `staging`; production promotions come from `staging` to `main`.
+Use the [deployment runbook](RAILWAY-DEPLOYMENT.md) for setup, verification and
+rollback. Record rollout observations in the release PR, where they remain tied
+to the revision that was deployed.
+
 ## The core principle: a source of truth is API-only
 
 Each service is a **source of truth** for one domain — the directory owns the org
@@ -85,10 +97,11 @@ Why enforce this:
   schema, its `Protocol` boundaries — none of that leaks to consumers. Consumers see
   only the HTTP surface. That means the team can refactor internals (swap a storage
   adapter, restructure tables, rename a class) without breaking anyone downstream.
-- **The OpenAPI contract *is* the boundary.** If it's not in `/openapi.json`, it's
-  not part of the contract. This gives a rotating, mixed-fluency org a single, honest,
-  machine-readable description of what each service promises — no tribal knowledge
-  required, no "ask the person who wrote it."
+- **HTTP operations have an OpenAPI contract.** `/openapi.json` describes the
+  HTTP surface. Meeting audio uses a WebSocket contract that OpenAPI cannot
+  express; its [API reference](../services/meeting/docs/API.md#ws-meetingssession_idstream)
+  documents frames and control messages. Consumer integrations must follow the
+  relevant published contract.
 - **One integration pattern everywhere.** Because there's no privileged in-process
   path, the docs catalog integrates with the directory exactly the way a third-party
   bot would: authenticated HTTP calls. Nothing gets special access it shouldn't have.

@@ -106,7 +106,7 @@ permission changes become known at repeated Google ingest, refetch, or scheduled
 refresh. A failed reconciliation retains the last complete grants until their
 existing expiry; it never extends them. Manual grants remain independent. See the
 [refresh schedule](DEPLOYMENT.md#source-access-refresh-schedule) and
-[integration verification](INGESTION-RETRIEVAL-AUDIT.md) for the accepted freshness
+[lifecycle testing guide](TESTING.md) for the accepted freshness
 window, recovery cases, and release evidence.
 
 Ranking is hybrid exact cosine plus complete keyword matching, with reciprocal
@@ -625,9 +625,11 @@ operator recovery operation, so **first confirm the owning process and its API
 requests have stopped**. Releasing a live owner defeats the guard.
 
 Acquire before any start heartbeat or refresh batch, retain through all batches
-and the final heartbeat, and release only after confirmed completion. A rejected
+and the final heartbeat, and release after confirmed completion or time-budget
+exhaustion. On budget exhaustion, the runner releases its exact owner even when
+an API request is still finishing, and still reports an incomplete run. A rejected
 runner must send failure, never start/success or release another run. The guard
-persists across restarts with no expiry. On ambiguous HTTP/monitor outcomes,
+persists across restarts with no expiry. On other ambiguous HTTP/monitor outcomes,
 leave it for [operator recovery](DEPLOYMENT.md#recovery-credential-rotation-and-disablerollback).
 This coordinates participating clients: `refresh-due` itself remains a standalone
 batch endpoint. Manual callers must follow this protocol or use `doc-source-refresh`.
@@ -646,6 +648,21 @@ batch. Failed rows record their attempt time, so they do not starve later rows d
 same hourly drain; run until `attempted` is less than `limit`. See the
 [refresh schedule](DEPLOYMENT.md#source-access-refresh-schedule). Disabled sources are skipped
 before applying the batch limit; neither their content nor ACL is fetched automatically.
+
+The API checks for caller disconnection before starting each document. A timeout
+does not forcibly cancel an in-flight fetch, grant reconciliation or indexing;
+that document finishes and saves its progress, then no further documents are
+started for a disconnected caller. Untouched documents keep their previous
+timestamps and remain eligible. Counts describe processed documents only. A later
+run skips completed documents using their recorded sync/attempt timestamps.
+An immediate replacement run can overlap the document still in flight; releasing
+the guard is not proof that every old API operation has stopped.
+
+Within a batch, repeated identity lookups reuse the same successful or unmapped
+directory result. The cache is discarded after the request, and directory failures
+are never cached. Each file's Google permissions are fetched independently. See
+[source ACL reconciliation](ARCHITECTURE.md#source-acl-reconciliation) for cache scope
+and grant handling.
 
 Source grants expire after `SOURCE_ACCESS_MAX_AGE_HOURS` (48 by default). A failed refresh
 does not erase a last-known-good grant immediately, but an extended connector, directory,
@@ -925,6 +942,6 @@ grant expiry remain intact. Only independently confirmed trash/deletion or an
 explicit removal triggers purge. A security removal records
 `removed_by=security:unexpected_acl`; admins notify the requester and retain the
 Discord PDF unless its removal is separately requested. The bot implements
-[link delivery and recovery](../../../discord-bot/docs/meeting-delivery.md) in
-#223. Removal notices and deletion of already posted Discord links/PDFs remain
-admin operations; automatic Discord cleanup is outside #223.
+[link delivery and recovery](../../../discord-bot/docs/meeting-delivery.md).
+Removal notices and deletion of already posted Discord links/PDFs remain manual
+admin operations.

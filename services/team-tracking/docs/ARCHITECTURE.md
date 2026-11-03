@@ -45,6 +45,15 @@ Both implement `StorageAdapter`; the app picks one at the wiring point.
 
 Having two adapters behind one Protocol is the payoff of the boundary: fast, deterministic tests against the in-memory adapter, plus a smaller integration suite (`tests/test_postgres_adapter.py`) that replays the same behavioral assertions against real Postgres to catch anything dict-land can't model (real FK enforcement, `citext`, unique constraints).
 
+Bounded [person search](API.md#post-peoplesearch) is a separate read contract
+from roster listing and primary-email identity lookup. It returns a minimal
+candidate projection and detects ambiguity with one extra row beyond the
+requested limit. Postgres applies all filters and an `EXISTS` alternate-email
+check before ordering and `LIMIT`, so identifiers cannot duplicate candidates
+or consume the bound. No total-count query, fuzzy ranking, identity store, or
+migration is needed. Email filters require identifier read access as well as
+people read access. A POST body keeps the filters out of URL audit logs.
+
 ### SQLAlchemy Core, not the ORM
 
 The Postgres adapter uses **SQLAlchemy Core** — `Table` objects and SQL expression constructs — not the ORM. There are no mapped classes, no session/identity-map, no lazy loading. Each method is an explicit `select`/`insert`/`update`/`delete` against the tables in `src/storage/schema.py`, and the result is hand-converted to a Pydantic model. The reasons:
@@ -149,7 +158,7 @@ Workspace dependency is resolved. See the [credentials and rollout runbook](DEPL
 
 **Independent changes, confirmed completion.** A sync applies removals before additions and attempts every one even when another fails, so a persistently rejected newcomer can't keep a departed member in the group. Any failure makes the whole sync `failed` with every error in `last_error`. Membership create/delete return an Operation; the provider counts a change as made only when the Operation is `done` with no `error`, or an idempotent already-exists/already-gone result confirms it.
 
-**Unconfirmed writes survive retries.** Before each membership call, the sync stores its intent in `team_google_groups.pending_changes` and marks the mapping `failed`. A confirmed completion or rejection clears a new intent. An unfinished Operation, uncertain transport/server failure, or process crash leaves it persisted, including the operation name when available. Cloud Identity's [API surface](https://docs.cloud.google.com/identity/docs/reference/rest) has no operation-polling method, so the next sync checks for the write's effect: an added address appears, or the exact membership resource being removed disappears. Pending additions are never replayed: the original request could outlive a successful retry and a later revocation. A pending removal can retry against its exact resource while the person remains unwanted; a rejected retry preserves the original pending intent. If the person rejoins, sync waits for the removal's effect before adding them again. Unrelated changes continue, but the mapping cannot become `synced` while anything is pending. Once an effect is observed, sync reconciles against the latest directory membership; a delayed addition for a departed person is removed. Pending changes never expire automatically. See [recovery](DEPLOYMENT.md#pending-membership-changes) and the [review-fix audit](GOOGLE-GROUPS-REVIEW.md).
+**Unconfirmed writes survive retries.** Before each membership call, the sync stores its intent in `team_google_groups.pending_changes` and marks the mapping `failed`. A confirmed completion or rejection clears a new intent. An unfinished Operation, uncertain transport/server failure, or process crash leaves it persisted, including the operation name when available. Cloud Identity's [API surface](https://docs.cloud.google.com/identity/docs/reference/rest) has no operation-polling method, so the next sync checks for the write's effect: an added address appears, or the exact membership resource being removed disappears. Pending additions are never replayed: the original request could outlive a successful retry and a later revocation. A pending removal can retry against its exact resource while the person remains unwanted; a rejected retry preserves the original pending intent. If the person rejoins, sync waits for the removal's effect before adding them again. Unrelated changes continue, but the mapping cannot become `synced` while anything is pending. Once an effect is observed, sync reconciles against the latest directory membership; a delayed addition for a departed person is removed. Pending changes never expire automatically. See [recovery](DEPLOYMENT.md#pending-membership-changes).
 
 **Concurrency.** `sync_team` holds a per-team lock from reading membership until it records the result, so a slow sync started before a membership ended can't finish after a newer sync and re-add the person. The lock is `StorageAdapter.lock_team_google_group`: in Postgres a session-level `pg_advisory_lock(hashtext('google-group:<team id>'))` on a dedicated connection, which covers every API worker *and* the separately running `team-tracking-groups sync` cron. A process-local lock in front of it keeps queued syncs in one process from each holding a pool connection while they wait. Both processes must use a direct database endpoint: [Neon's transaction pooler does not support session advisory locks](https://neon.com/docs/connect/connection-pooling#connection-pooling-in-transaction-mode). SQLAlchemy's application connection pool is compatible because the dedicated connection remains checked out for the whole sync.
 
@@ -297,7 +306,7 @@ Concrete, step-by-step walkthroughs — add an endpoint, add a storage-adapter m
 Explicitly out of scope:
 
 - No Discord/GitHub sync jobs — connectors are separate processes that speak the HTTP API. The one exception is pushing team membership *out* to managed Google Groups (above), because team-tracking owns that mapping; it never reads directory data back from Google.
-- No permission-enforcement engine — downstream systems derive access from membership data.
-- No login/UI for officers editing directory data — handled by whatever admin surface is chosen.
+- No general policy engine — the API enforces scopes and privileged writes; downstream systems derive application permissions from directory data.
+- No standalone web admin UI — the [Discord bot](../../../discord-bot/README.md#commands) already supports officer edits through this API.
 - No content storage — the directory is identity and structure only.
 - No pagination — list endpoints return all matching rows; add limit/offset if the roster grows past a few hundred.

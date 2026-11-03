@@ -167,6 +167,79 @@ curl -sS -X POST http://localhost:8000/people \
 
 ---
 
+### POST /people/search
+
+Find bounded directory candidates without downloading the roster. **Scope:**
+`people:read`; supplying `email` additionally requires `identifiers:read`, even
+when the address matches a primary email. The `admin` wildcard satisfies both.
+Scope checks and input validation finish before search storage is called.
+
+**Request body** (unknown fields are rejected):
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `name` | string or null | `null` | 1–200 characters; case-insensitive literal substring of `display_name` |
+| `email` | string or null | `null` | 1–320 characters; exact primary or registered alternate email |
+| `active_only` | boolean | `true` | Set `false` to include retired people |
+| `limit` | integer | `5` | 1–10; strings, booleans and fractional values are rejected |
+
+At least one non-null filter is required. Supplied strings are stripped of
+surrounding whitespace and lowercased; blank strings and NUL characters are
+rejected with 422, as are oversized strings and invalid limits. Internal spaces
+remain literal. `%`, `_`, and backslashes have no wildcard meaning. Email
+matching includes only `primary_email` and registered `provider="email"`
+identifiers, excluding legacy `uoft_email` identifiers and unverified claims.
+
+When both filters are supplied, **the same person must match both**. Conflicting
+filters return no matches; the server never falls back to a name-only or
+email-only result. Matching several identifiers or both primary and alternate
+email returns a person once. If an address occurs on different people across
+primary and alternate storage, both are candidates.
+
+Results are ordered by lowercase display name in code-point order, then UUID
+ascending, with at most `limit` candidates. **Response:** HTTP 200, including
+when there are no matches:
+
+```json
+{
+  "matches": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "display_name": "Alex Chen",
+      "primary_email": "alex@utmist.ca",
+      "active": true
+    }
+  ],
+  "has_more": false,
+  "needs_disambiguation": false
+}
+```
+
+`has_more` means additional candidates were omitted. `needs_disambiguation`
+means multiple people match **before truncation**, including when `limit=1`.
+Ask for more detail when it is true; never take the first partial-name match
+as a unique identity. With zero matches both flags are false. A single candidate
+is a directory lookup result, not proof of the caller's identity or email ownership.
+
+Candidates contain only stable ID, display name, primary email, and active status;
+alternate addresses, identifiers, access levels, and audit fields are omitted.
+People without Discord identifiers are included. Search does not create, link,
+or reactivate accounts. Existing list, primary-email lookup, reverse-identifier
+lookup, and login/linking behavior are unchanged.
+
+```bash
+curl -sS -X POST http://localhost:8000/people/search \
+  -H "X-API-Key: dev-api-key-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Alex", "email": "alex@utmist.ca", "limit": 5}'
+```
+
+**Errors:** 401 for missing/invalid credentials, 403 for missing scopes, 422 for
+invalid input. Search uses a POST body so query names and addresses do not enter
+request URL audit logs.
+
+---
+
 ### GET /people/by-email/{email}
 
 Resolve a person by their `primary_email` (case-insensitive). Declared before

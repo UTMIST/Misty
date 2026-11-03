@@ -182,6 +182,12 @@ export function renderAddMemberResult(result) {
         return `✅ Added **${result.person.display_name}** to **${result.team.label}**.`;
       case 'USER_NOT_LINKED':
         return USER_NOT_LINKED_MSG;
+      case 'PERSON_NOT_FOUND':
+        return 'No active directory member matched. Check the name and email.';
+      case 'PERSON_AMBIGUOUS':
+        return 'More detail is needed. Supply the full name and exact email together.';
+      case 'PERSON_INACTIVE':
+        return 'That directory member is inactive. Nothing was changed.';
       case 'TEAM_NOT_FOUND':
         return "There's no team with that slug.";
       case 'ALREADY_ON_TEAM':
@@ -204,6 +210,12 @@ export function renderRemoveMemberResult(result) {
         return `✅ Removed **${result.person.display_name}** from **${result.team.label}**.`;
       case 'USER_NOT_LINKED':
         return "That user hasn't linked their directory account, so they aren't on any team.";
+      case 'PERSON_NOT_FOUND':
+        return 'No active directory member matched. Check the name and email.';
+      case 'PERSON_AMBIGUOUS':
+        return 'More detail is needed. Supply the full name and exact email together.';
+      case 'PERSON_INACTIVE':
+        return 'That directory member is inactive. Nothing was changed.';
       case 'TEAM_NOT_FOUND':
         return "There's no team with that slug.";
       case 'NOT_ON_TEAM':
@@ -215,6 +227,21 @@ export function renderRemoveMemberResult(result) {
     }
   })();
   return { content, ephemeral: true };
+}
+
+export function renderUpdateMemberResult(result) {
+  const messages = {
+    UPDATE_UNCERTAIN:
+      'The update may have completed, but its result could not be confirmed. Check the current membership before asking again. It was not retried.',
+    UPDATED: 'Updated the existing team membership. Global access is unchanged.',
+    UNCHANGED: 'The requested team role and flag already match. Nothing was changed.',
+    UPDATE_REQUIRED: 'Supply a team role or team-admin flag to update.',
+    MEMBERSHIP_INVALID: 'The directory rejected the role or team-admin flag. Nothing was changed.',
+    MEMBERSHIP_CHANGED:
+      'The member, team, or membership is missing, inactive, ambiguous, or changed. Check the roster and ask again for a fresh preview.',
+    DIRECTORY_DOWN: DIRECTORY_DOWN_MSG,
+  };
+  return { content: messages[result.outcome] ?? FALLBACK, ephemeral: true };
 }
 
 export function renderRosterResult(result) {

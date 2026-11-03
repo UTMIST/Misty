@@ -26,6 +26,14 @@ class RefreshError(Exception):
     """A sanitized operational failure; never include response bodies or URLs."""
 
 
+class RefreshTimeout(RefreshError):
+    """An HTTP phase timed out; the API may still be processing its request."""
+
+
+class RefreshBudgetExpired(RefreshError):
+    """The runner has no time left to start more work."""
+
+
 class Batch(BaseModel):
     attempted: int = Field(strict=True, ge=0)
     refreshed: int = Field(strict=True, ge=0)
@@ -46,6 +54,7 @@ class Report:
     meeting_index_failed: int = 0
     meeting_cleanup_failed: int = 0
     drained: bool = False
+    budget_exhausted: bool = False
     error: str = ""
 
     @property
@@ -83,6 +92,8 @@ class DocsApiClient:
                 timeout=timeout,
                 follow_redirects=False,
             )
+        except httpx.TimeoutException:
+            raise RefreshTimeout(f"{method} {path} failed; request was not retried") from None
         except httpx.HTTPError:
             # A timeout does not prove the server stopped. Do not replay the POST.
             raise RefreshError(f"{method} {path} failed; request was not retried") from None
@@ -212,7 +223,7 @@ def run_refresh(
     def request_timeout() -> float:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise RefreshError("time budget exhausted before the queue was drained")
+            raise RefreshBudgetExpired("time budget exhausted before the queue was drained")
         return min(timeout, remaining)
 
     try:
@@ -230,6 +241,9 @@ def run_refresh(
         report.error = "batch budget exhausted before the queue was drained"
     except RefreshError as exc:
         report.error = str(exc)
+        report.budget_exhausted = isinstance(exc, RefreshBudgetExpired) or (
+            isinstance(exc, RefreshTimeout) and time.monotonic() >= deadline
+        )
     return report
 
 
@@ -260,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
     report = Report()
     monitor_failed = False
     guard_acquired = False
+    guard_released = False
     run_id = None
     try:
         # Separate clients keep catalog headers and cookies away from the monitor.
@@ -296,18 +311,21 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"source_refresh event=start run_id={run_id}", flush=True)
                 if monitor:
                     monitor_failed = not monitor.ping("start")
+                remaining = args.max_seconds - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise RefreshBudgetExpired("time budget exhausted before refreshing")
                 report = run_refresh(
                     client,
                     batch_size=args.batch_size,
                     max_batches=args.max_batches,
                     timeout=args.timeout,
-                    max_seconds=args.max_seconds,
+                    max_seconds=remaining,
                 )
                 if args.meeting_records and report.drained:
                     for _ in range(args.max_batches):
                         remaining = args.max_seconds - (time.monotonic() - started)
                         if remaining <= 0:
-                            raise RefreshError("meeting retry budget exhausted")
+                            raise RefreshBudgetExpired("meeting retry budget exhausted")
                         meetings = client.retry_meetings(
                             limit=args.batch_size, timeout=min(args.timeout, remaining)
                         )
@@ -322,15 +340,22 @@ def main(argv: list[str] | None = None) -> int:
                         raise RefreshError("meeting retry batch limit exhausted")
             except RefreshError as exc:
                 report.error = str(exc)
+                report.budget_exhausted = isinstance(exc, RefreshBudgetExpired) or (
+                    isinstance(exc, RefreshTimeout)
+                    and time.monotonic() - started >= args.max_seconds
+                )
             if monitor:
                 event = "success" if report.exit_code == 0 and not monitor_failed else "fail"
                 monitor_failed = not monitor.ping(event) or monitor_failed
-            # Keep ownership through the final ping so a delayed success cannot
-            # mask a new run. Uncertain API/monitor outcomes require inspection;
-            # never expire or release them automatically, including on crashes.
-            if guard_acquired and not report.error and not monitor_failed:
+            # Budget exhaustion releases only our owner after the final ping,
+            # even if the API is still working or monitoring failed. Other
+            # uncertain outcomes retain the guard for operator inspection.
+            if guard_acquired and (
+                report.budget_exhausted or (not report.error and not monitor_failed)
+            ):
                 try:
                     client.release_run(run_id)
+                    guard_released = True
                 except RefreshError as exc:
                     report.error = str(exc)
                     if monitor:
@@ -354,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
                 **asdict(report),
                 "exit_code": code,
                 "monitor_failed": monitor_failed,
+                "guard_released": guard_released,
                 "duration_seconds": round(time.monotonic() - started, 3),
             }
         ),

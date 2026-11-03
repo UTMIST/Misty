@@ -33,6 +33,64 @@ function fakeFetch(responses) {
 const BASE = 'http://d';
 const KEY = 'k';
 
+test('searchPeople uses the bounded active search body and strips unneeded fields', async () => {
+  const candidate = {
+    id: 'p1',
+    display_name: 'Alex',
+    primary_email: 'alex@example.org',
+    active: true,
+  };
+  const fetchImpl = fakeFetch([
+    {
+      status: 200,
+      body: {
+        matches: [{ ...candidate, access_level: 'admin', alternate_email: 'private@example.org' }],
+        has_more: false,
+        needs_disambiguation: false,
+      },
+    },
+  ]);
+  const client = createDirectoryClient({ baseUrl: BASE, apiKey: KEY, fetchImpl });
+  const signal = new AbortController().signal;
+  const result = await client.searchPeople(
+    { name: 'alex', email: 'alias@example.org' },
+    { signal },
+  );
+  assert.deepEqual(result.matches, [candidate]);
+  const { url, opts } = fetchImpl.calls[0];
+  assert.equal(url, `${BASE}/people/search`);
+  assert.equal(opts.method, 'POST');
+  assert.equal(opts.signal, signal);
+  assert.equal(opts.headers['X-API-Key'], KEY);
+  assert.deepEqual(JSON.parse(opts.body), {
+    name: 'alex',
+    email: 'alias@example.org',
+    active_only: true,
+    limit: 5,
+  });
+});
+
+test('searchPeople normalizes denial, outage, malformed and oversized results', async () => {
+  for (const response of [
+    { status: 403, body: { detail: 'private' } },
+    { status: 503 },
+    { status: 200, body: null },
+    { status: 200, body: { matches: [], has_more: false } },
+    { status: 200, body: { matches: [null], has_more: false, needs_disambiguation: false } },
+    {
+      status: 200,
+      body: { matches: Array(6).fill({}), has_more: true, needs_disambiguation: true },
+    },
+  ]) {
+    const client = createDirectoryClient({
+      baseUrl: BASE,
+      apiKey: KEY,
+      fetchImpl: fakeFetch([response]),
+    });
+    await assert.rejects(client.searchPeople({ name: 'Alex' }), DirectoryUnavailable);
+  }
+});
+
 test('getSelfKeyScopes returns scopes from GET /api-keys/self', async () => {
   const fetchImpl = fakeFetch([
     { status: 200, body: { name: 'bot', scopes: ['dev:spoof', 'people:read'] } },

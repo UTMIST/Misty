@@ -308,6 +308,9 @@ jobs:
           node --check scripts/readiness-checker.js
           node --check scripts/readiness-checker.test.js
           node --test scripts/readiness-checker.test.js
+      - name: Promotion workflow regressions
+        working-directory: .
+        run: node --test .github/scripts/promotion.test.cjs
       # Mirrors the ruff check + ruff format --check pair that gates every
       # Python service. ESLint covers correctness; Prettier covers formatting.
       # Scoped to *.js on purpose — the hand-wrapped Markdown is not Prettier's.

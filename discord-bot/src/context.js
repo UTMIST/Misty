@@ -4,6 +4,7 @@ import { createVerificationClient } from './clients/verificationClient.js';
 import { createLinkService } from './services/linkService.js';
 import { createEmailService } from './services/emailService.js';
 import { createSeedService } from './services/seedService.js';
+import { createPromotionService } from './services/promotionService.js';
 import { createTeamService } from './services/teamService.js';
 import { createChannelAccessService } from './services/channelAccessService.js';
 import { createDocService } from './services/docService.js';
@@ -63,6 +64,7 @@ export function createAppContext(config, { poster, notify, postMeetingLink } = {
   const linkService = createLinkService({ directory, verification });
   const emailService = createEmailService({ directory, verification });
   const seedService = createSeedService({ directory });
+  const promotionService = createPromotionService({ directory });
   const teamService = createTeamService({ directory });
   const channelAccessService = createChannelAccessService({ directory });
   const docService = createDocService({ docClient, directory });
@@ -109,6 +111,7 @@ export function createAppContext(config, { poster, notify, postMeetingLink } = {
     linkService,
     emailService,
     seedService,
+    promotionService,
     teamService,
     channelAccessService,
     docService,

@@ -1,3 +1,5 @@
+import { FALLBACK, DIRECTORY_DOWN_MSG, escapeInline } from './common.js';
+
 export function buildWhoamiEmbed(person, identifiers) {
   return {
     embeds: [
@@ -51,4 +53,37 @@ export function renderSeedResult(result) {
     }
   })();
   return { content, ephemeral: true };
+}
+
+const PROMOTION_DENIED =
+  'You can promote only another active member whose current global level is below yours, up to your own level. Nothing was changed.';
+
+export function renderPromoteResult(result) {
+  const messages = {
+    PROMOTED: () =>
+      `✅ Promoted **${escapeInline(result.person.display_name)}** from ${escapeInline(result.previousLevel)} to ${escapeInline(result.person.access_level)} (global access level). Team roles are unchanged.`,
+    UNCHANGED: () => 'That member already has the requested access level. Nothing was changed.',
+    SELF: () => 'You cannot change your own access level. Nothing was changed.',
+    FORBIDDEN: () => PROMOTION_DENIED,
+    TARGET_NOT_LOWER: () => PROMOTION_DENIED,
+    ESCALATION_DENIED: () => PROMOTION_DENIED,
+    DEMOTION_UNSUPPORTED: () => 'Demotions are not supported. Nothing was changed.',
+    INVALID_LEVEL: () =>
+      'That access-level change is not valid: only admin or superuser can be granted, from a known current level. Nothing was changed.',
+    USER_NOT_LINKED: () =>
+      'That mentioned member is not linked. Ask them to `/link`, or ask Misty in chat by name or email. Nothing was changed.',
+    PERSON_NOT_FOUND: () => 'No active directory member matched. Nothing was changed.',
+    PERSON_AMBIGUOUS: () => 'More detail is needed to identify that member. Nothing was changed.',
+    PERSON_INACTIVE: () => 'That directory member is inactive. Nothing was changed.',
+    PERSON_CHANGED: () =>
+      'That member changed since the preview. Nothing was changed; ask again for a fresh preview.',
+    SCOPE_MISSING: () =>
+      "The directory refused Misty's key for this change (it needs a valid key with `people:write` and `people:elevate`). Nothing was changed; ask a maintainer.",
+    UPDATE_REJECTED: () =>
+      'The directory rejected this change. Nothing was changed; check the member with a maintainer.',
+    UPDATE_UNCERTAIN: () =>
+      'The promotion may have completed, but its result could not be confirmed. Check the member with a maintainer before asking again. It was not retried.',
+    DIRECTORY_DOWN: () => DIRECTORY_DOWN_MSG,
+  };
+  return { content: messages[result.outcome]?.() ?? FALLBACK, ephemeral: true };
 }
