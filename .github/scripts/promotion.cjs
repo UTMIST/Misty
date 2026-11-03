@@ -56,6 +56,16 @@ function assertSnapshot(runGit, sha, main, staging) {
       tree(runGit, sha) !== tree(runGit, parents[0])) {
     throw new Error('Sync branch is not an unchanged staging snapshot merging this main commit.');
   }
+  // Parent identities and tree equality alone can conceal a discarded hotfix
+  // or an older staging snapshot. Recompute the merge, including on retries.
+  const mergedTree = runGit('merge-tree', '--write-tree', parents[0], main).split('\n')[0];
+  if (mergedTree !== tree(runGit, sha)) {
+    throw new Error('Sync snapshot does not match its parents\' merge result.');
+  }
+  const currentTree = runGit('merge-tree', '--write-tree', staging, sha).split('\n')[0];
+  if (currentTree !== tree(runGit, staging)) {
+    throw new Error('Sync snapshot would change current staging files.');
+  }
 }
 
 function prepareSync(runGit = git) {

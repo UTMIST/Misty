@@ -158,9 +158,76 @@ test('retry reuses an existing validated sync snapshot and open PR', async (t) =
   const snapshot = prepareSync(f.git);
   const gh = fakeGithub(f, { runs: (run, poll) => poll === 1 ? [] : [run] });
   await assert.rejects(sync(options(f, gh, { attempts: 1 })), /Timed out/);
+  f.commit('later.txt', 'staging advanced while CI was pending\n');
+  f.git('push', 'origin', 'staging');
+  const before = f.tree('staging');
   assert.equal(prepareSync(f.git).sha, snapshot.sha);
   await sync(options(f, gh));
+  assert.equal(f.tree('staging'), before);
   assert.deepEqual(gh.counts(), { creates: 1, merges: 1, polls: 2 });
+});
+
+test('an existing snapshot cannot roll back released files through an older staging parent', async (t) => {
+  const f = fixture(t);
+  const older = f.git('rev-parse', 'staging~1');
+  const bad = f.git('commit-tree', f.tree(older), '-p', older, '-p', f.main,
+    '-m', 'Invalid pre-release staging snapshot');
+  const ref = `refs/heads/automation/sync-main-${f.main}`;
+  f.git('push', 'origin', `${bad}:${ref}`);
+  const before = f.tree('staging');
+  const gh = fakeGithub(f);
+
+  await assert.rejects(sync(options(f, gh)), /merge result/);
+  assert.deepEqual(gh.counts(), { creates: 0, merges: 0, polls: 0 });
+  assert.equal(f.tree('staging'), before);
+  assert.equal(f.git('ls-remote', 'origin', ref).split(/\s/)[0], bad);
+});
+
+test('an existing snapshot cannot omit a main-only hotfix or conceal a merge conflict', async (t) => {
+  for (const conflict of [false, true]) {
+    const f = fixture(t);
+    f.git('checkout', 'main');
+    const main = f.commit('release.txt', 'production hotfix\n');
+    f.git('push', 'origin', 'main');
+    f.git('checkout', 'staging');
+    if (conflict) {
+      f.commit('release.txt', 'different staging fix\n');
+      f.git('push', 'origin', 'staging');
+    }
+    const before = f.tree('staging');
+    const bad = f.git('commit-tree', before, '-p', 'staging', '-p', main,
+      '-m', 'Invalid snapshot omitting the production hotfix');
+    const ref = `refs/heads/automation/sync-main-${main}`;
+    f.git('push', 'origin', `${bad}:${ref}`);
+    const gh = fakeGithub(f);
+
+    await assert.rejects(sync(options(f, gh)), /merge result|merge-tree/);
+    assert.deepEqual(gh.counts(), { creates: 0, merges: 0, polls: 0 });
+    assert.equal(f.tree('staging'), before);
+    assert.equal(f.git('ls-remote', 'origin', ref).split(/\s/)[0], bad);
+  }
+});
+
+test('a valid parent merge cannot reuse an older snapshot that changes current staging', async (t) => {
+  const f = fixture(t);
+  const older = f.git('rev-parse', 'staging~1');
+  f.git('checkout', 'main');
+  const main = f.commit('release.txt', 'old\n');
+  f.git('push', 'origin', 'main');
+  f.git('checkout', 'staging');
+  const mergedTree = f.git('merge-tree', '--write-tree', older, main).split('\n')[0];
+  assert.equal(mergedTree, f.tree(older));
+  const bad = f.git('commit-tree', mergedTree, '-p', older, '-p', main,
+    '-m', 'Snapshot discarding current staging content');
+  const ref = `refs/heads/automation/sync-main-${main}`;
+  f.git('push', 'origin', `${bad}:${ref}`);
+  const before = f.tree('staging');
+  const gh = fakeGithub(f);
+
+  await assert.rejects(sync(options(f, gh)), /current staging/);
+  assert.deepEqual(gh.counts(), { creates: 0, merges: 0, polls: 0 });
+  assert.equal(f.tree('staging'), before);
+  assert.equal(f.git('ls-remote', 'origin', ref).split(/\s/)[0], bad);
 });
 
 test('an existing branch with changed files is rejected without force-pushing', (t) => {
