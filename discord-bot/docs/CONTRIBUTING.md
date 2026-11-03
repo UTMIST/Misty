@@ -614,3 +614,47 @@ Changed-file rationale:
 - This contributing section records the snapshot and delivery convention.
 
 The root command-list update deliberately spans the root documentation zone.
+
+### Promotion implementation (#361)
+
+`/promote` and the `promote` helper tool change only a person's global
+`access_level` through `PATCH /people/{id}`. The directory gates that field on
+`people:elevate` but does not know the human caller, so the bot enforces the
+hierarchy in `promotionDecision` (`src/auth/policy.js`): caller admin+, target
+currently below the caller, destination above the target and at most the caller.
+Unknown levels are `INVALID_LEVEL`; do not reuse `rankOf`, which defaults to member.
+
+The caller is always the router's freshly authenticated principal. A name/email
+reference resolves through the minimal `PersonSearchMatch`, which has no
+`access_level` or `updated_at`, so preparation then re-reads the full person by
+the resolved ID. Preparation pins a snapshot of the target (`id`, name, email,
+`active`, `access_level`, `updated_at`); every action check re-reads both people
+and reruns the policy, and a fresh action check runs immediately before the
+PATCH. After a confirmed write, receipt checks recheck only the requester, so our
+own promotion does not make delivery fail. Success is reported only when the response matches the requested
+level. 401/403 mean the key was refused, so nothing changed; 400/409/422 are a
+directory rejection. A transport failure or malformed response after the PATCH
+starts (including a `200` whose body is not a person object, such as `null`) is
+uncertain, never "not found", so it also stops later batch actions. Only a real
+`404` means not found. An uncertain write is never retried, the same convention
+as #362.
+
+Remaining limitation: the final read and the PATCH are separate requests. Closing
+that window needs a conditional write in team-tracking, which is a separate
+service change.
+
+Changed-file rationale:
+
+- `src/auth/policy.js`: the shared promotion policy.
+- `src/clients/directoryClient.js`: the access-level-only PATCH and its errors.
+- `src/services/promotionService.js`: resolve, snapshot, recheck and write.
+- `src/commands/promote.js`, `src/commands/index.js`, `src/context.js`: declare
+  and wire the admin-only command and service.
+- `src/commandTools.js`, `src/helperActions.js`: allowlist the helper tool, bind
+  the resolved person, recheck before effects and reject duplicate targets.
+- `src/messages/helperActions.js`, `src/messages/people.js`: private preview and
+  outcome messages.
+- `src/messages/help.js`, `README.md`, root `README.md`: document the command,
+  the promotion table, global versus team roles and the required scopes.
+- `test/promotion.test.js`: the full policy matrix on helper and slash paths,
+  stale state, forged arguments, scope, outage and client contract.

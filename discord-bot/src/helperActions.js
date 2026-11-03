@@ -16,11 +16,12 @@ export class ActionBudgetExceeded extends Error {
 export function combineHelperActions(actions) {
   actions = actions.flatMap((action) => action.actions ?? [action]);
   if (actions.length > MAX_HELPER_ACTIONS) throw new Error('Too many proposed actions.');
-  const targets = actions
-    .filter((action) => action.membershipTarget)
-    .map((action) =>
-      JSON.stringify([action.membershipTarget.personId, action.membershipTarget.teamId]),
-    );
+  const targets = actions.flatMap((action) => [
+    ...(action.membershipTarget
+      ? [JSON.stringify([action.membershipTarget.personId, action.membershipTarget.teamId])]
+      : []),
+    ...(action.promotionTarget ? [JSON.stringify(['promote', action.promotionTarget])] : []),
+  ]);
   if (new Set(targets).size !== targets.length)
     throw new Error('Duplicate member targets. Nothing was changed.');
   if (actions.length === 1) return actions[0];

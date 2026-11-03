@@ -1,10 +1,4 @@
-function text(value) {
-  return String(value)
-    .replaceAll('\r', '\\r')
-    .replaceAll('\n', '\\n')
-    .replace(/([\\`*_{}[\]()<>#|~])/g, '\\$1')
-    .replaceAll('@', '@\u200b');
-}
+import { escapeInline as text } from './common.js';
 
 /** Shared recording updates omit requester and voice-channel details. */
 export function renderRecordingAnnouncement(subcommand, elapsedMs = 0) {
@@ -30,6 +24,7 @@ export function renderActionSummary({
   people,
   team,
   membership: currentMembership,
+  promotion,
 }) {
   const member = options.user && people[options.user.personId ?? options.user.id];
   const userLabel = options.user
@@ -42,13 +37,16 @@ export function renderActionSummary({
     ? `${team?.label ? `**${text(team.label)}** ` : ''}(${text(teamSlug)})`
     : null;
   const membership = commandName === 'team' && ['add', 'remove', 'update'].includes(subcommand);
-  const heading = currentMembership
-    ? `Update ${userLabel} on ${teamLabel}.\nTeam role: ${text(currentMembership.role_kind_id)} → ${text(options.role ?? currentMembership.role_kind_id)}\nTeam-admin flag: ${currentMembership.is_team_admin} → ${options.team_admin ?? currentMembership.is_team_admin}\nGlobal access level is unchanged.`
-    : membership
-      ? `${subcommand === 'remove' ? 'Remove' : 'Add'} ${userLabel} ${subcommand === 'remove' ? 'from' : 'to'} ${teamLabel}.`
-      : `**${text(operation.description.replace(/ \(admin\)$/, ''))}**`;
+  const heading = promotion
+    ? `Promote ${userLabel}.\nGlobal access level: ${text(promotion.access_level)} → ${text(options.level)}\nTeam roles and team-admin flags are unchanged.`
+    : currentMembership
+      ? `Update ${userLabel} on ${teamLabel}.\nTeam role: ${text(currentMembership.role_kind_id)} → ${text(options.role ?? currentMembership.role_kind_id)}\nTeam-admin flag: ${currentMembership.is_team_admin} → ${options.team_admin ?? currentMembership.is_team_admin}\nGlobal access level is unchanged.`
+      : membership
+        ? `${subcommand === 'remove' ? 'Remove' : 'Add'} ${userLabel} ${subcommand === 'remove' ? 'from' : 'to'} ${teamLabel}.`
+        : `**${text(operation.description.replace(/ \(admin\)$/, ''))}**`;
   const args = Object.entries(options).flatMap(([key, value]) => {
     if (membership && ['user', 'team', 'teamId'].includes(key)) return [];
+    if (promotion && ['user', 'level'].includes(key)) return [];
     const label = text(key.replaceAll('_', ' '));
     const definition = operation.options.find((option) => option.name === key);
     const rendered =
