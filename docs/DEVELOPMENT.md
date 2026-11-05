@@ -24,9 +24,9 @@ need all of them at once — stand up only what you're touching.
 | [`llm`](../services/llm/README.md) | 8002 | — | Stateless chat/embedding proxy; OpenAI default, optional Bedrock chat. No DB. |
 | [`verification`](../services/verification/README.md) | 8003 | Postgres :5434 ⚠️ | Email one-time codes (request / confirm). Backs `/link` and `/add-email`. |
 | [`meeting`](../services/meeting/README.md) | 8004 | — | **Stateful.** Live voice transcription → minutes/PDF; saved text is handed to the catalog. No local DB. |
-| [`connectors`](../services/connectors/README.md) | 8005 | — | Stateless `POST /fetch` adapter — pulls Google Docs/Sheets/Slides/Drive content as text for the catalog. No DB. |
+| [`connectors`](../services/connectors/README.md) | 8005 | — | Google/GitHub content, Google ACLs/discovery and meeting-Doc writes. No local DB. |
 | [`gateway`](../services/gateway/README.md) | 8006 | Postgres :5435 | Public scoped API; owns its issued-key registry. |
-| [`discord-bot`](../discord-bot/README.md) | 3001 (playground) | — | Discord slash commands + a browser playground that needs no Discord token. |
+| [`discord-bot`](../discord-bot/README.md) | 3001 (playground) | — | Slash commands, mention/DM helper and voice recording. The browser playground needs no Discord token; its helper is text-only. |
 
 > ⚠️ **Known port clash:** `documentation-system` and `verification` both bind
 > host port **5434** for their dev Postgres
@@ -361,6 +361,11 @@ The end-to-end loop. The per-service CONTRIBUTING docs have the code-level
 walkthroughs (add an endpoint, add a storage method, write a migration) — this
 is the workflow around them.
 
+Update developer docs in the same PR as the code. For user-visible changes,
+identify the affected wiki pages and release-note items in the PR; prepare and
+publish those through the [release guide](RELEASING.md). User walkthroughs live
+in the separate wiki repository.
+
 1. **Branch off `staging`.** Never commit straight to `main`; a CI guard rejects
    PRs to `main` that don't come from `staging` (see below).
 
@@ -436,20 +441,91 @@ is the workflow around them.
    required. PR workflows also check ownership/labels and PR size; the
    [zone check](../.github/workflows/pr-zone-check.yml) warns when a PR spans
    multiple zones, and [review notifications](../.github/workflows/discord-pr-notify.yml)
-   notify Discord. [Blocked/ready automation](../.github/workflows/blocked-ready-automation.yml)
-   runs on issue events, not PR events; see its [current limits](ONBOARDING.md#getting-work).
+   notify Discord. [Board reconciliation](../.github/workflows/project-board.yml)
+   follows issue/PR/review events and repairs missed changes on a schedule;
+   see the [settings, closing-link policy and activation steps](../.github/PROJECT-BOARD.md).
 
-   > **`services/meeting` went to staging with no CI coverage at all** — no test
-   > job, and `docker-build` skipped its image. Both are now wired up
-   > (`meeting-test` + a meeting build/smoke step), and its `ruff format --check`
-   > deferral has since been cleared along with `documentation-system`'s. Every
-   > Python job now gates lint and formatting alike.
+   Add test, lint and image-build coverage in the same PR as a new service.
+   The [CI inventory](#continuous-integration) describes the current checks.
 
 5. **Merging deploys.** Merging to `staging` deploys to Railway **staging**;
    merging `staging → main` deploys to **production**. PRs to `main` additionally
    run [`main-source-guard`](../.github/workflows/main-source-guard.yml), which
    enforces that they originate from `staging`. Operators: see
    [`RAILWAY-DEPLOYMENT.md`](RAILWAY-DEPLOYMENT.md).
+
+### Production promotion
+
+The [Production promotion workflow](../.github/workflows/promotion.yml) opens
+release PRs and reconciles production merge commits back into staging. After
+the one-time setup below, use **Actions → Production promotion → Run workflow**,
+select branch **main**, and operation **promote**. It first completes any
+outstanding history sync, then opens or reuses the `staging → main` PR. Review
+the release diff, validate staging, and merge the production PR normally with
+a **merge commit**. Additional staging merges update the open release PR, so
+review its current contents before merging.
+
+Every push to `main` automatically runs **sync**. The bot computes the merge of
+main into staging without executing staging code. It proceeds only when the
+result has exactly the same files as staging, creates an immutable snapshot
+branch and sync PR, waits for that PR's full `CI` run, and merges it. Using a
+snapshot that already contains staging preserves concurrent staging changes,
+including intentional reverts. The sync adds ancestry, with no file changes;
+it still triggers normal staging CI and Railway deployment. Recording a merge
+does not attest that the production deployment succeeded.
+
+Retries reuse the snapshot/PR; an already-synced branch is a no-op. The workflow
+never force-pushes, never pushes directly to either protected branch, never
+approves its own PR, and never merges the production PR. A conflict, content
+change, changed sync head, failed CI, or missing permission fails the run. Read
+the linked sync PR and run **sync** again after fixing the cause. Close/draft
+is treated as an operator stop; reopen/mark ready before retrying. Unexpected
+production-only changes require a reviewed reconciliation PR. Do not squash or
+rebase a history-sync PR: its purpose is to preserve main's ancestry.
+
+**One-time setup (repository/organization administrator):**
+
+The repository uses the [UTMIST Misty Release App](https://github.com/organizations/UTMIST/settings/apps/utmist-misty-release)
+and the `release` environment. The steps below describe its configuration and
+how to recreate it if needed.
+
+1. Create a dedicated private GitHub App and install it on **UTMIST/Misty only**.
+   Disable its webhook; it only needs installation tokens. Grant repository
+   **Contents: read/write**, **Pull requests: read/write**, **Actions: read**,
+   and **Workflows: write** (sync history can include workflow changes).
+   Metadata read access is implicit. Do not grant Administration permissions.
+2. Create the GitHub environment **release**. Under deployment branches/tags,
+   choose selected branches and add exactly the **main branch**, with no tag
+   rule. Keep this restriction even though staging is the default branch.
+   Store the App's client ID as environment variable `RELEASE_APP_CLIENT_ID`
+   and its generated private key as environment secret `RELEASE_APP_PRIVATE_KEY`.
+   Do not put the private key in repository/organization-wide secrets or a PAT.
+   No required environment reviewer is needed for this automatic history sync;
+   production approval remains on the production PR.
+3. In the classic **staging** branch protection, add only this App to
+   **Allow specified actors to bypass required pull requests**. Retain required
+   status checks, administrator enforcement, and all other settings.
+4. In the **Staging merge queue** ruleset (targeting only `refs/heads/staging`),
+   add only this App to the bypass list using **For pull requests only**.
+   This avoids requiring a human review/enqueue operation for a history-only
+   sync. All normal feature PRs still use the queue; sync PR CI is still required.
+   Do not add this App to any main bypass or status-check bypass. GitHub scopes
+   these exceptions to the App and branch, not to a PR title: the main-only
+   environment and the script's tree/head checks constrain how they are used.
+5. Merge the implementation into staging and promote it to main through the
+   normal reviewed PR process. The first main push runs sync, including any
+   older unsynced release history. For an existing rollout, run **sync** on main.
+   Confirm the sync PR's CI passes, its file diff is empty, it merges, and
+   `git merge-base --is-ancestor origin/main origin/staging` succeeds after fetch.
+
+The App's short-lived token triggers PR CI; the default `GITHUB_TOKEN` is not a
+substitute. See GitHub's [workflow trigger rules](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow),
+[App token action](https://github.com/actions/create-github-app-token), and
+[ruleset bypass modes](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository#granting-bypass-permissions-for-your-branch-or-tag-ruleset).
+The workflow requests tokens only for this repository and revokes them when
+the job ends. To disable automation, disable the workflow and remove the App's
+two staging bypass entries; normal release PRs continue to work. Rotate a
+compromised key in the App settings and replace the environment secret.
 
 ### Merge queue on `staging`
 
@@ -497,6 +573,30 @@ See GitHub's [merge queue documentation](https://docs.github.com/en/repositories
 for queue settings and failure handling.
 
 ---
+
+## Continuous integration
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) defines the current jobs:
+
+- **`python-test`** — team-tracking, Postgres 16 service container, applies migrations, runs the full pytest suite
+- **`python-lint`** — team-tracking ruff check + format
+- **`auth-lib-test`** — the shared `packages/auth` (`platform_auth`) pytest suite + ruff check/format
+- **`verification-test`** — services/verification, Postgres 16 service container, `alembic upgrade head`, then `pytest` + ruff check/format
+- **`llm-test`** — services/llm pytest suite + ruff check/format
+- **`meeting-test`** — services/meeting pytest suite + ruff check/format. No Postgres container and no AWS credentials: the service has no database, and its Transcribe/LLM clients are faked via `app.dependency_overrides`, so the suite runs fully offline
+- **`connectors-test`** — services/connectors pytest suite + ruff check/format. No container and no Google credentials: the Google API clients are faked, so the suite runs fully offline
+- **`documentation-system-test`** — Postgres 16 service container, runs `alembic upgrade head`, then `pytest` with `RUN_PG_TESTS=1` and `RUN_PG_MIGRATION_TESTS=1` + ruff check/format
+- **`gateway-test`** — isolated wheel install, migration round trip, opt-in Postgres tests, pytest, ruff check/format
+- **`node-test`** — the bot’s `node --test` suite, ESLint and Prettier `--check`, plus readiness-checker and promotion/sync regressions
+- **`docker-build`** — builds *and boot-smoke-tests* every service image (`python -c "import src.api.app"` for the seven APIs, `node --check src/index.js` for the bot), plus the directory/gateway HTTP smoke check
+
+The same jobs also run on pushes to `staging` and `main`, and on
+`merge_group` events targeting `staging`. Queue enforcement is configured
+separately in GitHub; see the [rollout guide](#merge-queue-on-staging).
+
+Repository files define the jobs, not which checks GitHub currently requires.
+Verify branch-protection/merge-queue settings against that inventory; a job’s
+presence in YAML alone is not proof it gates merging.
 
 ## Database test setup
 

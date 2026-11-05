@@ -31,8 +31,9 @@ Botocore Stubber does not exercise response parsing: use intercepted real
 HTTP transports when testing the raw boundary or an SDK upgrade. Focused review
 regressions are retained in `tests/test_tool_stop_reasons.py`: empty completions,
 truncated tool calls, metadata/audit preservation, and strict-request controls.
-Keep response-side empty-list support separate from request validation. The initial
-broad tool suite remains removed; see the [audit record](TOOL-USE-AUDIT.md#test-cleanup).
+Keep response-side empty-list support separate from request validation. These
+focused tests are not complete protocol coverage; add regressions for the
+transport behavior being changed.
 OpenAI treats added JSON response properties as backward-compatible. Validate the
 fields the adapter consumes and ignore extra metadata on known response objects;
 preserve bounded additions inside opaque reasoning state for replay. Do not add

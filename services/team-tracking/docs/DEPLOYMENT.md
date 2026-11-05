@@ -5,7 +5,7 @@ management, audit log, secrets. **Infrastructure** — how the service actually
 runs in staging + production — lives in the platform-wide runbook:
 
 - **[`docs/RAILWAY-DEPLOYMENT.md`](../../../docs/RAILWAY-DEPLOYMENT.md)** — Railway + Neon setup and the branching/auto-deploy flow.
-- **[`docs/DEPLOYMENT-HISTORY.md`](../../../docs/DEPLOYMENT-HISTORY.md)** — how we got there and the bugs we hit.
+- **[Platform architecture](../../../docs/ARCHITECTURE.md)** — service boundaries, key storage and deployment constraints.
 
 This file covers what's specific to *this service* regardless of where it runs.
 
@@ -273,13 +273,10 @@ and organization policy still have to permit these changes.
 If `last_error` starts with `group settings`, no new additions are attempted;
 removals still run and pending membership writes remain tracked. Check API
 enablement, the OAuth grant's `apps.groups.settings` scope, and the owning
-account's Google privileges. In the 2026-10-20 staging test, the nonadmin group
-owner received 401 despite valid scopes and enabled APIs. The explicitly approved
-temporary **Groups Admin** role allowed settings reads and writes after propagation;
-it was removed after testing. The user subsequently authorized ongoing Groups
-Admin access for both Misty accounts, and staging's role was restored. That proves
-a working permission configuration, not the minimum required privilege; a narrower
-supported alternative has not been tested.
+account's Google privileges. OAuth scopes and group ownership alone do not prove
+that Workspace policy permits settings writes. Verify settings reads and writes
+using the configured account and an approved administrative role before testing
+external-member additions; allow time for privilege changes to propagate.
 Retry normal sync after recovery. It reads settings first, so a lost PATCH response
 or a previous successful configuration does not cause blind repeated writes.
 
@@ -316,17 +313,12 @@ means the integration is disabled.
    `synced` results as settings-verified. Review mappings before a global backfill:
    it creates missing groups. Daily cron activation remains a separate operation.
 
-The [setup issue](https://github.com/UTMIST/Misty/issues/236) tracks setup history.
 Offline tests cover authorization failures, lost responses, settings read-back,
-removals despite settings failure, and pending-write recovery. The 2026-10-20 live
-test passed fresh-group setup, external-member addition/removal, repeat sync with
-no duplicate group or extra settings PATCH, and PR #279's command handlers through
-real HTTP to a local API using real Google providers. Its directory was in memory;
-the external member was the staging connector service account. All disposable
-groups were deleted. The temporary role was removed before the user separately
-approved ongoing Groups Admin access. This did not exercise the Discord gateway
-or deploy the new token/code. Runtime activation and actual
-Discord acceptance remain; production OAuth and rollout are separate.
+removals despite settings failure, and pending-write recovery. Record live
+acceptance in the rollout PR or issue, including the deployed revision, configured
+identity, external-member addition/removal and repeat-sync results. Exercise the
+Discord commands in the target environment as well as the Google/API path;
+an in-memory directory or local HTTP check does not verify the deployed bot.
 
 ### Existing groups and Drive shares
 
