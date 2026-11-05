@@ -175,7 +175,14 @@ def _url(value: str) -> str:
 class DiscoveryMonitor:
     """Independent Healthchecks pings; no source data or API credentials."""
 
-    def __init__(self, url: SecretStr, *, client: httpx.Client, run_id: str):
+    def __init__(
+        self,
+        url: SecretStr,
+        *,
+        client: httpx.Client,
+        run_id: str,
+        check: Literal["run", "completion"] = "run",
+    ):
         try:
             parsed = httpx.URL(url.get_secret_value())
         except (httpx.InvalidURL, ValueError):
@@ -193,19 +200,58 @@ class DiscoveryMonitor:
         self.url = SecretStr(str(parsed).rstrip("/"))
         self.client = client
         self.run_id = run_id
+        self.check = check
 
     def ping(self, event: str) -> bool:
         suffix = {"start": "/start", "success": "", "fail": "/fail"}[event]
-        try:
-            response = self.client.post(
-                self.url.get_secret_value() + suffix,
-                params={"rid": self.run_id},
-                timeout=10,
-                follow_redirects=False,
+        # At most four requests to the run check (two start, two finish), below
+        # Healthchecks' five-per-minute limit. Never retry discovery work here.
+        for attempt in (1, 2):
+            try:
+                response = self.client.post(
+                    self.url.get_secret_value() + suffix,
+                    params={"rid": self.run_id},
+                    headers={"Connection": "close"},
+                    timeout=10,
+                    follow_redirects=False,
+                )
+            except httpx.HTTPError as exc:
+                details = {"reason": "http_error", "error_type": type(exc).__name__}
+                retryable = isinstance(
+                    exc, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+                )
+            else:
+                if response.status_code == 200 and response.text.strip() == "OK":
+                    return True
+                reason = "unexpected_status"
+                if response.status_code == 200:
+                    reason = {
+                        "OK (not found)": "check_not_found",
+                        "OK (rate limited)": "rate_limited",
+                    }.get(response.text.strip(), "unexpected_body")
+                details = {"reason": reason, "status_code": response.status_code}
+                retryable = response.status_code == 408 or 500 <= response.status_code < 600
+            will_retry = retryable and attempt == 1
+            # Exception messages and response bodies can contain the secret ping URL.
+            print(
+                json.dumps(
+                    {
+                        "event": "monitor_failure",
+                        "level": "warning" if will_retry else "error",
+                        "run_id": self.run_id,
+                        "monitor": self.check,
+                        "stage": event,
+                        "attempt": attempt,
+                        "will_retry": will_retry,
+                        **details,
+                    }
+                ),
+                flush=True,
             )
-            return response.status_code == 200 and response.text.strip() == "OK"
-        except httpx.HTTPError:
-            return False
+            if not will_retry:
+                return False
+            time.sleep(1)
+        return False
 
 
 class DiscoveryClient:
@@ -475,7 +521,10 @@ def main(argv=None) -> int:
                 )
             if settings.discovery_completion_monitor_url.get_secret_value():
                 completion_monitor = DiscoveryMonitor(
-                    settings.discovery_completion_monitor_url, client=monitor_http, run_id=run_id
+                    settings.discovery_completion_monitor_url,
+                    client=monitor_http,
+                    run_id=run_id,
+                    check="completion",
                 )
             if args.require_monitor and (monitor is None or completion_monitor is None):
                 raise DiscoveryError(

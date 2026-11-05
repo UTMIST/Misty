@@ -198,13 +198,27 @@ planned maintenance verify that an actual clean scan has rearmed this deadline.
 `--require-monitor` validates both secret HTTPS URLs before catalog/connector work
 and rejects using the same check for both signals. Monitor requests use a separate
 HTTP client, empty POST bodies, a per-invocation UUID, 10-second phase timeouts,
-and no redirects or retries. HTTP 200 must contain exactly `OK` after trimming;
+and no redirects. Each ping closes its connection. Timeouts, network errors,
+remote protocol errors, HTTP 408 and HTTP 5xx receive one retry after one second,
+using the same signal and run ID. This bounds the run check to four requests per
+invocation even if both start and finish need a retry. Rate limits, other HTTP
+statuses and unexpected acknowledgements are not retried. See Healthchecks'
+[reliability guidance](https://healthchecks.io/docs/reliability_tips/).
+HTTP 200 must contain exactly `OK` after trimming;
 unknown/rate-limited responses are failures. See the [ping API](https://healthchecks.io/docs/http_api/).
-A failed start ping does not prevent discovery work or the completion ping, but
-the run check then receives failure.
-Any monitor-delivery failure exits 2 without replaying imports. Final pings happen
-while the checkpoint lock remains held; an overlapping invocation sends failure
-without sending start or completion, so it cannot hide the active run.
+An unrecovered start-ping failure does not prevent discovery work or the completion
+ping, but the run check then receives failure. An unrecovered monitor-delivery
+failure exits 2 without replaying imports. Final pings happen while the checkpoint
+lock remains held; an overlapping invocation sends failure without sending start
+or completion, so it cannot hide the active run.
+Each failed attempt emits a `monitor_failure` event with the run ID, monitor
+(`run` or `completion`), stage (`start`, `success` or `fail`), attempt number,
+`will_retry`, and a reason code. A retryable first failure logs a warning;
+an exhausted or non-retryable failure logs an error.
+HTTP responses include the status code; transport failures include only the
+exception class. Monitor URLs, raw response bodies and exception messages are
+never logged. Use this event alongside the final `monitor_failed` summary to
+distinguish connection failures, rejected checks and unexpected responses.
 
 Keep the project's Railway failure webhook as an independent fallback for
 `Deployment.failed`, `Deployment.crashed` and `Deployment.oom_killed`, with previews
