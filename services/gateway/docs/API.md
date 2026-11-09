@@ -40,8 +40,12 @@ occurs. Only `Person.primary_email` is accepted (trimmed and lowercased); second
 identifiers are not login addresses. Eligibility requires `active=true`.
 
 All responses, including errors, use `Cache-Control: no-store`. Input models
-reject extra fields. Login bodies are limited to 4096 bytes; errors never echo
-submitted codes. Codes must be exactly six ASCII digits. Successful auth responses include an
+reject extra fields. Login bodies are limited to 4096 bytes and must arrive within
+five seconds total, including chunked uploads. HTTP/1 connections close on login
+408, 413, and 429 responses so rejected uploads cannot linger. The edge-IP limit
+runs before the body reader, even when login is disabled. Email addresses containing control or
+other non-printable characters are rejected before login admission. Errors never
+echo submitted codes. Codes must be exactly six ASCII digits. Successful auth responses include an
 `issuer` derived from `GATEWAY_ENV`: `misty:local`, `misty:staging`, or
 `misty:production`. Consumers must check the expected issuer on every success.
 
@@ -115,7 +119,7 @@ Windows start on the first admitted request and expire after the duration below.
 | App start requests | 30/minute, 300/hour |
 | App confirm requests | 60/minute |
 | App status/issuer requests | `LOGIN_STATUS_PER_MINUTE` (default 600/minute), separate from login admission |
-| Backend-attested client IP | 5 starts/minute, 30 confirms/minute, shared across apps |
+| Backend-attested client IP | 5 starts/minute, 20 starts/hour, 30 confirms/minute, shared across apps |
 | Mailbox sends | 1/minute, 5/hour, 20/day, shared across apps |
 | Challenge guesses | 3, reserved before calling verification |
 | Challenge lifetime | 10 minutes from start, including delivery time |
@@ -129,8 +133,12 @@ an attacker can exhaust new-send capacity, so edge abuse protection and monitori
 remain necessary. An already-delivered code remains usable through send throttling.
 
 IPv4-mapped IPv6 addresses normalize to IPv4; native IPv6 addresses share a /64
-bucket. Mailbox quotas include unknown/inactive addresses. Delivery failure does
-not refund them. App/IP exhaustion returns **429** with `Retry-After: 60` (a retry
+bucket. The hourly client limit prevents a few clients from spending the app's
+entire hourly start budget. Users behind the same NAT or IPv6 /64 share this
+budget; sufficiently distributed traffic can still exhaust an app's capacity.
+Rejected app/IP admissions spend none of the other request buckets. Mailbox
+quotas include unknown/inactive addresses. Delivery failure does not refund them.
+App/IP exhaustion returns **429** with `Retry-After: 60` (a retry
 may still hit the hourly limit). Mailbox limits remain hidden behind generic
 202/400 responses. Status requests have a separate app quota, but all endpoints
 still share the pre-authentication edge-IP flood guard (`EDGE_REQUESTS_PER_MINUTE`,
@@ -141,8 +149,8 @@ identities; leave room for issuer checks and size shared-IP traffic separately.
 This is a request budget, not a measured throughput guarantee. Increasing it does
 not extend how long a retired member can retain access.
 
-Missing/invalid key → 401; missing scope → 403; oversized body → 413;
-invalid input → 422; disabled login or unavailable upstream → 503.
+Missing/invalid key → 401; missing scope → 403; body receive deadline → 408;
+oversized body → 413; invalid input → 422; disabled login or unavailable upstream → 503.
 
 ### Compute integration responsibilities
 

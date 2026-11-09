@@ -34,6 +34,9 @@ def request_limits(
         network = str(ip_network(f"{ip}/64", strict=False)) if ip.version == 6 else str(ip)
         digest = sha256(network.encode()).hexdigest()
         limits.append((f"ip:{digest}:{operation}", 5 if operation == "start" else 30, 60))
+        if operation == "start":
+            # A few clients must not consume the entire app's hourly start budget.
+            limits.append((f"ip:{digest}:start-hour", 20, 3600))
     return limits
 
 

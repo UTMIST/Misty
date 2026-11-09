@@ -9,7 +9,7 @@ from contracts.directory import DirectoryUnavailable
 from contracts.storage import StorageAdapter
 from contracts.login import VerificationUnavailable
 from src.api.deps import get_storage, lifespan
-from src.api.middleware import AuditLogMiddleware, LoginBoundaryMiddleware
+from src.api.middleware import AuditLogMiddleware, LoginBodyLimitMiddleware, LoginBoundaryMiddleware
 from src.api.ratelimit import ClientRateLimitMiddleware
 from src.api.readiness import ReadinessProbe
 from src.api.routers import resolve, email_login
@@ -31,7 +31,9 @@ def create_app() -> FastAPI:
     # outermost. Audit must be outermost so it still records the requests the
     # flood guard short-circuits — a 429 storm is exactly what you want in the
     # log. The per-key quota is not here; it runs as a router dependency, after
-    # auth has resolved the key (see src/api/ratelimit.py).
+    # auth has resolved the key (see src/api/ratelimit.py). Login no-store wraps
+    # the IP limit, which must reject floods before reading any request body.
+    app.add_middleware(LoginBodyLimitMiddleware)
     app.add_middleware(
         ClientRateLimitMiddleware,
         limit=get_settings().edge_requests_per_minute,

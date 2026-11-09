@@ -13,9 +13,14 @@ verifies the envelope, hash, revocation state, and scope. No environment bootstr
 key is accepted, and the CLI allows only explicitly supported external scopes.
 
 The resolver path is audit middleware → IP limit → authentication → consumer quota
-→ endpoint scope → upstream client → curated response. Login adds a bounded body
-reader and no-store headers, then scope checks and durable login quotas. `deps.py` supplies the
-pooled HTTP client through the `DirectoryClient` Protocol. Each app lifespan owns
+→ endpoint scope → upstream client → curated response. Login wraps the IP limit
+with no-store headers, then reads at most 4096 body bytes within one five-second
+deadline before JSON parsing, scope checks, and durable login quotas. Throttled
+requests are rejected before any body read; incoming chunks cannot extend the
+deadline. Login 408/413/429 responses close HTTP/1 connections so unfinished
+uploads cannot outlive rejection by cancelling the server's idle timeout.
+`deps.py` supplies the pooled HTTP client through the `DirectoryClient` Protocol.
+Each app lifespan owns
 its client, constructed lazily after scope checks under a lock so concurrent first
 requests share one pool. Shutdown closes that pool after requests drain; an unused
 app creates no client, and separate apps never share or close each other's pool.
@@ -93,8 +98,12 @@ and the next request. Verification retains separate HMAC/email rows; follow its
 
 The authenticated compute backend attests `client_ip`; it must derive that value
 from trusted ingress. This does not alter edge `X-Real-IP` handling. Mailbox and
-application quotas do not depend on the attestation. Keep the existing one-replica,
-one-worker limit because the pre-authentication flood guard and resolver quotas
+application quotas do not depend on the attestation. A persistent hourly start
+limit per client bounds how much of an app's hourly capacity a few clients can
+consume; it is shared across apps and by users behind the same NAT or IPv6 /64.
+See the [limits and remaining abuse trade-offs](API.md#limits-and-failures).
+Keep the existing one-replica, one-worker limit because the pre-authentication
+flood guard and resolver quotas
 are still process-local. Persistent login quotas alone do not authorize scaling.
 
 Successful auth responses attest `misty:<GATEWAY_ENV>`. The authenticated issuer

@@ -82,6 +82,35 @@ def confirm(client, challenge, code="123456", **extra):
     )
 
 
+@pytest.mark.parametrize(
+    "email",
+    [
+        "member\x00@example.com",
+        "member\x1f@example.com",
+        "member\x7f@example.com",
+        "member\u200b@example.com",
+        "member\u202e@example.com",
+        "\tmember@example.com",
+    ],
+)
+def test_nonprintable_email_is_rejected_before_login_work(login, monkeypatch, email):
+    client, store, directory, verification = login
+    calls = []
+
+    def unexpected(*args, **kwargs):
+        calls.append(True)
+        return False
+
+    monkeypatch.setattr(store, "allow_login_request", unexpected)
+    monkeypatch.setattr(directory, "get_person_by_email", unexpected)
+    response = start(client, email)
+    assert response.status_code == 422
+    assert response.json() == {"detail": "invalid login request"}
+    assert response.headers["cache-control"] == "no-store"
+    assert not calls
+    assert not verification.sent
+
+
 def test_other_challenges_cannot_exhaust_a_valid_code(login, monkeypatch):
     client, _, _, verification = login
     clock = [datetime(2026, 10, 26, tzinfo=timezone.utc)]

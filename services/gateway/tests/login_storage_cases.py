@@ -2,6 +2,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+import pytest
+
 from contracts.login import LoginChallenge
 
 NOW = datetime(2026, 10, 26, tzinfo=timezone.utc)
@@ -110,6 +112,38 @@ class LoginStorageCases:
         for _ in range(5):
             assert adapter.allow_login_request("compute", "start", "192.0.2.1", NOW)
         assert not adapter.allow_login_request("compute", "start", "::ffff:192.0.2.1", NOW)
+
+    def test_two_clients_cannot_exhaust_app_hourly_start_budget(self, adapter):
+        admitted = 0
+        for minute in range(30):
+            at = NOW + timedelta(minutes=minute)
+            for ip in ("192.0.2.1", "192.0.2.2"):
+                for _ in range(5):
+                    admitted += adapter.allow_login_request("compute", "start", ip, at)
+        assert admitted == 40
+        assert adapter.allow_login_request(
+            "compute", "start", "192.0.2.99", NOW + timedelta(minutes=30)
+        )
+        assert adapter.allow_login_request(
+            "compute", "start", "192.0.2.1", NOW + timedelta(hours=1)
+        )
+
+    @pytest.mark.parametrize(
+        "first,second",
+        [("192.0.2.1", "::ffff:192.0.2.1"), ("2001:db8::1", "2001:db8::99")],
+    )
+    def test_hourly_client_quota_is_shared_across_apps_and_address_forms(
+        self, adapter, first, second
+    ):
+        for minute in range(4):
+            for _ in range(5):
+                assert adapter.allow_login_request(
+                    f"app-{minute}", "start", first, NOW + timedelta(minutes=minute)
+                )
+        at = NOW + timedelta(minutes=5)
+        assert not adapter.allow_login_request("new-app", "start", second, at)
+        assert adapter.allow_login_request("new-app", "confirm", second, at)
+        assert adapter.allow_login_request("new-app", "status", None, at)
 
     def test_expired_rows_are_pruned_without_resetting_live_email_budget(self, adapter):
         item = challenge()

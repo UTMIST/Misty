@@ -47,6 +47,8 @@ class EmailStartIn(BaseModel):
     @field_validator("email")
     @classmethod
     def normalize_email(cls, value: str) -> str:
+        if not value.isprintable():
+            raise ValueError("invalid email")
         value = value.strip().lower()
         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
             raise ValueError("invalid email")
