@@ -39,13 +39,13 @@ docker compose up -d postgres
 uv sync --extra dev
 
 # 3. Apply database migrations (creates all 9 tables + seeds)
-uv run alembic upgrade head
+uv run python -m alembic upgrade head
 
 # 4. Start the API server
 uv run uvicorn src.api.app:app --reload --port 8000
 ```
 
-> The repo is a single [uv workspace](https://docs.astral.sh/uv/concepts/workspaces/) (root `pyproject.toml` with `[tool.uv.workspace] members = ["services/*", "packages/*"]`, one root `uv.lock`). team-tracking depends on the shared `platform-auth` package (`[tool.uv.sources] platform-auth = { workspace = true }`) but the commands above are unchanged — `uv sync`, `uv run pytest`, `uv run alembic` still work exactly as shown when run from this directory.
+> The repo is a single [uv workspace](https://docs.astral.sh/uv/concepts/workspaces/) (root `pyproject.toml` with `[tool.uv.workspace] members = ["services/*", "packages/*"]`, one root `uv.lock`). team-tracking depends on the shared `platform-auth` package (`[tool.uv.sources] platform-auth = { workspace = true }`) but the commands above are unchanged — `uv sync`, `uv run pytest`, `uv run python -m alembic` still work exactly as shown when run from this directory.
 
 The API is now at `http://localhost:8000`. Interactive Swagger UI is at `http://localhost:8000/docs`; the machine-readable schema is at `http://localhost:8000/openapi.json`.
 

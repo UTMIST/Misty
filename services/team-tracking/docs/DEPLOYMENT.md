@@ -64,12 +64,14 @@ API key. See [API.md](API.md) for response bodies.
 ## API key management (`team-tracking-keys` CLI)
 
 Every consumer (bot, docs-system, future services) authenticates with its own scoped `tt_…` key. The CLI talks directly to the DB — run it with `DATABASE_URL` pointing at the environment's Neon branch.
+Commands below run from the repository root and pin the directory and module;
+see [Python service CLIs](../../../docs/DEVELOPMENT.md#python-service-clis).
 
 ### Issue a key
 
 ```bash
 DATABASE_URL="<neon branch URL>" \
-  uv --project services/team-tracking run team-tracking-keys issue \
+  uv --directory services/team-tracking --project . run python -m src.cli issue \
     --name discord-bot --scopes people:read memberships:read
 ```
 
@@ -106,7 +108,7 @@ TT_DATABASE_URL="<team-tracking Neon branch>" \
 
 ```bash
 DATABASE_URL="<neon branch URL>" \
-  uv --project services/team-tracking run team-tracking-keys list --active-only
+  uv --directory services/team-tracking --project . run python -m src.cli list --active-only
 ```
 
 Only metadata prints — name, prefix, active flag, scopes. Plaintexts and hashes are never displayed.
@@ -115,7 +117,7 @@ Only metadata prints — name, prefix, active flag, scopes. Plaintexts and hashe
 
 ```bash
 DATABASE_URL="<neon branch URL>" \
-  uv --project services/team-tracking run team-tracking-keys revoke <api_key_id>
+  uv --directory services/team-tracking --project . run python -m src.cli revoke <api_key_id>
 ```
 
 Instant — next request with that key returns 401. Revoked keys stay in the table for audit history (soft delete).
@@ -226,16 +228,15 @@ After the variables are set, create groups for all existing teams and reconcile 
 ```bash
 DATABASE_URL="<team-tracking Neon URL>" GOOGLE_GROUPS_CUSTOMER_ID=... GOOGLE_GROUPS_DOMAIN=... \
 GOOGLE_OAUTH_CLIENT_ID=... GOOGLE_OAUTH_CLIENT_SECRET=... GOOGLE_OAUTH_REFRESH_TOKEN=... \
-  uv --project services/team-tracking run team-tracking-groups sync   # or: sync --team <slug>
+  uv --directory services/team-tracking --project . run python -m src.groups_cli sync   # or: sync --team <slug>
 ```
 
 It prints one line per team (`slug  status  group_email  last_error`) followed by
 a structured `groups_sync_finish` summary. Recorded provider failures do not
 stop other membership changes or teams: the command completes the pass and
 exits 0, with a warning if any team did not reach `synced`.
-Retired teams that never had a group are skipped. `--project` is required for
-the same reason as with `team-tracking-keys`: both DB services ship a top-level
-`src` package.
+Retired teams that never had a group are skipped. The local command pins the
+directory and module because services share the `src` package name.
 
 Run `team-tracking-groups sync` **daily** as a Railway cron
 service on the team-tracking image, with the same variables as the service.

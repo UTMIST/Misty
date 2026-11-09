@@ -88,9 +88,9 @@ llm has no `api_keys` table. Keys live in `CONSUMER_KEYS`, and the CLI only *pri
 Run from the repo root; provision a new embedding caller only when approved:
 
 ```bash
-uv --project services/llm run llm-keys --name meeting --scopes chat
+uv --directory services/llm --project . run python -m src.mint_key --name meeting --scopes chat
 # Example embedding-only caller, not an indexing-pipeline deployment:
-uv --project services/llm run llm-keys --name embedding-caller --scopes embed
+uv --directory services/llm --project . run python -m src.mint_key --name embedding-caller --scopes embed
 ```
 
 `chat` and `embed` are independent; use `--scopes chat embed` only when a caller needs both.
@@ -100,7 +100,9 @@ uv --project services/llm run llm-keys --name embedding-caller --scopes embed
 
 Then redeploy llm. **Revoking is the reverse**: drop the entry and redeploy. There is no revoke command, because there is no database.
 
-> Always pass `--project`. Every service declares a top-level `src` package, so in the shared workspace venv a bare invocation can resolve the wrong service's CLI. (Entry points differ — `src.mint_key:main` here, `src.cli:main` in team-tracking and documentation-system — but the `src` collision is what bites.) Verify the token starts with `llm_`.
+The directory and module selection
+avoid shared-workspace import collisions; see [Python service CLIs](../../../docs/DEVELOPMENT.md#python-service-clis).
+Verify the token starts with `llm_`.
 
 ## Deploy order
 

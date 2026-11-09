@@ -51,9 +51,9 @@ Configuring `DOCS_BASE_URL` also enables the [catalog credential check](#durable
 Outside `local`, `meeting` **refuses to boot** without `LLM_BASE_URL` and `LLM_API_KEY`. If `llm` is unreachable during a recording, `/stop` still returns the transcript and PDF with placeholder minutes; see [troubleshooting](#troubleshooting).
 
 1. Deploy `llm`.
-2. Mint a `chat`-scoped key named `meeting`:
+2. From the repository root, mint a `chat`-scoped key named `meeting`:
    ```bash
-   uv --project services/llm run llm-keys --name meeting --scopes chat
+   uv --directory services/llm --project . run python -m src.mint_key --name meeting --scopes chat
    ```
 3. Append the stderr JSON entry to **llm's** `CONSUMER_KEYS`; redeploy llm.
 4. Set the stdout plaintext key as **meeting's** `LLM_API_KEY`, and set `LLM_BASE_URL` to `http://${{llm.RAILWAY_PRIVATE_DOMAIN}}:${{llm.PORT}}` (not a literal `${PORT}`).
@@ -61,10 +61,11 @@ Outside `local`, `meeting` **refuses to boot** without `LLM_BASE_URL` and `LLM_A
 
 ## Consumer keys
 
-No `api_keys` table — keys live in `CONSUMER_KEYS`, and the CLI only *prints*:
+No `api_keys` table — keys live in `CONSUMER_KEYS`, and the CLI only *prints*.
+Run from the repository root:
 
 ```bash
-uv --project services/meeting run meeting-keys --name discord-bot --scopes meetings
+uv --directory services/meeting --project . run python -m src.mint_key --name discord-bot --scopes meetings
 ```
 
 - **stdout** — the plaintext key, shown **once**. Set as the bot's `MEETING_API_KEY`.
@@ -72,7 +73,9 @@ uv --project services/meeting run meeting-keys --name discord-bot --scopes meeti
 
 Then redeploy. Revoking is the reverse: drop the entry, redeploy.
 
-> Always pass `--project` — a bare invocation can resolve another service's CLI in the shared workspace venv. Verify the token starts with `meeting_`.
+The directory and module selection avoid
+shared-workspace import collisions; see [Python service CLIs](../../../docs/DEVELOPMENT.md#python-service-clis).
+Verify the token starts with `meeting_`.
 
 ## The bot degrades gracefully without this service
 

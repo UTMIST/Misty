@@ -302,6 +302,9 @@ jobs:
       - name: Promotion workflow regressions
         working-directory: .
         run: node --test .github/scripts/promotion.test.cjs
+      - name: Directory key provisioning regression
+        working-directory: .
+        run: node --test scripts/provision-directory-key.test.mjs
       # Mirrors the ruff check + ruff format --check pair that gates every
       # Python service. ESLint covers correctness; Prettier covers formatting.
       # Scoped to *.js on purpose — the hand-wrapped Markdown is not Prettier's.

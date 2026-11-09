@@ -66,7 +66,7 @@ including backups and environment selection. From this service directory, for a
 compatible one-revision downgrade:
 
 ```bash
-railway run --service verification --environment <staging|production> uv run alembic downgrade -1
+railway run --service verification --environment <staging|production> uv run python -m alembic downgrade -1
 ```
 
 Coordinate the schema step with the reviewed code rollback; do not downgrade

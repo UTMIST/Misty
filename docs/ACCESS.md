@@ -93,18 +93,10 @@ anything the club depends on.
 `DIRECTORY_API_KEY` is not something anyone gives you — you issue it yourself
 against your own local `team-tracking`:
 
-```bash
-uv --project services/team-tracking run team-tracking-keys issue \
-  --name discord-bot \
-  --scopes people:read people:write people:elevate \
-           identifiers:read identifiers:write \
-           teams:read teams:write memberships:read memberships:write \
-           role_kinds:read channels:read channels:write
-```
-
-Always pass `--project`, and check the token starts with `tt_` — see the
-`src`-collision gotcha in
-[DEVELOPMENT.md → Troubleshooting](DEVELOPMENT.md#troubleshooting).
+Follow the bot's [directory-key procedure](../discord-bot/README.md#directory-key-for-discord-mode)
+for the full scopes and directory-pinned command. It writes directly to the
+migrated local database and prints a `tt_` key once. No running HTTP server or
+organization credentials are needed.
 
 ---
 

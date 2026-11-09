@@ -295,7 +295,7 @@ Alembic manages the Postgres schema; migrations are written by hand and kept in 
 - **`010_pending_group_changes.py`** — persists unconfirmed membership changes. Downgrade refuses to discard pending changes; resolve them first.
 - **`011_remove_retired_provider.py`** — removes the retired provider and its identifiers. Downgrade restores only the provider vocabulary; see the [backup/recovery caveat](DEPLOYMENT.md#registry-cleanup-migration-011).
 
-Apply with `uv run alembic upgrade head`; roll back with `uv run alembic downgrade base`.
+Apply with `uv run python -m alembic upgrade head`; roll back with `uv run python -m alembic downgrade base`.
 
 ## Extending the system
 

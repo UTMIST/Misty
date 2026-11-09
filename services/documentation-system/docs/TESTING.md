@@ -79,22 +79,53 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-For Postgres use a **disposable** pgvector-enabled database, as in
-[README testing](../README.md#testing). The suite truncates catalog tables; migration
-checks also perform downgrades and create/drop a test role/database. CI's
-`documentation-system-test` job provisions `pgvector/pgvector:0.8.2-pg16` and runs
-the complete suite with both opt-ins.
+### Disposable Postgres suite
+
+**This suite destroys data.** Adapter tests truncate catalog tables;
+`RUN_PG_TESTS=1` also enables destructive migration tests even without the
+second flag. `RUN_PG_MIGRATION_TESTS=1` enables additional downgrades and
+temporary role/database creation. Use a separate disposable **cluster** with
+superuser credentials, never the retained Compose database or a Neon branch.
+
+From `services/documentation-system`, with Docker running, the block below
+creates a new pgvector container with memory-backed data and a random loopback
+port. It applies migrations and runs the full suite. The subshell limits the
+test URL and flags to this run; its exit trap removes the container on success
+or failure. No existing container or named volume is reused.
 
 ```bash
-docker compose up -d postgres
-export DATABASE_URL=postgresql+psycopg://docs:dev_password@localhost:5434/docs
-uv run alembic upgrade head
-RUN_PG_TESTS=1 uv run pytest tests/test_postgres_adapter.py::TestIngestionRetrieval -q
-RUN_PG_TESTS=1 RUN_PG_MIGRATION_TESTS=1 uv run pytest -q
+(
+  set -eu
+  docs_test_container=$(docker run --rm -d \
+    --tmpfs /var/lib/postgresql/data \
+    -p 127.0.0.1::5432 \
+    -e POSTGRES_USER=docs -e POSTGRES_PASSWORD=dev_password \
+    -e POSTGRES_DB=docs_test pgvector/pgvector:0.8.2-pg16)
+  trap 'docker stop "$docs_test_container" >/dev/null' EXIT
+
+  for attempt in {1..30}; do
+    if docker exec "$docs_test_container" pg_isready -h 127.0.0.1 -U docs -d docs_test >/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  docker exec "$docs_test_container" pg_isready -h 127.0.0.1 -U docs -d docs_test
+  docs_test_address=$(docker port "$docs_test_container" 5432/tcp)
+  export DATABASE_URL="postgresql+psycopg://docs:dev_password@${docs_test_address}/docs_test"
+  export DOCS_ENV=local RUN_PG_TESTS=1 RUN_PG_MIGRATION_TESTS=1
+  uv run python -m alembic upgrade head
+  uv run pytest -q
+)
 ```
 
-Expected: both adapters pass the lifecycle cases; SQL fault tests recover; the
-complete service suite and Ruff checks pass. Without `RUN_PG_TESTS=1`, database
+Expected: readiness reports `accepting connections`, migrations reach head,
+and the complete service suite passes. CI's `documentation-system-test` uses
+the same pgvector image and both opt-ins. To focus on the lifecycle cases,
+replace the final pytest command inside the block with
+`uv run pytest tests/test_postgres_adapter.py::TestIngestionRetrieval -q`.
+Exporting `DATABASE_URL` explicitly makes Alembic and pytest use the same
+cluster even though pytest disables `.env` loading after collection.
+Without `RUN_PG_TESTS=1`, database
 acceptance skips before connecting. No AWS, Google or live LLM calls are needed.
 When other worktrees are installed in the environment, pin and verify the `src`,
 `contracts` and `tests` import roots before collection, as required by
