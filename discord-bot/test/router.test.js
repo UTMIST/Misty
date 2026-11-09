@@ -164,6 +164,64 @@ test('dispatch: linked user gets handler payload', async () => {
   assert.equal(out.content, 'hi Alex');
 });
 
+test('dispatch denies inactive callers before protected handlers on Discord and web', async () => {
+  for (const surface of ['discord', 'web']) {
+    for (const [policy, level] of [
+      ['linked', 'member'],
+      ['admin', 'admin'],
+      ['superuser', 'superuser'],
+    ]) {
+      let handled = false;
+      const command = defineCommand({
+        name: 'protected',
+        description: 'protected',
+        auth: policy,
+        handler: async () => {
+          handled = true;
+          return { content: 'ran' };
+        },
+      });
+      const out = await dispatch(
+        { surface, commandName: 'protected', discordUserId: 'u1' },
+        {
+          commands: new Map([['protected', command]]),
+          appContext: {
+            directory: {
+              getPersonByDiscordId: async () => ({
+                id: 'retired',
+                active: false,
+                access_level: level,
+              }),
+            },
+          },
+        },
+      );
+      assert.equal(handled, false, `${surface} ${policy} reached the handler`);
+      assert.match(out.content, /link/i);
+    }
+  }
+});
+
+test('dispatch: public optional identification treats an inactive caller as anonymous', async () => {
+  const command = defineCommand({
+    name: 'help',
+    description: 'help',
+    auth: 'public',
+    identifyCaller: true,
+    handler: async ({ principal }) => ({ content: principal ? 'identified' : 'anonymous' }),
+  });
+  const out = await dispatch(
+    { commandName: 'help', discordUserId: 'u1' },
+    {
+      commands: new Map([['help', command]]),
+      appContext: {
+        directory: { getPersonByDiscordId: async () => ({ id: 'retired', active: false }) },
+      },
+    },
+  );
+  assert.equal(out.content, 'anonymous');
+});
+
 test('dispatch: DirectoryUnavailable → fail-closed payload', async () => {
   const { DirectoryUnavailable } = await import('../src/clients/directoryClient.js');
   const directory = {
@@ -357,7 +415,7 @@ test('dispatchAutocomplete returns [] when resolver throws', async () => {
   assert.deepEqual(out, []);
 });
 
-test('dispatchAutocomplete falls back to a null principal when the lookup exceeds the budget', async () => {
+test('dispatchAutocomplete skips a protected resolver when the principal lookup times out', async () => {
   mock.timers.enable({ apis: ['setTimeout'] });
   try {
     let seenPrincipal = 'unset';
@@ -366,7 +424,7 @@ test('dispatchAutocomplete falls back to a null principal when the lookup exceed
       return [];
     };
     const commands = cmdWithTeamAutocomplete(resolver);
-    // A hung directory call: never settles. The timeout must let the resolver run anyway.
+    // A hung directory call must not let a protected resolver run.
     const appContext = { directory: { getPersonByDiscordId: () => new Promise(() => {}) } };
     const pending = dispatchAutocomplete(
       {
@@ -381,11 +439,45 @@ test('dispatchAutocomplete falls back to a null principal when the lookup exceed
     // Tick past the principal budget (whatever it currently is) so the timeout fires.
     mock.timers.tick(PRINCIPAL_AUTOCOMPLETE_TIMEOUT_MS + 100);
     const out = await pending;
-    assert.equal(seenPrincipal, null);
+    assert.equal(seenPrincipal, 'unset');
     assert.deepEqual(out, []);
   } finally {
     mock.timers.reset();
   }
+});
+
+test('dispatchAutocomplete skips a protected resolver for inactive or unlinked callers', async () => {
+  for (const person of [null, { id: 'retired', active: false, access_level: 'admin' }]) {
+    let calls = 0;
+    const commands = cmdWithTeamAutocomplete(async () => {
+      calls += 1;
+      return [{ name: 'private', value: 'private' }];
+    });
+    const out = await dispatchAutocomplete(
+      { commandName: 'doc', subcommand: 'list', focusedOption: 'team', discordUserId: 'u1' },
+      { commands, appContext: { directory: { getPersonByDiscordId: async () => person } } },
+    );
+    assert.deepEqual(out, []);
+    assert.equal(calls, 0);
+  }
+});
+
+test('dispatchAutocomplete lets public options run anonymously', async () => {
+  const commands = cmdWithTeamAutocomplete(async ({ principal }) => {
+    assert.equal(principal, null);
+    return [{ name: 'public', value: 'public' }];
+  });
+  commands.get('doc').auth = 'public';
+  const out = await dispatchAutocomplete(
+    { commandName: 'doc', subcommand: 'list', focusedOption: 'team', discordUserId: 'u1' },
+    {
+      commands,
+      appContext: {
+        directory: { getPersonByDiscordId: async () => ({ id: 'retired', active: false }) },
+      },
+    },
+  );
+  assert.deepEqual(out, [{ name: 'public', value: 'public' }]);
 });
 
 test('dispatchAutocomplete returns [] for unknown option', async () => {

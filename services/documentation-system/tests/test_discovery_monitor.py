@@ -20,17 +20,24 @@ from src.discovery import (
 
 
 @pytest.mark.parametrize(
-    "status,body,accepted",
+    "status,body,accepted,reason",
     [
-        (200, "OK", True),
-        (200, "OK (not found)", False),
-        (200, "rate limited", False),
-        (302, "OK", False),
-        (503, "upstream secret", False),
+        (200, "OK", True, None),
+        (200, "OK (not found)", False, "check_not_found"),
+        (200, "OK (rate limited)", False, "rate_limited"),
+        (200, "upstream secret", False, "unexpected_body"),
+        (302, "OK", False, "unexpected_status"),
+        (403, "upstream secret", False, "unexpected_status"),
+        (429, "upstream secret", False, "unexpected_status"),
+        (503, "upstream secret", False, "unexpected_status"),
     ],
 )
-def test_monitor_requires_ack_and_sends_no_credentials_or_source_data(status, body, accepted):
+def test_monitor_requires_ack_and_sends_no_credentials_or_source_data(
+    status, body, accepted, reason, capsys, monkeypatch
+):
     requests = []
+    sleeps = []
+    monkeypatch.setattr("src.discovery.time.sleep", sleeps.append)
 
     def handler(request):
         requests.append(request)
@@ -43,14 +50,111 @@ def test_monitor_requires_ack_and_sends_no_credentials_or_source_data(status, bo
         assert monitor.ping("start") is accepted
         assert monitor.ping("success") is accepted
         assert monitor.ping("fail") is accepted
-    assert [r.url.path for r in requests] == ["/secret/start", "/secret", "/secret/fail"]
+    attempts = (1, 2) if status == 503 else (1,)
+    assert [r.url.path for r in requests] == [
+        path for path in ("/secret/start", "/secret", "/secret/fail") for _ in attempts
+    ]
+    assert sleeps == ([1, 1, 1] if status == 503 else [])
     for request in requests:
         assert request.method == "POST"
         assert not request.content
         assert "x-api-key" not in request.headers
         assert "authorization" not in request.headers
+        assert request.headers["connection"] == "close"
         assert dict(request.url.params) == {"rid": "test-run"}
         assert set(request.extensions["timeout"].values()) == {10}
+    output = capsys.readouterr()
+    assert "secret" not in output.out + output.err
+    records = [json.loads(line) for line in output.out.splitlines()]
+    if accepted:
+        assert records == []
+    else:
+        assert records == [
+            {
+                "event": "monitor_failure",
+                "level": "warning" if status == 503 and attempt == 1 else "error",
+                "run_id": "test-run",
+                "monitor": "run",
+                "stage": stage,
+                "attempt": attempt,
+                "will_retry": status == 503 and attempt == 1,
+                "reason": reason,
+                "status_code": status,
+            }
+            for stage in ("start", "success", "fail")
+            for attempt in attempts
+        ]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.LocalProtocolError],
+)
+@pytest.mark.parametrize("check", ["run", "completion"])
+def test_monitor_transport_failure_is_identified_and_bounded(error, check, capsys, monkeypatch):
+    requests = []
+    sleeps = []
+    monkeypatch.setattr("src.discovery.time.sleep", sleeps.append)
+
+    def handler(request):
+        requests.append(request)
+        raise error(f"upstream secret at {request.url}", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        monitor = DiscoveryMonitor(
+            SecretStr("https://monitor.test/secret"),
+            client=client,
+            run_id="test-run",
+            check=check,
+        )
+        assert monitor.ping("success") is False
+    attempts = (1,) if error is httpx.LocalProtocolError else (1, 2)
+    assert len(requests) == len(attempts)
+    assert sleeps == ([] if error is httpx.LocalProtocolError else [1])
+    output = capsys.readouterr()
+    assert "secret" not in output.out + output.err
+    assert "monitor.test" not in output.out + output.err
+    assert [json.loads(line) for line in output.out.splitlines()] == [
+        {
+            "event": "monitor_failure",
+            "level": "warning" if attempt < len(attempts) else "error",
+            "run_id": "test-run",
+            "monitor": check,
+            "stage": "success",
+            "attempt": attempt,
+            "will_retry": attempt < len(attempts),
+            "reason": "http_error",
+            "error_type": error.__name__,
+        }
+        for attempt in attempts
+    ]
+
+
+@pytest.mark.parametrize("status", [408, 500, 502, 503, 504])
+def test_transient_monitor_http_response_retries_only_same_signal(status, monkeypatch, capsys):
+    requests = []
+    sleeps = []
+    monkeypatch.setattr("src.discovery.time.sleep", sleeps.append)
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(status, text="upstream secret")
+        return httpx.Response(200, text="OK")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        monitor = DiscoveryMonitor(
+            SecretStr("https://monitor.test/secret"), client=client, run_id="test-run"
+        )
+        assert monitor.ping("fail") is True
+    assert sleeps == [1]
+    assert len(requests) == 2
+    assert requests[0].url == requests[1].url
+    assert requests[0].url.path == "/secret/fail"
+    assert dict(requests[0].url.params) == {"rid": "test-run"}
+    output = capsys.readouterr()
+    assert "secret" not in output.out + output.err
+    assert json.loads(output.out)["will_retry"] is True
 
 
 @pytest.mark.parametrize(
@@ -72,6 +176,7 @@ def test_invalid_monitor_urls_never_leak_secrets(url):
 
 @pytest.fixture
 def monitored_cli(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.discovery.time.sleep", lambda _: None)
     config = {
         "DISCOVERY_ENABLED": "true",
         "DISCOVERY_STATE_PATH": str(tmp_path / "state.json"),
@@ -89,6 +194,7 @@ def monitored_cli(monkeypatch, tmp_path):
     outcome = {
         "import": "indexed",
         "monitor_failure": None,
+        "monitor_failures_remaining": None,
         "listing_failure": False,
         "incomplete": False,
         "warnings": 0,
@@ -104,7 +210,11 @@ def monitored_cli(monkeypatch, tmp_path):
             assert "x-api-key" not in request.headers
             UUID(request.url.params["rid"])
             if request.url.path == outcome["monitor_failure"]:
-                raise httpx.ReadTimeout("secret network detail", request=request)
+                remaining = outcome["monitor_failures_remaining"]
+                if remaining is None or remaining > 0:
+                    if remaining is not None:
+                        outcome["monitor_failures_remaining"] -= 1
+                    raise httpx.ReadTimeout("secret network detail", request=request)
             if request.url.path == "/complete-secret":
                 # Success is sent only after durable completion.
                 state = State.model_validate_json(Path(config["DISCOVERY_STATE_PATH"]).read_text())
@@ -198,10 +308,29 @@ def test_api_failure_reports_failure_without_replay_or_sensitive_logs(monitored_
 
 
 @pytest.mark.parametrize("failed", ["/run-secret/start", "/complete-secret", "/run-secret"])
+def test_transient_monitor_failure_recovers_without_replaying_discovery(
+    monitored_cli, failed, capsys
+):
+    _, requests, events, outcome = monitored_cli
+    outcome["monitor_failure"] = failed
+    outcome["monitor_failures_remaining"] = 1
+    assert main(["--require-monitor"]) == 0
+    assert events.count(failed) == 2
+    assert events[-1] == "/run-secret"
+    assert "/run-secret/fail" not in events
+    assert sum(r.url.path == "/discover/google" for r in requests) == 1
+    assert sum(r.url.path == "/docs/discovery" for r in requests) == 2
+    assert len({r.url.params["rid"] for r in requests if r.url.host == "monitor.test"}) == 1
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert summary["monitor_failed"] is False
+
+
+@pytest.mark.parametrize("failed", ["/run-secret/start", "/complete-secret", "/run-secret"])
 def test_monitor_failure_preserves_work_and_never_replays_it(monitored_cli, failed, capsys):
     _, requests, events, outcome = monitored_cli
     outcome["monitor_failure"] = failed
     assert main(["--require-monitor"]) == 2
+    assert events.count(failed) == 2
     assert sum(r.url.path == "/docs/discovery" for r in requests) == 2
     # A clean scan still resets the completion deadline, but any earlier
     # delivery failure must keep the run check failed.
@@ -211,6 +340,24 @@ def test_monitor_failure_preserves_work_and_never_replays_it(monitored_cli, fail
     output = capsys.readouterr()
     assert "secret" not in output.out + output.err
     assert json.loads(output.out.splitlines()[-1])["monitor_failed"] is True
+
+
+def test_budget_stop_monitor_retry_does_not_replay_or_claim_scan_completion(
+    monitored_cli, monkeypatch, capsys
+):
+    config, requests, events, outcome = monitored_cli
+    monkeypatch.setenv("DISCOVERY_MAX_ITEMS", "1")
+    outcome["monitor_failure"] = "/run-secret"
+    outcome["monitor_failures_remaining"] = 1
+    assert main(["--require-monitor"]) == 0
+    assert events == ["/run-secret/start", "/run-secret", "/run-secret"]
+    assert sum(r.url.path == "/docs/discovery" for r in requests) == 1
+    state = State.model_validate_json(Path(config["DISCOVERY_STATE_PATH"]).read_text())
+    assert len(state.pending) == 1
+    assert state.completed_at is None
+    summary = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert summary["outcome"] == "item_budget"
+    assert summary["monitor_failed"] is False
 
 
 def test_overlap_reports_failure_without_start_or_completion(monitored_cli):

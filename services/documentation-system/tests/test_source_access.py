@@ -8,7 +8,11 @@ from contracts.fetcher import SourcePermission
 from contracts.types import Source, SourceGrant
 from contracts.visibility import Actor
 from src.api.routers.docs import _source_access_due
-from src.source_access import SourceAccessUnavailable, resolve_google_permissions
+from src.source_access import (
+    SourceAccessUnavailable,
+    SourceIdentityCache,
+    resolve_google_permissions,
+)
 from src.storage.in_memory import InMemoryStorageAdapter
 
 P1 = UUID("11111111-1111-1111-1111-111111111111")
@@ -126,6 +130,30 @@ def test_directory_failure_aborts_instead_of_returning_partial_acl():
         resolve_google_permissions(
             [permission("a", "user", "one@example.com")], Directory(down=True)
         )
+
+
+def test_cached_identity_keeps_each_permissions_provenance_and_expiration():
+    directory = Directory(people={"one@example.com": P1})
+    cache = SourceIdentityCache()
+    first = permission("first", "user", "one@example.com", ["folder-one"])
+    first.role = "writer"
+    resolve_google_permissions([first], directory, identity_cache=cache)
+    # A cached success must not reuse the previous file's grant or recheck the directory.
+    directory.down = True
+    expires = datetime.now(timezone.utc) + timedelta(hours=1)
+    second = permission("second", "user", " ONE@example.com ", ["folder-two"])
+    second.expiration_time = expires
+    resolved = resolve_google_permissions([second], directory, identity_cache=cache)
+    grant = resolved.grants[0]
+    assert grant.grantee_id == P1
+    assert grant.source_permission_id == "second" and grant.source_role == "reader"
+    assert grant.source_inherited_from == ["folder-two"]
+    assert grant.source_principal == "one@example.com" and grant.source_expires_at == expires
+    second.expiration_time = datetime.now(timezone.utc) - timedelta(seconds=1)
+    assert resolve_google_permissions([second], directory, identity_cache=cache).grants == []
+    # Ordinary uncached reconciliation still observes directory outages.
+    with pytest.raises(SourceAccessUnavailable):
+        resolve_google_permissions([first], directory)
 
 
 def test_successful_resync_revokes_only_source_grants_and_expiry_fails_closed():

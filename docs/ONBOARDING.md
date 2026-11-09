@@ -96,13 +96,19 @@ Issues carry labels on three independent axes:
 | Knowledge | `area/*` (often two or three) | Which parts of the system are involved, and so what you'd need to know to pick it up. |
 | State | `blocked` / `ready` | Whether it can be started right now. |
 
-**Check blockers and assignees before claiming a `ready` issue.** Each issue
-form’s **"Blocked by"** field (`#40, #42`) drives the state-label workflow.
-Closing the last blocker adds `ready`, reopening one re-blocks it, and assigning
-yourself removes `ready`. Two current limits matter: closing a blocker can add
-`ready` to an already-assigned dependent, and a new/edited issue with no blocker
-references is not automatically labeled `ready`. The label is a useful filter,
-not proof the work is unclaimed. Claim by *assigning yourself*, not just commenting.
+**Check blockers and assignees before claiming a `ready` issue.** Native
+dependencies and the form's **"Blocked by"** field (`#40, #42`) describe hard
+prerequisites. New issues enter Backlog; `ready` means unassigned work in Ready
+with no unresolved blockers. Use `on hold` for deliberate deferrals. Claim by
+*assigning yourself*, not just commenting.
+
+Issues and PRs are added automatically. Explicit closing links connect their
+progress: put `Closes #123` in a PR description only when merging finishes the
+issue's whole scope. A partial implementation should use a plain reference and
+leave acceptance open. GitHub closes linked issues on merge to the default
+branch, `staging`. See the [board automation runbook](../.github/PROJECT-BOARD.md)
+for review/reopen transitions, native settings, and the replacement Actions
+workflow's activation requirements.
 
 ### Filing an issue
 

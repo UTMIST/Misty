@@ -75,7 +75,7 @@ The same applies to `AUDIO_DRAIN_TIMEOUT_S` (5 s). Raising it makes `/stop` slow
 `src/stt/transcribe.py` wraps Amazon Transcribe streaming. It is exercised **only against a fake client** — never a live session.
 
 1. Keep the fakes in sync with any interface change. They are **not** in `conftest.py` (which holds only the dotenv/settings-cache fixtures) — each suite defines its own: `tests/test_transcribe.py`, `tests/test_sessions.py`, `tests/test_meetings_api.py`, `tests/test_minutes.py`.
-2. The wrapper handles AWS ending a stream on its own (idle timeout, 4 h cap) by reopening on the next audio and offsetting the new session's word times by the audio already delivered. That logic is unit-tested against a fake but **never observed against a real timeout** — treat changes there as unverified until someone runs a long live meeting.
+2. The wrapper handles AWS ending a stream on its own (idle timeout, 4 h cap) by reopening on the next audio and offsetting the new session's word times by the audio already delivered. Offline tests use a fake; changes also need the [live verification checklist](../README.md#live-verification) before deployment acceptance.
 3. **Never write a test that opens a real Transcribe stream.** The suite must stay offline and free.
 
 ## Testing

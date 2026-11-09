@@ -444,6 +444,33 @@ test('/record start is denied for an UNLINKED caller and never starts recording'
   assert.equal(startCalled, false, 'an unlinked caller must not reach meetingSurface.start');
 });
 
+test('/record start is denied for an inactive caller before starting recording', async () => {
+  const calls = [];
+  let startCalled = false;
+  const client = fakeClient();
+  wireDiscordClient(client, {
+    commands: recordCommands,
+    appContext: {
+      directory: {
+        getPersonByDiscordId: async () => ({ id: 'retired', active: false }),
+      },
+      meetingSurface: {
+        start: () => {
+          startCalled = true;
+          return { status: 'recording' };
+        },
+      },
+    },
+  });
+
+  await client.emit(
+    fakeRecordInteraction({ subcommand: 'start', voiceChannel: { id: 'vc1' }, calls }),
+  );
+
+  assert.equal(startCalled, false);
+  assert.match(calls.find((c) => c.method === 'editReply').payload.content, /link your account/i);
+});
+
 test('/record start proceeds for a LINKED caller in a voice channel', async () => {
   const calls = [];
   let startArgs = null;

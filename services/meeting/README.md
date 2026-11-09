@@ -142,14 +142,16 @@ Unlike `llm`, **this service holds state in process memory**: `SessionRegistry` 
 - **Not horizontally scalable as-is.** A given `session_id`'s WebSocket, `/transcript` polls, and `/stop` call must all land on the *same* process/instance. Running multiple replicas behind a load balancer without sticky routing on `session_id` will misroute `/transcript` and `/stop` calls to a process that never saw that session.
 - **Live sessions are ephemeral.** A process restart or crash loses the rolling transcript and open streams. There is no database or durable queue backing the session, and **nothing is written to disk**. `/stop` deregisters the session; callers must retain the PDF response. With `record` context, finalized text/metadata is handed to documentation-system or held temporarily in memory for retry after the reply. A restart loses unaccepted hand-offs; accepted records survive in the catalog. See the [retention contract](docs/API.md#durable-record-context).
 
-## Live-verify caveats (flagged for sub-plan 3 integration, not this task)
+## Live verification
 
-A few integration assumptions are baked in and documented in-code, but need confirming against the real Discord bot / AWS account rather than unit tests:
+Offline tests use fake Transcribe and LLM clients. For a deployment that changes
+audio handling, verify these integration assumptions with the real Discord bot
+and AWS account, and record the results in the release PR:
 
-- **Speaker-timeline anchoring** (`src/sessions.py`): a speaker's stream carries only the frames they spoke, so Transcribe's stream-relative word times are mapped back onto meeting time via anchors recorded at each detected silence. The 200 ms gap tolerance is reasoned from Discord's ~20 ms frame cadence, not yet measured against a live call.
-- **AWS session restarts:** Transcribe ends a streaming session on its own (idle timeout, 4h cap). The wrapper reopens on the next audio and offsets the new session's word times by the audio already delivered — unit-tested against a fake, not yet observed against a real timeout.
+- **Speaker-timeline anchoring** (`src/sessions.py`): a speaker's stream carries only the frames they spoke, so Transcribe's stream-relative word times are mapped back onto meeting time via anchors recorded at each detected silence. Check that the 200 ms gap tolerance preserves speaker timing with realistic Discord audio pacing.
+- **AWS session restarts:** Transcribe ends a streaming session on its own (idle timeout, 4h cap). Verify that the wrapper reopens on the next audio and offsets the new session's word times by the audio already delivered.
 - **Concurrent stream limits:** one open Transcribe stream per active speaker, for the whole meeting. Check the account's concurrent-stream quota before a large meeting.
-- **Amazon Transcribe streaming** needs real AWS credentials (`AWS_REGION` + the standard credential chain) and realistic audio pacing to validate end-to-end; the test suite exercises `src/stt/transcribe.py` against a fake client only, never a live Transcribe session.
+- **Amazon Transcribe streaming** needs real AWS credentials (`AWS_REGION` + the standard credential chain). Use an authorized live test to verify the full recording and finalization flow; keep repository tests offline.
 
 ## Testing
 

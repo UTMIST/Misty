@@ -200,6 +200,15 @@ connector reads that list before any export/download. documentation-system then 
 through Team Tracking's fail-closed, membership-synced Google Group lookup. It never
 infers Google Group membership from an ordinary Team Tracking membership.
 
+Scheduled refresh shares an in-memory identity cache across the documents in one
+`refresh-due` request. It caches successful and unmapped results by normalized email,
+separately for users and groups, and discards them before the next batch. Directory
+errors are not cached. Each file still supplies fresh Google permissions; permission
+IDs, roles, inheritance and expiration are evaluated separately for each file. This
+avoids repeating directory HTTP lookups for shared audiences without retaining
+identity or group-sync decisions across batches. Ingest and individual refetches
+continue to resolve identities independently.
+
 Unknown/external emails, unmapped/legacy groups, domain-wide shares, and `anyone` shares
 produce warnings but no grant. This deliberately means a broadly shared file can remain
 absent from the catalog's source-backed audience until an explicit supported mapping
@@ -231,9 +240,15 @@ Before its first heartbeat, the runner acquires the database's singleton
 drain and final heartbeat, across containers and API restarts. A conflicting
 runner exits nonzero and sends only `/fail`; it cannot replace the active start
 or send a misleading success. Run IDs alone only correlate Healthchecks durations.
-The guard has no TTL: after a crash or uncertain completion, admitting a new run
-could overlap work still running in the API. An operator must confirm quiescence
-before releasing that exact ID. The bounded refresh endpoint remains independently
+The guard has no TTL. Time-budget exhaustion is an explicit release exception:
+the runner reports failure but releases its exact owner even if its last API request
+has not finished. Each completed document commits its own progress; a disconnected
+refresh caller starts no further documents after the current one finishes. A new
+run skips documents with recent sync/attempt timestamps, while untouched rows stay
+due. Immediate replacement can still overlap in-flight work, so the final log's
+`guard_released` flag does not establish API quiescence. Other crashes or uncertain
+outcomes require an operator to confirm quiescence before releasing that exact ID.
+The bounded refresh endpoint remains independently
 callable; direct API clients must use the same guard protocol for an entire drain.
 Each catalog database must have its own heartbeat check.
 
@@ -385,9 +400,9 @@ so a caller can't probe for docs they may not see via status codes.
 
 ## Retrieval layer: chunking + search strategy (RAG)
 
-> **Status: spike / decision record** for the RAG epic (#125), fixing the parameters the
-> indexing pipeline (#175) and retrieval endpoint (#176) build on. The numbers are *starting*
-> values for the evaluation set (#178) to validate; when #178 moves one, update it here.
+This section describes the chunking and ranking parameters used by indexing and
+retrieval. Validate changes with the [evaluation harness](EVALUATION.md), and
+update the documented defaults alongside the implementation.
 
 **Decision (#208, [PR #219](https://github.com/UTMIST/Misty/pull/219)): ~500-token chunks,
 ~50-token overlap (10%), and hybrid keyword/vector retrieval.** Character equivalents below
@@ -397,12 +412,13 @@ are estimates for the sampled text, not alternative fixed-character defaults.
 
 The pipeline chunks the **stored plain text of a catalog entity**, not a URL-document:
 `doc_content.content_text` (capped at `MAX_CONTENT_CHARS` = 1,000,000, see `src/content.py`,
-populated during ingest), not the shorter `docs.content_snapshot`. Keying on the entity is
-deliberate: meeting records will be catalogued entities with no source URL, and a pipeline
-built around URL-fetched docs would silently exclude them.
+populated during ingest), not the shorter `docs.content_snapshot`. Chunking uses
+the stored text and catalog identity rather than refetching a URL. Saved meetings
+now have canonical Google Doc URLs; their catalogued text goes through this same
+indexing path.
 
-Stored text is already source-specific. Current shapes (all from the Google connector,
-`services/connectors/`):
+Stored text is already source-specific. Current shapes from
+[`services/connectors`](../../connectors/README.md) include:
 
 | Source | Extracted shape | Chunking implication |
 |--------|-----------------|----------------------|
@@ -411,7 +427,7 @@ Stored text is already source-specific. Current shapes (all from the Google conn
 | Google Sheets | Per-tab headings and Markdown tables of `FORMATTED_VALUE` rows, row-capped; cell newlines become `<br>` | Split per tab, then per row: each row is one line |
 | PDF (Drive) | `## Page N` boundaries with extracted page text; internal structure can be lossy | Respect pages where they fit, then use recursive splitting |
 | DOCX (Drive) | Markdown headings, bullets, and tables in document order | Respect rendered structure where it fits; table-cell newlines become `<br>` |
-| GitHub READMEs (#86) | Markdown (future) | Split on headings then paragraphs |
+| GitHub READMEs and text files | README Markdown or the explicitly selected UTF-8 file | Respect headings and paragraphs where present; other text uses recursive splitting |
 
 ### Chunk size and overlap
 
@@ -593,19 +609,15 @@ grants) belong to indexing (#175) and retrieval (#176).
 the same input and settings. `tests/test_chunking.py` asserts the invariants above on fixed
 cases (connector shapes, Unicode, repeated text, boundaries) and 200 seeded random inputs.
 
-### Carrying this into implementation
+### Pipeline verification
 
-- **#218 (pure chunker):** done; see "Chunker (#218)" above.
-- **#174 (storage):** store vectors and keyword-search metadata for the same chunks.
-- **#175 (indexing/lifecycle):** done; see "Indexing (#175)" below.
-- **#176 (retrieval):** implemented; see "Authorized retrieval" below. Evaluation (#178)
-  and consumer integration (#278) remain release gates. #277's automated lifecycle
-  verification and controlled staging gate are tracked in the
-  [integration audit](INGESTION-RETRIEVAL-AUDIT.md).
-- **#178 (evaluation):** built; see "Evaluation (#178)" below and
-  [EVALUATION.md](EVALUATION.md). The question set covers exact-name, acronym and date
-  queries alongside buried and boundary-straddling answers. First finding: at the
-  starting floor the relevance threshold, not the chunk size, dominates the score.
+Chunking, storage, indexing and retrieval run together in the
+[lifecycle tests](TESTING.md). The [evaluation harness](EVALUATION.md) measures
+ranking quality for exact-name, acronym and date queries, as well as buried and
+boundary-straddling answers. Provider quality and real access checks need
+evidence for the target environment; follow the
+[helper activation guide](../../../discord-bot/README.md#channel-scope-and-activation)
+for the bot's DM and channel consumers.
 
 ### Indexing (#175): `src/indexing.py`
 
@@ -613,7 +625,9 @@ cases (connector shapes, Unicode, repeated text, boundaries) and 200 seeded rand
 sets match its stored `doc_content` and title: the set for `embedder`'s model (the one
 search serves) and, during a re-embed, the set for `target`'s
 ([Model changes](#model-changes-209)). It is keyed on catalog identity and stored text, never on a URL or a
-fetch, so anything catalogued with stored text (future meetings, #211) indexes the same way.
+fetch, so anything catalogued with stored text, including saved meeting Docs,
+indexes the same way. Meeting acceptance, Google persistence and indexing are
+separate stages; see [meeting records](DEPLOYMENT.md#meeting-record-persistence).
 
 1. A missing or retired doc, or one with no content, has its chunks cleared (`cleared`).
    `clear_doc_chunks_if_unindexable` rechecks under the chunk writers' lock; if a newer
@@ -745,9 +759,10 @@ and executes the same HTTP exchanges. External responses use MockTransport;
 the dependency factories, HTTP clients, authorization and ranking remain real.
 The same lifecycle cases run on both adapters; additional Postgres cases inject
 SQL faults to prove rollback and safe retrieval errors. See the
-[#277 integration audit](INGESTION-RETRIEVAL-AUDIT.md) for coverage and evidence.
-Consumer-owner agreement, controlled staging/provider acceptance, and #278 remain
-separate release gates.
+[lifecycle testing guide](TESTING.md) for coverage and evidence.
+The Discord helper now consumes this contract in DMs and configured channels.
+Its [activation checks](../../../discord-bot/README.md#channel-scope-and-activation)
+and controlled provider acceptance remain separate from offline test coverage.
 
 The request body controls only query and k. Trusted headers select either an
 `Actor` or a `Channel(source_team_ids)`; literal assertion scopes are required,
@@ -875,7 +890,7 @@ it never spans network fetching or embedding.
 
 `contracts/meeting.py` defines the hand-off, metadata and injected writer.
 `meeting_records.py` orchestrates the leased state machine from the
-[shared design](../../../docs/MEETING-RECORDING.md#durable-records-design-212).
+[shared design](../../../docs/MEETING-RECORDING.md#durable-records).
 Migration 012 follows the refresh-runner migration 011. Both storage adapters
 implement atomic replay checks, version-checked transitions and catalog commits;
 `catalog_meeting` commits the Doc, source grants, content and saved state together.
@@ -918,7 +933,10 @@ indexing and cleanup failure counts. Pending or terminal failures and incomplete
 cleanup are not successful recovery. The runner preserves these outcomes in its
 warning summary while a drained run exits `0` and sends a completion heartbeat.
 Known work failures release the run guard after that heartbeat, while transport
-or monitoring uncertainty retains it and produces a nonzero exit.
+or monitoring uncertainty retains it and produces a nonzero exit, except that
+time-budget exhaustion releases the owner even during an outstanding meeting retry.
+Meeting retries retain their existing persistence/reconciliation state machine;
+they are not forcibly cancelled mid-operation.
 
 Meeting content is fetched with the writer OAuth identity in initial ingest,
 refetch and scheduled refresh. An ambiguous owner 404 follows the nondestructive

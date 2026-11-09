@@ -4,7 +4,14 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 
 from contracts.groups import GroupProvider, GroupProviderError
 from contracts.storage import StorageAdapter
-from contracts.types import Person, PersonCreate, PersonUpdate, TeamGoogleGroup
+from contracts.types import (
+    Person,
+    PersonCreate,
+    PersonSearch,
+    PersonSearchResult,
+    PersonUpdate,
+    TeamGoogleGroup,
+)
 from src.api.auth import AuthedKey, get_actor, require_scope
 from src.api.authz import require_access_level_change
 from src.api.deps import get_group_provider, get_storage
@@ -37,6 +44,20 @@ def list_people(
     _: AuthedKey = Depends(require_scope("people:read")),
 ) -> list[Person]:
     return storage.list_people(active_only=active_only)
+
+
+@router.post("/search", response_model=PersonSearchResult)
+def search_people(
+    payload: PersonSearch,
+    storage: StorageAdapter = Depends(get_storage),
+    key: AuthedKey = Depends(require_scope("people:read")),
+) -> PersonSearchResult:
+    if payload.email is not None and not key.has_scope("identifiers:read"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="email search requires scope: identifiers:read",
+        )
+    return storage.search_people(payload)
 
 
 # Declared before /{person_id} (literal-first convention) so "by-email" is
