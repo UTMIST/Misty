@@ -1,9 +1,11 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Barrier
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, event, select
 
 from src import cli
 from src.api.app import create_app
@@ -45,6 +47,45 @@ class TestPostgresStorage(StorageCases):
 
 class TestPostgresLoginStorage(LoginStorageCases):
     pass
+
+
+def test_final_attempt_is_atomic_without_advisory_lock(engine, adapter, monkeypatch):
+    from login_storage_cases import NOW, PERSON_ID, challenge
+    from src.storage.schema import login_challenges
+
+    item = challenge()
+    assert adapter.reserve_login(item)
+    assert adapter.activate_login(item.id, PERSON_ID, NOW)
+    for _ in range(2):
+        assert adapter.admit_login_attempt(item.id, item.owner, NOW)
+
+    # Exercise the SQL guard independently of the production advisory lock.
+    # Both callers reach their UPDATE before either executes it; a separate
+    # eligibility SELECT would therefore let both observe two spent attempts.
+    monkeypatch.setattr(adapter, "_login_transaction", engine.begin)
+    ready = Barrier(2, timeout=10)
+
+    def before_update(conn, cursor, statement, parameters, context, executemany):
+        if context.compiled is not None and context.compiled.statement.is_update:
+            ready.wait()
+
+    event.listen(engine, "before_cursor_execute", before_update)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            attempts = list(
+                pool.map(lambda _: adapter.admit_login_attempt(item.id, item.owner, NOW), range(2))
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", before_update)
+
+    assert [result.attempts for result in attempts if result is not None] == [3]
+    with engine.connect() as conn:
+        assert (
+            conn.execute(
+                select(login_challenges.c.attempts).where(login_challenges.c.id == item.id)
+            ).scalar_one()
+            == 3
+        )
 
 
 def test_login_quotas_survive_a_new_adapter(engine, adapter):

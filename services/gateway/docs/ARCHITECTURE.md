@@ -90,6 +90,9 @@ close the eligibility gap after authentication.
 Both adapters implement the same storage protocol. Postgres serializes short
 login-state transactions with a transaction-scoped advisory lock, never held during
 HTTP. This intentionally simple design fits the one-worker, low-volume deployment.
+Attempt admission also checks owner, expiry, redemption, and the remaining guess
+budget in a single conditional update, enforcing the cap in SQL independently of
+the advisory lock.
 Expiry indexes support pruning on each authenticated login/status request. Gateway
 challenges retain email/UUID until expiry and the next request; rate buckets retain
 hashes of email/IP (pseudonymous, not anonymous) for at most their one-day window

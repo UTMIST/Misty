@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Barrier
 from uuid import uuid4
 
 import pytest
@@ -94,6 +95,23 @@ class LoginStorageCases:
                 pool.map(lambda _: adapter.redeem_login(item.id, item.owner, NOW), range(10))
             )
         assert results.count(True) == 1
+
+    def test_concurrent_confirmations_share_the_final_attempt(self, adapter):
+        item = challenge()
+        assert adapter.reserve_login(item)
+        assert adapter.activate_login(item.id, PERSON_ID, NOW)
+        for _ in range(2):
+            assert adapter.admit_login_attempt(item.id, item.owner, NOW)
+        ready = Barrier(8, timeout=10)
+
+        def admit(_):
+            ready.wait()
+            return adapter.admit_login_attempt(item.id, item.owner, NOW)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            attempts = list(pool.map(admit, range(8)))
+        assert [item.attempts for item in attempts if item is not None] == [3]
+        assert adapter.admit_login_attempt(item.id, item.owner, NOW) is None
 
     def test_app_and_ip_limits_are_separate_from_status(self, adapter):
         for n in range(30):

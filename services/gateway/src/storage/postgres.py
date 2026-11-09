@@ -125,23 +125,18 @@ class PostgresStorageAdapter:
     def admit_login_attempt(self, challenge_id, owner, now):
         with self._login_transaction() as conn:
             row = conn.execute(
-                select(login_challenges).where(
+                update(login_challenges)
+                .where(
                     login_challenges.c.id == challenge_id,
                     login_challenges.c.owner == owner,
                     login_challenges.c.expires_at > now,
                     login_challenges.c.redeemed.is_(False),
                     login_challenges.c.attempts < policy.MAX_ATTEMPTS,
                 )
-            ).one_or_none()
-            if row is None:
-                return None
-            updated = conn.execute(
-                update(login_challenges)
-                .where(login_challenges.c.id == challenge_id)
                 .values(attempts=login_challenges.c.attempts + 1)
                 .returning(login_challenges)
-            ).one()
-            return LoginChallenge.model_validate(updated._mapping)
+            ).one_or_none()
+            return LoginChallenge.model_validate(row._mapping) if row is not None else None
 
     def redeem_login(self, challenge_id, owner, now):
         with self._login_transaction() as conn:
