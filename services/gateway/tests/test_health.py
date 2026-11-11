@@ -7,7 +7,7 @@ from sqlalchemy.exc import OperationalError
 
 from src.api.app import create_app
 from src.api.deps import get_storage
-from src.api.ratelimit import IP_LIMIT
+from src.config import get_settings
 from src.api.readiness import READINESS_CACHE_SECONDS, ReadinessProbe
 from src.storage.in_memory import InMemoryStorageAdapter
 from src.storage.postgres import PostgresStorageAdapter
@@ -63,11 +63,12 @@ def test_public_readiness_requests_do_not_repeat_database_work_after_ip_limit(cl
     store = CountingStore()
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: store
+    limit = get_settings().edge_requests_per_minute
     with TestClient(app) as client:
-        for _ in range(IP_LIMIT):
+        for _ in range(limit):
             assert client.get("/v1/resolve/discord/example").status_code == 401
         assert client.get("/v1/resolve/discord/example").status_code == 429
-        for _ in range(IP_LIMIT + 1):
+        for _ in range(limit + 1):
             assert client.get("/health/ready").status_code == 200
         assert store.calls == 1
 

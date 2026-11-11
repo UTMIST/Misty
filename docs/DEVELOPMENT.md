@@ -287,10 +287,10 @@ their code:
   seeded from a `CONSUMER_KEYS` JSON env var and parsed at boot into an
   in-memory store, not an `api_keys` table. Rotating a key means editing the
   variable and redeploying; there is no `revoke` command.
-- **`verification` has a database but no key table.** It uses a
-  `NullApiKeyStore`, so only the bootstrap `API_KEY` authenticates — there are no
-  per-consumer keys to mint. Its database retains verification request state
-  and code hashes; expiry does not delete rows.
+- **`verification` has a database but no key table.** Scoped `vf_` consumers
+  are configured in `CONSUMER_KEYS`; the bot bootstrap key remains supported.
+  Its database retains verification request state and code hashes; expiry does
+  not delete rows. Follow its [provisioning and retention guide](../services/verification/docs/DEPLOYMENT.md).
 - **`meeting` is stateful.** It holds one in-memory session per live meeting.
   It cannot be horizontally scaled without sticky routing on `session_id`, and
   a restart drops every in-flight meeting. See

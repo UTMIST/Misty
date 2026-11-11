@@ -19,7 +19,7 @@ Shared API-key auth (keys, scopes, audit) for UTMIST platform services. A pure l
 | `ADMIN_SCOPE` | `models.py` | The wildcard scope (`"admin"`) that satisfies any `require_scope` check. |
 | `DEV_SPOOF_SCOPE` | `models.py` | The `"dev:spoof"` scope; its [production guard](#development-scope-guard) is opt-in and uses the service's `is_prod` predicate. |
 | `ConsumerKeyRow` | `memory_store.py` | Frozen dataclass row shape backing `InMemoryKeyStore` — `id`, `name`, `scopes`, `active`, `revoked_at`. |
-| `InMemoryKeyStore` | `memory_store.py` | DB-free `ApiKeyStore` implementation. Used by services with no `api_keys` table (`llm`, `meeting`, `connectors`) — keys are seeded from config at boot rather than persisted. |
+| `InMemoryKeyStore` | `memory_store.py` | DB-free `ApiKeyStore` implementation. Used by services with no `api_keys` table (`llm`, `meeting`, `connectors`, `verification`) — keys are seeded from config at boot rather than persisted. |
 | `key_store_from_config` | `memory_store.py` | Parses a `CONSUMER_KEYS` JSON array (`[{"name","prefix","key_hash","scopes"}]`) into a populated `InMemoryKeyStore`. Raises `RuntimeError` on a malformed value so a bad env var fails a service's boot, not its first request. |
 
 ## Credential config convention
@@ -55,8 +55,7 @@ New service? Write the credentials as `SecretStr` from the start, and give the t
 ## Key-store wiring
 
 - **DB-backed** (`team-tracking`, `documentation-system`, `gateway`): the service's own `StorageAdapter` satisfies `ApiKeyStore` structurally. Gateway accepts only issued `gw_` keys and disables bootstrap authentication with `get_env_key=lambda: None`.
-- **Config-backed** (`llm`, `meeting`, `connectors`): `key_store_from_config(settings.consumer_keys.get_secret_value())` builds an `InMemoryKeyStore` at boot from `CONSUMER_KEYS`. There is no revoke call — revocation is dropping the entry from `CONSUMER_KEYS` and redeploying.
-- **Env-key-only** (`verification`): its `NullApiKeyStore` rejects all stored-key lookups; only the bootstrap `API_KEY` authenticates. See its [auth model](../../services/verification/README.md#auth-model).
+- **Config-backed** (`llm`, `meeting`, `connectors`, `verification`): `key_store_from_config(settings.consumer_keys.get_secret_value())` builds an `InMemoryKeyStore` at boot from `CONSUMER_KEYS`. There is no revoke call — revocation is dropping the entry from `CONSUMER_KEYS` and redeploying.
 
 ## Development scope guard
 
