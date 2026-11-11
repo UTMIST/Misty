@@ -125,6 +125,21 @@ Three things in `stream_meeting` exist because of specific failures:
 
 Malformed binary framing and feed failures drop the frame; unparseable JSON and text matching neither control shape are silently skipped. Only the binary path counts drops (`empty_ws_frame`, `malformed_ws_frame`, `feed_raised`); ignored text has no counter or log. Control values are not fully validated: an unhashable `speaker_id` raises out of the handler and enters disconnect recovery. Send string speaker/name values and preserve nonfatal handling when extending the protocol; see the [wire-contract limitation](API.md#messages-the-server-accepts).
 
+The AWS client uses a yielding input buffer (`src/stt/client.py`). The SDK's
+default buffer immediately raises `BlockingIOError` when empty, and CRT retries
+in a tight loop. Its callbacks can compete for the GIL with audio ingestion,
+building a WebSocket backlog that also delays heartbeat replies. Empty reads
+sleep for 1 ms on the CRT thread before returning the same would-block result;
+ready audio and EOF retain the SDK's behavior. The bounded wait also lets CRT
+service other connections on that thread. Audio is still sent once, with no
+additional buffer or replay.
+
+The SDK does not expose a buffer factory, so the client replaces its private
+serializer before signing or opening HTTP. The HTTP body and audio-event
+writer must share that exact buffer. Keep the offline SDK integration test
+passing when upgrading `amazon-transcribe` or `awscrt`; it exercises request
+signing, ordered audio events, and stream completion without contacting AWS.
+
 ## Why Opus decode is per-speaker and in-process
 
 Discord voice delivers **bare Opus packets** with no container or demuxer framing, and Opus decode carries state across packets. Two consequences:

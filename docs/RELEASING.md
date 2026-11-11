@@ -63,8 +63,8 @@ source revision. It predates `VERSION`. Backfill `v1.0.0` at that exact commit,
 not today's branch tip. This mapping neither proves that a tag exists nor closes
 the remaining acceptance work recorded in #319.
 
-`VERSION` now prepares **`1.0.1`**, the first tracked patch after the baseline.
-It collects the Groups, discovery and source-refresh warning fixes already
+The first tracked patch after the baseline, **`1.0.1`**, collected the Groups,
+discovery and source-refresh warning fixes already
 promoted in #327/#330, plus the hourly identity-cache fixes in #349. Earlier
 untagged fix deployments retain their existing commit/PR identities; we do not
 invent separate historical release numbers for them. Subsequent production

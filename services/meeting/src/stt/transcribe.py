@@ -96,9 +96,9 @@ class _StreamingTranscription:
 
     def _resolve_client(self):
         if self._client is None:
-            from amazon_transcribe.client import TranscribeStreamingClient
+            from src.stt.client import create_transcribe_client
 
-            self._client = TranscribeStreamingClient(region=self._region)
+            self._client = create_transcribe_client(self._region)
         return self._client
 
     def start(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
