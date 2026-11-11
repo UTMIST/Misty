@@ -75,13 +75,13 @@ docker compose up -d postgres
 uv sync --extra dev
 
 # 3. Apply database migrations
-uv run alembic upgrade head
+uv run python -m alembic upgrade head
 
 # 4. Start the API server
 uv run uvicorn src.api.app:app --reload --port 8001
 ```
 
-> The repo is a single [uv workspace](https://docs.astral.sh/uv/concepts/workspaces/) (root `pyproject.toml` with `[tool.uv.workspace] members = ["services/*", "packages/*"]`, one root `uv.lock`). documentation-system depends on the shared `platform-auth` package (`[tool.uv.sources] platform-auth = { workspace = true }`) but the commands above are unchanged — `uv sync`, `uv run pytest`, `uv run alembic` still work exactly as shown when run from this directory.
+> The repo is a single [uv workspace](https://docs.astral.sh/uv/concepts/workspaces/) (root `pyproject.toml` with `[tool.uv.workspace] members = ["services/*", "packages/*"]`, one root `uv.lock`). documentation-system depends on the shared `platform-auth` package (`[tool.uv.sources] platform-auth = { workspace = true }`) but the commands above are unchanged — `uv sync`, `uv run pytest`, `uv run python -m alembic` still work exactly as shown when run from this directory.
 
 The API is now running at `http://localhost:8001`. Interactive Swagger UI is at `http://localhost:8001/swagger` (note: relocated from `/docs`, since `/docs` is the docs-resource router). Machine-readable OpenAPI schema is at `GET /openapi.json`.
 
@@ -116,10 +116,10 @@ A doc whose source fetch failed at ingest is catalogued without content (the fai
 
 ```bash
 # What is missing, without fetching anything
-DOCS_API_KEY=doc_<prefix>_<secret> uv run doc-backfill --dry-run
+DOCS_API_KEY="doc_<prefix>_<secret>" uv run python -m src.backfill --dry-run
 
 # Repair it; exits non-zero if any doc still fails
-DOCS_API_KEY=doc_<prefix>_<secret> uv run doc-backfill
+DOCS_API_KEY="doc_<prefix>_<secret>" uv run python -m src.backfill
 ```
 
 Sources with `content_fetch_enabled=false` (`youtube`) can never have content, so they are reported as skipped rather than failed. A refetch that succeeds but extracts nothing (a title-only `github` doc, an empty page) is reported as `empty`, not `repaired` — a 200 from the refetch endpoint means the fetch ran, not that content was stored, so the run re-lists `has_content=false` to confirm. The tool checks its own scopes (`GET /api-keys/self`) before trusting any listing: without `docs:read:all` the catalog lists as empty rather than 403, which would otherwise read as "nothing to repair". See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#repairing-docs-missing-content-doc-backfill-cli).
@@ -336,29 +336,13 @@ real HTTP clients with deterministic external responses, and never seed chunks.
 See the [lifecycle testing guide](docs/TESTING.md) for commands,
 failure/freshness behavior, and controlled staging acceptance.
 
-**Full (includes Postgres integration):**
-```bash
-docker compose up -d postgres
-export DATABASE_URL=postgresql+psycopg://docs:dev_password@localhost:5434/docs
-uv run alembic upgrade head
-RUN_PG_TESTS=1 RUN_PG_MIGRATION_TESTS=1 uv run pytest -q
-```
-
-`tests/test_postgres_adapter.py` runs the same behavioral assertions against a live Postgres instance. Chunk assertions are shared with the in-memory suite through `tests/chunk_storage_cases.py`; migration tests also verify pgvector constraints and reversibility. Use the supplied pgvector-enabled container.
-
-Export `DATABASE_URL` explicitly so standalone Alembic and pytest target the same
-database. Standalone Alembic reads `.env`; pytest's autouse fixtures disable `.env`
-loading and clear cached settings before each test. Collection-time application
-imports can still read `.env` before those fixtures run. Exported environment
-variables take precedence in both cases.
-
-Use a disposable database: the adapter suite truncates catalog tables, and
-`RUN_PG_TESTS=1` alone enables older destructive migration tests (including
-`test_migration_004.py` and `test_migration_005.py`).
-`RUN_PG_MIGRATION_TESTS=1` additionally enables later suites with downgrades that
-drop chunk storage and creation/removal of a temporary database and role. The
-second flag is not a safety barrier for retained data. Enable both flags only
-against a disposable cluster with superuser credentials, as CI does.
+**Full (includes Postgres integration):** use the
+[disposable Postgres procedure](docs/TESTING.md#disposable-postgres-suite).
+These tests truncate catalog tables and reverse migrations; the quickstart's
+persistent Compose database is unsuitable. The procedure creates an isolated
+pgvector cluster, exports the same test URL for Alembic and pytest, enables both
+opt-ins and removes the cluster afterward. Shared adapter cases verify parity;
+migration cases verify constraints and reversibility.
 
 Lint before committing:
 
@@ -406,11 +390,9 @@ Controlled provider acceptance is an environment-specific check; see the
 
 ## Automatic sharing discovery
 
-When an operator enables discovery for your environment, share a supported Google
-file or My Drive folder with Misty's connector email; nested supported files are
-included. No `/doc add` or folder-root registration is needed. Use the
-[member instructions](docs/DISCOVERY.md#members-sharing-with-misty) for sharing
-prerequisites and expected search behavior.
+Discovery imports newly shared Google files and supported folder descendants.
+Operators: follow the [discovery runbook](docs/DISCOVERY.md).
+Members: use the wiki's [Google sharing guide](https://github.com/UTMIST/Misty/wiki/Documents#share-google-files-for-automatic-discovery).
 
 The HTTP-only `doc-discover` runner has separate settings from the API. It reads
 **process environment only**, including the existing `DOCS_BASE_URL`,

@@ -50,19 +50,30 @@ Two modes, one shared foundation. Pick which mode you need:
 
 ### First-time setup (once per machine)
 
-```bash
-# In services/team-tracking/
-cp .env.example .env
-docker compose up -d postgres            # named volume — survives reboots
-uv sync --extra dev                      # installs the Python env
-uv run alembic upgrade head              # migrations against the main DB
+From the repository root, with Docker running, initialize the directory schema
+before launching the playground. Keep existing `.env` files when repeating setup.
 
-# In discord-bot/
-cp .env.example .env
-npm install
+```bash
+(set -e
+ cd services/team-tracking
+ test -f .env || cp .env.example .env
+ docker compose up -d --wait postgres
+ uv sync --extra dev
+ uv run python -m alembic upgrade head)
+
+(set -e
+ cd discord-bot
+ test -f .env || cp .env.example .env
+ npm ci)
 ```
 
-Then seed at least one identity into main so `/link` has something to match:
+The playground is now ready for [daily startup](#playground-mode-browser-recommended-for-feature-dev).
+It creates its own test personas. After pulling schema changes, apply directory
+migrations again before launching it: the launcher clones the current main
+database and never migrates it itself.
+
+For real Discord mode, seed at least one local identity so `/link` has something
+to match:
 
 ```bash
 # Start main team-tracking briefly to seed via HTTP
@@ -75,21 +86,28 @@ curl -X POST http://localhost:8000/people \
 # Ctrl+C the uvicorn when done.
 ```
 
-Also issue an API key for the Discord bot (only if you'll use Discord mode):
+### Directory key for Discord mode
+
+From the repository root, issue a key against the migrated local directory
+database. The CLI writes directly to Postgres; port 8000 need not be running.
+It reads `services/team-tracking/.env`, with exported variables taking precedence.
 
 ```bash
-cd services/team-tracking
-uv --project . run team-tracking-keys issue --name discord-bot \
+uv --directory services/team-tracking --project . run python -m src.cli issue --name discord-bot \
   --scopes people:read people:write people:elevate identifiers:read identifiers:write \
            teams:read teams:write memberships:read memberships:write role_kinds:read \
            channels:read channels:write
 # Copy the tt_... key into discord-bot/.env as DIRECTORY_API_KEY.
-# IMPORTANT: this key must be issued against MAIN (port 8000), not scratch.
+# IMPORTANT: issue against the main local database, not scratch.
 # Verify the token starts with tt_ — a doc_-prefixed key means the shared venv
 # resolved documentation-system's CLI instead, and team-tracking will reject it.
 # scripts/provision-directory-key.sh is the source of truth for the bot's scopes
 # (people:elevate lets /seed create new people at admin/superuser level).
 ```
+
+The directory-pinned module form avoids shared-workspace import collisions;
+see [Python service CLIs](../docs/DEVELOPMENT.md#python-service-clis).
+Keys issued against `team_tracking_playground` disappear when scratch resets.
 
 ### Daily startup
 
@@ -414,29 +432,9 @@ parallel to team-tracking's scoped-key auth.
      exclusively here; stable commands are always global. Required only if you
      have testing-guild-only commands (see "Registration scope" above).
    - `DIRECTORY_BASE_URL` (e.g. `http://localhost:8000`).
-   - `DIRECTORY_API_KEY` — issue one from team-tracking:
-     ```bash
-     cd ../services/team-tracking
-     uv --project . run team-tracking-keys issue --name discord-bot \
-       --scopes people:read people:write people:elevate identifiers:read identifiers:write \
-                teams:read teams:write memberships:read memberships:write role_kinds:read \
-                channels:read channels:write
-     # The token must start with tt_ (a doc_-prefixed key means the shared venv
-     # resolved documentation-system's CLI). scripts/provision-directory-key.sh
-     # is the source of truth for these scopes — people:elevate is required so
-     # /seed can promote people to admin/superuser (without it, /seed to a
-     # privileged level returns 403). channels:read/write power /channel-access.
-     ```
-     **Important:** the CLI writes to whichever DB `.env`'s `DATABASE_URL` points
-     at, which is your main `team_tracking` DB by default. Do NOT issue this key
-     against the scratch playground DB (`team_tracking_playground`) — the scratch
-     DB gets dropped every time the playground shuts down or resets, taking any
-     keys issued against it with it. If your bot suddenly starts replying
-     "directory temporarily unavailable" after you ran the playground, check
-     with `curl http://localhost:8000/api-keys/self -H "X-API-Key: $KEY"` — a
-     401 means the key was on scratch and got wiped; issue a fresh one against
-     main and update `.env`.
-3. `npm install`
+   - `DIRECTORY_API_KEY` — follow [Directory key for Discord mode](#directory-key-for-discord-mode)
+     for the database, import path and full scope list.
+3. `npm ci`
 4. `npm run register` — registers the slash commands (run once, or whenever
    command definitions change). **Stable** commands go global (can take ~1h to
    propagate); **testing-guild-only** commands go only to that guild. See
@@ -663,6 +661,9 @@ your local team-tracking DB — commands you run in the playground never touch
 your working directory data.
 
 ### One command to start
+
+Complete [first-time setup](#first-time-setup-once-per-machine), including
+directory migrations, before using this daily-start command from `discord-bot`.
 
 ```bash
 npm run dev:web

@@ -23,7 +23,7 @@ TT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../services/team-tracking" && pwd)"
 # Issue a scoped key against the team-tracking Neon branch and echo the tt_... token.
 issue_key() {
   local name="$1"; shift
-  DATABASE_URL="$TT_DATABASE_URL" uv --project "$TT_DIR" run team-tracking-keys issue \
+  DATABASE_URL="$TT_DATABASE_URL" uv --directory "$TT_DIR" --project . run python -m src.cli issue \
     --name "$name" --scopes "$@" \
     | grep -oE 'tt_[A-Za-z0-9_-]+' | head -n1
 }

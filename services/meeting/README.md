@@ -71,10 +71,10 @@ Auth is scoped API keys via the shared `platform_auth` package, matching `llm` �
 
 ### Minting consumer keys
 
-Use the `meeting-keys` CLI. It prints the plaintext key **once** to stdout and the `CONSUMER_KEYS` JSON entry to stderr — it does not (and cannot) write to any store:
+From `services/meeting`, run the `meeting-keys` CLI as a module. It prints the plaintext key **once** to stdout and the `CONSUMER_KEYS` JSON entry to stderr — it does not (and cannot) write to any store:
 
 ```bash
-uv run meeting-keys --name discord-bot --scopes meetings
+uv run python -m src.mint_key --name discord-bot --scopes meetings
 # stdout: meeting_<prefix>_<secret>   (the key — give it to the consumer, shown ONCE)
 # stderr: {"name": "discord-bot", "prefix": "...", "key_hash": "$argon2id$...", "scopes": ["meetings"]}
 ```

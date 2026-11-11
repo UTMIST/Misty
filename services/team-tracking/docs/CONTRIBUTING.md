@@ -22,7 +22,7 @@ cd services/team-tracking
 cp .env.example .env
 docker compose up -d postgres
 uv sync --extra dev
-uv run alembic upgrade head
+uv run python -m alembic upgrade head
 ```
 
 > Note: the repo is a uv workspace (one root `pyproject.toml`, one root `uv.lock` shared with `packages/auth` and documentation-system). team-tracking depends on the shared `platform-auth` package via `[tool.uv.sources] platform-auth = { workspace = true }`, but `uv sync`/`uv run` from this directory work exactly as shown above.
@@ -94,7 +94,7 @@ Migrations are **hand-written** and kept in sync with `src/storage/schema.py`. T
 
 1. **Change `schema.py` first.** Add/alter the `Table` (or `Column`) in `src/storage/schema.py`. This stays the source of truth for what columns exist.
 
-2. **Inspect `migrations/versions/` and run `uv run alembic heads`** to identify the current head. Choose the next unused sequential revision ID and create `migrations/versions/<revision>_<short_name>.py`. Copy an existing file for the header shape. Replace the placeholders below with the chosen revision, current head, and creation date:
+2. **Inspect `migrations/versions/` and run `uv run python -m alembic heads`** to identify the current head. Choose the next unused sequential revision ID and create `migrations/versions/<revision>_<short_name>.py`. Copy an existing file for the header shape. Replace the placeholders below with the chosen revision, current head, and creation date:
 
    ```python
    """add preferred_name to people
@@ -129,9 +129,9 @@ Migrations are **hand-written** and kept in sync with `src/storage/schema.py`. T
 3. **Apply and verify.**
 
    ```bash
-   uv run alembic upgrade head      # apply
-   uv run alembic downgrade -1      # confirm the downgrade works
-   uv run alembic upgrade head      # re-apply
+   uv run python -m alembic upgrade head      # apply
+   uv run python -m alembic downgrade -1      # confirm the downgrade works
+   uv run python -m alembic upgrade head      # re-apply
    ```
 
    Alembic reads `DATABASE_URL` (via `migrations/env.py` → `src/config`), so it targets whatever database your `.env` points at.

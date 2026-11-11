@@ -80,10 +80,10 @@ Auth is scoped API keys via the shared `platform_auth` package, matching `llm`, 
 
 ### Minting consumer keys
 
-Use the `connectors-keys` CLI. It prints the plaintext key **once** to stdout and the `CONSUMER_KEYS` JSON entry to stderr — it does not (and cannot) write to any store:
+From `services/connectors`, run the `connectors-keys` CLI as a module. It prints the plaintext key **once** to stdout and the `CONSUMER_KEYS` JSON entry to stderr — it does not (and cannot) write to any store:
 
 ```bash
-uv run connectors-keys --name documentation-system --scopes fetch
+uv run python -m src.mint_key --name documentation-system --scopes fetch
 # stdout: connectors_<prefix>_<secret>   (the key — give it to the consumer, shown ONCE)
 # stderr: {"name": "documentation-system", "prefix": "...", "key_hash": "$argon2id$...", "scopes": ["fetch"]}
 ```

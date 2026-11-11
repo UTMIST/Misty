@@ -303,16 +303,16 @@ Provision the separate consumers below, plus the catalog embedding key described
 
 ```bash
 # 1. A key for meeting -> llm (scope: chat)
-uv --project services/llm run llm-keys --name meeting --scopes chat
+uv --directory services/llm --project . run python -m src.mint_key --name meeting --scopes chat
 
 # 2. A key for discord-bot -> meeting (scope: meetings)
-uv --project services/meeting run meeting-keys --name discord-bot --scopes meetings
+uv --directory services/meeting --project . run python -m src.mint_key --name discord-bot --scopes meetings
 
 # 3. A key for documentation-system -> connectors (scope: fetch)
-uv --project services/connectors run connectors-keys --name documentation-system --scopes fetch
+uv --directory services/connectors --project . run python -m src.mint_key --name documentation-system --scopes fetch
 
 # 4. A separate key for discord-bot -> llm (scope: chat)
-uv --project services/llm run llm-keys --name discord-bot --scopes chat
+uv --directory services/llm --project . run python -m src.mint_key --name discord-bot --scopes chat
 ```
 
 Each CLI prints the **plaintext key to stdout** (shown exactly once — it is
@@ -333,7 +333,7 @@ documentation-system indexes stored content through llm's `/embed`, so mint it a
 embedding key from the repo root:
 
 ```bash
-uv --project services/llm run llm-keys --name documentation-system --scopes embed
+uv --directory services/llm --project . run python -m src.mint_key --name documentation-system --scopes embed
 ```
 
 Append the JSON entry to `llm`'s `CONSUMER_KEYS` and set the plaintext key as
@@ -473,7 +473,7 @@ branch** for production, or `staging` branch for staging.
 ```bash
 TT_DB="<team-tracking Neon branch URL for this env>"
 DATABASE_URL="$TT_DB" \
-  uv --project services/team-tracking run team-tracking-seed seed-person \
+  uv --directory services/team-tracking --project . run python -m src.seed_cli seed-person \
     --name "Your Name" --email you@example.com --level superuser
 ```
 
@@ -482,6 +482,11 @@ attach your Discord account to the seeded person record. New admins get added
 by an existing admin running `/seed` from Discord.
 
 ## 7. Verify
+
+Configure and test ongoing alerts through the
+[readiness-monitoring runbook](READINESS-MONITORING.md). Deployment health
+checks and external monitoring verify different parts of service availability.
+
 - **APIs:** verify each deployed service from inside its container or an
   authorized host that can reach the same-environment private network. From
   the service container, request `http://localhost:$PORT/health`; from another

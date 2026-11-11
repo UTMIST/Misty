@@ -41,10 +41,10 @@ create; documentation-system owns recovery through the
 
 ## Consumer keys
 
-connectors has no `api_keys` table. Keys live in the `CONSUMER_KEYS` env var, and the CLI only *prints* — it cannot write to any store:
+connectors has no `api_keys` table. Keys live in the `CONSUMER_KEYS` env var, and the CLI only *prints* — it cannot write to any store. Run from the repository root:
 
 ```bash
-uv --project services/connectors run connectors-keys \
+uv --directory services/connectors --project . run python -m src.mint_key \
   --name documentation-system --scopes fetch
 ```
 
@@ -53,7 +53,9 @@ uv --project services/connectors run connectors-keys \
 
 Then redeploy connectors. **Revoking is the same operation in reverse**: drop the entry from `CONSUMER_KEYS` and redeploy. There is no revoke command, because there is no database.
 
-> Always pass `--project`. Every service declares a top-level `src` package, so in the shared workspace venv a bare invocation can resolve the wrong service's CLI and mint a key with the wrong envelope prefix. (The entry points differ — `src.mint_key:main` here, `src.cli:main` in team-tracking and documentation-system — but the `src` collision is what bites.) Verify the token starts with `connectors_`.
+Verify the token starts with `connectors_`.
+The directory-pinned module form is required for shared `src` imports;
+`--project` alone is insufficient. See [Python service CLIs](../../../docs/DEVELOPMENT.md#python-service-clis).
 
 ## Deploy order
 

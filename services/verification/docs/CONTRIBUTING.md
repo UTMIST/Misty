@@ -20,7 +20,7 @@ cd services/verification
 cp .env.example .env
 docker compose up -d postgres
 uv sync --extra dev
-uv run alembic upgrade head
+uv run python -m alembic upgrade head
 uv run pytest --ignore=tests/test_postgres_adapter.py   # fast run
 ```
 
@@ -110,9 +110,9 @@ Migrations are **hand-written** with sequential revision ids (`001`, `002`, …)
 3. **Apply and verify the round trip:**
 
    ```bash
-   uv run alembic upgrade head
-   uv run alembic downgrade -1
-   uv run alembic upgrade head
+   uv run python -m alembic upgrade head
+   uv run python -m alembic downgrade -1
+   uv run python -m alembic upgrade head
    ```
 
 Alembic reads `DATABASE_URL` via `migrations/env.py` → `src/config`, so it targets whatever your `.env` points at.
@@ -131,7 +131,7 @@ Runs against `InMemoryVerificationStore` and `FakeSender`, injected via `app.dep
 
 ```bash
 docker compose up -d postgres
-uv run alembic upgrade head
+uv run python -m alembic upgrade head
 uv run pytest
 ```
 

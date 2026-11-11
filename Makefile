@@ -34,7 +34,7 @@ BOT_DIR := discord-bot
 PG_SUITE := tests/test_postgres_adapter.py
 
 .DEFAULT_GOAL := help
-.PHONY: help install test test-full test-readiness test-release test-promotion lint format check check-node labels clean-pyc
+.PHONY: help install test test-full test-readiness test-release test-promotion test-provisioning check-docs lint format check check-node labels clean-pyc
 
 help: ## Show this help
 	@echo 'UTMIST ops platform'
@@ -76,7 +76,7 @@ install: ## Install every dependency (uv workspace + bot)
 	uv sync --extra dev
 	cd $(BOT_DIR) && npm ci
 
-test: test-readiness test-release test-promotion ## Fast suites only — no Docker, external network, or credentials (see test-full)
+test: test-readiness test-release test-promotion test-provisioning ## Fast suites only — no Docker, external network, or credentials (see test-full)
 	@set -e; for d in $(PY_DIRS); do \
 	  echo "==> $$d"; \
 	  ( cd $$d && uv run pytest -q --ignore=$(PG_SUITE) ); \
@@ -85,7 +85,7 @@ test: test-readiness test-release test-promotion ## Fast suites only — no Dock
 	@$(MAKE) --no-print-directory check-node
 	@cd $(BOT_DIR) && npm test
 
-test-full: test-readiness test-release test-promotion ## Collect all suites; DB opt-ins/setup still required (docs/DEVELOPMENT.md)
+test-full: test-readiness test-release test-promotion test-provisioning ## Collect all suites; DB opt-ins/setup still required (docs/DEVELOPMENT.md)
 	@echo "Requires each DB-backed service's Postgres up and migrated."
 	@echo "See docs/DEVELOPMENT.md — note documentation-system and verification both bind 5434."
 	@set -e; for d in $(PY_DIRS); do \
@@ -108,6 +108,13 @@ test-release: check-node ## Release version guard regressions and current VERSIO
 test-promotion: check-node ## Promotion/sync regressions (local Git repositories and fake GitHub)
 	node --test .github/scripts/promotion.test.cjs
 
+test-provisioning: check-node ## Directory-key CLI selection (fake uv/Railway, no credentials)
+	node --test scripts/provision-directory-key.test.mjs
+
+check-docs: check-node ## Check local Markdown links and anchors offline, plus checker regressions
+	node --test scripts/check-docs.test.mjs
+	node scripts/check-docs.mjs
+
 lint: ## Check lint + formatting everywhere (read-only — same gates as CI)
 	@set -e; for d in $(PY_DIRS); do \
 	  echo "==> $$d"; \
@@ -129,7 +136,7 @@ format: ## Apply formatters and autofixes in place
 labels: ## Check the zone list (PRs) and area list (issues) agree across their copies
 	@node scripts/check-labels.mjs
 
-check: lint labels test ## Lint + labels + fast tests. Pre-push for most changes; see test-full
+check: lint labels check-docs test ## Lint + labels + docs + fast tests. Pre-push for most changes; see test-full
 
 clean-pyc: ## Remove __pycache__ and stray .pyc files
 	find . -path ./.venv -prune -o -name '__pycache__' -type d -print0 2>/dev/null \

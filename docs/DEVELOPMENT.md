@@ -52,7 +52,7 @@ cd services/team-tracking
 cp .env.example .env
 docker compose up -d postgres
 uv sync --extra dev
-uv run alembic upgrade head
+uv run python -m alembic upgrade head
 uv run uvicorn src.api.app:app --reload --port 8000
 ```
 
@@ -66,7 +66,7 @@ cd services/documentation-system
 cp .env.example .env
 docker compose up -d postgres
 uv sync --extra dev
-uv run alembic upgrade head
+uv run python -m alembic upgrade head
 uv run uvicorn src.api.app:app --reload --port 8001
 ```
 
@@ -82,7 +82,7 @@ cd services/verification
 cp .env.example .env
 docker compose up -d postgres
 uv sync --extra dev
-uv run alembic upgrade head
+uv run python -m alembic upgrade head
 uv run uvicorn src.api.app:app --reload --port 8003
 ```
 
@@ -134,10 +134,12 @@ running state, not a broken one.
 **Discord bot — playground mode** (recommended dev loop, no Discord token —
 but Docker must be running):
 
+First complete the bot's [one-time setup](../discord-bot/README.md#first-time-setup-once-per-machine),
+including directory database migrations. The launcher copies that schema into
+scratch; it does not migrate a fresh or outdated database. Then, from the repo root:
+
 ```bash
 cd discord-bot
-cp .env.example .env
-npm install
 npm run dev:web
 ```
 
@@ -234,26 +236,39 @@ three are yours to provide. `MEETING_*` is genuinely optional: leave
 `MEETING_BASE_URL` blank and the bot boots fine with `/record` reporting
 "not configured".
 
-**Minting `DIRECTORY_API_KEY`** (against a running team-tracking on 8000):
+**Minting `DIRECTORY_API_KEY`:** follow the bot's
+[directory-key procedure](../discord-bot/README.md#directory-key-for-discord-mode).
+It writes directly to the migrated directory database; no HTTP server is needed.
+Use the full bot scope list there. A shorter key can boot successfully and then
+403 on individual commands. DB-free services instead print entries for
+`CONSUMER_KEYS`; see [Run the platform, in order](#run-the-platform-in-order).
+
+### Python service CLIs
+
+From the repository root, pin both the working directory and Python module:
 
 ```bash
-uv --project services/team-tracking run team-tracking-keys issue \
-  --name discord-bot \
-  --scopes people:read people:write people:elevate \
-           identifiers:read identifiers:write \
-           teams:read teams:write memberships:read memberships:write \
-           role_kinds:read channels:read channels:write
+uv --directory services/team-tracking --project . run python -m src.cli --help
 ```
 
-That scope list is the one
-[`scripts/provision-directory-key.sh`](../scripts/provision-directory-key.sh)
-uses, and it's the authoritative set. A shorter key still lets the bot boot —
-it just 403s on `/team`, `/seed`, `/my-teams`, or `/channel-access` at runtime, which is a
-confusing way to discover the problem. Always pass `--project`; see the
-`src`-collision gotcha in [Troubleshooting](#troubleshooting) for why a bare
-`team-tracking-keys` can mint an unusable key. `llm` and `meeting` mint
-differently (they have no key table) — see
-[Run the platform, in order](#run-the-platform-in-order).
+`--project` selects dependencies; it does not change the working directory or
+resolve the services' shared `src` import name. `--directory` plus `python -m`
+selects the intended source package and local `.env`. Exported variables still
+take precedence, so check the database/environment before issuing or revoking keys.
+
+| Service CLI | Python module | Expected key prefix |
+|---|---|---|
+| `team-tracking-keys` | `src.cli` | `tt_` |
+| `team-tracking-seed` / `team-tracking-groups` | `src.seed_cli` / `src.groups_cli` | — |
+| `doc-keys` | `src.cli` in `services/documentation-system` | `doc_` |
+| `doc-backfill` / `doc-discover` / `doc-source-refresh` | `src.backfill` / `src.discovery` / `src.source_refresh` | — |
+| `gateway-keys` | `src.cli` in `services/gateway` | `gw_` |
+| `llm-keys` / `meeting-keys` / `connectors-keys` | `src.mint_key` in the respective service | `llm_` / `meeting_` / `connectors_` |
+
+From inside the service directory, use `uv --project . run python -m …`.
+For migrations, use `uv run python -m alembic …` there too: the plain Alembic
+entry point can also import another service's `src` from the shared environment.
+Isolated deployed containers can use their installed console scripts directly.
 
 ---
 
@@ -345,8 +360,8 @@ or catalog with real owner validation), bring them up in this order:
 rather than storing it:
 
 ```bash
-uv --project services/llm     run llm-keys     --name meeting     --scopes chat
-uv --project services/meeting run meeting-keys --name discord-bot --scopes meetings
+uv --directory services/llm --project . run python -m src.mint_key     --name meeting     --scopes chat
+uv --directory services/meeting --project . run python -m src.mint_key --name discord-bot --scopes meetings
 ```
 
 stdout is the plaintext key (shown **once** — give it to the consumer); stderr is
@@ -441,9 +456,9 @@ in the separate wiki repository.
    required. PR workflows also check ownership/labels and PR size; the
    [zone check](../.github/workflows/pr-zone-check.yml) warns when a PR spans
    multiple zones, and [review notifications](../.github/workflows/discord-pr-notify.yml)
-   notify Discord. [Board reconciliation](../.github/workflows/project-board.yml)
-   follows issue/PR/review events and repairs missed changes on a schedule;
-   see the [settings, closing-link policy and activation steps](../.github/PROJECT-BOARD.md).
+   notify Discord. [Blocker automation](../.github/workflows/blocked-ready-automation.yml)
+   handles issue events and optionally updates project Ready/Blocked status;
+   see its [limits, configuration and closing-link policy](../.github/PROJECT-BOARD.md).
 
    Add test, lint and image-build coverage in the same PR as a new service.
    The [CI inventory](#continuous-integration) describes the current checks.
@@ -587,7 +602,7 @@ for queue settings and failure handling.
 - **`connectors-test`** — services/connectors pytest suite + ruff check/format. No container and no Google credentials: the Google API clients are faked, so the suite runs fully offline
 - **`documentation-system-test`** — Postgres 16 service container, runs `alembic upgrade head`, then `pytest` with `RUN_PG_TESTS=1` and `RUN_PG_MIGRATION_TESTS=1` + ruff check/format
 - **`gateway-test`** — isolated wheel install, migration round trip, opt-in Postgres tests, pytest, ruff check/format
-- **`node-test`** — the bot’s `node --test` suite, ESLint and Prettier `--check`, plus readiness-checker and promotion/sync regressions
+- **`node-test`** — the bot’s `node --test` suite, ESLint and Prettier `--check`, plus readiness-checker, promotion/sync and directory-key provisioning regressions
 - **`docker-build`** — builds *and boot-smoke-tests* every service image (`python -c "import src.api.app"` for the seven APIs, `node --check src/index.js` for the bot), plus the directory/gateway HTTP smoke check
 
 The same jobs also run on pushes to `staging` and `main`, and on
@@ -597,6 +612,26 @@ separately in GitHub; see the [rollout guide](#merge-queue-on-staging).
 Repository files define the jobs, not which checks GitHub currently requires.
 Verify branch-protection/merge-queue settings against that inventory; a job’s
 presence in YAML alone is not proof it gates merging.
+
+### Documentation checks
+
+Run `make check-docs` from the repository root after editing documentation.
+It checks common repository Markdown link forms and heading/custom anchors, including
+reference links, images and HTML `href`/`src` links, and ignores code examples.
+Tracked and new non-ignored Markdown files are included. The checker is
+dependency-free and offline; remote URLs, the separate wiki, rendered layout
+and fragments in non-Markdown files require separate review.
+
+The [documentation workflow](../.github/workflows/docs-check.yml) runs this
+check on PRs, pushes and staging merge groups without path filters.
+`make check` includes it; branch-protection settings remain a separate choice.
+
+Keep one canonical procedure for each task and link other entry points to it.
+Put prerequisites and destructive-operation warnings before the commands, state
+the working directory, and describe the expected result. Developer/operator
+contracts stay in this repository; member walkthroughs follow the
+[wiki release process](RELEASING.md#prepare-wiki-changes). Preserve useful anchors
+or update their incoming links when moving a section.
 
 ## Database test setup
 
@@ -608,7 +643,7 @@ pytest in each Python directory; it does not enable opt-in suites for you.
 - Documentation-system's `RUN_PG_TESTS=1` enables its Postgres adapter tests
   **and some destructive migration tests**. Additional migration suites also
   require `RUN_PG_MIGRATION_TESTS=1`. Use a disposable database even when the
-  second flag is unset; follow the [catalog test guide](../services/documentation-system/docs/CONTRIBUTING.md).
+  second flag is unset; follow the [disposable catalog test cluster](../services/documentation-system/docs/TESTING.md#disposable-postgres-suite).
 - Gateway requires `RUN_PG_TESTS=1` and an explicit `GATEWAY_TEST_DATABASE_URL`
   for a disposable database; see [gateway testing](../services/gateway/docs/CONTRIBUTING.md).
 
@@ -635,7 +670,7 @@ run with skipped suites is not the same coverage as CI.
   `documentation-system` uses — and requires Docker for the Postgres it clones
   its scratch DB from. Stop the catalog, start Docker, retry.
 - **`relation does not exist` / empty tables.** You skipped
-  `uv run alembic upgrade head`. Run it from the service directory after Postgres
+  `uv run python -m alembic upgrade head`. Run it from the service directory after Postgres
   is up.
 - **Bot says "directory is temporarily unavailable."** Your `DIRECTORY_API_KEY`
   is invalid against main — often a key that was issued against a scratch DB that
@@ -648,17 +683,11 @@ run with skipped suites is not the same coverage as CI.
   A `401` means reissue it against **main** (port 8000) and update `.env`.
 - **`/docs` 404s on the catalog.** Its Swagger UI is at `/swagger`; `/docs` is a
   real docs-resource router on that service.
-- **Minted a directory key with a `doc_` prefix (team-tracking rejects it).**
-  Both `services/team-tracking` and `services/documentation-system` declare a
-  top-level `src` package, each with a console script at `src.cli:main`
-  (`team-tracking-keys` and `doc-keys`). In the shared workspace venv these
-  collide, so a bare `team-tracking-keys …` can resolve documentation-system's
-  CLI and mint a `doc_`-envelope key — which team-tracking's auth rejects
-  (`parse_prefix` in [`packages/auth/platform_auth/hashing.py`](../packages/auth/platform_auth/hashing.py)
-  requires the `tt_` envelope). Always pin the project:
-  `uv --project services/team-tracking run team-tracking-keys …` (as
-  `scripts/provision-directory-key.sh` does), and verify the token's prefix is
-  `tt_`, not `doc_`, before using it as `DIRECTORY_API_KEY`.
+- **Wrong key prefix or `No module named src.cli`.** Workspace services share
+  `src` imports. `--project` alone can resolve another service's package. Follow
+  [Python service CLIs](#python-service-clis) to pin the directory and module,
+  then use the bot's [key procedure](../discord-bot/README.md#directory-key-for-discord-mode).
+  Check the token starts with `tt_` before using it as `DIRECTORY_API_KEY`.
 - **`/record` says "not configured".** `MEETING_BASE_URL` is unset on the bot.
   That's the intended graceful degradation, not a crash — set it (plus
   `MEETING_API_KEY`) to enable the command.

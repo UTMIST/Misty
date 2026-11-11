@@ -20,12 +20,13 @@ installing dependencies.
 
 ## Local setup
 
-The playground is the recommended dev loop. No Discord token needed:
+The playground is the recommended dev loop. Complete the README's
+[first-time setup](../README.md#first-time-setup-once-per-machine), including
+directory migrations, before running this from the repository root. No Discord
+token is needed:
 
 ```bash
 cd discord-bot
-cp .env.example .env
-npm install
 npm run dev:web
 ```
 
@@ -160,7 +161,7 @@ CI's `node-test` job runs `npm ci`, `npm test`, `npm run lint`, and
 ## Gotchas
 
 - **`DIRECTORY_API_KEY` must be issued against main (port 8000), not the playground.** A key issued against the scratch DB dies when that DB is wiped, and the symptom is "directory is temporarily unavailable". Verify with `curl http://localhost:8000/api-keys/self -H "X-API-Key: <key>"`.
-- **Mint directory keys with `uv --project services/team-tracking run team-tracking-keys …`.** A bare invocation can resolve documentation-system's CLI and mint a `doc_`-prefixed key that team-tracking rejects. The token must start with `tt_`.
+- **Pin the directory and module when minting keys.** Follow the [directory-key procedure](../README.md#directory-key-for-discord-mode). `--project` alone cannot resolve shared `src` imports; the token must start with `tt_`.
 - **The bot needs ten env vars to boot** — `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DIRECTORY_BASE_URL`, `DIRECTORY_API_KEY`, `DOC_BASE_URL`, `DOC_API_KEY`, `LLM_BASE_URL`, `LLM_API_KEY`, `VERIFICATION_BASE_URL`, `VERIFICATION_API_KEY`. `MEETING_*` is genuinely optional.
 - **Registering commands happens in the pre-deploy step, not at boot.** `railway.json`'s `preDeployCommand` runs `registerCommands.js` before the new process starts, so a deploy that fails there never starts the new process (Discord's global set may still have been overwritten — [RAILWAY-DEPLOYMENT.md §5](../../docs/RAILWAY-DEPLOYMENT.md#5-register-discord-slash-commands) covers recovery). Don't add a `rest.put(...)` to `index.js` to "make sure" — that would re-register on every restart. And don't tell a release note to run `register:production` by hand; the deploy already did.
 - **Beta commands only appear in the testing guild.** If a `beta: true` command isn't showing up, check `DISCORD_GUILD_ID`.

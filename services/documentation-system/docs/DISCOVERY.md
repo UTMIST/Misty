@@ -6,27 +6,23 @@ content and source access. Both are required for the sharing release. Discovery
 uses authenticated HTTP to connectors and the catalog; it has no catalog database
 connection and never holds the Google credential.
 
-## Members: sharing with Misty
+## Sharing prerequisites
 
-Ask the operator for the connector service-account email and confirmation that
-**discovery is enabled in your environment**. Share a supported file or My Drive
-folder with that address. The current ACL-reading setup requires sufficient source
-sharing to inspect the complete permission list; the verified setup uses **Editor**
-sharing. Viewer access can permit content reads while preventing the required ACL
-inspection. Misty uses read-only Google API scopes and never changes your sharing.
+Member steps live in the wiki's
+[Google sharing guide](https://github.com/UTMIST/Misty/wiki/Documents#share-google-files-for-automatic-discovery).
+Before directing members there, operators must confirm discovery is enabled for
+the target environment and provide its connector service-account address.
 
-No per-file `/doc add` or folder registration is required. Supported descendants,
-including nested folders and later additions, are discovered on recurring scans.
-The proposed schedule is every 15 minutes. Small scans normally import on the next
-run plus fetch/index time; large scans continue across runs, so this is not a
-15-minute latency guarantee. Staging must measure actual latency before release.
+The reader needs sufficient sharing to inspect the complete ACL; the verified
+setup uses **Editor**, with read-only Google API scopes. Viewer content access
+alone may not permit ACL inspection. Intended readers need matching verified
+directory identities or supported, synchronized team Google Groups. Unknown,
+link-wide, domain-wide and unmapped principals create no source-derived grant.
 
-Sharing with Misty does **not** make a document visible to everyone. Intended people
-also need their own source permission and a primary/verified matching email in the
-directory, or a supported, synchronized team Google Group grant. Unknown principals,
-link-wide/domain-wide shares and unmapped groups create no audience. Search with
-`/doc search` as the intended member. If a file is absent, ask the operator to inspect
-registration, ACL mapping and indexing. Sharing more broadly is not a recovery step.
+The proposed scan schedule is every 15 minutes. Import latency includes the
+next scan and fetch/index work; large traversals continue across invocations.
+Measure actual latency in staging before release. Registration, ACL mapping
+and indexing each need verification; broadening source sharing is not recovery.
 
 ## Coverage and exclusions
 

@@ -52,13 +52,13 @@ docker compose up -d postgres
 uv sync --extra dev
 
 # 3. Apply database migrations (creates the api_keys table)
-uv run alembic upgrade head
+uv run python -m alembic upgrade head
 
 # 4. Start the API server
 uv run uvicorn src.api.app:app --reload --port 8006
 ```
 
-> The repo is a single [uv workspace](https://docs.astral.sh/uv/concepts/workspaces/) (root `pyproject.toml` with `[tool.uv.workspace] members = ["services/*", "packages/*"]`, one root `uv.lock`). gateway depends on the shared `platform-auth` package (`[tool.uv.sources] platform-auth = { workspace = true }`) but the commands above are unchanged — `uv sync`, `uv run pytest`, `uv run alembic` still work exactly as shown when run from this directory.
+> The repo is a single [uv workspace](https://docs.astral.sh/uv/concepts/workspaces/) (root `pyproject.toml` with `[tool.uv.workspace] members = ["services/*", "packages/*"]`, one root `uv.lock`). gateway depends on the shared `platform-auth` package (`[tool.uv.sources] platform-auth = { workspace = true }`) but the commands above are unchanged — `uv sync`, `uv run pytest`, `uv run python -m alembic` still work exactly as shown when run from this directory.
 
 The API is now at `http://localhost:8006` (8000–8005 are the internal services).
 Interactive Swagger UI is at `http://localhost:8006/docs`; the machine-readable
@@ -252,9 +252,9 @@ disposable `gateway_test` database. The adapter tests clear its key table:
 docker compose up -d postgres
 docker compose exec postgres createdb -U gateway gateway_test
 export GATEWAY_TEST_DATABASE_URL=postgresql+psycopg://gateway:dev_password@localhost:5435/gateway_test
-DATABASE_URL="$GATEWAY_TEST_DATABASE_URL" uv run alembic upgrade head
-DATABASE_URL="$GATEWAY_TEST_DATABASE_URL" uv run alembic downgrade base
-DATABASE_URL="$GATEWAY_TEST_DATABASE_URL" uv run alembic upgrade head
+DATABASE_URL="$GATEWAY_TEST_DATABASE_URL" uv run python -m alembic upgrade head
+DATABASE_URL="$GATEWAY_TEST_DATABASE_URL" uv run python -m alembic downgrade base
+DATABASE_URL="$GATEWAY_TEST_DATABASE_URL" uv run python -m alembic upgrade head
 RUN_PG_TESTS=1 uv run pytest
 ```
 

@@ -28,7 +28,7 @@ the Protocol boundaries.
 cd services/documentation-system
 
 uv sync --extra dev
-docker compose up -d postgres      # only needed for the Postgres test suite / running the server
+docker compose up -d postgres      # retained database for running the local server
 ```
 
 > Note: the repo is a uv workspace (one root `pyproject.toml`, one root `uv.lock` shared with `packages/auth` and team-tracking). documentation-system depends on the shared `platform-auth` package via `[tool.uv.sources] platform-auth = { workspace = true }`, but `uv sync`/`uv run` from this directory work exactly as shown above.
@@ -125,7 +125,7 @@ probably introduced a divergence.
 Schema and seed data changes go through Alembic (`migrations/versions/`). Migrations are
 numbered sequentially (`001`, `002`, …) and chained by `down_revision`.
 
-1. Inspect `migrations/versions/` and run `uv run alembic heads` to find the current
+1. Inspect `migrations/versions/` and run `uv run python -m alembic heads` to find the current
    head. Choose the next unused sequential revision ID, create
    `migrations/versions/<revision>_<short_name>.py`, and set `revision` to that ID
    and `down_revision` to the head you inspected. Copy an existing migration's
@@ -138,8 +138,8 @@ numbered sequentially (`001`, `002`, …) and chained by `down_revision`.
    the post-migration schema — the Postgres adapter and the migrations share that shape.
 4. Apply and verify:
    ```bash
-   uv run alembic upgrade head
-   uv run alembic downgrade -1 && uv run alembic upgrade head   # prove downgrade works
+   uv run python -m alembic upgrade head
+   uv run python -m alembic downgrade -1 && uv run python -m alembic upgrade head   # prove downgrade works
    ```
 
 ---
@@ -158,20 +158,12 @@ Uses `InMemoryStorageAdapter` injected via `dependency_overrides`, plus fakes fo
 `Fetcher` and `DirectoryClient`. Runs in well under a second. This is the suite you run on
 every change.
 
-**Full (adds Postgres integration):**
-
-```bash
-docker compose up -d postgres
-export DATABASE_URL=postgresql+psycopg://docs:dev_password@localhost:5434/docs
-RUN_PG_TESTS=1 RUN_PG_MIGRATION_TESTS=1 uv run pytest -q
-```
-
-`tests/test_postgres_adapter.py` runs the same behavioral assertions against a live
-database and is gated behind `RUN_PG_TESTS=1`. That flag also enables older
-destructive migration tests; additional migration suites require
-`RUN_PG_MIGRATION_TESTS=1` too. Run the full suite before any change that
-touches `postgres.py`, `schema.py`, or a migration, using a disposable cluster as
-described in the [README testing instructions](../README.md#testing).
+**Full (adds Postgres integration):** follow the
+[disposable Postgres procedure](TESTING.md#disposable-postgres-suite).
+It creates an isolated cluster, applies migrations, enables both database-test
+flags and cleans up afterward. The suite truncates tables and reverses
+migrations; never point it at the retained Compose database. Run it before
+changes to `postgres.py`, `schema.py`, or migrations.
 
 ## Lint
 

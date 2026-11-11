@@ -28,6 +28,7 @@ testing, deployment and recovery.
 | Join the team and pick up work | [Contributor onboarding](docs/ONBOARDING.md) |
 | Change a service | Its README, API reference and `docs/CONTRIBUTING.md`, linked below |
 | Deploy or recover a service | [Railway runbook](docs/RAILWAY-DEPLOYMENT.md) |
+| Configure readiness alerts | [Readiness monitoring](docs/READINESS-MONITORING.md) |
 | Ship a release and update the user wiki | [Release guide](docs/RELEASING.md) |
 
 The platform runs on Railway with separate staging and production environments.
@@ -153,7 +154,8 @@ Nothing to bootstrap at the root to _run_ a service — stand up only what you n
 
 ```bash
 make install   # uv workspace + bot dependencies
-make check     # lint + format check + fast tests, across everything
+make check     # lint + format + labels + docs + fast tests, across everything
+make check-docs # offline local links/anchors and documentation-checker tests
 make test-full # collects all suites; DB suites still need explicit opt-ins
                # and disposable databases — see the testing guide below
 make help      # the rest

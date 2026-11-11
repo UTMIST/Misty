@@ -29,13 +29,13 @@ docker compose up -d postgres
 uv sync --extra dev
 
 # 3. Apply database migrations
-uv run alembic upgrade head
+uv run python -m alembic upgrade head
 
 # 4. Start the API server
 uv run uvicorn src.api.app:app --reload --port 8003
 ```
 
-> The repo is a single [uv workspace](https://docs.astral.sh/uv/concepts/workspaces/) (root `pyproject.toml` with `[tool.uv.workspace] members = ["services/*", "packages/*"]`, one root `uv.lock`). verification depends on the shared `platform-auth` package (`[tool.uv.sources] platform-auth = { workspace = true }`) but the commands above are unchanged — `uv sync`, `uv run pytest`, `uv run alembic` still work exactly as shown when run from this directory.
+> The repo is a single [uv workspace](https://docs.astral.sh/uv/concepts/workspaces/) (root `pyproject.toml` with `[tool.uv.workspace] members = ["services/*", "packages/*"]`, one root `uv.lock`). verification depends on the shared `platform-auth` package (`[tool.uv.sources] platform-auth = { workspace = true }`) but the commands above are unchanged — `uv sync`, `uv run pytest`, `uv run python -m alembic` still work exactly as shown when run from this directory.
 
 The API is now running at `http://localhost:8003`. Interactive Swagger UI is at `http://localhost:8003/docs`; the machine-readable schema is at `http://localhost:8003/openapi.json`.
 
@@ -114,7 +114,7 @@ Two adapters implement the `VerificationStore` Protocol (`contracts/storage.py`)
 
 ### Migrations
 
-Schema is managed by Alembic (`migrations/`). Migration `001` creates `verification_codes` plus the email index. Apply locally with `uv run alembic upgrade head`. In production this runs automatically as the Railway **`preDeployCommand`** (`railway.json`) before each release — it is **not** run by the container `CMD`.
+Schema is managed by Alembic (`migrations/`). Migration `001` creates `verification_codes` plus the email index. Apply locally with `uv run python -m alembic upgrade head`. In production this runs automatically as the Railway **`preDeployCommand`** (`railway.json`) before each release — it is **not** run by the container `CMD`.
 
 ## Email providers
 
@@ -184,7 +184,7 @@ Runs against `InMemoryVerificationStore`, injected into FastAPI via `app.depende
 
 ```bash
 docker compose up -d postgres
-uv run alembic upgrade head
+uv run python -m alembic upgrade head
 uv run pytest
 ```
 

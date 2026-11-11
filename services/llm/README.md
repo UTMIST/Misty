@@ -89,11 +89,11 @@ Auth is scoped API keys via the shared `platform_auth` package, matching team-tr
 Use the `llm-keys` CLI **from the repo root**. It prints the plaintext key **once** to stdout and the `CONSUMER_KEYS` JSON entry to stderr — it does not (and cannot) write to any store:
 
 ```bash
-uv --project services/llm run llm-keys --name reviewer-summaries --scopes chat
+uv --directory services/llm --project . run python -m src.mint_key --name reviewer-summaries --scopes chat
 # stdout: llm_<prefix>_<secret>   (the key — give it to the consumer, shown ONCE)
 # stderr: {"name": "reviewer-summaries", "prefix": "...", "key_hash": "$argon2id$...", "scopes": ["chat"]}
 # For an approved embedding-only caller:
-uv --project services/llm run llm-keys --name embedding-caller --scopes embed
+uv --directory services/llm --project . run python -m src.mint_key --name embedding-caller --scopes embed
 # Use --scopes chat embed only when a caller needs both.
 ```
 

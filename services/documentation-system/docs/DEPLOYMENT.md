@@ -81,9 +81,9 @@ or literal `act-as-channel` for channel searches. Neither literal scope is
 implied by admin. Issue the minimum appropriate key, for example:
 
 ```bash
-uv --project services/documentation-system run doc-keys issue --name member-search --scopes docs:read act-as-user
-uv --project services/documentation-system run doc-keys issue --name helper-search --scopes docs:read act-as-user act-as-channel
-uv --project services/llm run llm-keys --name documentation-system --scopes embed
+uv --directory services/documentation-system --project . run python -m src.cli issue --name member-search --scopes docs:read act-as-user
+uv --directory services/documentation-system --project . run python -m src.cli issue --name helper-search --scopes docs:read act-as-user act-as-channel
+uv --directory services/llm --project . run python -m src.mint_key --name documentation-system --scopes embed
 ```
 
 Run from the repository root. Append the last key to LLM's `CONSUMER_KEYS` and
@@ -211,7 +211,7 @@ Re-upgrading restores an empty chunk table; rebuild it by draining `POST /docs/i
 
 **On Railway,** migrations run automatically via `railway.json`'s
 `preDeployCommand: "alembic upgrade head"` before every deploy — idempotent,
-transactional, no manual step. **Locally,** run `uv run alembic upgrade head`
+transactional, no manual step. **Locally,** run `uv run python -m alembic upgrade head`
 after cloning or when new migrations land.
 
 ## Running the server locally
@@ -278,15 +278,15 @@ inside the service instead of requiring them wherever the script runs.
 
 ```bash
 # Discover only — lists what would be refetched, makes no fetch.
-DOCS_API_KEY=doc_<prefix>_<secret> uv --project services/documentation-system \
-  run doc-backfill --dry-run
+DOCS_API_KEY="doc_<prefix>_<secret>" uv --directory services/documentation-system --project . \
+  run python -m src.backfill --dry-run
 
 # Repair everything contentless.
-DOCS_API_KEY=doc_<prefix>_<secret> uv --project services/documentation-system \
-  run doc-backfill
+DOCS_API_KEY="doc_<prefix>_<secret>" uv --directory services/documentation-system --project . \
+  run python -m src.backfill
 
 # Narrow to one source kind.
-DOCS_API_KEY=... uv --project services/documentation-system run doc-backfill --source-id gdocs
+DOCS_API_KEY=... uv --directory services/documentation-system --project . run python -m src.backfill --source-id gdocs
 ```
 
 ### Authorization
@@ -294,7 +294,7 @@ DOCS_API_KEY=... uv --project services/documentation-system run doc-backfill --s
 Issue the key with **three** scopes (or `admin`):
 
 ```bash
-uv --project services/documentation-system run doc-keys \
+uv --directory services/documentation-system --project . run python -m src.cli \
   issue --name content-backfill --scopes docs:read docs:read:all docs:write
 ```
 
@@ -828,7 +828,7 @@ Production activation requires a separate rollout decision.
 
 ## Meeting record persistence
 
-Apply migrations through **016** (`uv run alembic upgrade head`) before the new API serves
+Apply migrations through **016** (`uv run python -m alembic upgrade head`) before the new API serves
 traffic. Migration 012 adds `meeting_records` and nullable `docs.purged_at`; the prior head
 is 011. Verify upgrade → downgrade -1 → upgrade against a disposable database,
 never against live meeting data. Downgrading 012 drops meeting retry payloads and IDs;
