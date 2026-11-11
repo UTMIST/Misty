@@ -622,7 +622,9 @@ or meeting-item failures. Those failures produce `level=warning` and
 `outcome=completed_with_warnings`; a clean drain uses `level=info` and
 `outcome=completed`. Exit `2` and `outcome=failed` mean configuration/auth/HTTP/response
 failure, an exhausted budget, or a conflicting runner. An unacknowledged monitor
-ping also exits `2`; `drained` still records whether the API work completed.
+ping also exits `2`; confirmed completion of all enabled queues still releases
+the guard. `drained` records document-queue completion; a subsequent meeting API
+failure can leave it `true` while retaining the guard.
 `budget_exhausted=true` identifies a time-budget stop, and `guard_released=true`
 confirms acknowledged deletion of this runner's guard. Budget exhaustion still
 exits `2` and sends a failure heartbeat, but attempts guard release even if an API
@@ -728,10 +730,11 @@ No destination is installed by this repository change.
 ### Recovery, credential rotation and disable/rollback
 
 The guard remains held through the final heartbeat attempt. A completed drain
-(including counted document/index failures) releases it. Time-budget exhaustion
-also releases the runner's exact owner, even when the last API request has not
-finished or the heartbeat failed. This is explicit cleanup, not automatic expiry.
-Other crashes, incomplete drains, API errors or uncertain heartbeats leave it held
+of all enabled queues (including counted item failures) releases it even when
+heartbeat delivery fails, so a monitor outage cannot block later refresh runs.
+Time-budget exhaustion also releases the runner's exact owner, even when the last
+API request has not finished or the heartbeat failed. This is explicit cleanup,
+not automatic expiry. Other crashes, incomplete drains or API errors leave it held
 for inspection. If admission or release times out, inspect ownership: the request
 may have committed.
 
@@ -766,7 +769,7 @@ an API schema rollback; ordinary cron disablement does not require a DB downgrad
 | `drained=true`, `failed>0` | Inspect sanitized API/connector/directory status. Failed documents retain their previous grants until expiry and wait for the next eligibility window; successful/later documents still advance. After restoring the dependency, let the next eligible refresh run or use the documented operator refetch flow. |
 | `index_failed>0` | Restore the llm/index dependency, then use a separate `docs:index` key with `POST /docs/index`, paging `after: next_after` until null. Verify no failed results and a subsequent empty stale-only pass. Refresh alone will not retry a now-fresh document's index. |
 | `drained=false`, budget exhausted | Inspect backlog and durations; reduce batch size or increase bounded limits only with enough margin before the next hour. Do not add replicas or another scheduler. |
-| `monitor_failed=true` | Check the check's URL, existence and integration; inspect Railway run status before retrying anything. A monitoring failure does not undo completed refreshes. |
+| `monitor_failed=true` | Check the check's URL, existence and integration. Completed API work still releases the guard (`guard_released=true`), so the next scheduled run can proceed. If release was not acknowledged, inspect the API error and ownership before recovery. Monitoring failure does not undo completed refreshes. |
 | Missing finish/missed-run alert | Inspect active runs and deploy history, duplicate services, schedule/config and private networking. Resolve an outstanding POST before resuming; record how long source grants lacked successful refresh. |
 
 Rotate the catalog key by issuing a new `docs:write meetings:write` key in staging, storing it
