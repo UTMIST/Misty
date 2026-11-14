@@ -625,11 +625,12 @@ operator recovery operation, so **first confirm the owning process and its API
 requests have stopped**. Releasing a live owner defeats the guard.
 
 Acquire before any start heartbeat or refresh batch, retain through all batches
-and the final heartbeat, and release after confirmed completion or time-budget
-exhaustion. On budget exhaustion, the runner releases its exact owner even when
+and the final heartbeat attempt, and release after confirmed API completion even
+if heartbeat delivery failed. Monitoring failures still exit nonzero. On
+time-budget exhaustion, the runner releases its exact owner even when
 an API request is still finishing, and still reports an incomplete run. A rejected
 runner must send failure, never start/success or release another run. The guard
-persists across restarts with no expiry. On other ambiguous HTTP/monitor outcomes,
+persists across restarts with no expiry. On other ambiguous API outcomes,
 leave it for [operator recovery](DEPLOYMENT.md#recovery-credential-rotation-and-disablerollback).
 This coordinates participating clients: `refresh-due` itself remains a standalone
 batch endpoint. Manual callers must follow this protocol or use `doc-source-refresh`.
