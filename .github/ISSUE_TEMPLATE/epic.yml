@@ -1,7 +1,7 @@
 name: Epic
 description: A body of work too big for one issue — a container tracked through sub-issues
 title: "Epic: "
-labels: ["epic"]
+labels: ["[epic] "]
 body:
   - type: input
     id: blocked-by
