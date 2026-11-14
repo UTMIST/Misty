@@ -614,7 +614,8 @@ Deploy order for the durable Google Doc path:
    `DOC_API_KEY`. In each originating text channel/thread grant the bot View
    Channel, Read Message History and Send Messages/Send Messages in Threads.
    On Discord readiness the bot recovers saved records with pending/failed
-   delivery, then polls every ten minutes. No new cron or Google key is needed.
+   delivery, then uses [adaptive recovery polling](../discord-bot/docs/meeting-delivery.md#recovery).
+   No new cron or Google key is needed.
 
 Rollout checks use a consented staging meeting: explicit and empty-channel stop,
 Doc sections and full transcript, native MIME type and configured destination,

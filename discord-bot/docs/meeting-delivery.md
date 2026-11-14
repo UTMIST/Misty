@@ -22,16 +22,25 @@ Missing or unresolved permissions fail delivery even if Discord would return a
 successful empty history list. Restore access before retrying; an empty list
 alone cannot authorize a replacement notification.
 
-On Discord readiness and every ten minutes, the bot polls saved records with
-`delivery_status=pending` or `failed`. It reads each record again before posting
-so removed, disabled and incomplete records are skipped. Google/catalog
+On Discord readiness, the bot polls saved records with `delivery_status=pending`
+or `failed`. Work and listing failures retain a ten-minute recovery interval.
+After successful empty polls, the interval backs off to 20, 40, then 60 minutes,
+so an idle bot does not repeatedly wake the catalog database. Normal stop delivery
+still runs immediately. Known unfinished saves and failed immediate deliveries
+resume recovery on the next ten-minute local timer tick, even during backoff;
+terminal persistence outcomes do not keep that fast retry active. Skipped timer
+ticks make no catalog request, and slow polls never overlap.
+
+The bot reads each record again before posting so removed, disabled and incomplete
+records are skipped. Google/catalog
 `persistence_status` and Discord `delivery_status` remain independent. A delayed
 or failed save never gets a saved-link announcement. Immediate failures produce
 a channel notice where possible; durable delivery failure is visible through
 `GET /meeting-records?delivery_status=failed&persistence_status=saved` and logs
 carry identifiers/status only. Restore destination access or catalog key scopes,
-then wait for the next poll or restart the bot to retry immediately. Keep the
-PDF and meeting ID for admin recovery of a persistence failure.
+then wait for the next poll or restart the bot to retry immediately. Recovery of
+saved records unknown to this process can take up to an hour during idle backoff.
+Keep the PDF and meeting ID for admin recovery of a persistence failure.
 
 Catalog requests have one ten-second deadline covering response headers and
 the JSON body. A stalled response times out so delivery recovery can continue.

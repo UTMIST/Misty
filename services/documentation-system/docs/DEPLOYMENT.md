@@ -823,7 +823,7 @@ Staging uses `python -m src.discovery --require-monitor`; provision the secret
 Outside staging, including PR previews, the config does not schedule discovery.
 This is separate from the existing-document refresh schedule above. Follow the
 [discovery runbook](DISCOVERY.md) for its two scoped keys, persistent checkpoint,
-15-minute schedule, enable/status/disable commands, recovery and staging acceptance.
+environment-specific schedules, enable/status/disable commands, recovery and staging acceptance.
 Production activation requires a separate rollout decision.
 
 ## Meeting record persistence
