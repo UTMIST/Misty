@@ -38,6 +38,24 @@ def test_embedding_settings(monkeypatch):
         Settings()
 
 
+def test_api_engine_hides_document_text_in_database_errors(monkeypatch):
+    from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError
+
+    from src.api.deps import _default_engine
+
+    monkeypatch.setenv("DATABASE_URL", "sqlite://")
+    engine = _default_engine.__wrapped__()
+    try:
+        with engine.connect() as connection, pytest.raises(DBAPIError) as exc:
+            connection.execute(
+                text("INSERT INTO missing_table VALUES (:body)"), {"body": "private body"}
+            )
+        assert "private body" not in str(exc.value)
+    finally:
+        engine.dispose()
+
+
 def test_verify_secrets_warns_in_production_with_default_llm_api_key(monkeypatch, caplog):
     from src.config import verify_production_secrets
 
