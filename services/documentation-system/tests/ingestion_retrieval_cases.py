@@ -421,7 +421,7 @@ class IngestionRetrievalCases:
     def test_changed_content_uses_every_refresh_trigger(self, flow, trigger):
         doc = flow.ingest()
         replacement = "CPSIF replacement from the upstream source."
-        flow.providers.documents[doc["url"]]["content"] = replacement
+        flow.providers.documents[doc["url"]]["content"] = replacement + "\x00"
         if trigger == "ingest":
             response = flow.client.post("/docs", headers=flow.writer, json={"url": doc["url"]})
             assert response.status_code == 200
@@ -627,6 +627,21 @@ class IngestionRetrievalCases:
         del flow.providers.fetch_errors[url]
         refreshed = flow.refetch(doc).json()
         flow.citations(flow.search(), refreshed, LONG)
+
+    def test_nul_characters_in_fetched_text_are_stripped_before_storage(self, flow):
+        # pypdf can extract U+0000 from PDFs (e.g. receipt numbers). Postgres
+        # text rejects it, which once failed discovery with a 500 on insert.
+        doc = flow.ingest("receipt", text="# CPSIF\x00 receipt\n\nInvoice GN32\x000002")
+        assert flow.store.get_doc_content(UUID(doc["id"])) == "# CPSIF receipt\n\nInvoice GN320002"
+        assert "\x00" not in doc["content_snapshot"]
+        flow.citations(flow.search(), doc, "# CPSIF receipt\n\nInvoice GN320002")
+
+        flow.providers.documents[doc["url"]].update(
+            title="Renamed\x00 receipt", content="CPSIF\x00 renewed"
+        )
+        refreshed = flow.refetch(doc).json()
+        assert flow.store.get_doc_content(UUID(doc["id"])) == "CPSIF renewed"
+        flow.citations(flow.search(), refreshed, "CPSIF renewed")
 
     def test_revoked_access_applies_even_when_new_content_cannot_be_indexed(self, flow):
         doc = flow.ingest()

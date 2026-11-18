@@ -23,7 +23,9 @@ def get_meeting_writer() -> MeetingWriter:
 
 @lru_cache(maxsize=1)
 def _default_engine() -> Engine:
-    return create_engine(get_settings().database_url, future=True, pool_pre_ping=True)
+    return create_engine(
+        get_settings().database_url, future=True, pool_pre_ping=True, hide_parameters=True
+    )
 
 
 def get_storage() -> StorageAdapter:
