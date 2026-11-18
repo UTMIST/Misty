@@ -363,8 +363,9 @@ def test_old_title_writer_rechecks_after_new_title_and_index_commit(adapter):
 
 
 @pytest.fixture
-def adapter():
+def adapter(request):
     engine = create_engine(get_settings().database_url, future=True)
+    request.addfinalizer(engine.dispose)
     with engine.begin() as conn:
         conn.execute(text("TRUNCATE doc_grants, doc_tags, docs, api_keys RESTART IDENTITY CASCADE"))
     return PostgresStorageAdapter(engine)
