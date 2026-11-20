@@ -1,5 +1,7 @@
 from functools import lru_cache
 
+from platform_auth import InMemoryKeyStore, key_store_from_config
+
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
@@ -7,7 +9,6 @@ from contracts.storage import VerificationStore
 from src.config import get_settings
 from src.email.base import EmailSender
 from src.email.fake import FakeSender
-from src.storage.null_keys import NullApiKeyStore
 
 
 @lru_cache(maxsize=1)
@@ -22,8 +23,13 @@ def get_storage() -> VerificationStore:
     return PostgresVerificationStore(_default_engine())
 
 
-def get_key_store() -> NullApiKeyStore:
-    return NullApiKeyStore()
+@lru_cache(maxsize=1)
+def _key_store() -> InMemoryKeyStore:
+    return key_store_from_config(get_settings().consumer_keys.get_secret_value())
+
+
+def get_key_store() -> InMemoryKeyStore:
+    return _key_store()
 
 
 def get_email_sender() -> EmailSender:

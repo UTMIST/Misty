@@ -11,11 +11,15 @@ Base URL (local): `http://localhost:8003` · Swagger UI: `/docs` · Schema: `/op
 ## Authentication
 
 ```
-X-API-Key: <the API_KEY env value>
+X-API-Key: <scoped vf_ key or bootstrap API_KEY>
 ```
 
-verification is **env-key-only**. There is no key-issuing CLI and no DB-backed keys — `NullApiKeyStore` short-circuits key lookups, so the only accepted credential is the bootstrap `API_KEY`, which carries the `admin` scope. The `vf_` envelope is reserved but unused, so **the env key must be a plain opaque string, not shaped like `vf_<prefix>_<secret>`.**
-
+Private consumers may authenticate with scoped `vf_` keys configured through
+`CONSUMER_KEYS`. The gateway uses a dedicated `verification:write` credential.
+The existing bootstrap `API_KEY` remains supported with `admin`; it must be a
+plain opaque string, not shaped like `vf_<prefix>_<secret>`. See
+[provisioning](DEPLOYMENT.md#scoped-consumer-keys). No keys are stored in this
+service's database.
 Both endpoints are gated by `require_scope("verification:write")`; `admin` satisfies it. `/health` is unauthenticated.
 
 `dev:spoof` is disabled.
@@ -60,7 +64,7 @@ curl -sS -X POST http://localhost:8003/verification/request-code \
 
 ### Behavior
 
-- **Rate limited per email.** If an unconsumed code for that *email* was created within `RATE_LIMIT_WINDOW` (60 s), the request is rejected with **429 `rate_limited`**. Note the limit keys on email, not subject — it protects the mailbox regardless of how many subjects a caller invents.
+- **Rate limited per email.** If an unconsumed code for that *email* was created within `RATE_LIMIT_WINDOW` (60 s), the request is rejected with **429 `rate_limited`**. The response includes `Retry-After` with the remaining window rounded up to whole seconds; this 429 occurs before any email send. Note the limit keys on email, not subject — it protects the mailbox regardless of how many subjects a caller invents.
 - **Send before persist.** The email goes out first. On `EmailSendError` the endpoint returns **502 `email_send_failed`** and stores nothing, so the caller isn't rate-limited out of an immediate retry.
 - **Supersede on reissue.** A new request for an existing subject atomically replaces that subject's row. Only the newest code is ever live.
 - The code is 6 digits, generated with `secrets`, expires after `CODE_TTL` (10 min), and is stored only as an HMAC-SHA256 digest.

@@ -43,3 +43,28 @@ def test_request_code_email_failure_returns_502_and_persists_nothing(client, sto
     assert r.json()["detail"] == "email_send_failed"
     # A failed send must not leave a code behind (else the user is rate-limited).
     assert store.get_code("discord:9") is None
+
+
+def test_cross_consumer_cooldown_reports_safe_retry_delay(client, email, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from src.api.routers import verification
+
+    clock = [datetime(2026, 10, 26, tzinfo=timezone.utc)]
+    monkeypatch.setattr(verification, "_now", lambda: clock[0])
+    assert (
+        client.post(
+            "/verification/request-code",
+            headers=AUTH,
+            json={"subject": "discord:1", "email": "a@b.com"},
+        ).status_code
+        == 202
+    )
+    clock[0] += timedelta(seconds=59.2)
+    body = {"subject": "gateway-login:independent", "email": "a@b.com"}
+    response = client.post("/verification/request-code", headers=AUTH, json=body)
+    assert response.status_code == 429
+    assert response.headers.get("retry-after") == "1"
+    assert len(email.sent) == 1
+    clock[0] += timedelta(seconds=1)
+    assert client.post("/verification/request-code", headers=AUTH, json=body).status_code == 202
+    assert len(email.sent) == 2
