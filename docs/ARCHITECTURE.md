@@ -17,6 +17,11 @@ see each service's own `docs/ARCHITECTURE.md`:
   playground), and its own "Consumer" section below sketches how it sits atop the
   directory.
 
+Repository-wide GitHub Q&A is planned separately from the current single-file
+fetcher. See [GitHub retrieval design notes](GITHUB-RETRIEVAL.md) for #333's
+proposed MCP restrictions, organization App setup, and public/private access
+model; these controls are not implemented yet.
+
 ## The services
 
 The platform has **seven backend services**: six internal domain/processing
