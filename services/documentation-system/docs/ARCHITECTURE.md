@@ -56,7 +56,9 @@ A divergence between the adapters is a bug; the shared seed (`build_seed_sources
 
 A `Fetcher` returns a `FetchResult` (`title`, full `content`, bounded `content_snapshot`)
 or raises `FetchError`, which is deliberately non-fatal at ingest: it becomes a warning
-and never blocks the doc.
+and never blocks the doc. `FetchResult` drops NUL (U+0000) characters from its text
+fields, because Postgres text rejects them and PDF extraction can produce them; text that
+was only NULs becomes `None`.
 
 - **`WebFetcher`** (`src/fetch/web.py`) — HTTP fetch (5s timeout, follows redirects), parses
   `<title>`, and keeps up to 2000 chars of stripped text as the snapshot. HTTP errors become

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class SourcePermission(BaseModel):
@@ -40,6 +40,16 @@ class FetchResult(BaseModel):
     # None means this fetcher has no source-ACL contract. Google fetches must
     # return a complete list, including [] when the file has no permissions.
     permissions: list[SourcePermission] | None = None
+
+    @field_validator("title", "content", "content_snapshot")
+    @classmethod
+    def _strip_nul(cls, value: str | None) -> str | None:
+        # Extractors (notably pypdf) can emit U+0000, which Postgres text
+        # rejects. Dropping it here covers every fetcher and every write path;
+        # text that was only NULs is "nothing extracted", per the invariant.
+        if value is None or "\x00" not in value:
+            return value
+        return value.replace("\x00", "") or None
 
 
 class FetchError(Exception):

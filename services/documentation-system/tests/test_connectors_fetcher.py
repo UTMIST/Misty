@@ -132,6 +132,14 @@ def test_empty_content_normalizes_content_and_snapshot_together():
     assert result.content_snapshot is None
 
 
+def test_nul_only_text_normalizes_to_nothing_extracted():
+    def handler(request):
+        return httpx.Response(200, json={"title": "\x00", "content": "\x00\x00", "warnings": []})
+
+    result = _fetcher(handler).fetch("https://docs.google.com/document/d/abc/edit")
+    assert (result.title, result.content, result.content_snapshot) == (None, None, None)
+
+
 def test_wrong_typed_content_int_becomes_a_fetcherror():
     # A well-formed JSON object with the wrong field type must not escape as
     # a raw TypeError (len(123)) — it has to become an ordinary FetchError,
