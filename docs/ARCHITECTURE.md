@@ -211,6 +211,9 @@ describes how it applies them concretely.
 - **Per-request audit middleware.** An audit-log middleware records every request with
   its resolved actor, giving a per-request trail across a org where the operator set
   turns over.
+  The [proposed observability design](OBSERVABILITY-DESIGN.md) extends this toward
+  member-workflow outcomes, correlation and dashboards; it is a review proposal,
+  not an enabled telemetry pipeline.
 - **Alembic migrations.** Schema is versioned as Alembic migrations applied with
   `alembic upgrade head`. The SQLAlchemy Core table definitions in
   `src/storage/schema.py` are the schema source of truth. This applies to the
