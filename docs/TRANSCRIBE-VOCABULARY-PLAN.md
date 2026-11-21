@@ -4,6 +4,8 @@ This document proposes future implementation work. It does not enable a vocabula
 change the live transcription path, or authorize an automatic production rollout.
 The goal is to improve recognition of UTMIST-specific names, acronyms and project
 terms spoken in meetings by deriving candidate words from the existing RAG chunks.
+Maintain **one shared club-wide vocabulary** for all meetings, refreshed weekly;
+there is no per-team or per-channel vocabulary selection.
 
 ## Intended flow
 
@@ -14,7 +16,7 @@ terms spoken in meetings by deriving candidate words from the existing RAG chunk
    snapshot and use a low-cost model, such as Luna if available to Misty, only
    for newly selected terms without an already approved spelling.
 5. Validate and review the candidate table, create an AWS custom vocabulary,
-   and use the ready vocabulary in meeting transcription streams.
+   and use the one ready club-wide vocabulary in all meeting transcription streams.
 
 The 20% selection is a **candidate generation rule**, not a guarantee that all
 candidates are suitable, fit in AWS's limit, or improve transcription. Validate
@@ -37,7 +39,7 @@ or a second live transcription pass.
 | documentation-system | Generate a bounded, reproducible candidate report from permitted chunk snapshots and own its provenance. |
 | llm | Offer a configured inexpensive model through the existing service boundary, if the provider supports it; no assumption that the Codex Luna model is available to this service. |
 | operator | Review candidate safety, spelling and spoken forms; run the controlled AWS staging trial. |
-| meeting | Select a configured, ready vocabulary by name at stream creation and preserve the current behavior when disabled. |
+| meeting | Use the configured, ready club-wide vocabulary by name at stream creation and preserve the current behavior when disabled. |
 
 ## 1. Extract and rank
 
@@ -105,8 +107,8 @@ because its count changed. Flag a change in source spelling, dictionary/model
 rules or an operator correction for review rather than silently reusing a stale
 rendering. Removals need no model call: build a revised table without them after
 review. A term leaving the top 20% or failing the new eligibility check must not
-be newly published, and any removal from an active vocabulary must follow the
-scope and revocation policy below. Dictionary, tokenizer or scope version changes
+be newly published, and any removal from the club-wide vocabulary must follow the
+source eligibility and revocation policy below. Dictionary, tokenizer or scope version changes
 require recomputing the snapshot and reviewing their effect, not an automatic
 full-model rerun.
 
@@ -147,16 +149,17 @@ solely because the model guesses it.
 
 A derived word can expose a private project, a person's name, an identifier or
 other protected information even without its surrounding text. The chunk store
-has documents with different audiences; a single global list must not be built
-from all readable chunks and attached to all meetings. AWS explicitly says not
+has documents with different audiences. Because this vocabulary is shared across
+the club, derive it only from an explicitly approved corpus whose terms are safe
+for club-wide use and external processing; do not simply use all readable chunks. AWS explicitly says not
 to put confidential information, personal information or protected health
 information into a custom vocabulary. Restrict the pilot to an explicitly approved,
 non-sensitive corpus and review terms before any external model or AWS upload.
 Authorization to read a document is not by itself authorization to disclose its
 terms to a model provider or to every meeting. Fail closed when source scope is
-unknown or a source grant is withdrawn: stop selecting affected vocabulary for
-new meetings until a verified replacement is ready. Decide how to identify affected
-versions, rebuild and remove AWS resources before any team-scoped expansion. Limit review artifacts, logs and storage accordingly.
+unknown or source eligibility is withdrawn: stop using the affected club-wide
+vocabulary for new meetings until a verified replacement is ready. Define how to
+identify affected versions, rebuild and remove AWS resources before rollout. Limit review artifacts, logs and storage accordingly.
 
 Use the [AWS table format](https://docs.aws.amazon.com/transcribe/latest/dg/custom-vocabulary-create-table.html):
 `Phrase`, `SoundsLike`, `IPA`, `DisplayAs`. Leave `SoundsLike` and `IPA` empty:
@@ -180,7 +183,8 @@ three files are equivalent to one combined vocabulary.
 
 ## 4. Meeting integration and rollout
 
-Start with an operator-approved staging vocabulary and a feature-disabled default.
+Start with one operator-approved club-wide staging vocabulary and a feature-disabled
+default. Use that same vocabulary for every meeting; do not select by team or channel.
 Verify the installed streaming SDK supports the vocabulary-name parameter, its
 language and region, and actual AWS readiness before wiring it to
 `start_stream_transcription`. Freeze the chosen vocabulary for a meeting and use
@@ -222,33 +226,23 @@ accuracy rate from that paper.
 
 ## Proposed implementation tickets
 
-1. **Corpus and ranking:** define the permitted source snapshot, overlap policy,
-   tokenizer, deterministic ranking and dictionary licenses; export a restricted
-   review report with the requested filters and top-20% rule. Acceptance: fixtures
-   demonstrate inflections, ordinary words, `http`, numbers, ordinals, retained
-   compounds and digits, duplicate embedding sets, ties and empty input.
-2. **Spelling suggestions:** configure an available cheap provider/model through
-   `llm`; implement bounded batches, strict mapping validation and review output.
-   Acceptance: fakes cover hallucinations, missing/duplicate entries, invalid AWS
-   syntax, timeout, retry and uncertain pronunciations; no raw chunk is sent.
-3. **Weekly refresh:** schedule a single idempotent weekly run; persist the last
-   successful snapshot, rank changes, approved mappings and pending work.
-   Acceptance: no-change and count-only changes call neither the model nor AWS;
-   additions call the model only when unresolved; removals need no model call;
-   retries, overlap, restarts and rule changes preserve the checkpoint and do not
-   promote incomplete work.
-4. **Vocabulary preparation:** add review, privacy/scope checks, byte-accurate AWS
-   table validation and versioned create/readiness workflow. Acceptance: reject
-   unsafe/unapproved, invalid, oversized or cross-language/region artifacts; keep
-   a known-good version on failure; do not upload actual customer data in tests.
-5. **Streaming integration:** pass the selected vocabulary name through meeting
-   configuration to each speaker stream and reopen. Acceptance: fake-client tests
-   cover disabled mode, enabled mode, multiple speakers, reopen, failures and
-   rollback; existing timestamp, audio and stop behavior remains intact.
-6. **Staging evaluation:** compare fixed held-out recordings, record counts,
-   accuracy, costs and decision against agreed thresholds. Acceptance: results
-   include baseline and smaller/larger candidates, absent-term cases and an
-   explicit recommendation before production enablement.
+1. **Weekly vocabulary pipeline:** define the permitted corpus, snapshot and
+   overlap rules; filter, rank and take the top 20%; compare against the last
+   successful run; suggest spellings for unresolved additions through `llm`;
+   review and validate the one club-wide AWS vocabulary, including its byte size.
+   Acceptance: fixtures cover dictionary inflections, common technical terms,
+   numbers, ordinals, compounds, repeated embedding sets, ties and empty input.
+   No-change and count-only runs call neither the model nor AWS; removals need no
+   model call; retries preserve completed work and do not publish incomplete
+   changes. Reject unsafe, unapproved, invalid or oversized outputs and retain a
+   still-authorized prior version on failure. External providers are faked in tests.
+2. **Transcribe integration and evaluation:** configure the single approved
+   club-wide vocabulary in meeting, use it for each speaker and reopened stream,
+   and compare fixed held-out recordings with and without it. Acceptance: fake
+   tests cover disabled and enabled operation, multiple speakers, reconnects,
+   failures and rollback; existing audio, timestamp and stop behavior is preserved.
+   Staging results include baseline, smaller and larger candidate lists, absent-term
+   cases, costs and an explicit decision against agreed thresholds before rollout.
 
 Open decisions: permitted corpus and reviewer; dictionary source/version; provider
 availability and data policy; weekly schedule and durable checkpoint location; pronunciation
