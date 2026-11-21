@@ -104,7 +104,7 @@ Each team gets a Google Group so Drive documents and channel access can be grant
 
 **Layering.** `contracts/groups.py` defines the `GroupProvider` Protocol. `src/providers/google_groups.py` implements it with the Cloud Identity Groups and Groups Settings APIs, and `src/google_groups.py` holds the reconciler (`sync_team`), which depends only on the two Protocols. Routers schedule syncs and never call Google. `src/api/deps.py` wires the provider, or `None` when the five `GOOGLE_*` settings are unset; with `None`, every sync trigger is a no-op.
 
-**Who is in a team's group.** Every *active* person whose membership is current today (`started_at <= today < ended_at`), with **all** of their addresses: `primary_email` plus every verified `email` identifier. People sign into Drive with whichever Google account they use, so adding every verified address is what makes a share to the group actually work for them. Parent teams do not inherit their sub-teams' members. A retired team keeps its group and existing Drive shares; reconciliation removes managed MEMBER-only memberships. Owners and managers remain, as described below, so retirement alone is not complete access revocation.
+**Who is in a team's group.** Every *active* person whose membership is current today (`started_at <= today < ended_at`), with **all** of their addresses: `primary_email` plus every verified `email` identifier. People sign into Drive with whichever Google account they use, so adding every verified address is what makes a share to the group actually work for them. Misty still attempts each verified address. If Google rejects a secondary `@mail.utoronto.ca` mailbox with membership error 4002 or 2028, the group can be used only after a fresh Google read confirms the same member’s primary address, all other required members, and all removals. The sync records a note to use the primary account for Drive. A missing primary, uncertain write or unexpected Google error still blocks the mapping. Parent teams do not inherit their sub-teams' members. A retired team keeps its group and existing Drive shares; reconciliation removes managed MEMBER-only memberships. Owners and managers remain, as described below, so retirement alone is not complete access revocation.
 
 **Reconcile, not replay.** A sync reads the group's current MEMBER-only memberships from Google, computes the desired set from the directory, and adds or removes the difference. Owners and managers are never touched, so the account that created the group, and anyone given Google-side management, stays. Anything else in the group that the directory doesn't list is removed, which is what "membership is the source of truth" means. Because every run converges from current state, a retry is just another run, and a missed event is fixed by the next one.
 
@@ -269,7 +269,7 @@ Two trade-offs worth knowing:
 | `group_email` | text NOT NULL | Fixed once `group_name` is set |
 | `group_name` | text NULL | Cloud Identity `groups/{id}`; null until creation succeeds |
 | `status` | text NOT NULL | `synced` / `needs_external_members` / `failed` (check constraint) |
-| `last_error` | text NULL | Why the last sync did not converge |
+| `last_error` | text NULL | Sync failure details or a sign-in note for a covered university address |
 | `last_synced_at` | timestamptz NULL | Last fully converged sync |
 | `pending_changes` | jsonb NOT NULL DEFAULT `[]` | Unconfirmed membership writes; shape is in [API.md](API.md#team-google-groups) |
 
