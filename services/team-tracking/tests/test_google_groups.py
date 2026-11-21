@@ -520,6 +520,20 @@ def test_provider_lists_only_plain_members_across_pages():
     assert s.calls[1][2]["params"]["pageToken"] == "t"
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    [{"name": "m/stale"}, {"roles": []}, {"roles": [{"name": "MEMBER"}]}],
+)
+def test_roster_read_rejects_incomplete_membership_page(invalid):
+    good = {"name": "m/1", "preferredMemberKey": {"id": "member@x"}, "roles": [{"name": "MEMBER"}]}
+    provider, _ = _provider(
+        FakeResponse(200, {"memberships": [good], "nextPageToken": "next"}),
+        FakeResponse(200, {"memberships": [invalid]}),
+    )
+    with pytest.raises(GroupProviderError, match="invalid membership"):
+        provider.list_members("groups/abc")
+
+
 def test_provider_add_member_outcomes():
     p, _ = _provider(
         FakeResponse(200, {"done": True}),
@@ -1247,3 +1261,121 @@ def test_rejected_address_cannot_clear_unconfirmed_access(storage, groups, scena
     result = sync_team(storage, groups, team.id, actor="retry")
     assert result.status == "failed"
     assert synced_team_for_group(storage, result.group_email) is None
+
+
+@pytest.fixture
+def rejected_primary(storage, groups, monkeypatch):
+    team = _team(storage)
+    confirmed = _member(storage, team, "member@example.test")
+    missing = _member(storage, team, "missing@outlook.com")
+    add = groups.add_member
+    provider, _ = _provider(
+        FakeResponse(403, {"error": {"message": "Error(2028): Permission denied."}})
+    )
+
+    def reject_one(name, email):
+        if email == missing.primary_email:
+            return provider.add_member(name, email)
+        return add(name, email)
+
+    monkeypatch.setattr(groups, "add_member", reject_one)
+    state = sync_team(storage, groups, team.id, actor="test")
+    assert state.status == "failed" and state.permits_individual_lookup
+    assert state.rejected_additions == [missing.primary_email]
+    return state, confirmed, missing
+
+
+def test_partial_roster_individual_api(client, rejected_primary):
+    state, confirmed, missing = rejected_primary
+    group_path = f"/teams/by-synced-google-group/{state.group_email}"
+    person_path = f"/people/{confirmed.id}/synced-google-teams"
+    opts = {"include_individual": "true"}
+    assert client.get(group_path, headers=AUTH).status_code == 404
+    assert client.get(person_path, headers=AUTH).json() == []
+    assert client.get(group_path, params=opts, headers=AUTH).json()["id"] == str(state.team_id)
+    response = client.get(person_path, params=opts, headers=AUTH)
+    assert [g["team_id"] for g in response.json()] == [str(state.team_id)]
+    assert missing.primary_email not in response.text
+    assert (
+        client.get(f"/people/{missing.id}/synced-google-teams", params=opts, headers=AUTH).json()
+        == []
+    )
+    assert client.get("/teams/google-groups", headers=AUTH).json()[0]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "change", ["left", "inactive", "retired", "unexpected", "missing", "during_read"]
+)
+def test_partial_roster_revalidates_before_person_read(storage, groups, rejected_primary, change):
+    state, confirmed, _ = rejected_primary
+    if change == "left":
+        (membership,) = storage.list_memberships(person_id=confirmed.id)
+        storage.end_membership(membership.id, date.today(), actor="test")
+    elif change == "inactive":
+        confirmed = storage.update_person(confirmed.id, PersonUpdate(active=False), actor="test")
+    elif change == "retired":
+        storage.update_team(state.team_id, TeamUpdate(active=False), actor="test")
+    elif change == "unexpected":
+        groups.add_member(state.group_name, "outsider@example.test")
+    elif change == "missing":
+        _member(storage, storage.get_team(state.team_id), "unconfirmed@example.test")
+    elif change == "during_read":
+        original = groups.list_members
+
+        def invalidate(name):
+            storage.put_team_google_group(
+                state.team_id,
+                group_email=state.group_email,
+                group_name=name,
+                status="failed",
+                last_error="settings unavailable",
+                last_synced_at=None,
+                actor="other-sync",
+            )
+            return original(name)
+
+        groups.list_members = invalidate
+    assert synced_groups_containing(storage, groups, confirmed, include_individual=True) == []
+
+
+@pytest.mark.parametrize("failure", ["settings", "list_members", "pending_add", "remove"])
+def test_new_failure_invalidates_partial_roster(storage, groups, rejected_primary, failure):
+    state, confirmed, _ = rejected_primary
+    if failure == "pending_add":
+
+        def uncertain(name, email):
+            raise GroupOperationPending("unknown result")
+
+        groups.add_member = uncertain
+    elif failure == "remove":
+        groups.add_member(state.group_name, "former@example.test")
+        groups.fail = "remove_member"
+    else:
+        groups.fail = failure
+    failed = sync_team(storage, groups, state.team_id, actor="retry")
+    assert failed.status == "failed" and not failed.permits_individual_lookup
+    assert synced_team_for_group(storage, state.group_email, include_individual=True) is None
+    assert synced_groups_containing(storage, groups, confirmed, include_individual=True) == []
+
+
+def test_partial_lookup_requires_unambiguous_address_even_outside_team(
+    storage, groups, rejected_primary
+):
+    state, person, _ = rejected_primary
+    team = storage.get_team(state.team_id)
+    former = _member(storage, team, "former@example.test")
+    # Move the current person's primary onto an address already verified by the former member.
+    shared = "ambiguous@example.test"
+    storage.add_person_email(former.id, shared, actor="test")
+    storage.update_person(former.id, PersonUpdate(active=False), actor="test")
+    person = storage.update_person(person.id, PersonUpdate(primary_email=shared), actor="test")
+    roster = groups.members[state.group_name]
+    roster[shared] = roster.pop("member@example.test")
+    assert synced_groups_containing(storage, groups, person, include_individual=True) == []
+    independent = "independent@example.test"
+    storage.add_person_email(person.id, independent, actor="test")
+    groups.add_member(state.group_name, independent)
+    assert [
+        g.team_id
+        for g in synced_groups_containing(storage, groups, person, include_individual=True)
+    ] == [team.id]

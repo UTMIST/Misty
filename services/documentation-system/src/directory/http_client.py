@@ -103,9 +103,11 @@ class HttpDirectoryClient:
         except (KeyError, ValueError, TypeError) as e:
             raise DirectoryUnavailable(f"malformed memberships response: {e}") from e
 
-    def _get_id(self, path: str) -> UUID | None:
+    def _get_id(self, path: str, *, params: dict[str, str] | None = None) -> UUID | None:
         try:
-            resp = self._client.get(f"{self._base_url}{path}", headers={"X-API-Key": self._api_key})
+            resp = self._client.get(
+                f"{self._base_url}{path}", params=params, headers={"X-API-Key": self._api_key}
+            )
         except httpx.HTTPError as e:
             raise DirectoryUnavailable(f"directory unreachable: {e}") from e
         if resp.status_code == 404:
@@ -128,16 +130,17 @@ class HttpDirectoryClient:
 
     def get_team_id_by_synced_google_group(self, email: str) -> UUID | None:
         encoded = quote(email.strip().lower(), safe="")
-        # Supplied by team-tracking issue #237. That endpoint is deliberately
-        # defined to 404 unless the mapping is active AND membership sync is
-        # healthy; documentation-system must not infer group membership from
-        # an ordinary Team Tracking membership.
-        return self._get_id(f"/teams/by-synced-google-group/{encoded}")
+        # Preserve a source grant for individual checks. Channel and meeting
+        # eligibility is resolved independently from the fully synced group list.
+        return self._get_id(
+            f"/teams/by-synced-google-group/{encoded}", params={"include_individual": "true"}
+        )
 
     def get_source_access_team_ids(self, person_id: UUID) -> frozenset[UUID]:
         try:
             resp = self._client.get(
                 f"{self._base_url}/people/{person_id}/synced-google-teams",
+                params={"include_individual": "true"},
                 headers={"X-API-Key": self._api_key},
             )
         except httpx.HTTPError as e:

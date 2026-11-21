@@ -45,15 +45,15 @@ class DirectoryClient(Protocol):
         ...
 
     def get_team_id_by_synced_google_group(self, email: str) -> UUID | None:
-        """Resolve only an active, membership-synced managed Google Group.
+        """Resolve a managed source grant usable by at least the individual lookup.
 
-        A mere team record or unsynchronized/legacy group mapping must return
-        None. Raises DirectoryUnavailable when sync state cannot be verified.
+        A known rejected addition may preserve the grant for confirmed people.
+        Other failed and legacy mappings return None. Raises DirectoryUnavailable when sync state cannot be verified.
         """
         ...
 
     def get_source_access_team_ids(self, person_id: UUID) -> frozenset[UUID]:
         """Teams whose managed Google Group currently contains this person
-        and whose membership sync is healthy. Never infer from directory-only
+        and whose sync supports individual access. Never infer from directory-only
         membership. Raises DirectoryUnavailable if state cannot be verified."""
         ...

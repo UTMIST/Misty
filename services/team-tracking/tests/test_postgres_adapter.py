@@ -793,3 +793,40 @@ def test_pg_stale_sync_in_another_process_cannot_readd_a_revoked_member(clean_db
     state = api.get_team_google_group(team.id)
     assert groups.members[state.group_name] == {}
     assert (state.status, state.updated_by) == ("synced", "api")
+
+
+def test_pg_rejected_additions_are_bound_to_the_writing_sync(clean_db):
+    from test_google_groups import FakeGroups, _member, _team
+    from contracts.groups import MembershipIdentityRejected
+    from src.google_groups import sync_team, synced_groups_containing
+
+    storage = PostgresStorageAdapter(clean_db)
+    team = _team(storage)
+    confirmed = _member(storage, team, "confirmed@example.test")
+    groups = FakeGroups()
+    sync_team(storage, groups, team.id, actor="initial")
+    missing = _member(storage, team, "missing@outlook.com")
+
+    def reject(name, email):
+        assert email == missing.primary_email
+        raise MembershipIdentityRejected("definite rejection")
+
+    groups.add_member = reject
+    state = sync_team(storage, groups, team.id, actor="test")
+    fresh = PostgresStorageAdapter(clean_db)
+    assert fresh.get_team_google_group(team.id) == state
+    assert [
+        g.team_id
+        for g in synced_groups_containing(fresh, groups, confirmed, include_individual=True)
+    ] == [team.id]
+
+    # An older API or cron writer only knows the pre-012 columns.
+    with clean_db.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE team_google_groups SET updated_at = updated_at + interval '1 second', last_error = 'list failed' WHERE team_id = :id"
+            ),
+            {"id": team.id},
+        )
+    assert not fresh.get_team_google_group(team.id).permits_individual_lookup
+    assert synced_groups_containing(fresh, groups, confirmed, include_individual=True) == []

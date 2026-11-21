@@ -218,17 +218,38 @@ class GoogleGroupsProvider:
     def list_members(self, group_name: str) -> dict[str, str]:
         members: dict[str, str] = {}
         params = {"view": "BASIC", "pageSize": 1000}
+        seen_tokens: set[str] = set()
         while True:
             status, body = self._call("GET", f"{group_name}/memberships", params=params)
-            if status >= 400:
+            if status != 200 or body.get("error"):
                 raise self._error(status, body, "list members")
-            for m in body.get("memberships", []):
-                roles = {r.get("name") for r in m.get("roles", [])}
-                if roles == {"MEMBER"}:
-                    members[m["preferredMemberKey"]["id"].lower()] = m["name"]
-            token = body.get("nextPageToken")
-            if not token:
+            page = body.get("memberships", [])
+            if not isinstance(page, list):
+                raise GroupProviderError("list members: invalid membership list")
+            try:
+                for member in page:
+                    roles = {r["name"] for r in member["roles"]}
+                    if not roles or roles - {"MEMBER", "OWNER", "MANAGER"}:
+                        raise ValueError
+                    if roles == {"MEMBER"}:
+                        email = member["preferredMemberKey"]["id"].strip().lower()
+                        name = member["name"]
+                        if (
+                            not email
+                            or not isinstance(name, str)
+                            or not name
+                            or members.get(email, name) != name
+                        ):
+                            raise ValueError
+                        members[email] = name
+            except (KeyError, TypeError, AttributeError, ValueError):
+                raise GroupProviderError("list members: invalid membership entry") from None
+            token = body.get("nextPageToken", "")
+            if token == "":
                 return members
+            if not isinstance(token, str) or token in seen_tokens:
+                raise GroupProviderError("list members: invalid pagination token")
+            seen_tokens.add(token)
             params = {**params, "pageToken": token}
 
     def add_member(self, group_name: str, email: str) -> None:

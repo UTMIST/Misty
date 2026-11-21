@@ -690,7 +690,9 @@ class PostgresStorageAdapter:
         last_synced_at: datetime | None,
         actor: str,
         pending_changes: list[PendingGroupChange] | None = None,
+        rejected_additions: list[str] | None = None,
     ) -> TeamGoogleGroup:
+        now = _now()
         values = {
             "group_email": group_email,
             "group_name": group_name,
@@ -698,7 +700,9 @@ class PostgresStorageAdapter:
             "last_error": last_error,
             "last_synced_at": last_synced_at,
             "pending_changes": [p.model_dump() for p in pending_changes or []],
-            "updated_at": _now(),
+            "rejected_additions": rejected_additions or [],
+            "roster_checked_at": now if rejected_additions else None,
+            "updated_at": now,
             "updated_by": actor,
         }
         stmt = pg_insert(team_google_groups).values(team_id=team_id, created_by=actor, **values)

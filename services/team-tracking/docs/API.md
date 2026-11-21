@@ -525,13 +525,23 @@ One team's mapping. **Scope:** `teams:read`. **Errors:** 404 if the team has no 
 
 ### GET /teams/by-synced-google-group/{email}
 
-The team (same body as `GET /teams/{team_id}`) whose managed group has this address, matched case-insensitively. Fails closed for access decisions: it answers only when the team's last sync is `synced`. Retired teams still resolve (check `active` in the body); sync removes managed MEMBER-only memberships but retains owners/managers and existing Drive shares. Retirement alone is not complete access revocation; see [the reconciliation contract](ARCHITECTURE.md#managed-google-groups). **Scope:** `teams:read`.
+The team (same body as `GET /teams/{team_id}`) whose managed group has this address, matched case-insensitively. By default the lookup requires the team's last sync to be `synced`. Retired teams still resolve (check `active` in the body); sync removes managed MEMBER-only memberships but retains owners/managers and existing Drive shares. Retirement alone is not complete access revocation; see [the reconciliation contract](ARCHITECTURE.md#managed-google-groups). **Scope:** `teams:read`.
 
-**Errors:** 404 for an unknown address or a mapping in `needs_external_members` or `failed`. This reads the recorded sync state and makes no Google call.
+For catalog ACL resolution, `?include_individual=true` also maps an active team
+whose sync verified that the only missing memberships were definitively rejected
+additions. This retains a candidate grant for a subsequent person check. Channel
+and meeting audiences still require `synced`.
+
+**Errors:** 404 for an unknown or ineligible mapping. This lookup reads the
+recorded sync state and makes no Google call.
 
 ### GET /people/{person_id}/synced-google-teams
 
 Mappings (same shape as `GET /teams/google-groups`) for the `synced` teams whose Google Group currently contains this person as a MEMBER under their `primary_email` or any verified `email` identifier. Membership is read live from Google, one call per synced team, so it reflects Google even when the directory disagrees. Owners and managers don't count. **Scope:** `people:read`.
+
+With `?include_individual=true`, an active current team member can also receive a
+`failed` mapping if the [individual access checks](ARCHITECTURE.md#individual-access-after-rejected-additions)
+succeed. The person response omits other members' rejection details.
 
 **Errors:** 404 if the person does not exist. 503 if Google Groups is not configured or Google can't be read; there is no partial answer.
 
