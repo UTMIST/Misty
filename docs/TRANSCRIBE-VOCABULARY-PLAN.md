@@ -36,18 +36,18 @@ or a second live transcription pass.
 
 | Component | Proposed responsibility |
 | --- | --- |
-| documentation-system | Generate a bounded, reproducible candidate report from permitted chunk snapshots and own its provenance. |
+| documentation-system | Generate a bounded, reproducible candidate report from the chunk database and own its provenance. |
 | llm | Offer a configured inexpensive model through the existing service boundary, if the provider supports it; no assumption that the Codex Luna model is available to this service. |
 | operator | Review candidate safety, spelling and spoken forms; run the controlled AWS staging trial. |
 | meeting | Use the configured, ready club-wide vocabulary by name at stream creation and preserve the current behavior when disabled. |
 
 ## 1. Extract and rank
 
-- Use active, eligible document chunks for the served embedding model, once per
-  document and chunk ordinal. Multiple embedding model sets must not multiply
-  counts. Pin or record the source snapshot and model used for a run; exclude
-  retired documents and stale or unauthorized source content according to the
-  catalog's current policy. Define overlap handling and text normalization in the
+- Use all chunks currently in the chunk database, including Discord and Drive
+  content. No separate source approval list or per-team filter is applied during
+  extraction. To avoid counting the same indexed document twice during re-embedding,
+  use the served model's chunk set once per document and ordinal; record the source
+  snapshot and model. Define overlap handling and text normalization in the
   implementation, and record them: chunk overlap can inflate frequency.
 - Tokenize words and keep the original form alongside a normalized matching key.
   Aggregate counts case-insensitively, preserving source evidence for authorized
@@ -147,19 +147,20 @@ solely because the model guesses it.
 
 ## 3. Scope, privacy and AWS format
 
-A derived word can expose a private project, a person's name, an identifier or
-other protected information even without its surrounding text. The chunk store
-has documents with different audiences. Because this vocabulary is shared across
-the club, derive it only from an explicitly approved corpus whose terms are safe
-for club-wide use and external processing; do not simply use all readable chunks. AWS explicitly says not
-to put confidential information, personal information or protected health
-information into a custom vocabulary. Restrict the pilot to an explicitly approved,
-non-sensitive corpus and review terms before any external model or AWS upload.
-Authorization to read a document is not by itself authorization to disclose its
-terms to a model provider or to every meeting. Fail closed when source scope is
-unknown or source eligibility is withdrawn: stop using the affected club-wide
-vocabulary for new meetings until a verified replacement is ready. Define how to
-identify affected versions, rebuild and remove AWS resources before rollout. Limit review artifacts, logs and storage accordingly.
+The input is all current database chunks, including Discord and Drive content,
+regardless of document audience. The result is one vocabulary used across the
+club. A derived word can expose a private project, a person's name, an identifier
+or other protected information even without its surrounding text. AWS explicitly
+says not to put confidential information, personal information or protected health
+information into a custom vocabulary. Review selected terms before sending them
+to an external model or uploading to AWS, and remove prohibited terms; document
+access alone does not establish that a term is suitable for club-wide use. Limit
+review artifacts, logs and storage accordingly.
+
+When a source is removed or access is revoked, recompute the next weekly snapshot;
+define how to identify affected vocabulary versions and remove or replace them.
+If a deployed version is found to contain prohibited or revoked material, stop
+using it for new meetings until a verified replacement is ready.
 
 Use the [AWS table format](https://docs.aws.amazon.com/transcribe/latest/dg/custom-vocabulary-create-table.html):
 `Phrase`, `SoundsLike`, `IPA`, `DisplayAs`. Leave `SoundsLike` and `IPA` empty:
@@ -226,7 +227,7 @@ accuracy rate from that paper.
 
 ## Proposed implementation tickets
 
-1. **Weekly vocabulary pipeline:** define the permitted corpus, snapshot and
+1. **Weekly vocabulary pipeline:** define the full chunk snapshot and
    overlap rules; filter, rank and take the top 20%; compare against the last
    successful run; suggest spellings for unresolved additions through `llm`;
    review and validate the one club-wide AWS vocabulary, including its byte size.
@@ -244,7 +245,7 @@ accuracy rate from that paper.
    Staging results include baseline, smaller and larger candidate lists, absent-term
    cases, costs and an explicit decision against agreed thresholds before rollout.
 
-Open decisions: permitted corpus and reviewer; dictionary source/version; provider
+Open decisions: reviewer and prohibited-term review process; dictionary source/version; provider
 availability and data policy; weekly schedule and durable checkpoint location; pronunciation
 review process; staging sample, accuracy thresholds and spending budget; and the
 policy for revocation and selection when a 20% candidate set exceeds 50 KB.
