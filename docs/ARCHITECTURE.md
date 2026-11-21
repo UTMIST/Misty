@@ -34,6 +34,9 @@ services and the public external gateway, plus the Discord bot as a consumer:
 
 > **Meeting recording** spans two components (the `meeting` service + a Discord *voice surface* in the bot) with live session state and a dedicated bot voice path. Its cross-cutting design is documented separately in **[MEETING-RECORDING.md](MEETING-RECORDING.md)**.
 
+A proposed chunk-derived custom vocabulary for meeting transcription is described in
+[TRANSCRIBE-VOCABULARY-PLAN.md](TRANSCRIBE-VOCABULARY-PLAN.md).
+
 The rest of this document details the team-tracking ↔ documentation-system
 relationship, the platform's main cross-service data flow. It has **two** legs:
 
