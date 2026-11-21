@@ -28,7 +28,7 @@ function renderGoogleGroupState(team, state) {
   let content;
   switch (state.status) {
     case 'synced':
-      content = `✅ ${header} is **synced**.`;
+      content = [`✅ ${header} is **synced**.`, error].filter(Boolean).join('\n');
       break;
     case 'needs_external_members':
       content = [

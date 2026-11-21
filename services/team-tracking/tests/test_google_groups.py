@@ -1154,3 +1154,96 @@ def test_settings_refresh_failure_does_not_prevent_google_membership_removal(sto
     assert [call[0] for call in members.calls] == ["GET", "DELETE"]
     assert members.calls[-1][1].endswith(member_name)
     assert state.pending_changes == []
+
+
+@pytest.mark.parametrize(
+    "status,reason",
+    [
+        (400, "Error(4002): Membership precondition check failed."),
+        (403, "Error(2028): Permission denied for resource groups/abc."),
+    ],
+)
+def test_rejected_campus_alias_uses_confirmed_primary_membership(storage, groups, status, reason):
+    team = _team(storage)
+    person = _member(storage, team, "primary@gmail.com")
+    state = sync_team(storage, groups, team.id, actor="initial")
+    storage.add_person_email(person.id, "campus@mail.utoronto.ca", actor="verified")
+    provider, _ = _provider(FakeResponse(status, {"error": {"message": reason}}))
+    groups.add_member = provider.add_member
+
+    state = sync_team(storage, groups, team.id, actor="retry")
+
+    assert state.status == "synced"
+    assert "primary" in state.last_error.lower()
+    assert _emails(groups, state) == {"primary@gmail.com"}
+    assert synced_team_for_group(storage, state.group_email).id == team.id
+    assert synced_groups_containing(storage, groups, person) == [state]
+    outsider = storage.create_person(
+        PersonCreate(display_name="Visitor", primary_email="visitor@gmail.com"), actor="test"
+    )
+    assert synced_groups_containing(storage, groups, outsider) == []
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "campus_is_primary",
+        "different_person",
+        "primary_disappeared",
+        "stale_member",
+        "unknown_403",
+        "noncampus",
+    ],
+)
+def test_rejected_address_cannot_clear_unconfirmed_access(storage, groups, scenario):
+    team = _team(storage)
+    campus = "member@mail.utoronto.ca" if scenario != "noncampus" else "member@outlook.com"
+    if scenario == "campus_is_primary":
+        _member(storage, team, campus)
+    else:
+        person = _member(storage, team, "primary@gmail.com")
+        storage.add_person_email(person.id, campus, actor="verified")
+    state = groups.create_group("ml@utmist.example", "ML", "test")
+    storage.put_team_google_group(
+        team.id,
+        group_email="ml@utmist.example",
+        group_name=state,
+        status="failed",
+        last_error=None,
+        last_synced_at=None,
+        pending_changes=[],
+        actor="test",
+    )
+    groups.add_member(state, "primary@gmail.com")
+    other = _member(storage, team, "other@gmail.com")
+    groups.add_member(state, other.primary_email)
+    if scenario == "different_person":
+        groups.members[state].pop("primary@gmail.com")
+    if scenario == "stale_member":
+        groups.add_member(state, "former@gmail.com")
+        groups.remove_member = lambda _name: None  # ACK before the removal is visible on readback.
+
+    provider, _ = _provider(
+        FakeResponse(
+            403,
+            {
+                "error": {
+                    "message": "denied"
+                    if scenario == "unknown_403"
+                    else "Error(2028): Permission denied for resource groups/abc."
+                }
+            },
+        )
+    )
+
+    def reject(group, email):
+        if email == campus:
+            if scenario == "primary_disappeared":
+                groups.members[group].pop("primary@gmail.com")
+            provider.add_member(group, email)
+        # A successful API acknowledgement alone does not prove group membership.
+
+    groups.add_member = reject
+    result = sync_team(storage, groups, team.id, actor="retry")
+    assert result.status == "failed"
+    assert synced_team_for_group(storage, result.group_email) is None

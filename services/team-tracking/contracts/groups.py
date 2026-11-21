@@ -6,6 +6,10 @@ class GroupProviderError(Exception):
     must never carry a credential or token."""
 
 
+class MembershipIdentityRejected(GroupProviderError):
+    """Google definitively refused this membership add with a known identity error."""
+
+
 class ExternalMembersDisabled(GroupProviderError):
     """The group still rejects outside members after settings reconciliation."""
 

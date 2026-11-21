@@ -500,14 +500,14 @@ Syncing happens after the response, never inside it: `POST`/`PATCH /teams`, `POS
 | `group_email` | string | The group's address. Fixed once `group_name` is set. |
 | `group_name` | string \| null | Cloud Identity resource (`groups/{id}`); `null` until creation succeeds |
 | `status` | string | `synced`, `needs_external_members`, or `failed` |
-| `last_error` | string \| null | Why the last sync did not converge |
+| `last_error` | string \| null | Sync failure details, or a Drive sign-in note for a covered secondary university address |
 | `last_synced_at` | datetime \| null | Last time a sync fully converged |
 | `pending_changes` | array | Unconfirmed membership writes: `action` (`add`/`remove`), `email`, nullable `membership_name` and `operation_name`; defaults to `[]` |
 | `created_at`, `updated_at`, `created_by`, `updated_by` | | `updated_by` is the key whose write triggered the last sync |
 
 `status` meanings:
 
-- `synced`: Google membership matches Team Tracking as of `last_synced_at`. For active teams, both external-member settings were also verified, even when the group is empty. Retired teams only require membership removal; their settings are left unchanged. A stored result from an older deployment needs a new sync to establish settings verification.
+- `synced`: Google membership covers Team Tracking as of `last_synced_at`. A secondary university address refused by Google can be covered by the same person’s confirmed primary membership under the [group reconciliation rules](ARCHITECTURE.md#managed-google-groups). For active teams, both external-member settings were also verified, even when the group is empty. Retired teams only require membership removal; their settings are left unchanged. A stored result from an older deployment needs a new sync to establish settings verification.
 - `needs_external_members`: settings were verified, but Google still rejected an external addition. Other additions and removals were attempted. Follow the [recovery runbook](DEPLOYMENT.md#external-member-setup-and-recovery) and retry sync.
 - `failed`: group creation/read, settings verification, or a membership change failed or remains unconfirmed. A settings failure holds all new additions but still attempts removals and preserves pending membership writes. `last_error` lists failures separated by `; `. `last_synced_at` remains the historical last success, not evidence the current attempt succeeded. Retry with the sync endpoint.
 

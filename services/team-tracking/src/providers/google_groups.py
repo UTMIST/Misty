@@ -7,7 +7,12 @@ lazily so the dependency never loads when Google Groups is unconfigured.
 
 from urllib.parse import quote
 
-from contracts.groups import ExternalMembersDisabled, GroupOperationPending, GroupProviderError
+from contracts.groups import (
+    ExternalMembersDisabled,
+    GroupOperationPending,
+    GroupProviderError,
+    MembershipIdentityRejected,
+)
 
 API = "https://cloudidentity.googleapis.com/v1"
 SCOPE = "https://www.googleapis.com/auth/cloud-identity.groups"
@@ -241,6 +246,10 @@ class GoogleGroupsProvider:
         # this if Google's wording changes.
         if "outside" in message or "external" in message:
             raise ExternalMembersDisabled(message)
+        if (status == 400 and message.startswith("error(4002):")) or (
+            status == 403 and message.startswith("error(2028):")
+        ):
+            raise MembershipIdentityRejected(str(self._error(status, body, f"add member {email}")))
         self._finished(status, body, f"add member {email}")
 
     def remove_member(self, membership_name: str) -> None:
