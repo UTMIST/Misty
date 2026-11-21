@@ -3,7 +3,46 @@
 Start with recordings in staging. A recording can end early and still produce a PDF and a link.
 The dashboard must show both the end of capture and the delivery of the requested output.
 Use the same measurement rules for answers, catalog updates, and the proposed features.
-[Dashboard wireframes](OBSERVABILITY-VIEWS.md#overview) · [Design issue #342](https://github.com/UTMIST/Misty/issues/342)
+[Dashboard wireframes](OBSERVABILITY-VIEWS.md#overview) · [Implementation tickets and definitions of done](OBSERVABILITY-IMPLEMENTATION.md) · [Design issue #342](https://github.com/UTMIST/Misty/issues/342)
+
+## Distributed traces in Railway logs
+
+Keep logs in Railway for the first implementation. Emit one structured JSON line to stdout per
+observation. A maintainer can filter the environment's logs by `trace_id` to follow one attempt
+across deployments, or by component and operation to investigate the same dependency across attempts.
+Use the OpenTelemetry trace model for the shape of the data. [OpenTelemetry traces](https://opentelemetry.io/docs/concepts/signals/traces/) · [Railway logs](https://docs.railway.com/observability/logs)
+
+| Field | What the producer records |
+| --- | --- |
+| `trace_id`, `span_id`, `parent_span_id` | Generate a trace at a Discord command, public request, or scheduled run. Each timed operation gets its own span. Omit the parent on the root. |
+| `service`, `component`, `operation` | Name the emitting service, the component that observed the work, and a stable operation such as `catalog.search`. Use route templates for HTTP. |
+| `event_id`, `event_name`, `event_time` | Give each observation a unique ID and a UTC timestamp. A span start, a domain event such as `capture.interrupted`, and a span end are distinct observations on the same span. Preserve the event ID on redelivery. |
+| `result`, `duration_ms` | On span end, record the observed outcome and locally measured elapsed time. Use bounded reason codes for failures or interruptions. |
+
+On authenticated Misty HTTP calls, inject W3C `traceparent` from the outgoing client span.
+The receiving service makes that span the parent of its server span. Start a fresh trace at public
+ingress or when internal context is missing or invalid. Keep external provider calls visible as
+local client spans and keep Misty context inside the platform. A retry gets a sibling span under
+the same logical operation. For a recovery job with its own root, record a span link to the
+original operation when scheduling it so later confirmation can update the original attempt.
+Trace context confers no access. [W3C Trace Context](https://www.w3.org/TR/trace-context/)
+
+## State inferred from component events
+
+For each instrumented operation in the tables below, use its start, milestones and outcome as
+the evidence for its timeline and component totals. Derive state when reading those observations.
+For example, capture start opens the recording, connection loss marks capture interrupted,
+catalog confirmation marks the save complete, and Discord acknowledgment marks delivery complete.
+Each component owns its own outcome. After those four events the workflow is partial, with a
+saved Doc and a delivered link. [Recording investigation](OBSERVABILITY-VIEWS.md#recording-investigation)
+
+Deduplicate by event ID. Match starts and ends by span and follow parent or linked spans across
+processes. A late start cannot reopen a finished span. Show the last observed milestone and its
+age while work is open. If the source restarts or its expected report goes stale, mark unfinished
+work unknown until evidence arrives. Only an observed timeout marks work timed out.
+Retain unsampled lifecycle events for these state views and totals. Sample finer diagnostic spans
+independently. Read resource usage, invoices and offline evaluation totals as measurements in
+their own right.
 
 ## Recording components
 
@@ -34,6 +73,8 @@ An interrupted recording stays partial if the bot delivers the recovered minutes
 | Discovery runner | Use the run summary, the checkpoint, and the last clean scan. | Time since the last clean scan, in hours. Count continued scans and scans with gaps separately. | Find repeated runs without a clean scan. |
 | Refresh runner | Use the drain result and the item counts in the run summary. | Failed refresh items / attempted refresh items. Count failed index operations separately. | Find item failures after a successful drain. |
 | Catalog, document state | At the end of a run, produce one summary for eligible documents. | Count current content checks, matching index versions, and current access checks separately. Show eligible and unknown counts for each measure. Show summary age in minutes. | Select the repair for content, the index, or access. An old summary leaves the current state unknown. |
+| Gateway, directory, and verification | Trace gateway admission, directory lookup, verification send/check and gateway redemption as separate operations where they occur. | Counts by operation and result, downstream duration, and rate-limited attempts. | Locate a login delay or denial without recording a mailbox, challenge, code, or key. |
+| Connectors, source reads | Trace discovery listing and content or access fetches under the calling operation. | Calls, retries, failures and duration by operation and source type. | Distinguish a slow upstream read from time spent indexing in the catalog. |
 | HTTP services and Railway | Use the request audit and Railway resource data. Include the gateway, directory, and verification services. | Request count and duration by route template. Separate access denials, rate limits, and service errors. Compare CPU and memory use with deployment times. | Find the service that caused a failure or delay. |
 | Telemetry exporter and receiver | Record queue drops, process restarts, and the last receipt from each expected source. | Dropped events / events offered to the queue. Age of the last receipt against the source schedule. | Distinguish a quiet period from a loss of measurements. |
 | Billing reports | Use reported usage, effective unit prices, Railway cost data, and invoices. | Estimated provider cost by feature and period. Show shared cost separately. Compare the estimate with the invoice for the same period. | Find the cause of a cost change. Show costs that have no known owner. |
@@ -62,8 +103,7 @@ Export only totals from the evaluation. [Offline examples](OBSERVABILITY-VIEWS.m
 
 ## Rules for all components
 
-- Give each attempt one opaque ID. Pass it only on authenticated internal operations. Access checks remain independent of this ID.
-- Give each child operation an ID. Count each provider call, including a retry. Count a repeated event with the same event ID once.
+- Use the root trace ID as the opaque attempt ID. Count each provider call, including retries.
 - Record the schema version, component, feature, stage, result, environment, traffic type, deployment revision, and UTC event time. The receiver records receipt time.
 - Measure local duration with a monotonic clock. Show the median, the 95th percentile, and the sample count. Show how many intervals have a missing start or end.
 - Group requests by start time. A missing end event after a restart gives an unknown result. A confirmed timeout gives a timeout result.
@@ -76,7 +116,14 @@ For cost per completion, use the same group of attempts for the cost and the cou
 Divide their known provider cost, including retry costs, by their confirmed completions.
 Show usage coverage with the result. Leave the result blank when the group has no confirmed completions.
 
-Start the staging trial with Railway. Test the overview with a lead and the timeline with a maintainer.
+Start the staging trial with a synthetic recording. From its Railway records, reconstruct the
+call tree and the capture, save, and delivery outcomes. Replay the records out of order with a
+duplicate delivery acknowledgment and verify the same state and counts. Repeat with the
+acknowledgment missing and a bot restart to verify unknown delivery. A future migration can
+map the same records to an OpenTelemetry exporter or another log store. Use this replay to
+check the new destination against Railway before switching readers.
+
+Test the overview with a lead and the timeline with a maintainer.
 Keep the existing runner alerts. Readiness polling has a separate approval process.
 Agree on access, data retention, alert limits, an operator, and a budget before live collection.
 [Readiness status](https://github.com/UTMIST/Misty/issues/55)

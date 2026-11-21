@@ -50,6 +50,28 @@ The median was **16 s** for 4 recordings in the previous hour. The sample is too
 | 13:38:17 | Catalog | Doc save complete |
 | 13:38:18 | Discord bot | Discord accepted the link. |
 
+**State at 13:38:18 UTC** · Capture interrupted · Doc saved · Link delivered · Recording partial
+
+Selecting an event highlights its span in the trace. The excerpt below expands the save
+operation for R3. Each indentation follows a parent span ID. Durations include child calls.
+
+```text
+Catalog      Save recording                 4.8 s  confirmed
+  Catalog      Call connectors                4.1 s  success
+    Connectors   Handle Google write            4.0 s  success
+      Connectors   Call Google Drive              3.6 s  success
+```
+
+Selecting the Google Drive call opens the connectors component view, filtered to that
+operation in the same environment and period. The example includes all observed calls.
+
+| Operation | Calls | Success | Failure | Unknown | Median duration of finished calls |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Google Drive create | 3 | 2 | 0 | 1 | 3.4 s |
+
+The unknown call belongs to another recording. Its last observation was a start before a
+worker restart. The component view links that observation back to its recording trace.
+
 **Meeting maintainer** · Examine the connection and audio processing at 13:38.
 The last deployment of the meeting service was at 13:12 UTC.
 The duration of missing speech is unknown. [Meeting troubleshooting](../services/meeting/docs/DEPLOYMENT.md#troubleshooting)
