@@ -19,8 +19,10 @@ see each service's own `docs/ARCHITECTURE.md`:
 
 Repository-wide GitHub Q&A is planned separately from the current single-file
 fetcher. See [GitHub retrieval design notes](GITHUB-RETRIEVAL.md) for #333's
-proposed MCP restrictions, organization App setup, and public/private access
-model; these controls are not implemented yet.
+three-phase implementation plan: public UTMIST repositories, individual GitHub
+authentication with private replies, then team-based channel answers. It covers
+service ownership, access rules, and work packages for future issues. These
+features are not implemented yet.
 
 ## The services
 
