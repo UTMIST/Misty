@@ -160,6 +160,40 @@ Workspace dependency is resolved. See the [credentials and rollout runbook](DEPL
 
 **Unconfirmed writes survive retries.** Before each membership call, the sync stores its intent in `team_google_groups.pending_changes` and marks the mapping `failed`. A confirmed completion or rejection clears a new intent. An unfinished Operation, uncertain transport/server failure, or process crash leaves it persisted, including the operation name when available. Cloud Identity's [API surface](https://docs.cloud.google.com/identity/docs/reference/rest) has no operation-polling method, so the next sync checks for the write's effect: an added address appears, or the exact membership resource being removed disappears. Pending additions are never replayed: the original request could outlive a successful retry and a later revocation. A pending removal can retry against its exact resource while the person remains unwanted; a rejected retry preserves the original pending intent. If the person rejoins, sync waits for the removal's effect before adding them again. Unrelated changes continue, but the mapping cannot become `synced` while anything is pending. Once an effect is observed, sync reconciles against the latest directory membership; a delayed addition for a departed person is removed. Pending changes never expire automatically. See [recovery](DEPLOYMENT.md#pending-membership-changes).
 
+Only `synced` mappings are usable in access lookups. Drive determines access to
+each file from its effective permissions.
+
+```text
+Skip an unknown team or a retired team without an existing group.
+Get or create the managed group and read its current roster. If either fails, finish as failed.
+Use only memberships with exactly the MEMBER role in both roster reads.
+Exclude OWNER and MANAGER memberships from coverage and removal.
+
+Desired addresses = primary and verified emails of active people with current
+                    memberships in this active team (empty for a retired team).
+For each desired address, track the primary emails of all people it belongs to.
+
+Resolve pending writes whose effects are visible and honor the remaining retry guards.
+For an active team, configure and verify both external-member settings.
+Attempt permitted removals of current addresses outside the desired set.
+If settings verified, attempt permitted additions of missing desired addresses.
+
+Eligible rejections = additions classified as identity errors (HTTP 400 / 4002
+  or HTTP 403 / 2028) for verified secondary @mail.utoronto.ca addresses
+  that are primary for none of their linked people.
+
+If settings failed, any write remains pending, or an unrelated error occurred, finish as failed.
+If Google blocked an external addition, finish as failed when eligible rejections
+  also occurred, otherwise needs_external_members.
+If there are no eligible rejections, finish as synced with confirmed changes.
+
+Read a fresh MEMBER-only roster. If the read fails, finish as failed.
+If the roster has any address outside the desired set, finish as failed.
+For each missing desired address, require an eligible rejection and every linked
+  person's primary address in the fresh roster. If either is absent, finish as failed.
+Finish as synced with a primary-account sign-in note only if covered aliases are missing.
+```
+
 **Concurrency.** `sync_team` holds a per-team lock from reading membership until it records the result, so a slow sync started before a membership ended can't finish after a newer sync and re-add the person. The lock is `StorageAdapter.lock_team_google_group`: in Postgres a session-level `pg_advisory_lock(hashtext('google-group:<team id>'))` on a dedicated connection, which covers every API worker *and* the separately running `team-tracking-groups sync` cron. A process-local lock in front of it keeps queued syncs in one process from each holding a pool connection while they wait. Both processes must use a direct database endpoint: [Neon's transaction pooler does not support session advisory locks](https://neon.com/docs/connect/connection-pooling#connection-pooling-in-transaction-mode). SQLAlchemy's application connection pool is compatible because the dedicated connection remains checked out for the whole sync.
 
 ## The data model (9 tables)
