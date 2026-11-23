@@ -12,7 +12,7 @@ class GitHubTeamMapping(BaseModel):
     github_team_id: int | None = Field(default=None, gt=0)
     slug: str | None = None
     name: str | None = None
-    status: Literal["pending", "active", "inactive"] = "pending"
+    status: Literal["pending", "retryable", "active", "inactive"] = "pending"
     version: int = 1
     created_at: datetime
     updated_at: datetime
@@ -37,9 +37,10 @@ class GitHubMappingRequest(BaseModel):
 
 
 class GitHubProviderError(Exception):
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, retryable: bool = False):
         super().__init__(code)
         self.code = code
+        self.retryable = retryable
 
 
 class GitHubTeamsClient(Protocol):

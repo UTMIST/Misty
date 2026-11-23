@@ -276,3 +276,10 @@ file is positively identified; cleanup permanently deletes it. An unconfirmed
 ## Managed GitHub team mappings (#405)
 
 See [the HTTP contract, adoption policy and recovery guide](../../team-tracking/docs/GITHUB-TEAMS.md).
+
+GitHub team errors carry `code`, `uncertain`, and `retryable` in `detail`.
+`retryable:true` with `uncertain:false` attests that provisioning failed before
+creation or was definitively rejected; missing/invalid metadata never authorizes
+a retry. Auxiliary organization/child-list 404s use `inspection_unavailable`,
+not the numeric-team `not_found` code. See the directory
+[recovery contract](../../team-tracking/docs/GITHUB-TEAMS.md#uncertain-operations-and-recovery).

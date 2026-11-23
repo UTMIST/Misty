@@ -275,7 +275,11 @@ class StorageAdapter(Protocol):
     def reserve_github_mapping(
         self, team_id: UUID, organization_id: int, *, actor: str, github_team_id: int | None = None
     ) -> GitHubTeamMapping:
-        """Atomically reserve once before provision/adoption. Existing rows conflict."""
+        """Reserve before provision/adoption; atomically reclaim only retryable rows."""
+        ...
+
+    def mark_github_mapping_retryable(self, team_id: UUID, version: int, *, actor: str) -> None:
+        """Mark only this pending, unbound attempt retryable after definitive rejection."""
         ...
 
     def finish_github_mapping(

@@ -662,8 +662,25 @@ class InMemoryStorageAdapter:
             team = self.get_team(team_id)
             if not team or not team.active:
                 raise ValueError("unknown_or_inactive_team")
-            if team_id in self._github_mappings:
-                raise ValueError("mapping_exists")
+            old = self._github_mappings.get(team_id)
+            if old is not None:
+                if (
+                    old.status != "retryable"
+                    or old.organization_id != organization_id
+                    or old.github_team_id is not None
+                    or github_team_id is not None
+                ):
+                    raise ValueError("mapping_exists")
+                item = old.model_copy(
+                    update={
+                        "status": "pending",
+                        "version": old.version + 1,
+                        "updated_at": _now(),
+                        "updated_by": actor,
+                    }
+                )
+                self._github_mappings[team_id] = item
+                return item.model_copy()
             if github_team_id is not None and any(
                 m.organization_id == organization_id and m.github_team_id == github_team_id
                 for m in self._github_mappings.values()
@@ -682,10 +699,32 @@ class InMemoryStorageAdapter:
             self._github_mappings[team_id] = item
             return item.model_copy()
 
+    def mark_github_mapping_retryable(self, team_id, version, *, actor):
+        with self._github_lock:
+            item = self._github_mappings.get(team_id)
+            if (
+                item
+                and item.status == "pending"
+                and item.github_team_id is None
+                and item.version == version
+            ):
+                self._github_mappings[team_id] = item.model_copy(
+                    update={
+                        "status": "retryable",
+                        "version": item.version + 1,
+                        "updated_at": _now(),
+                        "updated_by": actor,
+                    }
+                )
+
     def finish_github_mapping(self, team_id, organization_id, github_team_id, slug, name, *, actor):
         with self._github_lock:
             item = self.get_github_mapping(team_id)
-            if not item or item.status == "inactive" or item.organization_id != organization_id:
+            if (
+                not item
+                or item.status not in ("pending", "active")
+                or item.organization_id != organization_id
+            ):
                 raise ValueError("inactive_or_unknown_mapping")
             if item.github_team_id not in (None, github_team_id):
                 raise ValueError("identity_change_forbidden")

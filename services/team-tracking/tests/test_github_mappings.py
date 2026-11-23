@@ -109,3 +109,42 @@ def test_plain_team_write_scope_cannot_manage_github(setup):
     )
     assert response.status_code == 403
     assert store.get_github_mapping(team.id) is None and provider.calls == 0
+
+
+def test_definitive_prewrite_failure_can_retry(setup):
+    client, store, provider, team = setup
+    path = f"/teams/{team.id}/github-team"
+    headers = {"X-API-Key": "test-key"}
+
+    def rejected(*args, **kwargs):
+        raise GitHubProviderError("provider_unavailable", retryable=True)
+
+    provider.provision = rejected
+    assert client.post(path, headers=headers, json={"mode": "provision"}).status_code == 502
+    assert store.get_github_mapping(team.id).status == "retryable"
+    provider.provision = lambda *args, **kwargs: dict(
+        organization_id=123, team_id=77, slug="created", name="Created"
+    )
+    response = client.post(path, headers=headers, json={"mode": "provision"})
+    assert response.status_code == 200 and response.json()["status"] == "active"
+
+
+@pytest.mark.parametrize("operation", ["read", "reconcile"])
+def test_auxiliary_lookup_failure_keeps_mapping_active(setup, operation):
+    client, store, provider, team = setup
+    store.reserve_github_mapping(team.id, 123, actor="admin", github_team_id=77)
+    store.finish_github_mapping(team.id, 123, 77, "old", "Old", actor="admin")
+
+    def unavailable(*args):
+        raise GitHubProviderError("inspection_unavailable")
+
+    provider.inspect = unavailable
+    path = f"/teams/{team.id}/github-team"
+    headers = {"X-API-Key": "test-key"}
+    response = (
+        client.get(path, headers=headers)
+        if operation == "read"
+        else client.post(path + "/reconcile", headers=headers)
+    )
+    assert response.status_code == 502
+    assert store.get_github_mapping(team.id).status == "active"

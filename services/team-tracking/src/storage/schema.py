@@ -212,5 +212,7 @@ team_github_mappings = Table(
     Column("created_by", Text, nullable=False),
     Column("updated_by", Text, nullable=False),
     UniqueConstraint("organization_id", "github_team_id", name="uq_github_team_identity"),
-    CheckConstraint("status IN ('pending', 'active', 'inactive')", name="ck_github_mapping_status"),
+    CheckConstraint(
+        "status IN ('pending', 'retryable', 'active', 'inactive')", name="ck_github_mapping_status"
+    ),
 )

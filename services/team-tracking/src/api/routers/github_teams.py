@@ -39,10 +39,12 @@ def _finish(storage, provider, team_id, data, actor):
         raise HTTPException(409, str(e)) from None
 
 
-def _provider_call(fn):
+def _provider_call(fn, *, on_retryable=None):
     try:
         return fn()
     except GitHubProviderError as e:
+        if e.retryable and on_retryable is not None:
+            on_retryable()
         if e.code in (
             "organization_mismatch",
             "nested_team_unsupported",
@@ -98,7 +100,7 @@ def create_mapping(
         raise HTTPException(503, "GitHub team management not configured")
     # Reservation prevents concurrent create calls and survives lost responses/restarts.
     try:
-        storage.reserve_github_mapping(
+        reservation = storage.reserve_github_mapping(
             team_id, provider.organization_id, actor=actor, github_team_id=body.github_team_id
         )
     except ValueError as e:
@@ -108,7 +110,12 @@ def create_mapping(
             provider.inspect(body.github_team_id)
             if body.mode == "adopt"
             else provider.provision(team_id, reconcile_only=False)
+        ),
+        on_retryable=(
+            lambda: storage.mark_github_mapping_retryable(team_id, reservation.version, actor=actor)
         )
+        if body.mode == "provision"
+        else None,
     )
     return _finish(storage, provider, team_id, data, actor)
 
@@ -123,7 +130,7 @@ def reconcile(
 ):
     _team(storage, team_id)
     item = storage.get_github_mapping(team_id)
-    if not item or item.status == "inactive":
+    if not item or item.status not in ("pending", "active"):
         raise HTTPException(409, "no live mapping")
     try:
         data = (

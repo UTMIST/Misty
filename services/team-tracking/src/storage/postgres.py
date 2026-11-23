@@ -892,6 +892,39 @@ class PostgresStorageAdapter:
                 ).first()
                 if not team or not team.active:
                     raise ValueError("unknown_or_inactive_team")
+                old = (
+                    conn.execute(
+                        select(team_github_mappings)
+                        .where(team_github_mappings.c.team_id == team_id)
+                        .with_for_update()
+                    )
+                    .mappings()
+                    .first()
+                )
+                if old is not None:
+                    if (
+                        old["status"] != "retryable"
+                        or int(old["organization_id"]) != organization_id
+                        or old["github_team_id"] is not None
+                        or github_team_id is not None
+                    ):
+                        raise ValueError("mapping_exists")
+                    row = (
+                        conn.execute(
+                            update(team_github_mappings)
+                            .where(team_github_mappings.c.team_id == team_id)
+                            .values(
+                                status="pending",
+                                version=old["version"] + 1,
+                                updated_at=_now(),
+                                updated_by=actor,
+                            )
+                            .returning(team_github_mappings)
+                        )
+                        .mappings()
+                        .one()
+                    )
+                    return GitHubTeamMapping(**row)
                 row = (
                     conn.execute(
                         insert(team_github_mappings)
@@ -910,6 +943,21 @@ class PostgresStorageAdapter:
                 return GitHubTeamMapping(**row)
         except IntegrityError:
             raise ValueError("mapping_exists") from None
+
+    def mark_github_mapping_retryable(self, team_id, version, *, actor):
+        with self._engine.begin() as conn:
+            conn.execute(
+                update(team_github_mappings)
+                .where(
+                    team_github_mappings.c.team_id == team_id,
+                    team_github_mappings.c.status == "pending",
+                    team_github_mappings.c.github_team_id.is_(None),
+                    team_github_mappings.c.version == version,
+                )
+                .values(
+                    status="retryable", version=version + 1, updated_at=_now(), updated_by=actor
+                )
+            )
 
     def finish_github_mapping(self, team_id, organization_id, github_team_id, slug, name, *, actor):
         try:
@@ -930,7 +978,7 @@ class PostgresStorageAdapter:
                     not team
                     or not team.active
                     or not row
-                    or row["status"] == "inactive"
+                    or row["status"] not in ("pending", "active")
                     or int(row["organization_id"]) != organization_id
                 ):
                     raise ValueError("inactive_or_unknown_mapping")

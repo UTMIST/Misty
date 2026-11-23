@@ -24,3 +24,21 @@ def check_github_mapping_contract(store):
     store.update_team(a.id, TeamUpdate(active=True), actor="admin")
     assert store.get_github_mapping(a.id).status == "inactive"
     assert store.deactivate_github_mapping(b.id, actor="admin").status == "inactive"
+
+    retry = store.create_team(TeamCreate(slug="retry", label="Retry"), actor="test")
+    first = store.reserve_github_mapping(retry.id, 123, actor="first")
+    store.mark_github_mapping_retryable(retry.id, first.version, actor="first")
+    released = store.get_github_mapping(retry.id)
+    assert released.status == "retryable"
+    with pytest.raises(ValueError, match="inactive_or_unknown_mapping"):
+        store.finish_github_mapping(retry.id, 123, 99, "retry", "Retry", actor="stale")
+    second = store.reserve_github_mapping(retry.id, 123, actor="second")
+    assert second.status == "pending" and second.version > released.version
+    assert second.created_by == "first" and second.updated_by == "second"
+    store.mark_github_mapping_retryable(retry.id, first.version, actor="stale")
+    assert store.get_github_mapping(retry.id).status == "pending"
+    with pytest.raises(ValueError, match="mapping_exists"):
+        store.reserve_github_mapping(retry.id, 123, actor="concurrent")
+    store.finish_github_mapping(retry.id, 123, 99, "retry", "Retry", actor="second")
+    store.mark_github_mapping_retryable(retry.id, second.version, actor="stale")
+    assert store.get_github_mapping(retry.id).status == "active"

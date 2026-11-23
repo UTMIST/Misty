@@ -82,3 +82,15 @@ those remains an explicit staging rollout task in the runbook.
 | `services/team-tracking/tests/test_github_mappings.py` | Verify lifecycle, authorization, provider failures, or shared adapter behavior using offline fakes/disposable databases. |
 | `services/team-tracking/tests/test_postgres_adapter.py` | Verify lifecycle, authorization, provider failures, or shared adapter behavior using offline fakes/disposable databases. |
 | `uv.lock` | Lock the production HTTP/encryption dependency explicitly required by this issue. |
+
+## Review recovery fixes
+
+The existing contract, HTTP client/router, provider and adapter files now preserve
+explicit no-write retryability end to end. Both adapters retain audited retryable
+reservations with version-checked release and atomic reclaim. Schema and the
+unreleased migration 012 accept the new state. Connector inspection distinguishes
+auxiliary lookup failures from missing numeric team IDs. The shared adapter
+contract, mapping API tests, connector provider tests and new
+`services/team-tracking/tests/test_github_teams_client.py` cover definitive,
+ambiguous, stale-attempt and auxiliary-404 behavior. The focused runbook,
+connector API reference and agent invariant document these recovery semantics.

@@ -53,15 +53,25 @@ explicitly approve its reconciliation policy before it is enabled.
 ## Uncertain operations and recovery
 
 The directory reserves a `pending` row before the first provider operation. A
-second POST cannot create again. Provision uses a deterministic `misty-<uuid hex>`
-name and description marker. A lost response is recovered by read-only lookup
+second POST cannot create again while an operation remains pending. Provision
+uses a deterministic `misty-<uuid hex>` name and description marker. A lost response is recovered by read-only lookup
 of that exact identity and marker. Reconciliation never sends a second create.
 A mismatched marker is a conflict, not permission to adopt the existing team.
 Renames of known IDs refresh metadata without changing identity. If creation
 may still be running and no team can be found, leave it pending and inspect
 GitHub/API activity; do not delete the reservation to retry. A rejected adoption
 retains its reserved ID and can be reconciled after the external problem is
-resolved, or deactivated. Provider errors are static codes without vendor bodies.
+resolved, or deactivated.
+
+A definitive preflight failure or rejected create changes an unbound reservation
+to `retryable`; POST can atomically claim it again, preserving creation audit
+fields and advancing the version. Late failures cannot release a newer attempt.
+Only an explicit connector error with `retryable:true` and `uncertain:false`
+permits this transition. Transport failures, malformed responses, and ambiguous
+writes keep the reservation pending. Reconciliation remains read-only and does
+not claim retryable rows. Only a 404 from the numeric team lookup reports a
+missing team; organization/child-list failures leave the mapping unchanged.
+Provider errors are static codes without vendor bodies.
 Provider requests have timeouts and a 64 KiB response cap; there are no automatic
 write retries. Keep the admin token outside logs and content-fetch tools.
 

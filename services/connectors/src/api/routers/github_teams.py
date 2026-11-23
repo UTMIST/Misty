@@ -22,7 +22,9 @@ def _call(fn):
             "name_conflict",
         ):
             code = 409
-        raise HTTPException(code, detail={"code": e.code, "uncertain": e.uncertain}) from None
+        raise HTTPException(
+            code, detail={"code": e.code, "uncertain": e.uncertain, "retryable": e.retryable}
+        ) from None
 
 
 @router.get("/{team_id}", response_model=GitHubTeam)

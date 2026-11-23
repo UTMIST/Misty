@@ -81,11 +81,21 @@ class GitHubTeamsProvider:
             raise GitHubTeamError("invalid_provider_response") from None
 
     def inspect(self, team_id: int) -> GitHubTeam:
-        self._org()
+        try:
+            self._org()
+        except GitHubTeamError as e:
+            if e.code == "not_found":
+                raise GitHubTeamError("inspection_unavailable") from None
+            raise
         model = self._model(self._request("GET", f"/teams/{team_id}"))
-        children = self._request(
-            "GET", f"/orgs/{self.organization}/teams/{model.slug}/teams", params={"per_page": 1}
-        )
+        try:
+            children = self._request(
+                "GET", f"/orgs/{self.organization}/teams/{model.slug}/teams", params={"per_page": 1}
+            )
+        except GitHubTeamError as e:
+            if e.code == "not_found":
+                raise GitHubTeamError("inspection_unavailable") from None
+            raise
         if children:
             raise GitHubTeamError("nested_team_unsupported")
         # Enterprise team-sync returns current IdP mappings. A 404 can also mean
@@ -105,7 +115,10 @@ class GitHubTeamsProvider:
         return model
 
     def provision(self, team_id: UUID, *, reconcile_only: bool) -> GitHubTeam:
-        self._org()
+        try:
+            self._org()
+        except GitHubTeamError as e:
+            raise GitHubTeamError(e.code, retryable=True) from None
         # Stable generated slug + description bind recovery to the exact Misty UUID.
         slug = f"misty-{team_id.hex}"
         marker = f"Misty managed team {team_id}"
@@ -113,18 +126,23 @@ class GitHubTeamsProvider:
             existing = self._request("GET", f"/orgs/{self.organization}/teams/{slug}")
         except GitHubTeamError as e:
             if e.code != "not_found":
-                raise
+                raise GitHubTeamError(e.code, retryable=True) from None
         else:
             if existing.get("description") != marker:
                 raise GitHubTeamError("name_conflict")
             return self.inspect(existing["id"])
         if reconcile_only:
             raise GitHubTeamError("creation_unresolved", uncertain=True)
-        data = self._request(
-            "POST",
-            f"/orgs/{self.organization}/teams",
-            json={"name": slug, "description": marker, "privacy": "closed", "repo_names": []},
-        )
+        try:
+            data = self._request(
+                "POST",
+                f"/orgs/{self.organization}/teams",
+                json={"name": slug, "description": marker, "privacy": "closed", "repo_names": []},
+            )
+        except GitHubTeamError as e:
+            raise GitHubTeamError(
+                e.code, uncertain=e.uncertain, retryable=not e.uncertain
+            ) from None
         try:
             return self.inspect(data["id"])
         except (KeyError, GitHubTeamError):

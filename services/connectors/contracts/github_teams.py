@@ -22,10 +22,11 @@ class ProvisionTeam(BaseModel):
 
 
 class GitHubTeamError(Exception):
-    def __init__(self, code: str, *, uncertain: bool = False):
+    def __init__(self, code: str, *, uncertain: bool = False, retryable: bool = False):
         super().__init__(code)
         self.code = code
         self.uncertain = uncertain
+        self.retryable = retryable
 
 
 class GitHubTeams(Protocol):

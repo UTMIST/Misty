@@ -35,7 +35,8 @@ def upgrade():
         sa.Column("updated_by", sa.Text, nullable=False),
         sa.UniqueConstraint("organization_id", "github_team_id", name="uq_github_team_identity"),
         sa.CheckConstraint(
-            "status IN ('pending', 'active', 'inactive')", name="ck_github_mapping_status"
+            "status IN ('pending', 'retryable', 'active', 'inactive')",
+            name="ck_github_mapping_status",
         ),
     )
 

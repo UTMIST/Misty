@@ -19,20 +19,25 @@ class HttpGitHubTeamsClient:
             r = self.client.request(
                 method, self.url + path, headers={"X-API-Key": self.key}, **kwargs
             )
-            if r.status_code == 404:
-                raise GitHubProviderError("not_found")
-            if r.status_code == 409:
+            if r.status_code >= 400:
                 detail = r.json().get("detail", {})
                 code = detail.get("code") if isinstance(detail, dict) else None
-                if code in (
+                if code not in (
+                    "not_found",
+                    "not_configured",
                     "organization_mismatch",
                     "nested_team_unsupported",
                     "idp_managed_team_unsupported",
                     "name_conflict",
+                    "inspection_unavailable",
                 ):
-                    raise GitHubProviderError(code)
-            if r.status_code >= 400:
-                raise GitHubProviderError("provider_unavailable")
+                    code = "provider_unavailable"
+                retryable = (
+                    isinstance(detail, dict)
+                    and detail.get("retryable") is True
+                    and detail.get("uncertain") is False
+                )
+                raise GitHubProviderError(code, retryable=retryable)
             data = r.json()
             if data["organization_id"] != self.organization_id or not isinstance(
                 data["team_id"], int
