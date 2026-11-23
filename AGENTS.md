@@ -12,7 +12,7 @@ services/documentation-system/  docs catalog                   — 8001, Postgre
 services/llm/                   chat / embedding proxy         — 8002, no DB
 services/verification/          email one-time codes           — 8003, Postgres 5434 ⚠
 services/meeting/               live transcription → minutes   — 8004, no DB, STATEFUL
-services/connectors/            Google/GitHub fetch, discovery, meeting-Doc writer — 8005, no DB
+services/connectors/            Google/GitHub fetch, discovery, meeting-Doc writer — 8005, optional encrypted OAuth vault
 services/gateway/               public external API            — 8006, Postgres 5435
 packages/auth/                  platform_auth — shared API-key auth library
 discord-bot/                    Discord frontend + web playground
@@ -59,7 +59,7 @@ Violating any of these is a bug even if tests pass.
 - **`down_revision` points at the current head**, and `downgrade()` must actually reverse `upgrade()` except for the explicit retirement exceptions below. Verify the round trip: `upgrade head` → `downgrade -1` → `upgrade head`.
 - **Retirement exceptions:** documentation-system [009](services/documentation-system/docs/DEPLOYMENT.md#registry-cleanup-migration-009) and team-tracking [011](services/team-tracking/docs/DEPLOYMENT.md#registry-cleanup-migration-011) intentionally preserve their data cleanup on downgrade; only the registry entries are restored. Follow the linked backup/recovery guidance and verify the round trip with existing rows, checking that unrelated data survives. These exceptions do not waive reversibility for other migrations.
 - **New columns on existing tables are nullable or have a `server_default`**, mirrored in the Pydantic model and both adapters.
-- Current heads: team-tracking **011**, documentation-system **018**, verification **001**, gateway **002**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
+- Current heads: team-tracking **012**, documentation-system **018**, verification **001**, gateway **002**. `llm` and `meeting` have no schema. Optional GitHub OAuth in connectors initializes its own encrypted SQLite vault (no Alembic). (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
 
 ### Configuration
 
@@ -132,6 +132,7 @@ Run what CI runs for that service — `.github/workflows/ci.yml` is authoritativ
 - **Discovery imports; refresh repairs.** `doc-discover` enumerates new Google file identities over authenticated HTTP, with a persistent checkpoint volume and `discover` connector scope. It never grants access from listing metadata, reactivates retired docs, or refetches existing docs. See [discovery operations](services/documentation-system/docs/DISCOVERY.md); keep #292 refresh separate.
 - **documentation-system's Swagger is at `/swagger`, not `/docs`** — `/docs` is a real docs-resource router on that service.
 - **Source refresh guards do not expire.** Time-budget exhaustion releases the runner's exact guard even if API work is still finishing; completed documents keep their progress, and disconnected refresh requests stop between documents. Other crashes or uncertain failures can retain the guard. Confirm its process and API work have stopped before manual release; see the [recovery runbook](services/documentation-system/docs/DEPLOYMENT.md#recovery-credential-rotation-and-disablerollback). A new container must not bypass the guard or reuse the old ID.
+- **Verified GitHub identity is separate from legacy `github` identifiers.** Require a fresh successful connector linking status plus the matching directory identity before synchronization. OAuth tokens and state live only in the connector-owned encrypted vault; never expose them as tools or put them in directory records. See [GitHub linking](services/connectors/docs/GITHUB-LINKING.md).
 - **`npm run dev:web` occupies port 8001 and 5433**, and needs Docker. Stop documentation-system first.
 - **Q&A workers must stay isolated (`meeting`).** Use the injected `qna_runner`, not `asyncio.to_thread`: audio ingestion and `/stop` share the default executor, so slow Q&A can otherwise starve them and lose the audio tail. Admission capacity stays occupied until the actual worker finishes, including after request cancellation.
 - **Completed meeting persistence is text-only.** `meeting` hands off before cleanup; documentation-system owns `meeting_records` and immutable canonical Google IDs. Use the connector OAuth writer for meeting content/ACL fetches. Never retry an ambiguous create blindly or rewrite an existing Doc body. Removal fences every known Google identity and purges all catalog aliases under the ingestion locks; ordinary ingest can leave `record.doc_id` unset. See [the persistence runbook](services/documentation-system/docs/DEPLOYMENT.md#meeting-record-persistence).
