@@ -191,7 +191,8 @@ Read a fresh MEMBER-only roster. If the read fails, finish as failed.
 If the roster has any address outside the desired set, finish as failed.
 For each missing desired address, require an eligible rejection and every linked
   person's primary address in the fresh roster. If either is absent, finish as failed.
-Finish as synced with a primary-account sign-in note only if covered aliases are missing.
+Finish as synced.
+Add the primary-account sign-in note only if a covered alias is still missing.
 ```
 
 **Concurrency.** `sync_team` holds a per-team lock from reading membership until it records the result, so a slow sync started before a membership ended can't finish after a newer sync and re-add the person. The lock is `StorageAdapter.lock_team_google_group`: in Postgres a session-level `pg_advisory_lock(hashtext('google-group:<team id>'))` on a dedicated connection, which covers every API worker *and* the separately running `team-tracking-groups sync` cron. A process-local lock in front of it keeps queued syncs in one process from each holding a pool connection while they wait. Both processes must use a direct database endpoint: [Neon's transaction pooler does not support session advisory locks](https://neon.com/docs/connect/connection-pooling#connection-pooling-in-transaction-mode). SQLAlchemy's application connection pool is compatible because the dedicated connection remains checked out for the whole sync.
