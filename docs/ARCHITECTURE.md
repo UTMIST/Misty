@@ -17,6 +17,13 @@ see each service's own `docs/ARCHITECTURE.md`:
   playground), and its own "Consumer" section below sketches how it sits atop the
   directory.
 
+Repository-wide GitHub Q&A is planned separately from the current single-file
+fetcher. See [GitHub retrieval design notes](GITHUB-RETRIEVAL.md) for #333's
+three-phase implementation plan: public UTMIST repositories, individual GitHub
+authentication with private replies, then team-based channel answers. It covers
+service ownership, access rules, and work packages for future issues. These
+features are not implemented yet.
+
 ## The services
 
 The platform has **seven backend services**: six internal domain/processing
