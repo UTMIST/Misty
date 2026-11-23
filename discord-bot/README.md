@@ -939,3 +939,22 @@ so a concurrent edit after the final check can still race with the write.
 This adds `/team update` to normal command registration; deployment's existing
 pre-deploy registration handles it. Existing `memberships:read/write` scopes
 suffice. Deploy #360's resolver before this dependent change.
+
+### Verified GitHub accounts (#406)
+
+`/github action:connect|reconnect|confirm|status|unlink` uses the existing linked-member
+command authorization in Discord and the web playground. Responses are private.
+Connect/reconnect opens GitHub's browser authorization, not a personal App
+installation. Finish with `action:confirm code:<browser completion code>` from
+the same Misty session; the callback alone does not verify a link. Reconnect verifies the same numeric account ID; unlink first to
+switch accounts. Legacy GitHub username identifiers remain unverified.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `GITHUB_CONNECTOR_BASE_URL` | unset | Internal connector URL for verified linking |
+| `GITHUB_CONNECTOR_API_KEY` | unset | Secret key with `github-links:read` and `github-links:write` |
+
+Without both settings, the command reports linking is disabled. Register commands
+through the normal deployment step after rollout. This command is deliberately
+not a helper/model tool. See [OAuth operations](../services/connectors/docs/GITHUB-LINKING.md)
+for scopes, callback/volume setup and recovery. No private repository Q&A is added.

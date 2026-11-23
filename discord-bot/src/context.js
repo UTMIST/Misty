@@ -1,3 +1,4 @@
+import { createGithubLinkClient } from './clients/githubLinkClient.js';
 import { createDirectoryClient } from './clients/directoryClient.js';
 import { createDocClient } from './clients/docClient.js';
 import { createVerificationClient } from './clients/verificationClient.js';
@@ -61,6 +62,10 @@ export function createAppContext(config, { poster, notify, postMeetingLink } = {
     baseUrl: config.verificationBaseUrl,
     apiKey: config.verificationApiKey,
   });
+  const githubLinks = createGithubLinkClient({
+    baseUrl: config.githubConnectorBaseUrl,
+    apiKey: config.githubConnectorApiKey,
+  });
   const linkService = createLinkService({ directory, verification });
   const emailService = createEmailService({ directory, verification });
   const seedService = createSeedService({ directory });
@@ -109,6 +114,7 @@ export function createAppContext(config, { poster, notify, postMeetingLink } = {
     docClient,
     verification,
     linkService,
+    githubLinks,
     emailService,
     seedService,
     promotionService,

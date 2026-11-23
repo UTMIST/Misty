@@ -39,7 +39,12 @@ export function loadConfig(env = process.env) {
   if (missing.length > 0) {
     throw new Error(`Missing required env vars: ${missing.join(', ')}`);
   }
+  if (Boolean(env.GITHUB_CONNECTOR_BASE_URL) !== Boolean(env.GITHUB_CONNECTOR_API_KEY)) {
+    throw new Error('Set both GITHUB_CONNECTOR_BASE_URL and GITHUB_CONNECTOR_API_KEY');
+  }
   return {
+    githubConnectorBaseUrl: env.GITHUB_CONNECTOR_BASE_URL?.replace(/\/+$/, ''),
+    githubConnectorApiKey: env.GITHUB_CONNECTOR_API_KEY,
     discordToken: env.DISCORD_TOKEN,
     discordClientId: env.DISCORD_CLIENT_ID,
     // Optional dedicated testing guild. Commands always register globally (prod);
