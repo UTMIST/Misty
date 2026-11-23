@@ -35,6 +35,21 @@ class GitHubLinking:
     ):
         self.vault, self.provider, self.directory, self.clock = vault, provider, directory, clock
 
+    def _cleanup_directory(self, tx, person_id, row):
+        # The durable terminal state is also a cleanup marker for older vault rows.
+        if row.get("status") in ("unlinked", "revoked", "reauthorization_required") and row.get(
+            "directory_cleanup_pending", True
+        ):
+            self.directory.unlink(person_id)
+            row["directory_cleanup_pending"] = False
+            tx.set("person:" + person_id, row)
+
+    def _retry_directory_cleanup(self, person_id):
+        with self.vault.transaction() as tx:
+            row = tx.get("person:" + person_id)
+            if row:
+                self._cleanup_directory(tx, person_id, row)
+
     def start(self, person_id, discord_id):
         self.directory.validate(person_id, discord_id)
         state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
@@ -47,6 +62,7 @@ class GitHubLinking:
             if len(tx.keys("state:")) >= 1000:
                 raise GitHubOAuthError("link_capacity_reached")
             current = tx.get("person:" + person_id) or {"generation": 0}
+            self._cleanup_directory(tx, person_id, current)
             tx.set(
                 state_key(state),
                 dict(
@@ -73,6 +89,7 @@ class GitHubLinking:
         profile = self.provider.profile(tokens["access_token"])
         with self.vault.transaction() as tx:
             old = tx.get("person:" + person_id) or {"generation": 0}
+            self._cleanup_directory(tx, person_id, old)
             if old["generation"] != pending["generation"]:
                 raise GitHubOAuthError("link_binding_changed")
             if old.get("github_id") and old["github_id"] != profile["github_id"]:
@@ -146,6 +163,8 @@ class GitHubLinking:
         with self.vault.transaction() as tx:
             row = tx.get("person:" + person_id)
             if not row or row.get("status") != "linked":
+                if row:
+                    self._cleanup_directory(tx, person_id, row)
                 return {"status": "unlinked" if not row else row.get("status", "unlinked")}
             if row["discord_id"] != discord_id:
                 raise GitHubOAuthError("directory_binding_rejected")
@@ -166,11 +185,12 @@ class GitHubLinking:
                     discord_id=discord_id,
                     generation=row["generation"] + 1,
                     status="reauthorization_required",
+                    directory_cleanup_pending=True,
                 )
                 failure = True
             tx.set("person:" + person_id, row)
         if failure:
-            self.directory.unlink(person_id)
+            self._retry_directory_cleanup(person_id)
             return {"status": "reauthorization_required"}
         return {"status": "linked", "github_id": row["github_id"], "login": row["login"]}
 
@@ -179,10 +199,19 @@ class GitHubLinking:
         # Clear locally before remote cleanup, including all pending callbacks.
         with self.vault.transaction() as tx:
             old = tx.get("person:" + person_id) or {"generation": 0}
-            tx.set("person:" + person_id, dict(generation=old["generation"] + 1, status="unlinked"))
-        self.directory.unlink(person_id)
-        if old.get("access_token"):
-            self.provider.revoke(old["access_token"])
+            tx.set(
+                "person:" + person_id,
+                dict(
+                    generation=old["generation"] + 1,
+                    status="unlinked",
+                    directory_cleanup_pending=True,
+                ),
+            )
+        try:
+            self._retry_directory_cleanup(person_id)
+        finally:
+            if old.get("access_token"):
+                self.provider.revoke(old["access_token"])
         return {"status": "unlinked"}
 
     def revoked(self, github_id):
@@ -194,9 +223,12 @@ class GitHubLinking:
                     tx.set(
                         key,
                         dict(
-                            github_id=github_id, generation=row["generation"] + 1, status="revoked"
+                            github_id=github_id,
+                            generation=row["generation"] + 1,
+                            status="revoked",
+                            directory_cleanup_pending=True,
                         ),
                     )
                     affected.append(key.split(":", 1)[1])
         for person_id in affected:
-            self.directory.unlink(person_id)
+            self._retry_directory_cleanup(person_id)

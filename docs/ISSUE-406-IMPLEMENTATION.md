@@ -98,3 +98,14 @@ those remains an explicit staging rollout task in the runbook.
 | `services/team-tracking/tests/test_github_identity.py` | Verify lifecycle, authorization, provider failures, or shared adapter behavior using offline fakes/disposable databases. |
 | `services/team-tracking/tests/test_postgres_adapter.py` | Verify lifecycle, authorization, provider failures, or shared adapter behavior using offline fakes/disposable databases. |
 | `uv.lock` | Lock the production HTTP/encryption dependency explicitly required by this issue. |
+
+## Review recovery fixes
+
+`services/connectors/src/github_linking.py` keeps durable pending directory
+cleanup in terminal vault records and retries it under the vault lock from
+status/reconnect, including after restart. Cleanup cannot erase a subsequently
+confirmed link. `services/connectors/tests/test_github_linking.py` covers outages
+for unlink, refresh failure and revocation, recovery by status/reconnect, account
+transfer and delayed cleanup. `services/connectors/docs/GITHUB-LINKING.md`
+records these semantics and corrects the connector directory key to require
+`identifiers:read` for its Discord reverse lookup.

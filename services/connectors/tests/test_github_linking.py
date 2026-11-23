@@ -43,6 +43,7 @@ class Provider:
 
 class Directory:
     valid = True
+    cleanup_failure = False
     records = {}
 
     def __init__(self):
@@ -53,9 +54,16 @@ class Directory:
             raise GitHubOAuthError("directory_binding_rejected")
 
     def verify(self, person_id, discord_id, **profile):
+        if any(
+            owner != person_id and existing["github_id"] == profile["github_id"]
+            for owner, existing in self.records.items()
+        ):
+            raise GitHubOAuthError("github_account_already_linked")
         self.records[person_id] = profile
 
     def unlink(self, person_id):
+        if self.cleanup_failure:
+            raise GitHubOAuthError("directory_unavailable")
         self.records.pop(person_id, None)
 
 
@@ -161,3 +169,63 @@ def test_confirmation_requires_original_discord_and_browser_code(system):
     with pytest.raises(GitHubOAuthError, match="confirmation_expired"):
         service.confirm(person, "123", result["confirmation_code"])
     assert not directory.records
+
+
+@pytest.mark.parametrize("operation", ["unlink", "refresh", "revocation"])
+@pytest.mark.parametrize("recovery", ["status", "reconnect"])
+def test_directory_cleanup_survives_outage_and_restart(system, operation, recovery):
+    service, provider, directory, now, path, key = system
+    person = str(uuid4())
+    link(service, person)
+    directory.cleanup_failure = True
+    with pytest.raises(GitHubOAuthError, match="directory_unavailable"):
+        if operation == "unlink":
+            service.unlink(person, "123")
+        elif operation == "refresh":
+            now[0] = 1990
+            provider.failure = True
+            service.status(person, "123")
+        else:
+            service.revoked(77)
+    assert person in directory.records
+    with service.vault.transaction() as tx:
+        row = tx.get("person:" + person)
+        assert row["directory_cleanup_pending"] is True
+        assert "access_token" not in row and "refresh_token" not in row
+    restarted = GitHubLinking(
+        GitHubVault(str(path), key), provider, directory, clock=lambda: now[0]
+    )
+    # A terminal status must not silently claim cleanup succeeded during the outage.
+    with pytest.raises(GitHubOAuthError, match="directory_unavailable"):
+        restarted.status(person, "123")
+    directory.cleanup_failure = False
+    provider.failure = False
+    if recovery == "status":
+        result = restarted.status(person, "123")
+        assert (
+            result["status"]
+            == {
+                "unlink": "unlinked",
+                "refresh": "reauthorization_required",
+                "revocation": "revoked",
+            }[operation]
+        )
+    else:
+        begin(restarted, person)
+    assert person not in directory.records
+    with restarted.vault.transaction() as tx:
+        assert tx.get("person:" + person)["directory_cleanup_pending"] is False
+    # Explicit unlink releases the GitHub identity for a different directory person.
+    if operation == "unlink":
+        assert link(restarted, str(uuid4()))["status"] == "linked"
+
+
+def test_delayed_cleanup_does_not_delete_a_new_confirmed_link(system):
+    service, provider, directory, now, path, key = system
+    person = str(uuid4())
+    link(service, person)
+    service.unlink(person, "123")
+    link(service, person)
+    service._retry_directory_cleanup(person)
+    assert directory.records[person]["github_id"] == 77
+    assert service.status(person, "123")["status"] == "linked"

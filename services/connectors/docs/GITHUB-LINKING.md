@@ -76,7 +76,7 @@ access logs on this listener: authorization codes/state must not enter request
 logs. Audit middleware records paths, never queries, bodies or provider content.
 Provider failures use static messages. Disable HTTP debug/trace logging.
 
-The connector's directory key needs `people:read`, `github-identities:verify`;
+The connector's directory key needs `identifiers:read`, `github-identities:verify`;
 read consumers can use `github-identities:read` separately. The bot's connector
 key needs only `github-links:read` and `github-links:write`. The App uses its
 registered permissions, not broad OAuth `repo` scopes. Browser linking and `/user`
@@ -98,8 +98,10 @@ infer identity from username/email or fall back to another person's credentials.
 Directory and vault writes are separate transactions. If a crash or directory
 outage leaves stale directory identity, consumers must require a fresh successful
 connector status and matching directory identity before acting; a directory row
-alone is not proof of a live authorization. Reconnect/status reconciles after
-recovery. Never issue a second OAuth exchange for a consumed callback. A remote
+alone is not proof of a live authorization. Terminal vault states retain a durable directory-cleanup marker until the
+idempotent directory DELETE succeeds. Status and reconnect retry this cleanup
+under the vault lock before returning a terminal status or starting a new link.
+A cleanup outage returns an error, preserving the marker across restarts. Never issue a second OAuth exchange for a consumed callback. A remote
 revocation failure after unlink does not restore local credentials; revoke the
 App authorization through GitHub settings if needed. Removed credentials are
 not retained in plaintext as a retry queue.
