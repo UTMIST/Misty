@@ -159,7 +159,7 @@ def test_text_request_and_legacy_response_through_real_sdk(monkeypatch, thinking
 
 @pytest.mark.parametrize("model", [_MODEL, "gpt-6.2-sol"])
 def test_parallel_tool_roundtrip_preserves_state_results_and_phase(monkeypatch, capsys, model):
-    first = _response(
+    tool_call_response = _response(
         [
             _STATE,
             _message("Checking", "commentary"),
@@ -168,8 +168,8 @@ def test_parallel_tool_roundtrip_preserves_state_results_and_phase(monkeypatch, 
         ],
         model=model,
     )
-    second = _response([_message("Done", "final_answer")], model=model)
-    with _boundary([first, second]) as (provider, calls):
+    final_response = _response([_message("Done", "final_answer")], model=model)
+    with _boundary([tool_call_response, final_response]) as (provider, calls):
         client = _route(provider, monkeypatch)
         body = {
             "model": model,
