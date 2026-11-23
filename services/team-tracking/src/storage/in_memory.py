@@ -1,4 +1,5 @@
 from contracts.github_identity import VerifiedGitHubIdentity
+from contracts.github import GitHubTeamMapping
 import threading
 from datetime import date, datetime, timezone
 from uuid import UUID, uuid4
@@ -72,6 +73,8 @@ class InMemoryStorageAdapter:
     ) -> None:
         self._github_identities = {}
         self._github_identity_lock = threading.RLock()
+        self._github_mappings = {}
+        self._github_lock = threading.RLock()
         self._people: dict[UUID, Person] = {}
         self._teams: dict[UUID, Team] = {}
         self._role_kinds: dict[str, RoleKind] = {rk.id: rk for rk in (seed_role_kinds or [])}
@@ -223,6 +226,8 @@ class InMemoryStorageAdapter:
         data["updated_by"] = actor
         updated = Team(**data)
         self._teams[team_id] = updated
+        if not updated.active:
+            self.deactivate_github_mapping(team_id, actor=actor)
         return updated
 
     # --- Role kinds ---
@@ -644,6 +649,124 @@ class InMemoryStorageAdapter:
     def lock_team_google_group(self, team_id: UUID) -> threading.Lock:
         # One process is all that can share this storage, so one lock suffices.
         return self._google_group_lock
+
+    def get_github_mapping(self, team_id):
+        with self._github_lock:
+            item = self._github_mappings.get(team_id)
+            if item is None:
+                return None
+            team = self.get_team(team_id)
+            if not team or not team.active:
+                return item.model_copy(update={"status": "inactive"})
+            return item.model_copy()
+
+    def reserve_github_mapping(self, team_id, organization_id, *, actor, github_team_id=None):
+        with self._github_lock:
+            team = self.get_team(team_id)
+            if not team or not team.active:
+                raise ValueError("unknown_or_inactive_team")
+            old = self._github_mappings.get(team_id)
+            if old is not None:
+                if (
+                    old.status != "retryable"
+                    or old.organization_id != organization_id
+                    or old.github_team_id is not None
+                    or github_team_id is not None
+                ):
+                    raise ValueError("mapping_exists")
+                item = old.model_copy(
+                    update={
+                        "status": "pending",
+                        "version": old.version + 1,
+                        "updated_at": _now(),
+                        "updated_by": actor,
+                    }
+                )
+                self._github_mappings[team_id] = item
+                return item.model_copy()
+            if github_team_id is not None and any(
+                m.organization_id == organization_id and m.github_team_id == github_team_id
+                for m in self._github_mappings.values()
+            ):
+                raise ValueError("mapping_exists")
+            now = _now()
+            item = GitHubTeamMapping(
+                team_id=team_id,
+                organization_id=organization_id,
+                github_team_id=github_team_id,
+                created_at=now,
+                updated_at=now,
+                created_by=actor,
+                updated_by=actor,
+            )
+            self._github_mappings[team_id] = item
+            return item.model_copy()
+
+    def mark_github_mapping_retryable(self, team_id, version, *, actor):
+        with self._github_lock:
+            item = self._github_mappings.get(team_id)
+            if (
+                item
+                and item.status == "pending"
+                and item.github_team_id is None
+                and item.version == version
+            ):
+                self._github_mappings[team_id] = item.model_copy(
+                    update={
+                        "status": "retryable",
+                        "version": item.version + 1,
+                        "updated_at": _now(),
+                        "updated_by": actor,
+                    }
+                )
+
+    def finish_github_mapping(self, team_id, organization_id, github_team_id, slug, name, *, actor):
+        with self._github_lock:
+            item = self.get_github_mapping(team_id)
+            if (
+                not item
+                or item.status not in ("pending", "active")
+                or item.organization_id != organization_id
+            ):
+                raise ValueError("inactive_or_unknown_mapping")
+            if item.github_team_id not in (None, github_team_id):
+                raise ValueError("identity_change_forbidden")
+            if any(
+                m.team_id != team_id
+                and m.organization_id == organization_id
+                and m.github_team_id == github_team_id
+                for m in self._github_mappings.values()
+            ):
+                raise ValueError("github_team_already_mapped")
+            item = item.model_copy(
+                update={
+                    "github_team_id": github_team_id,
+                    "slug": slug,
+                    "name": name,
+                    "status": "active",
+                    "version": item.version + 1,
+                    "updated_at": _now(),
+                    "updated_by": actor,
+                }
+            )
+            self._github_mappings[team_id] = item
+            return item.model_copy()
+
+    def deactivate_github_mapping(self, team_id, *, actor):
+        with self._github_lock:
+            item = self._github_mappings.get(team_id)
+            if item is None:
+                return None
+            item = item.model_copy(
+                update={
+                    "status": "inactive",
+                    "version": item.version + 1,
+                    "updated_at": _now(),
+                    "updated_by": actor,
+                }
+            )
+            self._github_mappings[team_id] = item
+            return item.model_copy()
 
     def get_verified_github(self, person_id):
         with self._github_identity_lock:

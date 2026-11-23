@@ -283,3 +283,14 @@ The directory has two storage adapters, scoped API-key auth, identity mapping, a
 The verified account API stores numeric IDs separately from legacy username
 identifiers. Credentials remain connector-owned. See the
 [contract and deployment guide](../connectors/docs/GITHUB-LINKING.md).
+
+### Managed GitHub team mapping (#405)
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `CONNECTORS_URL` | empty | Internal connector URL; enables GitHub team mapping with the following settings |
+| `CONNECTORS_API_KEY` | empty | Secret connector key with `github-teams:read` and `github-teams:manage` |
+| `GITHUB_ORGANIZATION_ID` | `0` | Stable UTMIST organization ID; zero disables management |
+
+See [the admin contract and recovery guide](docs/GITHUB-TEAMS.md).
+This foundation does not synchronize memberships or grant repository access.

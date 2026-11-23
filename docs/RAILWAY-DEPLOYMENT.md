@@ -647,3 +647,9 @@ volume, provision its encryption key and GitHub App OAuth credentials, then enab
 linking and register `/github`. Expose only the fixed callback and signed webhook
 paths through an HTTPS ingress with query logging disabled. Keep one worker.
 See [the complete setup and recovery guide](../services/connectors/docs/GITHUB-LINKING.md).
+
+## Managed GitHub team mapping (#405)
+
+Apply directory migration 012, then configure the separate connector/admin keys
+and stable organization ID before enabling management. See the
+[service runbook](../services/team-tracking/docs/GITHUB-TEAMS.md).

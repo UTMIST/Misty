@@ -310,3 +310,15 @@ from content retrieval and does not expose tokens over HTTP.
 
 Enabled linking fails at boot for incomplete configuration. See
 [GitHub OAuth operations](docs/GITHUB-LINKING.md).
+
+### Managed GitHub teams (#405)
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `GITHUB_ADMIN_TOKEN` | empty | Separate secret administrative credential with organization Members write access |
+| `GITHUB_ORGANIZATION_ID` | `0` | Stable UTMIST organization ID checked before provider operations |
+| `GITHUB_ORGANIZATION` | `UTMIST` | Organization login; stable ID remains authoritative |
+
+Team routes require `github-teams:read` / `github-teams:manage`, independently
+of content-fetch scopes. Both token and organization ID must be set together.
+See [the cross-service contract](../team-tracking/docs/GITHUB-TEAMS.md).

@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     github_oauth_vault_key: SecretStr = SecretStr("")
     github_directory_url: str = ""
     github_directory_api_key: SecretStr = SecretStr("")
+
+    github_admin_token: SecretStr = SecretStr("")
+    github_organization_id: int = Field(default=0, ge=0)
+    github_organization: str = "UTMIST"
     max_content_chars: int = Field(default=1_200_000, gt=0)
     # Metadata precheck plus a streamed byte cap for uploaded Drive media and
     # GitHub files. Missing/stale Drive size cannot bypass the stream cap.
@@ -118,6 +122,12 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
             raise RuntimeError("Invalid GitHub vault encryption key") from None
         if not settings.github_oauth_vault_path.startswith("/"):
             raise RuntimeError("GitHub vault path must be absolute on a persistent volume")
+
+    fields = [settings.github_admin_token.get_secret_value(), settings.github_organization_id]
+    if any(fields) and not all(fields):
+        raise RuntimeError(
+            "GitHub team management requires GITHUB_ADMIN_TOKEN and GITHUB_ORGANIZATION_ID"
+        )
     if settings.connectors_env == "local":
         return
     insecure: list[str] = []

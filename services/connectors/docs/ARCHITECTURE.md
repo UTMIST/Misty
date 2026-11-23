@@ -208,3 +208,7 @@ and [writer API](API.md#meeting-writer-googledocs).
 ## Verified GitHub accounts (#406)
 
 See [the identity/OAuth contract and operations guide](GITHUB-LINKING.md).
+
+## Managed GitHub team mappings (#405)
+
+See [the HTTP contract, adoption policy and recovery guide](../../team-tracking/docs/GITHUB-TEAMS.md).

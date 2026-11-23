@@ -12,10 +12,9 @@ runbook. This working branch keeps the pieces together for end-to-end review;
 local commits group the implementation by responsibility. It has not been pushed,
 deployed, or used to modify GitHub accounts.
 
-Both independent worktrees start at staging `52246a4` and allocate directory
-revision 012 from head 011. Whichever merges second must rebase, renumber its
-migration, and point `down_revision` at the new head before integration. Do not
-merge two different revisions named 012.
+The worktrees originally started independently at `52246a4`. The local
+account-linking branch now includes the managed-team branch: mapping migration
+012 follows 011, and verified-identity migration 013 follows 012.
 
 ## Verification
 
@@ -88,7 +87,7 @@ those remains an explicit staging rollout task in the runbook.
 | `services/team-tracking/docs/API.md` | Keep the corresponding API, architecture, deployment, or contributor documentation accurate and link the focused runbook. |
 | `services/team-tracking/docs/ARCHITECTURE.md` | Keep the corresponding API, architecture, deployment, or contributor documentation accurate and link the focused runbook. |
 | `services/team-tracking/docs/DEPLOYMENT.md` | Keep the corresponding API, architecture, deployment, or contributor documentation accurate and link the focused runbook. |
-| `services/team-tracking/migrations/versions/012_verified_github_identities.py` | Create the new directory-owned identity table with a reversible migration. |
+| `services/team-tracking/migrations/versions/013_verified_github_identities.py` | Create the new directory-owned identity table with a reversible migration. |
 | `services/team-tracking/src/api/app.py` | Register the new scoped routes or authenticated command. |
 | `services/team-tracking/src/api/routers/github_identity.py` | Expose the scoped service contract with domain-to-HTTP error mapping and trusted actor handling. |
 | `services/team-tracking/src/storage/in_memory.py` | Implement identical identity/retirement semantics in both directory adapters. |
@@ -109,3 +108,14 @@ for unlink, refresh failure and revocation, recovery by status/reconnect, accoun
 transfer and delayed cleanup. `services/connectors/docs/GITHUB-LINKING.md`
 records these semantics and corrects the connector directory key to require
 `identifiers:read` for its Discord reverse lookup.
+
+## Local branch integration
+
+The integration commit merges the fixed #405 branch into #406. Shared config,
+wiring, contracts, schema, adapters and PostgreSQL tests retain both independent
+GitHub capabilities; shared references, configuration examples and deployment
+notes link both runbooks. The identity migration is renamed to revision 013 with
+012 as its parent, and the agent head/runbooks reflect the linear history.
+`uv.lock` retains both branches' declared HTTP/encryption dependencies. These
+shared-file resolutions are necessary to keep the combined checkout runnable;
+there are no changes to the bot implementation in this merge.

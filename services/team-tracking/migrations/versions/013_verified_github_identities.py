@@ -1,7 +1,7 @@
 """Verified GitHub account IDs, separate from unverified legacy identifiers.
 
-Revision ID: 012
-Revises: 011
+Revision ID: 013
+Revises: 012
 Create Date: 2026-11-22
 """
 
@@ -9,8 +9,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
 
-revision = "012"
-down_revision = "011"
+revision = "013"
+down_revision = "012"
 branch_labels = None
 depends_on = None
 

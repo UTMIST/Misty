@@ -1,5 +1,7 @@
 from contracts.github_identity import VerifiedGitHubIdentity
 from src.storage.schema import verified_github_identities
+from contracts.github import GitHubTeamMapping
+from src.storage.schema import team_github_mappings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
@@ -339,6 +341,17 @@ class PostgresStorageAdapter:
                 row = conn.execute(
                     update(teams).where(teams.c.id == team_id).values(**patch).returning(teams)
                 ).one_or_none()
+                if row is not None and patch.get("active") is False:
+                    conn.execute(
+                        update(team_github_mappings)
+                        .where(team_github_mappings.c.team_id == team_id)
+                        .values(
+                            status="inactive",
+                            version=team_github_mappings.c.version + 1,
+                            updated_at=_now(),
+                            updated_by=actor,
+                        )
+                    )
         except IntegrityError as e:
             raise ValueError(f"slug conflict on update: {patch.get('slug')}") from e
         return _team_row_to_model(row) if row else None
@@ -854,6 +867,168 @@ class PostgresStorageAdapter:
                 )
         except Exception:
             pass  # best-effort; DB blips must not fail the auth path
+
+    def get_github_mapping(self, team_id):
+        with self._engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(team_github_mappings, teams.c.active.label("team_active"))
+                    .join(teams)
+                    .where(team_github_mappings.c.team_id == team_id)
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                return None
+            data = dict(row)
+            if not data.pop("team_active"):
+                data["status"] = "inactive"
+            return GitHubTeamMapping(**data)
+
+    def reserve_github_mapping(self, team_id, organization_id, *, actor, github_team_id=None):
+        try:
+            with self._engine.begin() as conn:
+                team = conn.execute(
+                    select(teams.c.active).where(teams.c.id == team_id).with_for_update()
+                ).first()
+                if not team or not team.active:
+                    raise ValueError("unknown_or_inactive_team")
+                old = (
+                    conn.execute(
+                        select(team_github_mappings)
+                        .where(team_github_mappings.c.team_id == team_id)
+                        .with_for_update()
+                    )
+                    .mappings()
+                    .first()
+                )
+                if old is not None:
+                    if (
+                        old["status"] != "retryable"
+                        or int(old["organization_id"]) != organization_id
+                        or old["github_team_id"] is not None
+                        or github_team_id is not None
+                    ):
+                        raise ValueError("mapping_exists")
+                    row = (
+                        conn.execute(
+                            update(team_github_mappings)
+                            .where(team_github_mappings.c.team_id == team_id)
+                            .values(
+                                status="pending",
+                                version=old["version"] + 1,
+                                updated_at=_now(),
+                                updated_by=actor,
+                            )
+                            .returning(team_github_mappings)
+                        )
+                        .mappings()
+                        .one()
+                    )
+                    return GitHubTeamMapping(**row)
+                row = (
+                    conn.execute(
+                        insert(team_github_mappings)
+                        .values(
+                            team_id=team_id,
+                            organization_id=str(organization_id),
+                            github_team_id=str(github_team_id) if github_team_id else None,
+                            created_by=actor,
+                            updated_by=actor,
+                        )
+                        .returning(team_github_mappings)
+                    )
+                    .mappings()
+                    .one()
+                )
+                return GitHubTeamMapping(**row)
+        except IntegrityError:
+            raise ValueError("mapping_exists") from None
+
+    def mark_github_mapping_retryable(self, team_id, version, *, actor):
+        with self._engine.begin() as conn:
+            conn.execute(
+                update(team_github_mappings)
+                .where(
+                    team_github_mappings.c.team_id == team_id,
+                    team_github_mappings.c.status == "pending",
+                    team_github_mappings.c.github_team_id.is_(None),
+                    team_github_mappings.c.version == version,
+                )
+                .values(
+                    status="retryable", version=version + 1, updated_at=_now(), updated_by=actor
+                )
+            )
+
+    def finish_github_mapping(self, team_id, organization_id, github_team_id, slug, name, *, actor):
+        try:
+            with self._engine.begin() as conn:
+                team = conn.execute(
+                    select(teams.c.active).where(teams.c.id == team_id).with_for_update()
+                ).first()
+                row = (
+                    conn.execute(
+                        select(team_github_mappings)
+                        .where(team_github_mappings.c.team_id == team_id)
+                        .with_for_update()
+                    )
+                    .mappings()
+                    .first()
+                )
+                if (
+                    not team
+                    or not team.active
+                    or not row
+                    or row["status"] not in ("pending", "active")
+                    or int(row["organization_id"]) != organization_id
+                ):
+                    raise ValueError("inactive_or_unknown_mapping")
+                if (
+                    row["github_team_id"] is not None
+                    and int(row["github_team_id"]) != github_team_id
+                ):
+                    raise ValueError("identity_change_forbidden")
+                result = (
+                    conn.execute(
+                        update(team_github_mappings)
+                        .where(team_github_mappings.c.team_id == team_id)
+                        .values(
+                            github_team_id=str(github_team_id),
+                            slug=slug,
+                            name=name,
+                            status="active",
+                            version=team_github_mappings.c.version + 1,
+                            updated_at=_now(),
+                            updated_by=actor,
+                        )
+                        .returning(team_github_mappings)
+                    )
+                    .mappings()
+                    .one()
+                )
+                return GitHubTeamMapping(**result)
+        except IntegrityError:
+            raise ValueError("github_team_already_mapped") from None
+
+    def deactivate_github_mapping(self, team_id, *, actor):
+        with self._engine.begin() as conn:
+            row = (
+                conn.execute(
+                    update(team_github_mappings)
+                    .where(team_github_mappings.c.team_id == team_id)
+                    .values(
+                        status="inactive",
+                        version=team_github_mappings.c.version + 1,
+                        updated_at=_now(),
+                        updated_by=actor,
+                    )
+                    .returning(team_github_mappings)
+                )
+                .mappings()
+                .first()
+            )
+            return GitHubTeamMapping(**row) if row else None
 
     def get_verified_github(self, person_id):
         with self._engine.connect() as conn:

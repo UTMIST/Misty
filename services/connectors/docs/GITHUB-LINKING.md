@@ -50,10 +50,10 @@ The verification scope must not be granted to the ordinary bot/model consumer.
 
 ## Deployment and credential store decision
 
-Apply directory migration 012 before enabling connectors, then configure the
-bot. These independent issue branches both initially allocate revision 012:
-whichever migration merges second must be renumbered and point to the new head.
-Never deploy two different revisions with the same ID.
+The account-linking branch includes the managed-team branch. Apply directory
+migration 012 (team mappings), then 013 (verified identities) before enabling
+connectors and configuring the bot. The linear migration history contains no
+duplicate revision IDs.
 
 The chosen store is SQLite owned exclusively by connectors on its own volume,
 with Fernet authenticated encryption of each JSON record (tokens and PKCE state).

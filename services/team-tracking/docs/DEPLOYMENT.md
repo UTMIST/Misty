@@ -370,3 +370,7 @@ Use a database backup to recover the previous assignments.
 ## Verified GitHub accounts (#406)
 
 See [the identity/OAuth contract and operations guide](../../connectors/docs/GITHUB-LINKING.md).
+
+## Managed GitHub team mappings (#405)
+
+See [the HTTP contract, adoption policy and recovery guide](GITHUB-TEAMS.md).

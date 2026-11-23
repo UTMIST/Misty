@@ -24,6 +24,7 @@ dependencies = [
     "argon2-cffi>=23.1",
     "google-auth[requests]>=2.30",
     "platform-auth",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]

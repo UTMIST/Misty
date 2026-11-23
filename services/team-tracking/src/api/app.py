@@ -43,6 +43,9 @@ def create_app() -> FastAPI:
 
     app.include_router(github_identity.router)
     app.include_router(teams.router)
+    from src.api.routers import github_teams
+
+    app.include_router(github_teams.router)
     app.include_router(role_kinds.router)
     app.include_router(memberships.router)
     app.include_router(providers.router)

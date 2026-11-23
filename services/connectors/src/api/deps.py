@@ -57,6 +57,19 @@ def get_discovery_source() -> DiscoverySource:
 
 
 @lru_cache(maxsize=1)
+def get_github_teams():
+    from src.sources.github_teams import GitHubTeamsProvider
+
+    s = get_settings()
+    return GitHubTeamsProvider(
+        token=s.github_admin_token.get_secret_value(),
+        organization_id=s.github_organization_id,
+        organization=s.github_organization,
+        timeout=s.request_timeout_s,
+    )
+
+
+@lru_cache(maxsize=1)
 def get_github_linking():
     from fastapi import HTTPException
 
