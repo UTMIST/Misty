@@ -69,7 +69,7 @@ No dependency update or database migration is needed.
 
 The adapter uses OpenAI Responses with `store=false`, no automatic retries, and
 the existing SDK timeout. `thinking=true` maps to medium effort; false maps to low
-because GPT-6.1 Sol cannot disable reasoning. Both consume the caller's output
+on both Sol models. Both settings consume the caller's output
 budget, whose OpenAI minimum is 16 tokens. Validate answer completeness and latency
 with representative bot and minutes prompts during the deployment smoke check.
 
@@ -81,6 +81,23 @@ together and restores the AWS region/credentials. There is no automatic fallback
 Use the [provider architecture](ARCHITECTURE.md#openai-chat-default) for response
 compatibility and [contribution checks](CONTRIBUTING.md#changing-tool-use-transport)
 for SDK/transport changes.
+
+### Comparing Sol models in staging
+
+With `LLM_PROVIDER=openai`, send the same staging `POST /chat` requests once with
+`"model": "gpt-6.1-sol"` and once with `"model": "gpt-6.2-sol"`. Use a fresh
+conversation per model and send the same model ID on every tool round. Hold the
+prompt, tool definitions, reasoning effort and output budget constant.
+
+Use a representative Discord lookup and a meeting transcript with known
+decisions, owners and action items. Check tool selection and arguments, the
+grounded final answer, and minutes accuracy. Compare elapsed time and sum input
+and output token usage across all rounds per completed task. Use the provider's
+billing data for actual cost, including cache discounts.
+
+To make the selected model the default, set `LLM_MODEL` on the target
+environment's llm service and redeploy. To roll back to 6.1, set
+`LLM_MODEL=gpt-6.1-sol` and redeploy. Start fresh tool conversations after either change.
 
 ## Consumer keys
 
@@ -149,7 +166,7 @@ Note that **a key rotation is not covered by a code rollback** — `CONSUMER_KEY
 
 - Every `/chat` call bills against the selected provider account. There is no per-consumer budget or rate limit in this service — a runaway consumer is bounded only by the provider's own throttling, which surfaces as **429**.
 - `max_tokens` defaults to 16,000 and is capped at 64,000 by the request model. A consumer that doesn't set it gets the default, not the cap.
-- `THINKING_DEFAULT=true` selects medium reasoning on GPT-6.1 Sol. `"thinking": false` lowers effort to low; reasoning remains enabled. Reasoning tokens count toward output usage and `max_tokens`.
+- `THINKING_DEFAULT=true` selects medium reasoning on both Sol models. `"thinking": false` selects low. Reasoning tokens count toward output usage and `max_tokens`.
 - Requests that fail validation (422) or authorization (403) are rejected before the provider is called and cost nothing.
 
 ## Troubleshooting
