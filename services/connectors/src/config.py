@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     # MAX_CONTENT_CHARS (1,000,000) so this guard never trips first — the
     # catalog's clamp must remain the authoritative one, or its "content
     # truncated" warning can never fire.
+    github_admin_token: SecretStr = SecretStr("")
+    github_organization_id: int = Field(default=0, ge=0)
+    github_organization: str = "UTMIST"
     max_content_chars: int = Field(default=1_200_000, gt=0)
     # Metadata precheck plus a streamed byte cap for uploaded Drive media and
     # GitHub files. Missing/stale Drive size cannot bypass the stream cap.
@@ -76,6 +79,11 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
     # The optional OAuth writer may be disabled, but an enabled writer must
     # have complete configuration outside local (checked below).
     settings = settings or get_settings()
+    fields = [settings.github_admin_token.get_secret_value(), settings.github_organization_id]
+    if any(fields) and not all(fields):
+        raise RuntimeError(
+            "GitHub team management requires GITHUB_ADMIN_TOKEN and GITHUB_ORGANIZATION_ID"
+        )
     if settings.connectors_env == "local":
         return
     insecure: list[str] = []
