@@ -54,3 +54,26 @@ def get_discovery_source() -> DiscoverySource:
         max_file_bytes=settings.max_file_bytes,
         request_timeout_s=settings.request_timeout_s,
     )
+
+
+@lru_cache(maxsize=1)
+def get_github_linking():
+    from fastapi import HTTPException
+
+    from src.github_linking import GitHubLinking
+    from src.sources.github_directory import HttpGitHubDirectory
+    from src.sources.github_oauth import GitHubOAuth
+    from src.sources.github_vault import GitHubVault
+
+    s = get_settings()
+    if not s.github_oauth_enabled:
+        raise HTTPException(503, "GitHub linking not configured")
+    return GitHubLinking(
+        GitHubVault(s.github_oauth_vault_path, s.github_oauth_vault_key.get_secret_value()),
+        GitHubOAuth(
+            client_id=s.github_oauth_client_id.get_secret_value(),
+            client_secret=s.github_oauth_client_secret.get_secret_value(),
+            callback_url=s.github_oauth_callback_url,
+        ),
+        HttpGitHubDirectory(s.github_directory_url, s.github_directory_api_key.get_secret_value()),
+    )

@@ -272,3 +272,7 @@ Drive 404 cannot prove deletion, even for the writer: status returns
 `inaccessible`, preserving catalog content for admin investigation. A trashed
 file is positively identified; cleanup permanently deletes it. An unconfirmed
 404 during deletion returns `delete_unconfirmed`, keeping cleanup pending.
+
+## Verified GitHub accounts (#406)
+
+See [the identity/OAuth contract and operations guide](GITHUB-LINKING.md).

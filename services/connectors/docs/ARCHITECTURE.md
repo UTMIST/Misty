@@ -175,7 +175,7 @@ editor API responses/exports remain exempt. `MediaIoBaseDownload` alone would
 not provide this protection: an ignored Range request can make it buffer the
 whole response before returning a chunk.
 
-## Why no persistence
+## Why no source-content persistence
 
 Caching fetched content here would mean deciding invalidation policy on behalf of every consumer, and holding document text in a service whose entire authorization story is "the caller already checked." Consumers that want a cache own it — documentation-system stores its own content snapshots, with its own staleness rules.
 
@@ -187,7 +187,7 @@ SDK enters the API layer. Each request lists one page of direct shares or one
 folder's immediate children. Format classification uses the same `EXTRACTORS` and
 `text/*` fallback as fetch. Discovery returns no ACLs or content and cannot authorize
 a member. The external catalog runner owns traversal, checkpoints and scheduling;
-connectors remains stateless. See [API](API.md#post-discovergoogle) and the
+the discovery path remains stateless. See [API](API.md#post-discovergoogle) and the
 [discovery runbook](../../documentation-system/docs/DISCOVERY.md).
 
 ## Meeting writes
@@ -204,3 +204,7 @@ in-memory HTML upload converted in the same Drive create operation; no empty Doc
 is published and retries never replace a human-edited body. See the
 [durable record architecture](../../../docs/MEETING-RECORDING.md#durable-records)
 and [writer API](API.md#meeting-writer-googledocs).
+
+## Verified GitHub accounts (#406)
+
+See [the identity/OAuth contract and operations guide](GITHUB-LINKING.md).

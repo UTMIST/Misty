@@ -24,7 +24,7 @@ uv sync --extra dev
 uv run pytest          # confirm the environment works — no Docker, no network
 ```
 
-No database, no Docker, no Google credentials needed. The whole suite runs against fakes.
+No external database, no Docker, no Google credentials needed; GitHub OAuth tests use temporary encrypted SQLite vaults. The whole suite runs against fakes.
 
 ## Walkthrough: add an extractor for a new MIME type
 
@@ -115,7 +115,7 @@ Say you're adding YouTube.
 
 ## Testing
 
-Single-mode. No Docker, no database, no network, no Google credentials:
+Single-mode. No Docker, no external database, no network, no Google credentials:
 
 ```bash
 uv run pytest
