@@ -310,3 +310,7 @@ Explicitly out of scope:
 - No standalone web admin UI — the [Discord bot](../../../discord-bot/README.md#commands) already supports officer edits through this API.
 - No content storage — the directory is identity and structure only.
 - No pagination — list endpoints return all matching rows; add limit/offset if the roster grows past a few hundred.
+
+## Verified GitHub accounts (#406)
+
+See [the identity/OAuth contract and operations guide](../../connectors/docs/GITHUB-LINKING.md).

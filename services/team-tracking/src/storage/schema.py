@@ -194,3 +194,14 @@ team_google_groups = Table(
         name="ck_team_google_groups_status",
     ),
 )
+
+
+verified_github_identities = Table(
+    "verified_github_identities",
+    metadata,
+    Column("person_id", UUID(as_uuid=True), ForeignKey("people.id"), primary_key=True),
+    Column("github_id", Text, nullable=True, unique=True),
+    Column("login", Text, nullable=True),
+    Column("verified_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_by", Text, nullable=False),
+)

@@ -28,6 +28,9 @@ from contracts.types import (
 )
 
 
+from contracts.github_identity import VerifiedGitHubIdentity
+
+
 class StorageAdapter(Protocol):
     """Stable internal contract between the API and the persistence layer.
 
@@ -263,4 +266,20 @@ class StorageAdapter(Protocol):
     def lock_team_google_group(self, team_id: UUID) -> AbstractContextManager[None]:
         """Exclusive per-team lock, held across one whole sync. Must exclude
         every process sharing this storage (API workers and the CLI cron)."""
+        ...
+
+    def get_verified_github(self, person_id: UUID) -> VerifiedGitHubIdentity | None:
+        """Verified links only, never legacy username identifiers; inactive people return None."""
+        ...
+
+    def set_verified_github(
+        self, person_id: UUID, discord_id: str, github_id: int, login: str, *, actor: str
+    ) -> VerifiedGitHubIdentity:
+        """Active person and current Discord link must match. Duplicate accounts conflict.
+        Reconnect may update login for same numeric ID; switching requires unlink first.
+        """
+        ...
+
+    def unlink_verified_github(self, person_id: UUID, *, actor: str) -> None:
+        """Clear verified identity but retain its audited row; credentials are connector-owned."""
         ...

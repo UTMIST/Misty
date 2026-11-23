@@ -1,3 +1,4 @@
+from contracts.github_identity import VerifiedGitHubIdentity
 import threading
 from datetime import date, datetime, timezone
 from uuid import UUID, uuid4
@@ -69,6 +70,8 @@ class InMemoryStorageAdapter:
         seed_role_kinds: list[RoleKind] | None = None,
         seed_providers: list[Provider] | None = None,
     ) -> None:
+        self._github_identities = {}
+        self._github_identity_lock = threading.RLock()
         self._people: dict[UUID, Person] = {}
         self._teams: dict[UUID, Team] = {}
         self._role_kinds: dict[str, RoleKind] = {rk.id: rk for rk in (seed_role_kinds or [])}
@@ -641,3 +644,50 @@ class InMemoryStorageAdapter:
     def lock_team_google_group(self, team_id: UUID) -> threading.Lock:
         # One process is all that can share this storage, so one lock suffices.
         return self._google_group_lock
+
+    def get_verified_github(self, person_id):
+        with self._github_identity_lock:
+            p = self.get_person(person_id)
+            item = self._github_identities.get(person_id)
+            return (
+                item.model_copy()
+                if item and item.github_id is not None and p and p.active
+                else None
+            )
+
+    def set_verified_github(self, person_id, discord_id, github_id, login, *, actor):
+        with self._github_identity_lock:
+            p = self.get_person(person_id)
+            owner = self.get_person_by_identifier("discord", discord_id)
+            if not p or not p.active or not owner or owner.id != person_id:
+                raise ValueError("identity_binding_changed")
+            existing = self._github_identities.get(person_id)
+            if existing and existing.github_id is not None and existing.github_id != github_id:
+                raise ValueError("unlink_before_switching_accounts")
+            if any(
+                i.github_id == github_id and i.person_id != person_id
+                for i in self._github_identities.values()
+            ):
+                raise ValueError("github_account_already_linked")
+            item = VerifiedGitHubIdentity(
+                person_id=person_id,
+                github_id=github_id,
+                login=login,
+                verified_at=_now(),
+                updated_by=actor,
+            )
+            self._github_identities[person_id] = item
+            return item.model_copy()
+
+    def unlink_verified_github(self, person_id, *, actor):
+        with self._github_identity_lock:
+            item = self._github_identities.get(person_id)
+            if item is not None:
+                self._github_identities[person_id] = item.model_copy(
+                    update={
+                        "github_id": None,
+                        "login": None,
+                        "verified_at": _now(),
+                        "updated_by": actor,
+                    }
+                )

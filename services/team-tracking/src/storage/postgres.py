@@ -1,3 +1,5 @@
+from contracts.github_identity import VerifiedGitHubIdentity
+from src.storage.schema import verified_github_identities
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
@@ -852,3 +854,78 @@ class PostgresStorageAdapter:
                 )
         except Exception:
             pass  # best-effort; DB blips must not fail the auth path
+
+    def get_verified_github(self, person_id):
+        with self._engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(verified_github_identities)
+                    .join(people)
+                    .where(
+                        people.c.id == person_id,
+                        people.c.active.is_(True),
+                        verified_github_identities.c.github_id.is_not(None),
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            return VerifiedGitHubIdentity(**row) if row else None
+
+    def set_verified_github(self, person_id, discord_id, github_id, login, *, actor):
+        try:
+            with self._engine.begin() as conn:
+                person = conn.execute(
+                    select(people).where(people.c.id == person_id).with_for_update()
+                ).first()
+                owner = conn.execute(
+                    select(person_identifiers)
+                    .where(
+                        person_identifiers.c.provider == "discord",
+                        person_identifiers.c.external_id == discord_id,
+                    )
+                    .with_for_update()
+                ).first()
+                if not person or not person.active or not owner or owner.person_id != person_id:
+                    raise ValueError("identity_binding_changed")
+                old = conn.execute(
+                    select(verified_github_identities)
+                    .where(verified_github_identities.c.person_id == person_id)
+                    .with_for_update()
+                ).first()
+                if old and old.github_id is not None and int(old.github_id) != github_id:
+                    raise ValueError("unlink_before_switching_accounts")
+                row = (
+                    conn.execute(
+                        pg_insert(verified_github_identities)
+                        .values(
+                            person_id=person_id,
+                            github_id=str(github_id),
+                            login=login,
+                            updated_by=actor,
+                        )
+                        .on_conflict_do_update(
+                            index_elements=[verified_github_identities.c.person_id],
+                            set_={
+                                "github_id": str(github_id),
+                                "login": login,
+                                "verified_at": _now(),
+                                "updated_by": actor,
+                            },
+                        )
+                        .returning(verified_github_identities)
+                    )
+                    .mappings()
+                    .one()
+                )
+                return VerifiedGitHubIdentity(**row)
+        except IntegrityError:
+            raise ValueError("github_account_already_linked") from None
+
+    def unlink_verified_github(self, person_id, *, actor):
+        with self._engine.begin() as conn:
+            conn.execute(
+                update(verified_github_identities)
+                .where(verified_github_identities.c.person_id == person_id)
+                .values(github_id=None, login=None, verified_at=_now(), updated_by=actor)
+            )

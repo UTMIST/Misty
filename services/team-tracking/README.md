@@ -277,3 +277,9 @@ The directory has two storage adapters, scoped API-key auth, identity mapping, a
 - **General policy engine** — the API enforces key scopes and privileged-write rules; consumers derive their application permissions from directory identities and memberships.
 - **Standalone web admin UI** — admins can already manage people and teams through the [Discord commands](../../discord-bot/README.md#commands). Other admin clients must use the authenticated API.
 - **Pagination** — list endpoints return all matching rows. Adequate for UTMIST's roster size; add limit/offset when needed.
+
+### Verified GitHub identities (#406)
+
+The verified account API stores numeric IDs separately from legacy username
+identifiers. Credentials remain connector-owned. See the
+[contract and deployment guide](../connectors/docs/GITHUB-LINKING.md).
