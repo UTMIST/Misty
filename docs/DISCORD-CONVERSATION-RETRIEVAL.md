@@ -23,6 +23,10 @@ Proposed pilot, requiring requester and maintainer agreement:
 - Enroll named server text channels explicitly, with a visible member notice
   explaining search, model processing, answer copies, removal, and contact owner.
   Bot read access alone never enrolls a channel. Enrollment is guild-specific.
+  Only enroll a source whose current human audience can be enumerated and whose
+  every member has both `ViewChannel` and `ReadMessageHistory`; if that
+  condition cannot be established, use a restricted reply surface or reject
+  the source.
 - Retrieve from the exact enrolled channel where the question is asked. Public
   threads under enrolled parents require separate explicit enrollment; search
   and publish only within that exact thread. An automatically created helper
@@ -135,9 +139,13 @@ exchange supports it. A newer message is not automatically a superseding decisio
 
 1. Reject unsupported surfaces and missing enrollment before any search/model
    call. Refresh requester guild membership, roles, channel overrides, source
-   and destination, including a thread's parent. Require requester and bot
-   `ViewChannel` and `ReadMessageHistory`; verify bot send permissions for the
-   actual destination. Departure, failed lookup, or ambiguous state fails closed.
+   and destination, including a thread's parent. Resolve the current human
+   audience for the exact destination, including `@everyone`, role grants and
+   member overrides. Require every audience member and the requester to have
+   both `ViewChannel` and `ReadMessageHistory`; require the bot to have both
+   permissions and send access. If the audience cannot be enumerated or any
+   member lacks history access, use a restricted reply surface or fail closed.
+   Departure, failed lookup, or ambiguous state also fails closed.
 2. The pilot's audience rule is exact source equals destination. A parent is not
    equivalent to its thread. Private threads are rejected before retrieval,
    regardless of membership or `ManageThreads`. Public threads also require
@@ -156,11 +164,12 @@ exchange supports it. A newer message is not automatically a superseding decisio
    Do not stream source-derived tokens before this gate.
 
 Same-source publication avoids proving subset relationships between arbitrary
-channel audiences. It does not freeze future membership: anyone later allowed
-to read that channel may read its answer history, like other channel messages.
-Discord offers no atomic permission-check-and-send transaction. A change between
-the final check and send remains a race; rechecks and reply invalidation narrow
-it but cannot guarantee zero disclosure. This limitation needs explicit review.
+channel audiences only after the audience-wide history condition passes. It does
+not freeze future membership: anyone later allowed to read that channel may read
+its answer history, like other channel messages. Discord offers no atomic
+permission-check-and-send transaction. A change between the final check and send
+remains a race; rechecks and reply invalidation narrow it but cannot guarantee
+zero disclosure. This limitation needs explicit review.
 
 ## Data lifecycle and recovery
 
@@ -227,7 +236,7 @@ must not be disclosed. Requester validation may change this distribution.
 | Useful answers | At least 24/30 answers judged useful by requester and reviewer; report failures by category |
 | Citation support | Every factual decision claim supported by an accessible message; no invented links; distinguish proposals from agreement |
 | Conflict / missing context | Preserve both sides and dates; say evidence is incomplete rather than invent a decision or assert none exists |
-| Access isolation | Zero excluded source text, titles, links or existence hints in output or model input across guild/role/override/private-thread tests |
+| Access isolation | Zero excluded source text, titles, links or existence hints in output or model input across guild/role/override/private-thread tests, including a channel where one visible member lacks `ReadMessageHistory`; enrollment/publication must be rejected or use a restricted reply surface |
 | In-flight revocation | Change membership, enrollment, role override, parent access or message content during generation and between output parts; remaining evidence is withheld |
 | Injection / self-reinforcement | Fake instructions to search private channels, run commands or cite a past Misty answer do not affect scope or actions |
 | Recovery / removal | Exercise partial events, duplicate events, reconnect, crash around send, cleanup failure, answer expiry, 202/429 retries and inaccessible history |
