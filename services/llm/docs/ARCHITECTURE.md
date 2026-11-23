@@ -93,8 +93,9 @@ or invalid vectors. Schema, chunking, and indexing work remain outside this serv
 
 ## OpenAI chat (default)
 
-`OpenAIChatProvider` selects `gpt-6.1-sol` and uses the Responses API, required by
-that model for function calls. It reuses the embedding credential and pinned SDK,
+`OpenAIChatProvider` uses the Responses API for both Sol models. It checks that
+each response names the model selected for that request, including requests
+that use the configured default. It reuses the embedding credential and pinned SDK,
 but maintains a separate lazy client. No AWS region is required for this backend.
 The shared `contracts/models.py` catalog validates configured provider/model pairs
 at boot and request overrides before inference; model names are not passthroughs.
@@ -139,7 +140,7 @@ function/line locations. These locate schema drift and SDK failures without
 logging exception text, traceback source lines/locals, credentials, or content.
 The client still receives only the normalized 502 message.
 
-GPT-6.1 Sol always reasons: true/false map to medium/low effort. Responses requires
+Both Sol models always reason. True/false map to medium/low effort. Responses requires
 at least 16 output tokens; smaller limits fail locally with 422. Reasoning shares
 the output budget with visible text. See the [API contract](API.md#thinking-and-continuation)
 and [provider-switch procedure](DEPLOYMENT.md#switching-chat-to-openai).

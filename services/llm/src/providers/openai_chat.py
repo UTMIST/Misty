@@ -91,12 +91,18 @@ def _response_object(value, required: set[str]) -> dict:
     return value
 
 
-def _result(payload: dict, *, structured: bool, tool_names: set[str], used_ids: set[str]):
+def _result(
+    payload: dict,
+    *,
+    expected_model: str,
+    structured: bool,
+    tool_names: set[str],
+    used_ids: set[str],
+):
     _response_object(payload, {"id", "object", "created_at", "model", "status", "output", "usage"})
     if payload["object"] != "response" or payload.get("error") is not None:
         raise ValueError("invalid response")
-    model = text_value(payload["model"], nonempty=True)
-    if model not in OPENAI_MODELS:
+    if payload["model"] != expected_model:
         raise ValueError("unexpected response model")
     status = payload["status"]
     if status == "completed" and payload.get("incomplete_details") is None:
@@ -186,7 +192,7 @@ def _result(payload: dict, *, structured: bool, tool_names: set[str], used_ids: 
     input_tokens, output_tokens = usage_values(payload["usage"], "input_tokens", "output_tokens")
     return LLMResult(
         content=text,
-        model=model,
+        model=expected_model,
         stop_reason=stop_reason,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -230,7 +236,7 @@ class OpenAIChatProvider:
                 "model": model,
                 "input": _input(request),
                 "max_output_tokens": request.max_tokens,
-                # GPT-6.1 Sol always reasons. Low is its smallest supported effort.
+                # Both Sol models always reason. Low is their smallest supported effort.
                 "reasoning": {"effort": "medium" if request.thinking else "low"},
                 "store": False,
                 "include": ["reasoning.encrypted_content"],
@@ -266,7 +272,13 @@ class OpenAIChatProvider:
             stage = "response_decode"
             payload = decode_json_object(response.http_response.content)
             stage = "response_validation"
-            return _result(payload, structured=structured, tool_names=tool_names, used_ids=used_ids)
+            return _result(
+                payload,
+                expected_model=model,
+                structured=structured,
+                tool_names=tool_names,
+                used_ids=used_ids,
+            )
         except RateLimitError:
             raise ProviderRateLimited("OpenAI chat rate limited") from None
         except (APITimeoutError, APIConnectionError):

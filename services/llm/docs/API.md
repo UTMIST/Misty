@@ -45,9 +45,9 @@ Text sent upstream must be valid UTF-8; invalid text is rejected before a provid
 |---|---|---|---|
 | `messages` | `[{role, content}]` | — | Required, **min 1**. `role` is `user` or `assistant`; `content` is a non-empty string or a non-empty list of the structured blocks below. |
 | `system` | string \| null | `null` | Optional system prompt |
-| `model` | string \| null | `LLM_MODEL` | OpenAI: `gpt-6.1-sol`; Bedrock: `claude-sonnet-4-6` or `claude-opus-4-6` |
+| `model` | string \| null | `LLM_MODEL` | OpenAI accepts `gpt-6.1-sol` and `gpt-6.2-sol`. Bedrock accepts `claude-sonnet-4-6` and `claude-opus-4-6`. |
 | `max_tokens` | int | `16000` | `16`–`64000` for OpenAI; `1`–`64000` for Bedrock. Includes reasoning tokens. |
-| `thinking` | bool \| null | `THINKING_DEFAULT` | OpenAI: true → medium, false → low reasoning (GPT-6.1 Sol cannot disable reasoning). Bedrock: thinking on/off. `null` means "use the server default", which is **not** the same as `false`. |
+| `thinking` | bool \| null | `THINKING_DEFAULT` | Both OpenAI models use medium reasoning for `true` and low for `false`. Bedrock toggles thinking on/off. `null` uses the server default. |
 | `tools` | tool definitions \| null | `null` | Optional client-executed tools. Omitted, `null`, and `[]` mean no tool definitions; at most 32 definitions. |
 
 `model` is validated against the catalog in `contracts/models.py`, including compatibility with `LLM_PROVIDER`. Unknown or incompatible models return **422** before inference. The default is `gpt-6.1-sol` on `openai`; there is no cross-provider fallback.
@@ -234,10 +234,10 @@ reasoning fields are validated; additional native properties are preserved uncha
 so new metadata does not break continuation. Text blocks may carry an assistant
 `phase`; replay it too. OpenAI requests
 containing Bedrock signed/redacted blocks, and Bedrock requests containing OpenAI
-state, return **422** before inference. Start a fresh conversation when switching providers.
+state, return **422** before inference. Start a fresh conversation when switching models or providers.
 
-For GPT-6.1 Sol, `thinking: true` selects `medium`; `false` selects `low`. Both use
-reasoning tokens within `max_tokens`; a small budget may be consumed before an answer.
+Both OpenAI models count reasoning tokens toward `max_tokens` at either effort level.
+A small budget may be consumed before an answer.
 OpenAI does not return readable chain-of-thought text. See
 [OpenAI reasoning continuation](https://developers.openai.com/api/docs/guides/reasoning).
 
