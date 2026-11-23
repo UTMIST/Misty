@@ -46,3 +46,15 @@ def get_group_provider() -> GroupProvider | None:
     """FastAPI dependency: process-wide group provider, None when unconfigured.
     Tests override via app.dependency_overrides[get_group_provider]."""
     return _default_group_provider()
+
+
+@lru_cache(maxsize=1)
+def get_github_teams():
+    from src.providers.github_teams import HttpGitHubTeamsClient
+
+    s = get_settings()
+    return HttpGitHubTeamsClient(
+        url=s.connectors_url,
+        key=s.connectors_api_key.get_secret_value(),
+        organization_id=s.github_organization_id,
+    )
