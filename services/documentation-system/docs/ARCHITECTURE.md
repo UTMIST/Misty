@@ -231,8 +231,9 @@ counts preserve the distinction between source freshness and searchable content.
 After draining, handled item failures produce a structured warning and exit `0`;
 the successful heartbeat means the runner completed, not that every item refreshed.
 Railway failure notifications and independent start/finish heartbeat pings cover
-process failures and missing runs; monitoring failure does not undo or replay API
-work. Deployment, recovery and monitoring setup live in the
+process failures and missing runs. A monitoring failure still exits nonzero, but
+does not undo or replay API work or retain the guard after confirmed completion.
+Deployment, recovery and monitoring setup live in the
 [refresh runbook](DEPLOYMENT.md#source-access-refresh-schedule).
 
 Before its first heartbeat, the runner acquires the database's singleton
@@ -932,9 +933,10 @@ The removal marker retries version conflicts before proceeding.
 indexing and cleanup failure counts. Pending or terminal failures and incomplete
 cleanup are not successful recovery. The runner preserves these outcomes in its
 warning summary while a drained run exits `0` and sends a completion heartbeat.
-Known work failures release the run guard after that heartbeat, while transport
-or monitoring uncertainty retains it and produces a nonzero exit, except that
-time-budget exhaustion releases the owner even during an outstanding meeting retry.
+Known work failures release the run guard after the heartbeat attempt, even if
+monitoring fails. API transport uncertainty retains it and produces a nonzero
+exit, except that time-budget exhaustion releases the owner even during an
+outstanding meeting retry.
 Meeting retries retain their existing persistence/reconciliation state machine;
 they are not forcibly cancelled mid-operation.
 
