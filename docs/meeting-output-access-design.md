@@ -52,7 +52,7 @@ flowchart TD
     C -->|No| X
     C -->|Yes| D{"Question valid and Q&A available?"}
     D -->|No| X
-    D -->|Yes| E["Bind original session; snapshot bounded live transcript"]
+    D -->|Yes| E["Bind original session; snapshot finalized speech from last 15 minutes"]
     E --> F["Generate answer using isolated Q&A capacity"]
     F --> G{"Answer and transcript references valid?"}
     G -->|No| Y["Private Q&A error; recording continues"]
@@ -66,6 +66,12 @@ or grant access to it. Bind an accepted question to its original session so a
 later recording cannot become its source. Q&A failures must not interrupt audio
 ingestion or meeting finalization. Questions outside the available transcript
 must receive an insufficient-evidence answer rather than invented facts.
+
+The implemented Q&A window is the last **15 minutes of elapsed meeting time**,
+including silence, or the meeting so far if shorter. Only speech finalized at
+request time is available. Dense transcripts can shorten the window further;
+the response discloses the retained range. See the existing
+[Q&A API contract](../services/meeting/docs/API.md#post-meetingssession_idqna).
 
 ## Common errors and handling
 
@@ -81,7 +87,7 @@ Do not log questions, transcripts, answers, or credentials.
 | --- | --- | --- |
 | Unlinked caller or directory unavailable | Refuse before starting; do not guess identity. | "Link your account first" or "I cannot verify you right now; try again shortly." |
 | Caller is not in voice | Refuse before starting. | "Join a voice channel first." |
-| Recording already active in the server | Keep the existing meeting; do not start another. | "A recording is already active in this server." |
+| Recording already active in the server | Keep the existing meeting; do not start another. If the caller cannot view the recorded VC, or access cannot be verified, give only a generic private error without the VC name/reference, elapsed time, meeting title, requester, or Doc link. | "A recording is already active in this server." |
 | Forum trigger, unsupported output type, or unauthorized override | Reject before capture/provider calls; do not silently ignore the option. | "Meeting commands are not supported in forums," "Choose a text channel or VC chat," or "Only Misty admins can select an output channel." |
 | Required output permission missing at startup | Refuse; identify view/send/attachment permission, plus history access for saved recordings. | "Cannot start: I need [permission] in the selected output channel." |
 | VC-chat notice permission missing, or notice send fails | Refuse even if the output override is writable; do not capture without the notice. | "Cannot start: I could not post the recording notice in VC chat." |
@@ -181,7 +187,11 @@ private to the person asking.
 
 Misty checks that access before generating an answer and again before sending
 it. Being allowed to read the alternate output channel does not grant Q&A
-access. The existing live-transcript window still applies.
+access. Q&A already uses the last **15 minutes of elapsed meeting time**, or the
+meeting so far if shorter, with only finalized speech available at request time.
+Dense transcripts may shorten that window further and disclose the retained
+range, as defined in the existing
+[Q&A API contract](../services/meeting/docs/API.md#post-meetingssession_idqna).
 
 ## Who can see the content?
 
@@ -245,7 +255,8 @@ what happens when no transcript-sharing teams are configured.
 | When should a permission-related delivery error appear? | When recording ends automatically or `/record stop` is called, attempt delivery to the original selected destination. If permissions were restored, deliver normally; otherwise report the delivery failure where possible. | Decided |
 | How is failed final delivery recovered? | Keep existing behavior: saved-Doc link delivery retries at the original selected destination through the existing recovery process, including after restart. Report PDF upload failures where possible; do not add a durable PDF retry system in this change or redirect output automatically. | Decided |
 | Which channel is stored for saved-link recovery? | Persist the selected output destination in `text_channel_id`: the recorded VC's chat by default, or the admin's override. Keep `voice_channel_id` separate for Google Doc sharing. Immediate delivery and restart recovery must use the stored output destination, not the launch channel, for the meeting title, start time, requester mention, and Doc link. | Decided |
-| What may status/stop replies reveal to callers without VC visibility? | Only a generic private response: no VC name/reference, elapsed time, meeting title, requester, or Doc link. Treat unverifiable access the same way. Preserve existing stop authorization and the empty-VC exception; any permitted stop gets a generic acknowledgement, not meeting details or redirected output. | Decided |
+| What may duplicate-start, status, or stop replies reveal to callers without VC visibility? | Only a generic private response: no VC name/reference, elapsed time, meeting title, requester, or Doc link. Apply this to "recording already active" errors as well as status/stop replies, and treat unverifiable access the same way. Preserve existing stop authorization and the empty-VC exception; any permitted stop gets a generic acknowledgement, not meeting details or redirected output. | Decided |
+| Which transcript window does Q&A use? | Keep the implemented last-15-minutes window, measured in elapsed meeting time including silence; use the meeting so far if shorter. Only finalized speech at request time is included. Dense transcripts may shorten the window further, with the retained range disclosed. | Existing behavior |
 | What if permissions broaden mid-meeting? | Continue recording. Current Discord permissions govern visibility. | Decided |
 | Keep saved Docs team-scoped? | Yes. Retain the recorded VC's configured-team sharing, including team members who missed the call and future members of those teams. Discord output access remains separate. | Decided |
 | How do admins configure a VC's teams? | Keep current `/channel-access` behavior: configure the invocation channel (the parent for threads). Configure a VC from its own chat; do not add a `channel:` selector. Live VC-chat availability still needs verification. | Decided |
@@ -254,10 +265,13 @@ what happens when no transcript-sharing teams are configured.
 
 ## Offline acceptance cases to test
 
-- **Status and stop without VC visibility:** invoke `/record status` and
+- **Duplicate start, status, and stop without VC visibility:** while another
+  recording is active, invoke `/record start`, `/record status`, and
   `/record stop` from an unrelated accessible channel as someone unable to view
-  the recorded VC. Verify private replies contain no VC name/reference, elapsed
-  time, title, requester, or Doc link. Cover a denied stop while people remain,
+  the recorded VC. For the duplicate start, place the caller in a different VC
+  and verify the original meeting continues without starting another. Verify
+  private replies contain no VC name/reference, elapsed time, title, requester,
+  or Doc link. Cover a denied stop while people remain,
   a stop allowed by the existing empty-VC exception, a stop failure, and an
   unresolved permission lookup. Keep final output at its selected destination.
 - **Saved-link destination survives restart:** start from `#general` while in a
