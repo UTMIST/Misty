@@ -2,6 +2,128 @@
 
 Related: [#285](https://github.com/UTMIST/Misty/issues/285)
 
+## Transcription and delivery flow
+
+These diagrams describe the intended design, including the decisions in the
+answer matrix. Error labels below are documentation references, not new API
+error codes.
+
+```mermaid
+flowchart TD
+    A["/record start in a supported server channel"] --> B{"Start checks pass?"}
+    B -->|No| X["Private error; do not capture audio"]
+    B -->|Yes| C["Choose output: VC chat by default; admin override if supplied"]
+    C --> D{"Output permissions and VC notice permissions pass?"}
+    D -->|No| X
+    D -->|Yes| E["Post recording notice in VC chat; name output destination"]
+    E --> F{"Notice delivered and voice connection ready?"}
+    F -->|No| X
+    F -->|Yes| G["Stream audio to transcription; keep live transcript in memory"]
+    G --> I{"Recording event"}
+    I -->|"Output permission changes"| G
+    I -->|"Stop command or empty-call auto-stop"| J["Drain captured audio and finalize"]
+    I -->|"Bot moves to another VC"| K["Close capture gate before new-VC audio; require fresh start"]
+    K --> J
+    J --> L["Generate minutes and PDF; hand off saved record if save=true"]
+    L --> M["Attempt PDF and saved-link delivery independently at chosen destination"]
+    M --> N["Report failures where possible; keep existing saved-link recovery"]
+```
+
+Start checks cover a linked account, caller presence in the recorded VC, no
+other active recording in the server, supported trigger location, and Misty
+admin authority for an override. All checkable authorization and permission
+failures must be rejected before paid processing or audio capture. The bot must
+successfully post the notice before capture begins; a failed join must not be
+reported as an active recording.
+
+Audio is not persisted. A saved Google Doc uses the VC's team sharing, not the
+Discord output channel's audience. `save:false` skips Google persistence and
+link delivery. Output permission loss does not stop capture; recheck at final
+delivery. Audience expansion also does not stop recording. A VC move closes
+capture before destination-channel audio can enter either recording mode.
+
+## Live Q&A flow
+
+```mermaid
+flowchart TD
+    A["/qna question"] --> B{"Active meeting and exact recorded VC chat?"}
+    B -->|No| X["Private rejection; no provider call"]
+    B -->|Yes| C{"Caller can read/write chat and use command?"}
+    C -->|No| X
+    C -->|Yes| D{"Question valid and Q&A available?"}
+    D -->|No| X
+    D -->|Yes| E["Bind original session; snapshot bounded live transcript"]
+    E --> F["Generate answer using isolated Q&A capacity"]
+    F --> G{"Answer and transcript references valid?"}
+    G -->|No| Y["Private Q&A error; recording continues"]
+    G -->|Yes| H{"Caller still has VC-chat access?"}
+    H -->|No| Z["Withhold answer; no meeting content disclosed"]
+    H -->|Yes| I["Reply privately with answer, meeting identity, and references"]
+```
+
+Voice presence is not required for Q&A. An output override does not move Q&A
+or grant access to it. Bind an accepted question to its original session so a
+later recording cannot become its source. Q&A failures must not interrupt audio
+ingestion or meeting finalization. Questions outside the available transcript
+must receive an insufficient-evidence answer rather than invented facts.
+
+## Common errors and handling
+
+Messages below describe the intended user-facing response; exact wording can
+follow the bot's existing messages. Errors and acknowledgements are private
+where an interaction is available. For automatic stops or inaccessible channels,
+report where possible without sending meeting content to a different audience.
+Do not log questions, transcripts, answers, or credentials.
+
+### Recording and output
+
+| Case | Required flow | Error or notice |
+| --- | --- | --- |
+| Unlinked caller or directory unavailable | Refuse before starting; do not guess identity. | "Link your account first" or "I cannot verify you right now; try again shortly." |
+| Caller is not in voice | Refuse before starting. | "Join a voice channel first." |
+| Recording already active in the server | Keep the existing meeting; do not start another. | "A recording is already active in this server." |
+| Forum trigger, unsupported output type, or unauthorized override | Reject before capture/provider calls; do not silently ignore the option. | "Meeting commands are not supported in forums," "Choose a text channel or VC chat," or "Only Misty admins can select an output channel." |
+| Required output permission missing at startup | Refuse; identify view/send/attachment permission, plus history access for saved recordings. | "Cannot start: I need [permission] in the selected output channel." |
+| VC-chat notice permission missing, or notice send fails | Refuse even if the output override is writable; do not capture without the notice. | "Cannot start: I could not post the recording notice in VC chat." |
+| Bot cannot join voice or recording service is unavailable | Abort startup and release partial session resources. | "Could not join the voice channel" or "Meeting recording is unavailable." |
+| Stop requested outside the recorded VC while it still has people | Leave recording active; retain the existing empty-VC stop exception. | "Join the recorded voice channel to stop this recording." |
+| Output permissions lost or audience broadened mid-meeting | Continue recording. Attempt delivery at end; never redirect automatically. | No interruption solely for this change; report any remaining delivery failure when recording ends. |
+| Bot moves to another VC | Stop capture before new-VC audio enters, then finalize the original meeting, including `save:false`. | "Recording ended because I moved voice channels. Start a new recording in the new channel." |
+| Voice/stream connection drops | Use existing best-effort finalization/recovery; do not promise a complete transcript or restart a new session silently. | "Connection lost; wrapping up the captured recording," or "The recording could not be recovered" if recovery fails. |
+| Finalization, PDF generation, or upload fails | Report failure where possible. Do not add durable PDF retries or suppress independently available saved-link delivery. | "Could not generate/deliver the meeting PDF." Distinguish generation from upload failure. |
+| Saved Doc is pending, failed, or admin-only | Do not announce a pending/failed save as a saved link. Retain existing persistence handling; explain admin-only sharing separately. | "The meeting record is still saving," "The meeting record could not be saved," or "The saved record is admin-only." |
+| Saved-link post fails, destination is deleted, or required permissions remain missing at end | Retain the original selected destination and existing link retry/restart recovery; do not reroute. | "Could not deliver the saved meeting link; restore access to the original destination for retry." |
+| Bot or meeting service restarts during a live meeting | Do not promise recovery of in-memory session state. Recover already-persisted pending link deliveries separately. | "No active recording" or a recovery-failure notice where possible; do not claim recording continued. |
+
+A failure in one output must not prevent attempting another independently
+available output. Saved-link retry success does not imply that a failed PDF was
+retried or delivered. If the notice cannot be sent, a log/status failure can be
+recorded without copying meeting content into an unrelated channel or DM.
+
+### Q&A
+
+HTTP statuses here are the existing meeting-service Q&A responses; local
+Discord access rejections do not need to become new service HTTP errors.
+
+| Case | Required flow | Private response / service status |
+| --- | --- | --- |
+| No active recording | Do not invoke Q&A. | "No active meeting in this server." An expired backend session returns `404`. |
+| Wrong channel, forum, DM, or missing VC-chat read/write/command access | Reject before provider use; do not expose a private VC's identity to an unauthorized caller. | "Use Q&A in the recorded VC chat with the required access." |
+| Blank question or more than 1,000 characters | Reject before provider use. | "Enter a question containing text, up to 1,000 characters." Backend validation: `422`. |
+| Meeting starts stopping before Q&A is admitted | Do not switch to another session or retry against a new meeting. | "This recording is ending or has ended." `409`. |
+| Q&A capacity is full | Reject the question without blocking transcription or stop. | "Meeting Q&A is busy; try again shortly." `429`. |
+| Latest transcript segment cannot fit | Do not send an oversized request to the model. | "The latest transcript passage is too large; try again after more speech is transcribed." `413`. |
+| Little transcript or no supporting evidence | Answer only from available evidence; disclose a shortened window when used. | "There is not enough information in the available transcript to answer that." Not a transport error. |
+| Invalid answer or unverifiable references | Do not publish the invalid answer. | "I could not generate a reliable answer; try again." `502`. |
+| Provider timeout | Release the request path without disrupting capture; retain existing worker-capacity safeguards. | "The answer took too long; try again shortly." `504`. |
+| Q&A unconfigured, unavailable, or provider/network failure | Fail this question only; do not expose internal credentials/provider details. | "Meeting Q&A is not configured" or "temporarily unavailable." Backend availability failure: `503`. |
+| Caller loses access before answer delivery | Recheck and withhold meeting content; do not deliver it elsewhere. | Generic permission failure if a private response is still possible. |
+
+Existing error mappings:
+[Q&A adapter](../discord-bot/src/adapters/discord/qna.js),
+[meeting API](../services/meeting/src/api/routers/meetings.py), and
+[saved-link recovery](../discord-bot/docs/meeting-delivery.md).
+
 ## Problem
 
 Currently, someone can join a private VC, run `/record start` in a public text
@@ -15,64 +137,34 @@ that channel should not automatically expose the conversation to its members.
 ```
 
 The caller must be in the VC being recorded and have a linked Misty account.
-They can run the command from another channel. Both of these already work;
-the change is where Misty sends the outputs. The new design excludes forum
-channels and forum posts as trigger locations.
+They can run the command from another channel.  
 
-**CHANGE: By default, subtitles, the PDF, and the saved Google Doc link go to the
-recorded VC's own chat.**
+Both of these already work; the change is where Misty sends the outputs. 
+
+The new design excludes forum channels and forum posts as trigger locations.
+
+**CHANGE: By default, the PDF and the saved Google Doc link go to the recorded VC's own chat.**
 
 The channel where the command was typed receives only a private acknowledgement.
+
+### Admin-only command
 
 
 ```text
 /record start [output_channel:<channel>]
 ```
 
-### Potential addition
 
 If we really don't like the inflexibility of the above, we can allow admins that trigger `/record` and change the output channel of the transcription (in discord).
 
-`output_channel` lets an admin deliberately choose another
-Discord audience for the transcript. This can be in the form of a `text` channel, a `vc text channel`. Admin-only use is the intended direction;
-we still need to choose which admin permission authorizes it.
+`output_channel` lets an admin deliberately choose another Discord audience for the transcript. This can be in the form of a `text` channel, a `vc text channel`. Admin-only use is the intended direction.
 
 If Misty loses the required permission to post during recording, it stops the
 recording. It must not automatically send the content to another channel.
 
 ## Forum triggers
 
-Meeting features must not be triggered from forum channels or forum posts.
-Supporting those trigger locations adds complexity, so they are excluded from
-this design.
-
-## Subtitles — separate discussion
-
-Discord does not support threads inside VC chat. We need a separate discussion
-on how to present subtitles within the chosen output destination.
-
-### Current solution (though not preferred)
-
-Posting batched messages directly in chat is an option, not a settled decision.
-However, using the initial **thread** solution causes many challenges. For example..
-- If we restrict `\record` to be called within a VC chat, we cannot use threads
-- If we completely abandon the **VC \record only** solution and use **threads for subtitles**, the following issues arise. (1) During a pending call, we remove/add users. We also need to remove/add them from the thread permission.
-
-### Additional notes to live subtitles
-
-Currently, Discord does not have a native solution for live subtitiles. It's an ongoing accessibility issue. There are some discord bots that do live transcription though, but using the similar **post message in channel** method we have. Some examples..
-
-[Scriptly](https://www.scriptly.xyz/)
-![alt text](image.png)
-
-[Discmeet ai slop](https://discmeet.com/)
-![alt text](image-1.png)
-
-The second one is frankly more interesting as you configure a meeting notes channel, and it adds threads to it.
-
-However, this brings forth the same privacy issue with private/public/locked VCs.
-See [What if we really want the thread solution?](#what-if-we-really-want-the-thread-solution)
-for the most controlled approach we could support and its limitations.
+Meeting features must not be triggered from forum channels or forum posts. Supporting those trigger locations adds complexity, so they are excluded from this design.
 
 ## Q&A
 
@@ -89,8 +181,7 @@ access. The existing live-transcript window still applies.
 
 ## Who can see the content?
 
-Discord controls access to the subtitles and PDF through the selected channel's
-permissions. This is not a fixed list of attendees: someone granted access
+Discord controls access to the PDF through the selected channel's permissions. This is not a fixed list of attendees: someone granted access
 later may read the history (depending on how the channel is configured). Removing access cannot undo a download or copy.
 
 Saved Google Docs use a separate, existing rule: **the teams configured for the
@@ -136,43 +227,66 @@ configuration. Team-based saved Doc access itself remains agreed. If we choose
 to split the settings, we must decide how existing VC mappings carry over and
 what happens when no transcript-sharing teams are configured.
 
-## Still to decide
-
-- **Which admins can select `output_channel`?** Misty admins, Discord admins,
-  or another permission? Is their explicit selection enough to approve sharing?
-- **Which destinations can they select?** Start with ordinary text channels,
-  or also support threads and forum posts?
-- **What happens if output is unavailable?** Define startup failures and safe
-  final delivery after posting permission is lost. Never fall back publicly.
-- **What if permissions broaden mid-meeting?** Continue with the new audience,
-  or stop recording?
-- **Keep saved Docs team-scoped?** This includes team members who missed the
-  meeting and future members of the same Google Group.
-- **How do admins configure a VC's teams?** Verify `/channel-access` in VC chat;
-  consider adding an explicit `channel:` option so it can be configured elsewhere.
-- **Where do notices go with an override?** Decide where to announce recording
-  and show meeting status without exposing details in unrelated channels.
 
 ## Question and answer matrix
 
-Answers agreed so far are recorded here; unanswered items remain open. This
-matrix takes precedence where a decision revises the earlier discussion above.
 
 | Question | Answer | Status |
 | --- | --- | --- |
-| Which admins can select `output_channel`? | Misty admins. Their explicit selection approves the destination; no separate VC-to-channel mapping is required. | Decided |
+| Which admins can select `output_channel`? | Misty admins and superusers. Their explicit selection approves the destination; no separate VC-to-channel mapping is required. | Decided |
 | Which destinations can they select? | Ordinary text channels and VC chats. No forums, forum posts, or threads in the initial selector. | Decided |
-| What permissions are required before starting? | Both message-sending and PDF attachment permissions, with access to the selected destination. Refuse to start if either is missing; no link-only fallback. | Decided |
+| What permissions are required before starting? | Require access to the selected destination, message-sending permission, and PDF attachment permission. Saved recordings also require `ReadMessageHistory` there because saved-Doc link delivery checks history before sending. Independently verify Misty can view and send messages in the recorded VC's chat, even with an output override, so the recording notice can be posted before capturing audio. Refuse to start if a required permission is missing; no link-only fallback. | Decided |
+| What if Misty moves to another VC during recording? | Stop forwarding audio before any audio from the new VC enters the session, then finalize the original meeting. This applies to saved and PDF-only (`save:false`) recordings. Keep the original output destination; recording the new VC requires a fresh start. | Decided |
 | What if required output permissions are lost mid-recording? | Continue recording; permission loss may be accidental or temporary. Do not automatically send content to another channel. | Decided |
 | When should a permission-related delivery error appear? | When recording ends automatically or `/record stop` is called, attempt delivery to the original selected destination. If permissions were restored, deliver normally; otherwise report the delivery failure where possible. | Decided |
-| How is failed final delivery recovered? | Retry/recovery policy still needs to be defined; recording does not stop early because output permissions changed. | Open |
+| How is failed final delivery recovered? | Keep existing behavior: saved-Doc link delivery retries at the original selected destination through the existing recovery process, including after restart. Report PDF upload failures where possible; do not add a durable PDF retry system in this change or redirect output automatically. | Decided |
 | What if permissions broaden mid-meeting? | Continue recording. Current Discord permissions govern visibility. | Decided |
 | Keep saved Docs team-scoped? | Yes. Retain the recorded VC's configured-team sharing, including team members who missed the call and future members of those teams. Discord output access remains separate. | Decided |
 | How do admins configure a VC's teams? | Keep current `/channel-access` behavior: configure the invocation channel (the parent for threads). Configure a VC from its own chat; do not add a `channel:` selector. Live VC-chat availability still needs verification. | Decided |
 | Should transcript sharing have its own command? | Consider separating saved meeting Doc sharing from `/channel-access` document-answer scope; see the dedicated section above. This revisits which command owns meeting-team configuration. | Open |
-| Where do notices go with an override? | Not yet decided. | Open |
+| Where do notices go with an override? | Post the recording-start notice in the recorded VC's chat, explicitly naming the selected output channel. Check VC-chat access and message-sending permission beforehand and deliver the notice before capturing audio; do not start if it cannot be posted. Command acknowledgements stay private; the PDF and saved-Doc link go to the selected output destination. | Decided |
 
-## What if we really want the thread solution?
+## Offline acceptance cases to test
+
+- **PDF-only recording moves from team A's VC to team B's VC:** start with
+  `save:false`, capture A's speech, and simulate the move while B's audio begins
+  arriving. Verify the capture gate closes before B's audio is forwarded,
+  A's PDF contains only A's audio-derived content, and no new recording starts
+  automatically. A fresh `/record start` is required for B's VC.
+- **Saved recording lacks history access:** allow viewing, sending messages,
+  and attaching files at the selected destination, but deny
+  `ReadMessageHistory`. Verify startup is refused before capturing audio or
+  invoking paid providers, with an error identifying the missing permission.
+  Allowing PDF delivery alone must not bypass the saved-link prerequisite.
+
+## Subtitles — TBD
+
+Subtitles are deferred. Placement, presentation, access handling, and error
+behavior remain TBD; they are not part of the recording and Q&A flow above.
+The notes below preserve the options discussed, not selected requirements.
+An earlier idea was to use the same output destination as the PDF and saved
+link, but subtitle routing is also TBD.
+
+Discord does not support threads inside VC chat. 
+
+### Option: batched messages
+
+Posting batched mestsages directly in chat is an option, not a settled decision.
+However, using the initial **thread** solution causes many challenges. For example..
+- If we restrict `\record` to be called within a VC chat, we cannot use threads
+- If we completely abandon the **VC \record only** solution and use **threads for subtitles**, the following issues arise. (1) During a pending call, we remove/add users. We also need to remove/add them from the thread permission.
+
+### Subtitle examples
+
+Currently, Discord does not have a native solution for live subtitiles. It's an ongoing accessibility issue. There are some discord bots that do live transcription though, but using the similar **post message in channel** method we have. Some examples include Scriptly and Discmeet.
+
+The second one (Discmeet) is frankly more interesting as you configure a meeting notes channel, and it adds threads to it.
+
+However, this brings forth the same privacy issue with private/public/locked VCs.
+See [What if we really want the thread solution?](#what-if-we-really-want-the-thread-solution)
+for the most controlled approach we could support and its limitations.
+
+### What if we really want the thread solution?
 
 We could create **one private subtitle thread per meeting in an admin-configured
 ordinary text channel**. The recording can still start from elsewhere; the
