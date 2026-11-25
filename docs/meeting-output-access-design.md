@@ -86,7 +86,8 @@ Do not log questions, transcripts, answers, or credentials.
 | Required output permission missing at startup | Refuse; identify view/send/attachment permission, plus history access for saved recordings. | "Cannot start: I need [permission] in the selected output channel." |
 | VC-chat notice permission missing, or notice send fails | Refuse even if the output override is writable; do not capture without the notice. | "Cannot start: I could not post the recording notice in VC chat." |
 | Bot cannot join voice or recording service is unavailable | Abort startup and release partial session resources. | "Could not join the voice channel" or "Meeting recording is unavailable." |
-| Stop requested outside the recorded VC while it still has people | Leave recording active; retain the existing empty-VC stop exception. | "Join the recorded voice channel to stop this recording." |
+| Status or stop requested by a caller who cannot view the recorded VC, or whose access cannot be verified | Give only a generic private response. Do not reveal the VC name/reference, elapsed time, meeting title, requester, or Doc link. Preserve existing stop authorization, including the empty-VC exception; any permitted stop gets a generic acknowledgement and output stays at the selected destination. | "No recording details are available to you here," or a generic acknowledgement if the stop is permitted. |
+| Stop requested outside the recorded VC while it still has people, and the caller can view that VC | Leave recording active; retain the existing empty-VC stop exception. | "Join the recorded voice channel to stop this recording." |
 | Output permissions lost or audience broadened mid-meeting | Continue recording. Attempt delivery at end; never redirect automatically. | No interruption solely for this change; report any remaining delivery failure when recording ends. |
 | Bot moves to another VC | Stop capture before new-VC audio enters, then finalize the original meeting, including `save:false`. | "Recording ended because I moved voice channels. Start a new recording in the new channel." |
 | Voice/stream connection drops | Use existing best-effort finalization/recovery; do not promise a complete transcript or restart a new session silently. | "Connection lost; wrapping up the captured recording," or "The recording could not be recovered" if recovery fails. |
@@ -137,9 +138,9 @@ that channel should not automatically expose the conversation to its members.
 ```
 
 The caller must be in the VC being recorded and have a linked Misty account.
-They can run the command from another channel.  
+They can run the command from another channel.
 
-Both of these already work; the change is where Misty sends the outputs. 
+Both of these already work; the change is where Misty sends the outputs.
 
 The new design excludes forum channels and forum posts as trigger locations.
 
@@ -159,8 +160,11 @@ If we really don't like the inflexibility of the above, we can allow admins that
 
 `output_channel` lets an admin deliberately choose another Discord audience for the transcript. This can be in the form of a `text` channel, a `vc text channel`. Admin-only use is the intended direction.
 
-If Misty loses the required permission to post during recording, it stops the
-recording. It must not automatically send the content to another channel.
+If Misty loses the required permission to post during recording, it continues
+recording. When the meeting ends or `/record stop` is called, attempt delivery
+to the selected output channel. If permissions are still missing, report the
+delivery failure where possible and retain existing saved-link recovery.
+It must not automatically send the content to another channel.
 
 ## Forum triggers
 
@@ -240,6 +244,8 @@ what happens when no transcript-sharing teams are configured.
 | What if required output permissions are lost mid-recording? | Continue recording; permission loss may be accidental or temporary. Do not automatically send content to another channel. | Decided |
 | When should a permission-related delivery error appear? | When recording ends automatically or `/record stop` is called, attempt delivery to the original selected destination. If permissions were restored, deliver normally; otherwise report the delivery failure where possible. | Decided |
 | How is failed final delivery recovered? | Keep existing behavior: saved-Doc link delivery retries at the original selected destination through the existing recovery process, including after restart. Report PDF upload failures where possible; do not add a durable PDF retry system in this change or redirect output automatically. | Decided |
+| Which channel is stored for saved-link recovery? | Persist the selected output destination in `text_channel_id`: the recorded VC's chat by default, or the admin's override. Keep `voice_channel_id` separate for Google Doc sharing. Immediate delivery and restart recovery must use the stored output destination, not the launch channel, for the meeting title, start time, requester mention, and Doc link. | Decided |
+| What may status/stop replies reveal to callers without VC visibility? | Only a generic private response: no VC name/reference, elapsed time, meeting title, requester, or Doc link. Treat unverifiable access the same way. Preserve existing stop authorization and the empty-VC exception; any permitted stop gets a generic acknowledgement, not meeting details or redirected output. | Decided |
 | What if permissions broaden mid-meeting? | Continue recording. Current Discord permissions govern visibility. | Decided |
 | Keep saved Docs team-scoped? | Yes. Retain the recorded VC's configured-team sharing, including team members who missed the call and future members of those teams. Discord output access remains separate. | Decided |
 | How do admins configure a VC's teams? | Keep current `/channel-access` behavior: configure the invocation channel (the parent for threads). Configure a VC from its own chat; do not add a `channel:` selector. Live VC-chat availability still needs verification. | Decided |
@@ -248,6 +254,19 @@ what happens when no transcript-sharing teams are configured.
 
 ## Offline acceptance cases to test
 
+- **Status and stop without VC visibility:** invoke `/record status` and
+  `/record stop` from an unrelated accessible channel as someone unable to view
+  the recorded VC. Verify private replies contain no VC name/reference, elapsed
+  time, title, requester, or Doc link. Cover a denied stop while people remain,
+  a stop allowed by the existing empty-VC exception, a stop failure, and an
+  unresolved permission lookup. Keep final output at its selected destination.
+- **Saved-link destination survives restart:** start from `#general` while in a
+  private VC, finalize the recording, and restart before saved-link delivery
+  succeeds. Verify `text_channel_id` stores the VC's ID and recovery posts the
+  meeting title, start time, requester mention, and Doc link only in VC chat.
+  Repeat with an admin-selected output channel and verify only that destination
+  receives the recovered link message. `#general` must receive no public meeting
+  details in either case; `voice_channel_id` remains the recorded VC's ID.
 - **PDF-only recording moves from team A's VC to team B's VC:** start with
   `save:false`, capture A's speech, and simulate the move while B's audio begins
   arriving. Verify the capture gate closes before B's audio is forwarded,
@@ -267,7 +286,7 @@ The notes below preserve the options discussed, not selected requirements.
 An earlier idea was to use the same output destination as the PDF and saved
 link, but subtitle routing is also TBD.
 
-Discord does not support threads inside VC chat. 
+Discord does not support threads inside VC chat.
 
 ### Option: batched messages
 
