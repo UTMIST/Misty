@@ -227,3 +227,57 @@ def test_openapi_includes_strict_contract(ctx):
     schema = ctx[0].get("/openapi.json").json()
     assert "/search" in schema["paths"]
     assert schema["components"]["schemas"]["SearchRequest"]["additionalProperties"] is False
+
+
+@pytest.mark.parametrize(
+    "case_name,outcome",
+    [
+        ("alice", "results"),
+        ("empty-relevance", "no_hits"),
+        ("denied-person", "denied"),
+        ("scope-unavailable", "directory_unavailable"),
+        ("embedding-error", "embedding_error"),
+        ("missing-context", "invalid_request"),
+        ("unconfigured-channel", "no_channel_teams"),
+        ("storage-failure", "storage_unavailable"),
+        ("disabled", None),
+    ],
+)
+def test_search_outcome_in_actual_request_audit(ctx, monkeypatch, capsys, case_name, outcome):
+    import json
+    from src.config import get_settings
+
+    client, adapter, docs, directory, embeddings, keys = ctx
+    monkeypatch.setattr(get_settings(), "search_outcome_audit_enabled", outcome is not None)
+    name = "alice" if case_name in {"storage-failure", "disabled"} else case_name
+    case = next(c for c in FIXTURE["cases"] if c["name"] == name)
+    request = deepcopy(case["request"])
+    request["url"] = request.pop("path")
+    headers = request["headers"]
+    headers["X-API-Key"] = keys[headers["X-API-Key"]]
+    if case_name == "unconfigured-channel":
+        directory.channel_teams = frozenset()
+    directory.unavailable = case_name == "scope-unavailable"
+    if case_name == "embedding-error":
+        embeddings.error = 502
+    if case_name == "storage-failure":
+
+        def fail(**kwargs):
+            raise RetrievalUnavailable("private dependency canary")
+
+        monkeypatch.setattr(adapter, "search_chunks", fail)
+    response = client.request(**request)
+    assert response.status_code == (
+        503 if case_name == "storage-failure" else case["response"]["status"]
+    )
+    captured = capsys.readouterr().out
+    audit = next(json.loads(line) for line in captured.splitlines() if '"duration_ms"' in line)
+    assert audit.get("search_outcome") == outcome
+    assert audit["status"] == response.status_code
+    for private in (
+        request["json"]["query"],
+        headers["X-API-Key"],
+        str(P1),
+        "private dependency canary",
+    ):
+        assert private not in json.dumps(audit)

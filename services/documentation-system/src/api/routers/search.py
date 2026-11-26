@@ -4,7 +4,7 @@ import re
 import time
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from starlette.responses import Response
@@ -25,6 +25,11 @@ from src.api.deps import get_directory, get_embeddings, get_storage
 from src.config import get_settings
 
 
+def _observe(request: Request, outcome: str) -> None:
+    if get_settings().search_outcome_audit_enabled:
+        request.state.audit_extra = {"search_outcome": outcome}
+
+
 class _SearchRoute(APIRoute):
     def get_route_handler(self):
         handler = super().get_route_handler()
@@ -32,7 +37,16 @@ class _SearchRoute(APIRoute):
         async def validated(request):
             try:
                 return await handler(request)
+            except HTTPException as exc:
+                if exc.status_code in (401, 403) and not getattr(
+                    request.state, "audit_extra", None
+                ):
+                    _observe(request, "denied")
+                elif exc.status_code == 400 and not getattr(request.state, "audit_extra", None):
+                    _observe(request, "invalid_request")
+                raise
             except RequestValidationError as exc:
+                _observe(request, "invalid_request")
                 # FastAPI's default error response echoes invalid Unicode input
                 # and fails to encode it. Keep the detail shape without input.
                 errors = [{k: error[k] for k in ("type", "loc", "msg")} for error in exc.errors()]
@@ -78,6 +92,7 @@ def _warn_on_excluded_docs(storage: StorageAdapter, model: str) -> None:
 @router.post("/search", response_model=SearchResponse)
 def search(
     payload: SearchRequest,
+    request: Request,
     person_id: UUID | None = Depends(get_on_behalf_actor),
     guild_id: str | None = Header(default=None, alias="X-Guild-ID"),
     channel_id: str | None = Header(default=None, alias="X-Channel-ID"),
@@ -110,12 +125,15 @@ def search(
                 directory.get_source_access_team_ids(person_id),
             )
     except DirectoryUnavailable:
+        _observe(request, "directory_unavailable")
         raise HTTPException(503, "retrieval scope unavailable") from None
     if isinstance(visibility, Channel) and not visibility.source_team_ids:
+        _observe(request, "no_channel_teams")
         return SearchResponse(results=[])
     try:
         embedding = embeddings.embed_query(payload.query)
     except EmbeddingError as exc:
+        _observe(request, "embedding_error")
         raise HTTPException(exc.status_code, "query embedding unavailable") from None
     try:
         results = storage.search_chunks(
@@ -126,6 +144,8 @@ def search(
             min_cosine=get_settings().search_min_cosine,
         )
     except RetrievalUnavailable:
+        _observe(request, "storage_unavailable")
         raise HTTPException(503, "retrieval storage unavailable") from None
     _warn_on_excluded_docs(storage, embedding.model)
+    _observe(request, "results" if results else "no_hits")
     return SearchResponse(results=results)

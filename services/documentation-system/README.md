@@ -310,6 +310,7 @@ Machine-readable OpenAPI schema: `GET /openapi.json`. Interactive Swagger UI: `G
 | `SEARCH_EMBED_MODEL` | `openai-embed-3-small` | Neutral embedding alias; `openai-embed-3-large` is also supported at 1536 dimensions |
 | `EMBED_MODEL` | unset | Re-embed target; while it names another model, indexing also builds that model's sets beside the served ones. See [re-embedding](docs/DEPLOYMENT.md#re-embedding-after-a-model-change-209) |
 | `EMBED_MAX_REQUEST_CHARS` | `400000` | Indexing request character budget; keep at or below the LLM service's limit |
+| `SEARCH_OUTCOME_AUDIT_ENABLED` | `false` | Add a bounded search outcome to the existing restricted request audit. See [search outcomes](docs/API.md#search-outcomes). |
 | `SEARCH_MIN_COSINE` | `0.3` | Absolute vector relevance floor, greater than 0 and at most 1; complete keyword matches qualify independently |
 
 The directory key additionally needs `channels:read` for channel search. See

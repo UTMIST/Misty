@@ -109,6 +109,19 @@ existing expiry; it never extends them. Manual grants remain independent. See th
 [lifecycle testing guide](TESTING.md) for the accepted freshness
 window, recovery cases, and release evidence.
 
+#### Search outcomes
+
+With `SEARCH_OUTCOME_AUDIT_ENABLED=true`, filter this environment's restricted
+catalog request logs to `POST /search` and group by `search_outcome` and HTTP
+status. The added field contains only a fixed label. `results` and `no_hits`
+describe the visible serving index. Neither proves complete source coverage.
+`no_channel_teams` means the directory resolved an empty channel scope and no
+search ran. `denied`, `invalid_request`, `directory_unavailable`,
+`embedding_error` and `storage_unavailable` identify other exit paths.
+A missing label is unclassified. For the share of executed index searches
+returning zero hits, use `no_hits / (results + no_hits)` and leave an empty
+denominator blank. Use the existing duration field to compare slow requests.
+
 Ranking is hybrid exact cosine plus complete keyword matching, with reciprocal
 rank fusion (`1/(60+vector_rank) + 1/(60+keyword_rank)`). Each branch considers up
 to `max(50,5*k)` eligible chunks, with active-document, grant-expiry, context,
