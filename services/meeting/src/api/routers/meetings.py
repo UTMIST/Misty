@@ -91,7 +91,15 @@ import re
 import secrets
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from platform_auth import ADMIN_SCOPE, parse_prefix, verify_key
 
 from src.api.auth import require_scope
@@ -264,10 +272,23 @@ async def ask_meeting(
 @router.post("/meetings/{session_id}/stop", response_model=StopResponse)
 async def stop_meeting(
     session_id: str,
+    http_request: Request,
     request: StopRequest | None = None,
     _key=Depends(require_scope(MEETINGS_SCOPE)),
     registry: SessionRegistry = Depends(get_session_registry),
 ) -> StopResponse:
+    # Auth and scope checks have succeeded. Only accept the pilot's W3C v00
+    # context. Never copy the header itself into logs or downstream requests.
+    parents = http_request.headers.getlist("traceparent")
+    if len(parents) == 1:
+        parent = re.fullmatch(r"00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}", parents[0])
+        if parent and int(parent[1], 16) and int(parent[2], 16):
+            http_request.state.audit_extra = {
+                "trace_id": parent[1],
+                "parent_span_id": parent[2],
+                "span_id": secrets.token_hex(8),
+                "operation": "meeting.stop",
+            }
     if not _valid_session_id(session_id):
         raise HTTPException(status_code=400, detail="invalid session_id")
     session = registry.get(session_id)

@@ -505,3 +505,30 @@ def test_qna_malformed_upstream_envelope_returns_safe_provider_error(
     assert response.status_code == 503
     assert "PRIVATE" not in response.text
     assert "PRIVATE" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "parent,authorized,linked",
+    [
+        ("00-" + "1" * 32 + "-" + "2" * 16 + "-01", True, True),
+        ("00-" + "1" * 32 + "-" + "2" * 16 + "-01", False, False),
+        ("00-" + "0" * 32 + "-" + "2" * 16 + "-01", True, False),
+        ("00-" + "1" * 32 + "-" + "0" * 16 + "-01", True, False),
+        ("private-header-canary", True, False),
+    ],
+)
+def test_restricted_stop_audit(client, consumer_key, parent, authorized, linked, capsys):
+    import json
+
+    headers = {"traceparent": parent}
+    if authorized:
+        headers["X-API-Key"] = consumer_key
+    response = client.post("/meetings/missing/stop", headers=headers)
+    assert response.status_code == (404 if authorized else 401)
+    captured = capsys.readouterr().out
+    record = next(json.loads(line) for line in captured.splitlines() if '"duration_ms"' in line)
+    assert "private-header-canary" not in captured and consumer_key not in captured
+    assert ("trace_id" in record) is linked
+    if linked:
+        assert record["trace_id"] == "1" * 32 and record["parent_span_id"] == "2" * 16
+        assert len(record["span_id"]) == 16 and record["operation"] == "meeting.stop"

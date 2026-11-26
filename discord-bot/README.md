@@ -447,6 +447,7 @@ parallel to team-tracking's scoped-key auth.
 
 | Configuration | Default | Meaning |
 | --- | --- | --- |
+| `RECORDING_TRACE_ENABLED` | `false` | Enable restricted recording diagnostics on the bot. Filter Railway logs in one environment by `trace_id` to join bot stop events to the meeting request. |
 | `HELPER_TOOLS_ENABLED` | `false` | Literal `true` enables authorized document retrieval and command tools for Discord mentions and DMs |
 
 Enable only after retrieval and the destination's channel configuration are

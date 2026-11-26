@@ -325,3 +325,11 @@ returns; the finalized text is held in memory and retried with backoff for
 `RECORD_HANDOFF_HOLD_S`. Expiry logs `meeting.record_handoff_failed` with only
 the meeting ID. A process crash before acceptance can lose this in-memory
 payload; the Discord PDF and explicit delayed-save notice are the fallback.
+
+### Recording stop diagnostics
+
+An authenticated stop accepts an optional W3C version 00 `traceparent`. The
+existing restricted request audit includes the trace, client parent and server
+span IDs, HTTP status and duration. Missing or invalid context is ignored.
+Use the bot and meeting logs from the same environment. The stop audit can
+contain the request path and caller metadata and belongs in restricted logs.
