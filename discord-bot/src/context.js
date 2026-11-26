@@ -49,6 +49,7 @@ export function createAppContext(config, { poster, notify, postMeetingLink } = {
     baseUrl: config.docBaseUrl,
     apiKey: config.docApiKey,
   });
+  const beginTrace = config.recordingTraceEnabled && poster ? createStopTracer() : undefined;
   const meetingDelivery = postMeetingLink
     ? createMeetingDelivery({
         records: createMeetingRecordClient({
@@ -56,6 +57,7 @@ export function createAppContext(config, { poster, notify, postMeetingLink } = {
           apiKey: config.docApiKey,
         }),
         post: postMeetingLink,
+        beginTrace,
       })
     : null;
   const verification = createVerificationClient({
@@ -84,10 +86,11 @@ export function createAppContext(config, { poster, notify, postMeetingLink } = {
     const meetingClient = createMeetingClient({
       baseUrl: config.meetingBaseUrl,
       wsUrl: config.meetingWsUrl,
-      beginTrace: config.recordingTraceEnabled ? createStopTracer() : undefined,
+      beginTrace,
       apiKey: config.meetingApiKey,
     });
     meetingSurface = createMeetingSurface({
+      beginTrace,
       meetingClient,
       makeRecorder: (o) => createRecorder(o),
       poster: poster ?? (async () => {}),

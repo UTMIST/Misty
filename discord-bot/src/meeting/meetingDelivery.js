@@ -1,5 +1,5 @@
 /** Deliver only saved references. This service never writes Google or meeting content. */
-export function createMeetingDelivery({ records, post }) {
+export function createMeetingDelivery({ records, post, beginTrace }) {
   const inFlight = new Map();
   // Remember a successful Discord send if its acknowledgement fails. The
   // adapter also recovers recent messages after a process restart.
@@ -79,7 +79,16 @@ export function createMeetingDelivery({ records, post }) {
           console.warn('meeting delivery poll failed');
         }
       }
-      for (const meetingId of pending) await deliver(meetingId);
+      for (const meetingId of pending) {
+        const trace = beginTrace?.(meetingId);
+        const result = await deliver(meetingId);
+        if (trace) {
+          if (result.status === 'posted' || result.persistenceStatus === 'saved') {
+            trace.mark('save.confirmed');
+          }
+          trace.mark(`link.${result.status}`);
+        }
+      }
       return { empty: listed && pending.size === 0 && awaitingRecovery.size === 0 };
     })().finally(() => (polling = null));
     return polling;

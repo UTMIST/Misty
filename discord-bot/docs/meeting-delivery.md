@@ -80,3 +80,33 @@ state separately. They make no audio, Discord, Google, directory or catalog
 calls and require no acting identity selection. Ordinary commands still require
 an identity, and the preview cannot be submitted while a request is running.
 Voice capture still requires the real Discord adapter.
+
+## Investigate one recording
+
+Enable `RECORDING_TRACE_ENABLED=true` on the bot in the selected environment
+and restart it. Filter the restricted bot logs by `schema=misty.recording.v1`.
+Use the time of the incident to find a recording trace, then filter both the
+bot and meeting logs by that trace ID. The meeting request audit contains its
+HTTP status and duration. Bot elapsed times use the local clock for each span.
+
+From `discord-bot/`, run the following with raw bot log messages, one JSON
+object per line, from **one environment**. Use a window from recording start
+through the most recent delivery retry.
+
+```sh
+node scripts/recording-report.js "$TRACE_ID" < recording.jsonl
+```
+
+The report combines observed milestones regardless of order or duplicates.
+A normal capture needs a successful stop response and confirmed PDF delivery.
+A saved recording also needs save and link confirmation. Voice loss, stream
+loss, or a move stays visible even after both outputs arrive. A failed link
+attempt can include a failed receipt update after Discord accepted the send.
+Recovery uses the existing catalog meeting UUID to find the same trace after
+restart. The report counts no extra recording for that retry.
+
+A missing confirmation leaves the result unconfirmed. `dropped_before` in
+a raw bot event counts records lost by the process since its previous successful
+write. It cannot identify which recording lost evidence. The report describes
+the observed bot workflow. It cannot measure missing speech, transcript accuracy,
+or isolate a slow provider inside the meeting service. Keep raw logs restricted.
