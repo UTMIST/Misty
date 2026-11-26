@@ -20,6 +20,8 @@ flowchart TD
     F -->|No| X
     F -->|Yes| G["Stream audio to transcription; keep live transcript in memory"]
     G --> I{"Recording event"}
+    I -->|"Participant joins"| H["Notify joiner: recording active and sharing destination; policy explanation unless dismissed"]
+    H --> G
     I -->|"Output permission changes"| G
     I -->|"Stop command or empty-call auto-stop"| J["Drain captured audio and finalize"]
     I -->|"Bot moves to another VC"| K["Close capture gate before new-VC audio; require fresh start"]
@@ -73,6 +75,68 @@ request time is available. Dense transcripts can shorten the window further;
 the response discloses the retained range. See the existing
 [Q&A API contract](../services/meeting/docs/API.md#post-meetingssession_idqna).
 
+## Permission and authorization checklist
+
+Use this checklist when creating implementation tickets. **Recorded VC** means
+where audio is captured; **output destination** means its chat by default or
+the admin-selected text channel/VC chat. Check them independently using effective
+Discord permissions, not role names or what appeared in a channel picker.
+Resolve caller identity and channel context from trusted Discord/directory data.
+
+Misty `admin` and `superuser` are global directory access levels. Discord
+Administrator and a team's admin flag do not independently grant Misty admin
+authority. Internal service API-key scopes are separate from member permissions.
+
+### Before recording starts
+
+All applicable checks must pass before capturing audio or invoking paid
+providers. A failed check prevents startup, identifies the missing permission
+privately where safe, and does not silently select another destination.
+
+| Check | Whose access? | Where? | Requirement |
+| --- | --- | --- | --- |
+| R1 — Caller identity | Caller | Misty directory | Active linked account. If identity cannot be verified, refuse startup. |
+| R2 — Voice presence | Caller | Recorded VC | Caller is connected to the VC being recorded. Running the command elsewhere does not select that channel as output. |
+| R3 — Override authority | Caller | Misty directory | Supplying `output_channel` requires Misty `admin` or `superuser`. Reject an unauthorized supplied override. |
+| R4 — Supported context | Request | Invocation and output channels | Reject forum triggers. Output supports ordinary text channels and VC chats, not threads or forum posts. |
+| R5 — Voice connection | Misty bot | Recorded VC | Effective `ViewChannel` and `Connect`; joining must succeed before reporting recording as active. |
+| R6 — Output posting | Misty bot | Selected output destination | Effective `ViewChannel`, `SendMessages`, and `AttachFiles`, including for `save:false`. |
+| R7 — Saved-link history | Misty bot | Selected output destination, only when `save:true` | Effective `ReadMessageHistory`; additionally `Connect` if this destination is a VC chat. Joining the output VC is not required. |
+| R8 — Recording notice | Misty bot | Recorded VC's chat, even with an override | Effective `ViewChannel` and `SendMessages`. Successfully post the notice naming the output destination before capture starts. |
+
+No other recording may be active in the server. This is a lifecycle check, not
+a Discord permission. Apply R5/R8 at the recorded VC and R6/R7 at the output;
+permission at one does not establish permission at the other.
+
+### During recording, Q&A, and delivery
+
+| Check | Who and where? | When? | Failure behavior |
+| --- | --- | --- | --- |
+| P1 — Q&A authorization | Caller in the exact recorded VC chat: effective `ViewChannel`, `SendMessages`, `UseApplicationCommands`, and permission to use `/qna` under command-specific Discord settings | Before provider use and again before sending the answer | Reject/withhold privately without meeting details. Voice presence or access to an output override does not substitute for this check. |
+| P2 — Meeting metadata visibility | Caller: effective `ViewChannel` at the recorded VC | Before duplicate-start/status/stop replies and each helper stop-confirmation preview | Missing or unverifiable visibility means generic private text only. Preserve existing stop authorization and its empty-VC exception. |
+| P3 — PDF delivery | Misty bot at the persisted output destination: R6 | At final delivery | Report failure where possible. Do not reroute or add durable PDF retries. |
+| P4 — Saved-link delivery | Misty bot at the persisted output destination: R6's view/send checks and R7; no attachment permission is needed for the link itself | At immediate delivery and each recovery attempt, including after restart | Retain existing saved-link recovery. Never substitute the launch channel, parent, or another channel. |
+
+Output permission loss after startup does **not** stop recording. A caller
+losing Q&A access blocks that answer, not audio capture. Broader channel
+visibility also does not stop recording. Google Doc sharing follows the
+[saved-meeting permission policy](MEETING-RECORDING.md#google-setup).
+
+### Suggested implementation tickets
+
+These are work groupings, not created GitHub issues. Use the
+[offline acceptance cases](#offline-acceptance-cases-to-test) as acceptance criteria.
+
+| Work | Include | Scope |
+| --- | --- | --- |
+| Recording startup and output selection | R1–R8, override validation, notice-before-capture, and missing-permission errors | Discord bot |
+| Persisted output and recovery | P3–P4; selected output in `text_channel_id`, recorded VC in `voice_channel_id`, and restart recovery | Bot handoff and saved-record integration |
+| Q&A access and recording privacy | P1–P2, including duplicate-start errors and helper previews; retain the implemented Q&A window | Discord bot |
+| VC-move isolation | Close audio forwarding before new-VC audio enters, including `save:false` | Discord bot lifecycle |
+| Late-joiner notices and policy preference | Automatic per-meeting notice, dismissible policy explanation, and preference persistence | Discord bot; preference storage owner still to be decided |
+
+The transcript-sharing command remains separate open work.
+
 ## Common errors and handling
 
 Messages below describe the intended user-facing response; exact wording can
@@ -89,10 +153,10 @@ Do not log questions, transcripts, answers, or credentials.
 | Caller is not in voice | Refuse before starting. | "Join a voice channel first." |
 | Recording already active in the server | Keep the existing meeting; do not start another. If the caller cannot view the recorded VC, or access cannot be verified, give only a generic private error without the VC name/reference, elapsed time, meeting title, requester, or Doc link. | "A recording is already active in this server." |
 | Forum trigger, unsupported output type, or unauthorized override | Reject before capture/provider calls; do not silently ignore the option. | "Meeting commands are not supported in forums," "Choose a text channel or VC chat," or "Only Misty admins can select an output channel." |
-| Required output permission missing at startup | Refuse; identify view/send/attachment permission, plus history access for saved recordings. | "Cannot start: I need [permission] in the selected output channel." |
+| Required output permission missing at startup | Refuse; identify view/send/attachment permission, plus history access for saved recordings. A saved recording with a VC output destination also requires `Connect` there to read history for saved-link delivery; this does not require joining the output VC. | "Cannot start: I need [permission] in the selected output channel." |
 | VC-chat notice permission missing, or notice send fails | Refuse even if the output override is writable; do not capture without the notice. | "Cannot start: I could not post the recording notice in VC chat." |
 | Bot cannot join voice or recording service is unavailable | Abort startup and release partial session resources. | "Could not join the voice channel" or "Meeting recording is unavailable." |
-| Status or stop requested by a caller who cannot view the recorded VC, or whose access cannot be verified | Give only a generic private response. Do not reveal the VC name/reference, elapsed time, meeting title, requester, or Doc link. Preserve existing stop authorization, including the empty-VC exception; any permitted stop gets a generic acknowledgement and output stays at the selected destination. | "No recording details are available to you here," or a generic acknowledgement if the stop is permitted. |
+| Status or stop requested by a caller who cannot view the recorded VC, or whose access cannot be verified | Give only a generic private response, including the `@Misty` stop-confirmation preview before confirmation. Do not reveal the VC name/reference, elapsed time, meeting title, requester, or Doc link. Preserve existing stop authorization, including the empty-VC exception; any permitted stop gets a generic acknowledgement and output stays at the selected destination. | "No recording details are available to you here," or a generic acknowledgement if the stop is permitted. |
 | Stop requested outside the recorded VC while it still has people, and the caller can view that VC | Leave recording active; retain the existing empty-VC stop exception. | "Join the recorded voice channel to stop this recording." |
 | Output permissions lost or audience broadened mid-meeting | Continue recording. Attempt delivery at end; never redirect automatically. | No interruption solely for this change; report any remaining delivery failure when recording ends. |
 | Bot moves to another VC | Stop capture before new-VC audio enters, then finalize the original meeting, including `save:false`. | "Recording ended because I moved voice channels. Start a new recording in the new channel." |
@@ -176,6 +240,37 @@ It must not automatically send the content to another channel.
 
 Meeting features must not be triggered from forum channels or forum posts. Supporting those trigger locations adds complexity, so they are excluded from this design.
 
+## Late-joiner notifications
+
+### When and what Misty sends
+
+When a person joins a VC with an active recording, **Misty automatically sends
+that participant a fresh recording notice**. Do not rely on the requester or
+the original start notice. The notification explains that recording is active,
+the Discord output destination including any override, and the applicable
+saved-Doc sharing policy or PDF-only behavior for `save:false`.
+
+The existing prompt to start a recording skips active meetings, so it does not
+fulfill this requirement. This notification must work for a participant without
+`ReadMessageHistory` and remind them of the recording/consent policy.
+
+### "Don't show again"
+
+Store the participant's preference to hide repeated **policy explanations** in
+future meetings. It must not affect anyone else. Always send the brief
+recording-active notice and that meeting's sharing destination, even when the
+explanation is hidden. Dismissal is not blanket consent to future recordings.
+
+### Delivery details still to settle
+
+Automatic notification and dismissal behavior are decided. Before the ticket
+is ready to implement, choose the delivery method (for example, DM or a fresh
+VC-chat notice), what happens if delivery fails, and preference storage, scope,
+and reset behavior. Those details have not been decided by this reorganization.
+
+Acceptance cases: **Late joiner misses the start notice** and **Policy explanation
+dismissed** in [Offline acceptance cases to test](#offline-acceptance-cases-to-test).
+
 ## Q&A
 
 `/qna` runs **only in the recorded VC's chat**, even if an admin selected a
@@ -249,22 +344,34 @@ what happens when no transcript-sharing teams are configured.
 | --- | --- | --- |
 | Which admins can select `output_channel`? | Misty admins and superusers. Their explicit selection approves the destination; no separate VC-to-channel mapping is required. | Decided |
 | Which destinations can they select? | Ordinary text channels and VC chats. No forums, forum posts, or threads in the initial selector. | Decided |
-| What permissions are required before starting? | Require access to the selected destination, message-sending permission, and PDF attachment permission. Saved recordings also require `ReadMessageHistory` there because saved-Doc link delivery checks history before sending. Independently verify Misty can view and send messages in the recorded VC's chat, even with an output override, so the recording notice can be posted before capturing audio. Refuse to start if a required permission is missing; no link-only fallback. | Decided |
+| What permissions are required before starting? | Apply R1–R8 in the [permission and authorization checklist](#permission-and-authorization-checklist). Check the recorded VC and output independently; refuse startup if any applicable check fails. | Decided |
 | What if Misty moves to another VC during recording? | Stop forwarding audio before any audio from the new VC enters the session, then finalize the original meeting. This applies to saved and PDF-only (`save:false`) recordings. Keep the original output destination; recording the new VC requires a fresh start. | Decided |
 | What if required output permissions are lost mid-recording? | Continue recording; permission loss may be accidental or temporary. Do not automatically send content to another channel. | Decided |
 | When should a permission-related delivery error appear? | When recording ends automatically or `/record stop` is called, attempt delivery to the original selected destination. If permissions were restored, deliver normally; otherwise report the delivery failure where possible. | Decided |
 | How is failed final delivery recovered? | Keep existing behavior: saved-Doc link delivery retries at the original selected destination through the existing recovery process, including after restart. Report PDF upload failures where possible; do not add a durable PDF retry system in this change or redirect output automatically. | Decided |
 | Which channel is stored for saved-link recovery? | Persist the selected output destination in `text_channel_id`: the recorded VC's chat by default, or the admin's override. Keep `voice_channel_id` separate for Google Doc sharing. Immediate delivery and restart recovery must use the stored output destination, not the launch channel, for the meeting title, start time, requester mention, and Doc link. | Decided |
-| What may duplicate-start, status, or stop replies reveal to callers without VC visibility? | Only a generic private response: no VC name/reference, elapsed time, meeting title, requester, or Doc link. Apply this to "recording already active" errors as well as status/stop replies, and treat unverifiable access the same way. Preserve existing stop authorization and the empty-VC exception; any permitted stop gets a generic acknowledgement, not meeting details or redirected output. | Decided |
+| What may duplicate-start, status, or stop replies reveal to callers without VC visibility? | Only a generic private response: no VC name/reference, elapsed time, meeting title, requester, or Doc link. Apply this to "recording already active" errors, status/stop replies, and the `@Misty` stop-confirmation preview before the caller confirms. Treat unverifiable access the same way. Preserve existing stop authorization and the empty-VC exception; any permitted stop gets a generic acknowledgement, not meeting details or redirected output. | Decided |
 | Which transcript window does Q&A use? | Keep the implemented last-15-minutes window, measured in elapsed meeting time including silence; use the meeting so far if shorter. Only finalized speech at request time is included. Dense transcripts may shorten the window further, with the retained range disclosed. | Existing behavior |
 | What if permissions broaden mid-meeting? | Continue recording. Current Discord permissions govern visibility. | Decided |
 | Keep saved Docs team-scoped? | Yes. Retain the recorded VC's configured-team sharing, including team members who missed the call and future members of those teams. Discord output access remains separate. | Decided |
 | How do admins configure a VC's teams? | Keep current `/channel-access` behavior: configure the invocation channel (the parent for threads). Configure a VC from its own chat; do not add a `channel:` selector. Live VC-chat availability still needs verification. | Decided |
 | Should transcript sharing have its own command? | Consider separating saved meeting Doc sharing from `/channel-access` document-answer scope; see the dedicated section above. This revisits which command owns meeting-team configuration. | Open |
 | Where do notices go with an override? | Post the recording-start notice in the recorded VC's chat, explicitly naming the selected output channel. Check VC-chat access and message-sending permission beforehand and deliver the notice before capturing audio; do not start if it cannot be posted. Command acknowledgements stay private; the PDF and saved-Doc link go to the selected output destination. | Decided |
+| How are late joiners informed? | Automatic fresh notice from Misty; see [Late-joiner notifications](#late-joiner-notifications) for contents and remaining delivery details. | Decided |
+| What does "Don't show again" hide? | Only repeated policy explanations, not each meeting's recording notice or sharing destination. See [Late-joiner notifications](#late-joiner-notifications). | Decided |
 
 ## Offline acceptance cases to test
 
+- **Late joiner misses the start notice:** join the recorded VC after capture
+  starts, without `ReadMessageHistory`, while an admin has selected a broader
+  output channel. Verify Misty sends a new notification identifying recording
+  activity and the actual sharing destination, rather than relying on history
+  access or the requester to explain it.
+- **Policy explanation dismissed:** choose "Don't show again," then join a
+  later recorded meeting with a different output destination. Verify the
+  repeated policy explanation is hidden but a brief recording notice and the
+  new sharing destination are still sent. Another participant's explanation
+  must not be suppressed by this preference.
 - **Duplicate start, status, and stop without VC visibility:** while another
   recording is active, invoke `/record start`, `/record status`, and
   `/record stop` from an unrelated accessible channel as someone unable to view
@@ -274,6 +381,11 @@ what happens when no transcript-sharing teams are configured.
   or Doc link. Cover a denied stop while people remain,
   a stop allowed by the existing empty-VC exception, a stop failure, and an
   unresolved permission lookup. Keep final output at its selected destination.
+- **Helper stop preview without VC visibility:** ask `@Misty` to stop recording
+  from an unrelated accessible channel. Verify the private confirmation preview
+  omits the recorded VC reference and all meeting details before the caller
+  confirms. Repeat when VC visibility cannot be verified and when access is
+  lost before a confirmation page is sent. Keep existing stop authorization.
 - **Saved-link destination survives restart:** start from `#general` while in a
   private VC, finalize the recording, and restart before saved-link delivery
   succeeds. Verify `text_channel_id` stores the VC's ID and recovery posts the
@@ -291,6 +403,12 @@ what happens when no transcript-sharing teams are configured.
   `ReadMessageHistory`. Verify startup is refused before capturing audio or
   invoking paid providers, with an error identifying the missing permission.
   Allowing PDF delivery alone must not bypass the saved-link prerequisite.
+- **Saved recording can join the source VC but not the output VC:** select
+  another VC's chat as the admin override. Allow Misty to connect to the
+  recorded VC and to view/send/attach/read history at the output VC, but deny
+  `Connect` at the output VC. Verify startup is refused before capture or paid
+  processing, identifying the missing output-VC permission. Granting it should
+  permit startup without making Misty join that output VC.
 
 ## Subtitles — TBD
 
