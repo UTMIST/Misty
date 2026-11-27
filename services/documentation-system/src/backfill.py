@@ -33,6 +33,7 @@ import sys
 from dataclasses import dataclass, field, replace
 
 import httpx
+from platform_auth.telemetry import internal_request
 
 DEFAULT_BASE_URL = "http://localhost:8001"
 
@@ -112,8 +113,11 @@ class DocsApiClient:
 
     def _get(self, path: str, params: dict | None = None):
         try:
-            resp = self._client.get(
-                f"{self._base_url}{path}", headers=self._headers, params=params or {}
+            resp = internal_request(
+                self._client.get,
+                f"{self._base_url}{path}",
+                headers=self._headers,
+                params=params or {},
             )
         except httpx.HTTPError as e:
             raise BackfillError(f"GET {path} failed: {e}") from e
@@ -163,8 +167,8 @@ class DocsApiClient:
         fetcher (github) or an empty extraction leaves the doc contentless and
         still reports success. `_verify_repairs` settles that, not this."""
         try:
-            resp = self._client.post(
-                f"{self._base_url}/docs/{doc_id}/refetch", headers=self._headers
+            resp = internal_request(
+                self._client.post, f"{self._base_url}/docs/{doc_id}/refetch", headers=self._headers
             )
         except httpx.HTTPError as e:
             return f"unreachable: {e}"

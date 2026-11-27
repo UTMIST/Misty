@@ -6,6 +6,7 @@ Fetcher.fetch takes only a url — the registry has already resolved the source.
 """
 
 import httpx
+from platform_auth.telemetry import internal_request
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from contracts.fetcher import FetchError, FetchResult, SourceGone, SourcePermission
@@ -52,7 +53,8 @@ class ConnectorsFetcher:
     def fetch(self, url: str) -> FetchResult:
         client = self._client or httpx.Client(timeout=self._timeout)
         try:
-            resp = client.post(
+            resp = internal_request(
+                client.post,
                 f"{self._base_url}/fetch",
                 json={"url": url, "source_id": self._source_id},
                 headers={"X-API-Key": self._api_key},
