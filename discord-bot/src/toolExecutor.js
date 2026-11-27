@@ -46,6 +46,25 @@ export const OUTCOME = {
   EXHAUSTED: 'exhausted', // a work limit was reached before a final answer
 };
 
+export function failureOutcome(error) {
+  if (error?.kind === 'timeout' || error?.name === 'TimeoutError') return 'timeout';
+  if (error?.kind === 'cancelled' || error?.name === 'AbortError') return 'cancelled';
+  return 'failed';
+}
+
+export function observeModel(run) {
+  return withSpan('answer.model', async (span) => {
+    try {
+      const response = await run();
+      if (response?.stop_reason === 'tool_use') span.mark('tool_round');
+      return response;
+    } catch (error) {
+      span.outcome(failureOutcome(error));
+      throw error;
+    }
+  });
+}
+
 function toolUseBlocks(blocks) {
   return (blocks ?? []).filter((b) => b && b.type === 'tool_use');
 }
@@ -126,7 +145,7 @@ export function createToolExecutor({
                   observe('timeout');
                   exhausted = true;
                   controller.abort();
-                  reject(new Error('helper deadline reached'));
+                  reject(new DOMException('helper deadline reached', 'TimeoutError'));
                 },
                 Math.ceil(deadline - performance.now()),
               );
@@ -196,8 +215,8 @@ export function createToolExecutor({
 
         let res;
         try {
-          res = await withSpan('answer.model', async (span) => {
-            const response = await withDeadline((signal) =>
+          res = await observeModel(() =>
+            withDeadline((signal) =>
               llmClient.chat({
                 messages: history,
                 system: clarifyPreparation
@@ -209,10 +228,8 @@ export function createToolExecutor({
                 maxTokens,
                 signal,
               }),
-            );
-            if (response.stop_reason === 'tool_use') span.mark('tool_round');
-            return response;
-          });
+            ),
+          );
         } catch (error) {
           if (isExhausted()) return { outcome: OUTCOME.EXHAUSTED };
           throw error;

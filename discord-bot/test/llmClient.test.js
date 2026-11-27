@@ -132,7 +132,7 @@ test('chat aborts and throws LlmUnavailable when the request stalls past timeout
   const client = createLlmClient({ baseUrl: BASE, apiKey: KEY, fetchImpl, timeoutMs: 10 });
   await assert.rejects(
     () => client.chat({ messages: [{ role: 'user', content: 'q' }] }),
-    LlmUnavailable,
+    (error) => error instanceof LlmUnavailable && error.kind === 'timeout',
   );
 });
 
@@ -155,7 +155,7 @@ for (const phase of ['headers', 'body']) {
     });
     await assert.rejects(
       client.chat({ messages: [{ role: 'user', content: 'Read' }], signal: controller.signal }),
-      LlmUnavailable,
+      (error) => error instanceof LlmUnavailable && error.kind === 'cancelled',
     );
     assert.equal(fetchSignal.aborted, true);
   });
@@ -180,7 +180,7 @@ test('the client timeout remains active through response body reading', async ()
   });
   await assert.rejects(
     client.chat({ messages: [{ role: 'user', content: 'Read' }] }),
-    LlmUnavailable,
+    (error) => error instanceof LlmUnavailable && error.kind === 'timeout',
   );
   assert.equal(fetchSignal.aborted, true);
 });

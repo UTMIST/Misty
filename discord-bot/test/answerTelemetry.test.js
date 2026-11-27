@@ -137,7 +137,14 @@ if (process.argv[2] === '--emit') {
           trace.filter((e) => e.event_name === 'part_sent').length,
           end.result === 'full' ? 2 : end.result === 'partial' ? 1 : 0,
         );
+        if (['timeout', 'cancelled'].includes(end.result)) {
+          assert.equal(
+            trace.find((e) => e.operation === 'answer.model' && e.event_name === 'end')?.result,
+            end.result,
+          );
+        }
         if (['full', 'partial', 'withheld'].includes(end.result)) {
+          assert.equal(trace.filter((e) => e.event_name === 'tool_round').length, 1);
           assert.equal(
             trace.filter((e) => e.operation === 'answer.tools' && e.event_name === 'end').length,
             1,

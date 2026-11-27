@@ -1,8 +1,7 @@
-import { withSpan } from './telemetry.js';
 import { resolvePrincipal } from './auth/principal.js';
 import { authorize } from './auth/policy.js';
 import { DirectoryUnavailable } from './clients/directoryClient.js';
-import { OUTCOME } from './toolExecutor.js';
+import { OUTCOME, failureOutcome, observeModel } from './toolExecutor.js';
 import { renderHelperAnswer } from './messages/helper.js';
 
 export const LINK_PROMPT =
@@ -97,11 +96,11 @@ export async function prepareHelperReply(
   if (!toolsAvailable(appContext, context)) {
     let content;
     try {
-      ({ content } = await withSpan('answer.model', () =>
+      ({ content } = await observeModel(() =>
         appContext.helperService.answer({ turns: safeTurns, principal }),
       ));
     } catch (err) {
-      observe(err.kind === 'timeout' || err.kind === 'cancelled' ? err.kind : 'failed');
+      observe(failureOutcome(err));
       console.error('helper answer failed');
       return { content: LLM_UNAVAILABLE };
     }
@@ -146,7 +145,7 @@ export async function prepareHelperReply(
         return { content: EMPTY_ANSWER };
     }
   } catch (err) {
-    observe(err.kind === 'timeout' || err.kind === 'cancelled' ? err.kind : 'failed');
+    observe(failureOutcome(err));
     console.error('helper tool answer failed');
     return { content: LLM_UNAVAILABLE };
   }

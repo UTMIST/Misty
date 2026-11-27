@@ -1,3 +1,4 @@
+import { failureOutcome } from '../../toolExecutor.js';
 import { withSpan } from '../../telemetry.js';
 import { prepareHelperReply, resolveHelperCaller, WITHHELD_ANSWER } from '../../helperFlow.js';
 import { sendDiscordMessage } from './messages.js';
@@ -323,8 +324,8 @@ async function handleAnswer(message, options, run, question) {
           else if (prepared === 'answer')
             prepared = withheld ? 'withheld' : parts ? 'full' : 'failed';
           delivery.outcome(prepared);
-        } catch {
-          prepared = parts ? 'partial' : 'failed';
+        } catch (err) {
+          prepared = parts ? 'partial' : failureOutcome(err);
           delivery.outcome(prepared);
           console.error('Could not deliver helper reply');
         }

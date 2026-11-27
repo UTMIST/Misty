@@ -37,6 +37,8 @@ export function createLlmClient({ baseUrl, apiKey, fetchImpl = fetch, timeoutMs 
 
       const controller = new AbortController();
       const abort = () => controller.abort();
+      const failureKind = () =>
+        signal?.aborted ? 'cancelled' : controller.signal.aborted ? 'timeout' : 'failed';
       signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted) abort();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -51,10 +53,7 @@ export function createLlmClient({ baseUrl, apiKey, fetchImpl = fetch, timeoutMs 
             signal: controller.signal,
           });
         } catch {
-          throw new LlmUnavailable(
-            'network error reaching llm service',
-            signal?.aborted ? 'cancelled' : controller.signal.aborted ? 'timeout' : 'failed',
-          );
+          throw new LlmUnavailable('network error reaching llm service', failureKind());
         }
         if (!resp.ok)
           throw new LlmUnavailable(
@@ -65,7 +64,7 @@ export function createLlmClient({ baseUrl, apiKey, fetchImpl = fetch, timeoutMs 
         try {
           data = await resp.json();
         } catch {
-          throw new LlmUnavailable('malformed llm response');
+          throw new LlmUnavailable('malformed llm response', failureKind());
         }
         return {
           content: data.content,
