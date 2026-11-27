@@ -140,7 +140,9 @@ def unpack(row):
         ):
             return None
         k, v = a["key"], a.get("value")
-        if k in ("elapsed_ms", "dropped_before", "measures") and isinstance(v, str):
+        if k in ("elapsed_ms", "dropped_before", "sequence", "measures") and isinstance(
+            v, str
+        ):
             try:
                 v = json.loads(v)
             except (ValueError, RecursionError):
@@ -155,18 +157,9 @@ def pull(db, args, now):
     counts = Counter()
     drops = 0
     try:
-        db.execute("begin immediate")
-        if args.command == "railway":
-            bind(db, "railway_environment", args.environment_id)
-            bind(db, "railway_service/" + args.service, args.service_id)
-        db.execute("insert or ignore into sources(service) values(?)", (args.service,))
-        last = db.execute(
-            "select checkpoint from sources where service=?", (args.service,)
-        ).fetchone()[0]
         end = utc(args.until) if args.until else now - timedelta(seconds=5)
         if end > now or end < now - RETENTION:
             raise ValueError("poll end must be within retention and in the past")
-        prior = utc(last) if last else None
         floor = (
             max(utc(args.available_since), now - RETENTION)
             if args.available_since
@@ -174,18 +167,43 @@ def pull(db, args, now):
         )
         if floor > end:
             raise ValueError("available-since exceeds window")
+        if args.command == "railway":
+            # Remember where coverage was supposed to begin even if the first
+            # provider call fails. A later retry must not slide past an unread page.
+            with db:
+                bind(db, "railway_environment", args.environment_id)
+                bind(db, "railway_service/" + args.service, args.service_id)
+                key = "railway_start/" + args.service
+                db.execute(
+                    "insert or ignore into meta values(?,?)",
+                    (key, iso(end - timedelta(seconds=args.window_seconds))),
+                )
+                first = utc(
+                    db.execute("select value from meta where key=?", (key,)).fetchone()[
+                        0
+                    ]
+                )
+        db.execute("begin immediate")
+        db.execute("insert or ignore into sources(service) values(?)", (args.service,))
+        last = db.execute(
+            "select checkpoint from sources where service=?", (args.service,)
+        ).fetchone()[0]
+        prior = utc(last) if last else None
         gap = prior is not None and prior < floor
         if args.command == "railway":
-            if prior:
-                end = min(
-                    end, max(prior, floor) + timedelta(seconds=args.window_seconds)
-                )
-            start = (prior or end - timedelta(seconds=args.window_seconds)) - timedelta(
-                seconds=args.overlap_seconds
+            covered_from = prior or first
+            gap = covered_from < floor
+            end = min(
+                end, max(covered_from, floor) + timedelta(seconds=args.window_seconds)
             )
+            start = covered_from - timedelta(seconds=args.overlap_seconds)
         else:
             start = now - RETENTION
-        start = max(start, floor)
+        # Use the same millisecond boundaries locally and in the Railway query.
+        start = utc(iso(max(start, floor)))
+        end = utc(iso(end))
+        if start > end:
+            raise ValueError("end precedes the start of this source")
         if args.command == "railway" and prior and end < prior:
             raise ValueError("a live poll cannot rewind its checkpoint")
         records = (
