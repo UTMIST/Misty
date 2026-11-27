@@ -27,7 +27,7 @@ import base64
 import logging
 import threading
 
-from src.contracts import QnaResponse, Segment, StopResponse
+from src.contracts import AudioDrain, QnaResponse, Segment, StopResponse
 from src.pipeline.transcript import assemble_transcript
 
 _logger = logging.getLogger("meeting.audit")
@@ -293,6 +293,7 @@ class MeetingSession:
         # off the transcript. The socket delivers in order, so the signal
         # arriving means all prior audio has already been fed.
         self._audio_complete = asyncio.Event()
+        self._audio_end_reason: AudioDrain = "unknown"
         # Every path that discards audio increments one of these. They are
         # reported as a single line at stop, because "words went missing" with
         # nothing in the logs is how most of this service's bugs reached
@@ -415,18 +416,16 @@ class MeetingSession:
             ", ".join(f"{reason}={count}" for reason, count in sorted(self._drops.items())),
         )
 
-    def mark_audio_complete(self) -> None:
-        """Called by the WS ingest loop when the bot signals end-of-audio.
+    def mark_audio_complete(self, *, disconnected: bool = False) -> None:
+        """Release the barrier once, retaining the first reason it opened."""
+        if not self._audio_complete.is_set():
+            self._audio_end_reason = "disconnected" if disconnected else "confirmed"
+            self._audio_complete.set()
 
-        Safe to call more than once, and before stop() -- the flag is what
-        matters, not the ordering.
-        """
-        self._audio_complete.set()
-
-    async def _await_audio_complete(self) -> None:
+    async def _await_audio_complete(self) -> AudioDrain:
         """Block until the tail of the meeting has been fed, or give up."""
         if self._audio_complete.is_set():
-            return
+            return self._audio_end_reason
         timeout = self._deps.get("audio_drain_timeout_s", AUDIO_DRAIN_TIMEOUT_S)
         try:
             await asyncio.wait_for(self._audio_complete.wait(), timeout)
@@ -437,6 +436,8 @@ class MeetingSession:
                 self.session_id,
                 timeout,
             )
+            return "timed_out"
+        return self._audio_end_reason
 
     async def stop(self, title: str | None = None, record=None) -> StopResponse:
         if record and record.started_at > self._deps["now"]():
@@ -451,7 +452,7 @@ class MeetingSession:
         # Wait for the tail BEFORE quiescing: the last frames may still be in
         # flight on the WS, and refusing them is exactly how the transcript lost
         # its ending. Stream them in, THEN cut.
-        await self._await_audio_complete()
+        audio_drain = await self._await_audio_complete()
         # Now quiesce, so no frame can slip in between the snapshot and the end
         # of finalization.
         self._stopping = True
@@ -505,6 +506,7 @@ class MeetingSession:
                 transcript=transcript_text,
                 minutes=minutes,
                 pdf_b64=pdf_b64,
+                audio_drain=audio_drain,
             )
             if record is not None:
                 from src.contracts import RecordResult

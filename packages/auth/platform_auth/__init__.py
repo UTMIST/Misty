@@ -16,7 +16,11 @@ from platform_auth.models import (
     AuthedKey,
 )
 
+from platform_auth.telemetry import span, trace_headers
+
 __all__ = [
+    "span",
+    "trace_headers",
     "AuditLogMiddleware",
     "AuthDeps",
     "build_auth",

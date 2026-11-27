@@ -203,6 +203,7 @@ Set these per environment (staging vs production) per service.
 | `LLM_BASE_URL` / `LLM_API_KEY` | required; llm URL and the bot’s own `chat`-scoped consumer key (step 4b) |
 | `INFRASTRUCTURE_DISCORD_USERNAME` | *optional* — Discord username or ID shown by `/bug` for infrastructure support |
 | `MEETING_BASE_URL` / `MEETING_API_KEY` | meeting; a `meetings`-scoped consumer key |
+| `RECORDING_TRACE_ENABLED` | Bot only. Set to `true` for a recording pilot in the selected environment. Unset and redeploy to disable. Use restricted service logs for investigation. |
 | `MEETING_WS_URL` | *optional* — derived from `MEETING_BASE_URL` if unset |
 
 Each `*_BASE_URL` follows the same private-network template shape, e.g.
