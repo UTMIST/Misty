@@ -521,3 +521,30 @@ def test_failed_checkpoint_write_cannot_report_clean_completion(monitored_cli, m
     summary = json.loads(output.out.splitlines()[-1])
     assert summary["level"] == "error"
     assert summary["outcome"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("change", "outcome"),
+    [({}, "clean"), ({"import": "index_failed"}, "gaps"), ({"listing_failure": True}, "failed")],
+)
+def test_discovery_traces_only_internal_requests(monitored_cli, monkeypatch, change, outcome):
+    from platform_auth import telemetry
+
+    _, requests, _, behavior = monitored_cli
+    behavior.update(change)
+    events = []
+    monkeypatch.setattr(telemetry._emitter, "offer", events.append)
+    monkeypatch.setenv("TELEMETRY_ENABLED", "true")
+    monkeypatch.setenv("TELEMETRY_ENV", "local")
+    main(["--require-monitor"])
+    [end] = [
+        e for e in events if e["event_name"] == "end" and e["operation"] == "catalog.discovery"
+    ]
+    assert end["result"] == outcome
+    assert end["traffic"] == "background"
+    for request in requests:
+        if request.url.host == "monitor.test":
+            assert "traceparent" not in request.headers
+        else:
+            assert request.headers["traceparent"].split("-")[1] == end["trace_id"]
+    assert "secret" not in json.dumps(events)

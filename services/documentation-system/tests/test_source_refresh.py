@@ -820,3 +820,21 @@ def test_meeting_phase_requires_its_literal_scope_before_work():
         )
         with pytest.raises(RefreshError, match="meetings:write"):
             client.check_scope(timeout=5, meetings=True)
+
+
+@pytest.mark.parametrize("index_failed,expected", [(0, "drained"), (1, "gaps")])
+def test_refresh_trace_counts_failures_after_drain(monkeypatch, index_failed, expected):
+    from platform_auth import telemetry
+
+    events = []
+    monkeypatch.setattr(telemetry._emitter, "offer", events.append)
+    monkeypatch.setenv("TELEMETRY_ENABLED", "true")
+    monkeypatch.setenv("TELEMETRY_ENV", "local")
+    monkeypatch.setenv("DOCS_API_KEY", "offline-key")
+    with api([counts(1, index_failed=index_failed)]) as (client, _):
+        monkeypatch.setattr(source_refresh, "DocsApiClient", lambda **kw: client)
+        assert main([]) == 0
+    [end] = [e for e in events if e["operation"] == "catalog.refresh" and e["event_name"] == "end"]
+    assert end["result"] == expected
+    assert end["measures"] == {"attempted": 1, "item_failed": 0, "index_failed": index_failed}
+    assert "offline-key" not in json.dumps(events)

@@ -951,3 +951,26 @@ Generation-time decisions/action items/participants remain separate fields;
 readable content follows current Google edits. Google creation is a single HTML
 conversion and later retries never write that body. Audio stays entirely outside
 this persistence boundary. No durable PDF copy is retained by the platform.
+
+### Search and catalog health
+
+Authorized search emits one platform outcome per request when shared telemetry
+is enabled, independently of the optional search audit field. A completed query
+with no hits contributes to the empty-search rate. Missing channel configuration,
+denials and upstream failures have their own results. Search spans start after
+authentication, with separate observations for early framework rejections.
+
+Discovery and source refresh create background spans. Discovery distinguishes a
+clean traversal, gaps, a continuation, and failure. Refresh records attempted
+documents, item failures and indexing failures. Only authenticated catalog and
+connector requests receive trace context. External heartbeat endpoints do not.
+
+After a refresh guard is successfully released, an enabled catalog emits one
+read-only aggregate over active Google documents from fetch-enabled sources.
+Content freshness uses the stored text's fetch time. Access freshness uses its
+last successful reconciliation, including revocation. Each compares against
+the configured refresh interval. Missing or future timestamps are unknown.
+Index currency requires matching content and title hashes for the serving model.
+Missing content or a legacy set with an unknown title hash leaves index state
+unknown. A document with stored content and no serving set has a missing index.
+The aggregate query never reads document text into the telemetry stream.

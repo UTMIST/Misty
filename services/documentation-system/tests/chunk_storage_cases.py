@@ -50,6 +50,48 @@ def make_doc(adapter):
 
 
 class ChunkStorageCases:
+    def test_freshness_counts_each_eligible_doc_once_and_uses_stored_content(self, adapter):
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(days=1)
+        docs = [make_doc(adapter) for _ in range(4)]
+        current, old, never, retired = docs
+        adapter.update_doc(retired.id, {"active": False}, actor="test")
+        for doc, stamp in ((current, now), (old, since)):
+            adapter.upsert_doc_content(
+                doc.id,
+                content_text="abc def",
+                content_hash=content_hash("abc def"),
+                fetched_at=stamp,
+            )
+            adapter.replace_doc_chunks(
+                doc.id,
+                [
+                    make_chunk(text="abc", source_text="abc def"),
+                    make_chunk(ordinal=1, start=4, text="def", source_text="abc def"),
+                ],
+            )
+        # This title makes the old set stale; fetching metadata does not freshen its stored bytes.
+        adapter.update_doc(old.id, {"title": "changed", "fetched_at": now}, actor="test")
+        adapter.replace_source_grants(
+            old.id,
+            origin="google_drive",
+            grants=[],
+            synced_at=now,
+            expires_at=now + timedelta(days=1),
+            actor="test",
+        )
+        expected = {
+            "eligible": 3,
+            "content_current": 1,
+            "content_unknown": 1,
+            "index_current": 1,
+            "index_unknown": 1,
+            "access_current": 1,
+            "access_unknown": 2,
+        }
+        assert adapter.source_freshness(["web"], FAKE_MODEL, since, now) == expected
+        assert adapter.source_freshness([], FAKE_MODEL, since, now) == dict.fromkeys(expected, 0)
+
     def test_chunk_round_trip_with_unicode_offsets_and_order(self, adapter):
         doc = make_doc(adapter)
         source = "α😀\r\nUTMIST CPSIF"

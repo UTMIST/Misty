@@ -390,3 +390,36 @@ def test_unhandled_search_error_keeps_stack_and_redacts_values(ctx, monkeypatch,
     assert "routers/search.py" in traceback
     if not malformed_hits:
         assert "in broken_search" in traceback
+
+
+@pytest.mark.parametrize(
+    "case_name,expected",
+    [
+        ("alice", "results"),
+        ("empty-relevance", "no_hits"),
+        ("denied-person", "denied"),
+        ("scope-unavailable", "directory_unavailable"),
+    ],
+)
+def test_search_trace_does_not_depend_on_legacy_audit(ctx, monkeypatch, case_name, expected):
+    from platform_auth import telemetry
+
+    client, _, _, directory, _, keys = ctx
+    events = []
+    monkeypatch.setattr(telemetry._emitter, "offer", events.append)
+    monkeypatch.setenv("TELEMETRY_ENABLED", "true")
+    monkeypatch.setenv("TELEMETRY_ENV", "local")
+    monkeypatch.setattr(get_settings(), "search_outcome_audit_enabled", False)
+    case = next(c for c in FIXTURE["cases"] if c["name"] == case_name)
+    req = deepcopy(case["request"])
+    req["url"] = req.pop("path")
+    req["headers"]["X-API-Key"] = keys[req["headers"]["X-API-Key"]]
+    parent = "00-" + "ab" * 16 + "-" + "cd" * 8 + "-01"
+    req["headers"]["traceparent"] = parent
+    directory.unavailable = case_name == "scope-unavailable"
+    resp = client.request(**req)
+    assert resp.status_code == case["response"]["status"]
+    [end] = [e for e in events if e["operation"] == "catalog.search" and e["event_name"] == "end"]
+    assert end["result"] == expected
+    assert end["trace_id"] == "ab" * 16
+    assert req["json"]["query"] not in json.dumps(events)

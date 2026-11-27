@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import time
+from functools import wraps
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -21,17 +22,50 @@ from contracts.retrieval import (
 from contracts.storage import StorageAdapter
 from contracts.visibility import Actor, Channel
 from platform_auth import AuthedKey
+from platform_auth.telemetry import span
 from src.api.auth import get_on_behalf_actor, require_api_key
 from src.api.deps import get_directory, get_embeddings, get_storage
 from src.config import get_settings
 
 
 def _observe(request: Request, outcome: str) -> None:
+    request.state.search_outcome = outcome
+    if call := getattr(request.state, "search_call", None):
+        call.outcome(outcome)
     if get_settings().search_outcome_audit_enabled:
         request.state.audit_extra = {
             **getattr(request.state, "audit_extra", {}),
             "search_outcome": outcome,
         }
+
+
+def _early_outcome(request, outcome):
+    if getattr(request.state, "search_outcome", None):
+        return
+    with span("catalog.search", service="documentation-system") as call:
+        call.outcome(outcome)
+        _observe(request, outcome)
+
+
+def _trace_search(handler):
+    @wraps(handler)
+    def traced(*args, **kwargs):
+        request = kwargs["request"]
+        # The framework has authenticated the principal before accepting the
+        # incoming trace from another service.
+        with span("catalog.search", service="documentation-system") as call:
+            request.state.search_call = call
+            try:
+                return handler(*args, **kwargs)
+            except StarletteHTTPException as exc:
+                if not getattr(request.state, "search_outcome", None):
+                    _observe(request, "denied" if exc.status_code == 403 else "invalid_request")
+                raise
+            except Exception:
+                _observe(request, "internal_error")
+                raise
+
+    return traced
 
 
 class _SearchRoute(APIRoute):
@@ -46,11 +80,11 @@ class _SearchRoute(APIRoute):
                 fallback = {400: "invalid_request", 401: "denied", 403: "denied"}.get(
                     exc.status_code
                 )
-                if fallback and "search_outcome" not in getattr(request.state, "audit_extra", {}):
-                    _observe(request, fallback)
+                if fallback:
+                    _early_outcome(request, fallback)
                 raise
             except RequestValidationError as exc:
-                _observe(request, "invalid_request")
+                _early_outcome(request, "invalid_request")
                 # FastAPI's default error response echoes invalid Unicode input
                 # and fails to encode it. Keep the detail shape without input.
                 errors = [{k: error[k] for k in ("type", "loc", "msg")} for error in exc.errors()]
@@ -58,7 +92,7 @@ class _SearchRoute(APIRoute):
                     json.dumps({"detail": errors}), status_code=422, media_type="application/json"
                 )
             except Exception as exc:
-                _observe(request, "internal_error")
+                _early_outcome(request, "internal_error")
                 # Save the call sites. Raise outside the handler so framework
                 # traceback formatting cannot include the original values.
                 failure = RuntimeError("catalog search failed").with_traceback(exc.__traceback__)
@@ -100,6 +134,7 @@ def _warn_on_excluded_docs(storage: StorageAdapter, model: str) -> None:
 
 
 @router.post("/search", response_model=SearchResponse)
+@_trace_search
 def search(
     payload: SearchRequest,
     request: Request,
@@ -157,5 +192,6 @@ def search(
         _observe(request, "storage_unavailable")
         raise HTTPException(503, "retrieval storage unavailable") from None
     _warn_on_excluded_docs(storage, embedding.model)
+    response = SearchResponse(results=results)
     _observe(request, "results" if results else "no_hits")
-    return SearchResponse(results=results)
+    return response
