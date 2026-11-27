@@ -61,7 +61,7 @@ Registers or updates the display name for a speaker. Send string values for both
 
 Send **once**, after the recording stops and every captured frame has been forwarded. Because the socket delivers in order, this proves all audio has arrived, and `POST /stop` waits for it before finalizing.
 
-If neither this signal nor a disconnect has been observed, `/stop` proceeds after a 5 s drain timeout and logs a warning. The transcript tail may then be short, which is exactly the failure this signal prevents. **Send it.** An observed disconnect marks audio complete and skips the drain wait.
+If neither this signal nor a disconnect has been observed, `/stop` proceeds after a 5 s drain timeout and logs a warning. The transcript tail may then be short, which is exactly the failure this signal prevents. **Send it.** A disconnect releases the wait and the response preserves the [drain outcome](#recording-stop-diagnostics).
 
 Invalid JSON and text matching neither control shape are ignored. **Current limitation:** control values are not fully validated. For example, `{"speaker_id": [], "display_name": "x"}` raises `TypeError`, exits the handler, and enters [disconnect recovery](#disconnect). Clients must not rely on malformed control values being nonfatal.
 
@@ -83,7 +83,7 @@ the service uses this value directly to anchor speech on the meeting timeline.
 
 ### Disconnect
 
-Disconnecting (or erroring) **without** a preceding `POST /stop` **holds** the session for `DISCONNECT_GRACE_S` (default 60 s). Call `/stop` promptly to attempt recovery into minutes and a PDF. The disconnect also marks end-of-audio, since a closed socket can deliver no more frames.
+Disconnecting (or erroring) **without** a preceding `POST /stop` **holds** the session for `DISCONNECT_GRACE_S` (default 60 s). Call `/stop` promptly to attempt recovery into minutes and a PDF. Disconnect releases the audio barrier immediately. Without an earlier explicit end marker the stop response reports `disconnected`.
 
 **Starting `/stop` does not cancel the grace timer.** At expiry, the timer checks only whether the session is still registered. If so, `discard()` aborts each speaker's Transcribe stream and deregisters the session, even when finalization is in progress. An unfinished transcript flush can therefore be interrupted; merely starting stop before expiry does not guarantee complete recovery. If the transcript is already assembled, teardown can still deregister the session while report generation or hand-off continues.
 
@@ -221,6 +221,7 @@ What it does, in order: wait for the end-of-audio barrier (max 5 s) → close th
     "decisions": ["Target three tiers for 2026"],
     "action_items": ["Sam to send the deck by Friday"]
   },
+  "audio_drain": "confirmed",
   "pdf_b64": "JVBERi0xLjQK..."
 }
 ```
@@ -330,6 +331,15 @@ payload; the Discord PDF and explicit delayed-save notice are the fallback.
 
 An authenticated stop accepts an optional W3C version 00 `traceparent`. The
 existing restricted request audit includes the trace, client parent and server
-span IDs, HTTP status and duration. Missing or invalid context is ignored.
+span IDs, HTTP status and duration. On success it also records `audio_drain`.
+Missing or invalid context is ignored.
 Use the bot and meeting logs from the same environment. The stop audit can
 contain the request path and caller metadata and belongs in restricted logs.
+
+The stop response includes the server's `audio_drain` observation. An explicit
+WebSocket `{"end_of_audio": true}` gives `confirmed`. A disconnect before
+that marker gives `disconnected`. A wait that expires gives `timed_out`.
+A missing value on an older deployment or an unavailable observation gives
+`unknown` in bot diagnostics. The bot records this result on the stop request
+span. Confirmation covers the order of frames on the socket. Speech quality
+and transcription coverage require separate evidence.

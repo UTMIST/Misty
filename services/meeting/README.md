@@ -115,7 +115,7 @@ The wire contract the Discord-bot side mirrors.
 
    `{"speaker_id": "<id>", "display_name": "<name>"}` — registers/updates the display name shown for a speaker_id. Send this whenever a speaker's identity becomes known (e.g. a Discord user joins voice).
 
-   `{"end_of_audio": true}` — send **once**, after the bot stops recording and has forwarded every frame it captured. The socket delivers in order, so the server treats this as proof that all audio has arrived, and `POST /stop` waits for it before finalizing. If neither this signal nor a disconnect has been observed, `/stop` proceeds after `sessions.AUDIO_DRAIN_TIMEOUT_S` (5s) and logs a warning; the tail of the transcript may then be short. An observed disconnect marks audio complete and skips that wait.
+   `{"end_of_audio": true}` — send **once**, after the bot stops recording and has forwarded every frame it captured. The socket delivers in order, so the server treats this as proof that all audio has arrived, and `POST /stop` waits for it before finalizing. If neither this signal nor a disconnect has been observed, `/stop` proceeds after `sessions.AUDIO_DRAIN_TIMEOUT_S` (5s) and logs a warning; the tail of the transcript may then be short. A disconnect releases the wait and preserves its own [drain outcome](docs/API.md#recording-stop-diagnostics).
 
    Invalid JSON and unrecognized control shapes are ignored. Send string `speaker_id` and `display_name` values: malformed control values are not fully validated and can end the handler (see the [current limitation](docs/API.md#messages-the-server-accepts)).
 2. **Audio** (WebSocket binary frame), one raw Opus packet per frame, framed as:
@@ -129,7 +129,7 @@ The wire contract the Discord-bot side mirrors.
 
    i.e. a length-prefixed speaker id, then an 8-byte millisecond timestamp, then the raw Opus payload with no further framing. `ts_ms` is nonnegative elapsed time since recording start, including silence, using one shared monotonic clock for all speakers; it is neither Unix time nor accumulated speaking time. Truncated/undersized frames are dropped, not fatal.
 
-**Disconnect:** if the client disconnects (or errors) without a preceding `POST /stop`, the server holds the session for `DISCONNECT_GRACE_S` (default 60 s) and marks audio complete. Call `/stop` promptly to attempt recovery. Starting stop does not cancel the grace timer: if the session is still registered at expiry, `session.discard()` aborts its streams and deregisters it, potentially interrupting an unfinished transcript flush. Discard itself produces no artifacts. `DISCONNECT_GRACE_S=0` discards immediately; see the [disconnect contract](docs/API.md#disconnect).
+**Disconnect:** if the client disconnects (or errors) without a preceding `POST /stop`, the server holds the session for `DISCONNECT_GRACE_S` (default 60 s) and releases the audio barrier. Call `/stop` promptly to attempt recovery. Starting stop does not cancel the grace timer: if the session is still registered at expiry, `session.discard()` aborts its streams and deregisters it, potentially interrupting an unfinished transcript flush. Discard itself produces no artifacts. `DISCONNECT_GRACE_S=0` discards immediately; see the [disconnect contract](docs/API.md#disconnect).
 
 ## Private deploy (Railway)
 

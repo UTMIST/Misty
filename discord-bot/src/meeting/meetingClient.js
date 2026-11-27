@@ -200,7 +200,14 @@ export function createMeetingClient({
     }
     try {
       const report = await resp.json();
-      span?.mark('stop.response');
+      if (span) {
+        const drain = report?.audio_drain;
+        const observed = ['confirmed', 'timed_out', 'disconnected'].includes(drain)
+          ? drain
+          : 'unknown';
+        span.mark(`stop.drain_${observed}`);
+        span.mark('stop.response');
+      }
       return report;
     } catch {
       span?.mark('stop.error');
