@@ -154,6 +154,8 @@ one-minute count and latency histograms, catalog job and mark summaries, and
 resource samples. For a period boundary inside a minute or an attempt that
 crosses minutes, the reader uses the projected start and terminal times. The
 health request reads the raw store only for current source collection status.
+Source rows include the collector's historical gaps, dropped events and rejected
+events. These lifetime counts can cover periods outside the selected window.
 
 A start selects an attempt into its period. A terminal observed before that
 period ends supplies the result. A missing or conflicting terminal leaves the
@@ -167,7 +169,9 @@ Select background traffic for scheduled catalog runs. The catalog measures conte
 index and access from the same owner-side database snapshot at guard release.
 The view reports the UTC sample time and its age at period end. An absent or failed
 sample, a sample at least 65 minutes old on the hourly schedule, or a newer
-finished run with no sample leaves current document state unknown. Last clean scan
+finished run with no sample leaves current document state unknown. Incomplete
+counter sets or a current-plus-unknown count above the eligible population also
+leave the document state unknown. Last clean scan
 and last clean refresh remain identifiable after subsequent partial or failed runs.
 
 ### Importing local Railway resource samples

@@ -167,15 +167,28 @@ def _catalog(db, traffic, end):
         (traffic, last["ts"], end),
     ).fetchone()
 
+    eligible = measures.get("eligible")
+    pairs = [
+        (measures.get(name + "_current"), measures.get(name + "_unknown"))
+        for name in ("content", "index", "access")
+    ]
     if (
-        missing_after_refresh
-        or age >= 65
-        or last["result"] != "success"
-        or "eligible" not in measures
+        type(eligible) is not int
+        or eligible < 0
+        or any(
+            type(current) is not int
+            or type(unknown) is not int
+            or min(current, unknown) < 0
+            or current + unknown > eligible
+            for current, unknown in pairs
+        )
     ):
+        return (
+            "".join(parts)
+            + "<p>Incomplete or inconsistent catalog counts. Current document state unknown.</p>"
+        )
+    if missing_after_refresh or age >= 65 or last["result"] != "success":
         parts.append("<p>Current document state unknown.</p>")
-    if not measures or "eligible" not in measures:
-        return "".join(parts)
     rows = []
     for name in ("content", "index", "access"):
         rows.append(
@@ -264,7 +277,7 @@ def render_health(
         state = (
             (source_db or db)
             .execute(
-                "select last_success,last_error from sources where service=?",
+                "select last_success,last_error,gaps,drops,rejected from sources where service=?",
                 (service,),
             )
             .fetchone()
@@ -288,16 +301,37 @@ def render_health(
                 )
             )
         )
-        source_status.append((service, stamp or "Unknown", status))
+        source_status.append(
+            (
+                service,
+                stamp or "Unknown",
+                status,
+                *(state[2:] if state else ("—", "—", "—")),
+            )
+        )
     parts.append(
         _table(
-            ("Service", "Last successful collection UTC", "Collection state"),
+            (
+                "Service",
+                "Last successful collection UTC",
+                "Collection state",
+                "Historical gaps",
+                "Dropped events",
+                "Rejected events",
+            ),
             source_status,
         )
     )
-    if any(row[-1] != "Current" for row in source_status):
+    if any(row[2] != "Current" for row in source_status):
         parts.append(
             "<p>Missing or stale sources leave activity unknown. Counts below cover observed events only.</p>"
+        )
+    if any(
+        any(isinstance(value, int) and value for value in row[3:])
+        for row in source_status
+    ):
+        parts.append(
+            "<p>Historical gaps, drops and rejections cover the collector's lifetime. A recent successful read cannot recover missing records.</p>"
         )
     currents, current_median = _cohort(db, traffic, start, end)
     previous, previous_median = _cohort(db, traffic, previous_start, start)

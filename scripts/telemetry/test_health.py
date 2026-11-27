@@ -209,6 +209,34 @@ class HealthTest(unittest.TestCase):
         self.assertIn("Current document state unknown", self.page())
         self.assertIn("<td>40</td><td>2</td><td>0</td>", self.page())
 
+    def test_invalid_coverage_and_rejected_inputs_stay_visible(self):
+        # The wire contract bounds integers separately. An upstream producer can
+        # still send counts that cannot describe a single snapshot.
+        measures = {
+            "eligible": 1,
+            "content_current": 1,
+            "content_unknown": 1,
+            "index_current": 1,
+            "index_unknown": 0,
+            "access_current": 1,
+            "access_unknown": 0,
+        }
+        self.attempt(
+            "catalog.freshness",
+            "success",
+            service="documentation-system",
+            measures=measures,
+        )
+        with self.db:
+            self.db.execute(
+                "insert into sources(service,last_success,gaps,drops,rejected) values(?,?,?,?,?)",
+                ("documentation-system", iso(END), 2, 3, 4),
+            )
+        page = self.page()
+        self.assertIn("Current document state unknown", page)
+        self.assertNotIn("<td>content</td><td>1</td><td>1</td><td>1</td>", page)
+        self.assertIn("<td>Current</td><td>2</td><td>3</td><td>4</td>", page)
+
     def test_resource_import_is_atomic_replay_safe_and_bound_to_environment(self):
         def data(rows):
             stream = StringIO()
