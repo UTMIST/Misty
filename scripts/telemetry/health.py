@@ -246,7 +246,7 @@ def _resources(db, start, end, previous_start):
     )
 
 
-def render_health(db, traffic, start, end, previous_start, now):
+def render_health(db, traffic, start, end, previous_start, now, stale_seconds=300):
     parts = ["<h2>Workflow health</h2>"]
     source_status = []
     for service in (
@@ -266,7 +266,16 @@ def render_health(db, traffic, start, end, previous_start, now):
             else (
                 "Read failed"
                 if state[1]
-                else ("Stale" if _minutes(stamp, now) >= 5 else "Current")
+                else (
+                    "Stale"
+                    if not -60
+                    <= (
+                        datetime.fromisoformat(now.replace("Z", "+00:00"))
+                        - datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                    ).total_seconds()
+                    <= stale_seconds
+                    else "Current"
+                )
             )
         )
         source_status.append((service, stamp or "Unknown", status))
