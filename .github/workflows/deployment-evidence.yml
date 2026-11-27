@@ -1,0 +1,49 @@
+name: Record deployment evidence
+
+on:
+  deployment_status:
+  workflow_dispatch:
+    inputs:
+      deployment_id:
+        description: GitHub deployment ID to reconcile
+        type: number
+        required: true
+      dry_run:
+        description: Preview evidence without commenting
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  deployments: read
+  statuses: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: deployment-evidence-${{ github.event.deployment.id || inputs.deployment_id }}
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Deployment events can point at arbitrary refs. Execute trusted code.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Attach actual Railway deployment evidence
+        uses: actions/github-script@v9
+        env:
+          DEPLOYMENT_ID: ${{ github.event.deployment.id || inputs.deployment_id }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        with:
+          script: |
+            const { evidence } = require('./.github/scripts/deployment-evidence.cjs');
+            const result = await evidence({ github, ...context.repo,
+              deploymentId: Number(process.env.DEPLOYMENT_ID),
+              dryRun: process.env.DRY_RUN === 'true' });
+            await core.summary.addHeading('Deployment evidence')
+              .addCodeBlock(JSON.stringify(result, null, 2), 'json').write();
