@@ -18,6 +18,16 @@ def _client(handler):
     )
 
 
+def test_email_lookup_is_in_body_only():
+    def handle(request):
+        assert request.method == "POST"
+        assert str(request.url) == "http://d/people/by-email"
+        assert json.loads(request.content) == {"email": "a+b@example.org"}
+        return httpx.Response(404, json={"detail": "person not found"})
+
+    assert _client(handle).get_person_by_email("a+b@example.org") is None
+
+
 def test_get_person_by_github_found_and_404():
     def h(req):
         if req.url.path == "/people/by-identifier/github/octocat":

@@ -165,3 +165,7 @@ reset counters during routine deploys. For rollback, disable login and stop
 in-flight requests first; migration002 can be downgraded on a backup-protected
 maintenance window, discarding pending challenges/counters but preserving keys.
 Do not downgrade a live database merely to test reversibility.
+
+Deploy team-tracking with `POST /people/by-email` before rolling out the gateway
+login client that uses it. The endpoint uses the existing `people:read` scope.
+The gateway sends the email in the request body to keep it out of access logs.

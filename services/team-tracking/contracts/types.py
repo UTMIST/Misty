@@ -112,6 +112,20 @@ class PersonUpdate(BaseModel):
         return _normalize_email(v) if v is not None else None
 
 
+class PrimaryEmailLookup(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    email: str = Field(min_length=1, max_length=320, repr=False)
+
+    @field_validator("email")
+    @classmethod
+    def normalize(cls, value):
+        email = _normalize_email(value)
+        if not email or "\x00" in email:
+            raise ValueError("email must be nonblank and contain no NUL")
+        return email
+
+
 class PersonSearch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
