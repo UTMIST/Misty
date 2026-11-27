@@ -173,7 +173,9 @@ class MeetingRecordCases:
         assert fresh.storage.get_meeting(record.meeting_id).persistence_status == "create_uncertain"
         writer.fail = None
         clock[0] += timedelta(hours=2)
-        with telemetry.span("catalog.refresh", service="documentation-system", traffic="background"):
+        with telemetry.span(
+            "catalog.refresh", service="documentation-system", traffic="background"
+        ):
             fresh.advance(record.meeting_id)
         assert fresh.storage.get_meeting(record.meeting_id).persistence_status == "saved"
         assert len(writer.created) == 1
