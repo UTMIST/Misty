@@ -846,6 +846,7 @@ def test_stop_waits_for_end_of_audio_before_finalizing():
 
     result = asyncio.run(scenario())
 
+    assert result.audio_drain == "confirmed"
     assert stream.sent, "the tail frame was refused; stop() did not wait"
     assert "last words" in result.transcript
 
@@ -860,6 +861,7 @@ def test_stop_does_not_hang_when_end_of_audio_never_arrives():
     result = asyncio.run(asyncio.wait_for(session.stop(), 5))
 
     assert result.transcript == ""
+    assert result.audio_drain == "timed_out"
 
 
 def test_feed_is_still_refused_after_the_audio_barrier_passes():
@@ -1070,3 +1072,19 @@ def test_saturated_qna_pool_keeps_real_audio_dispatch_and_stop_responsive():
             runner.close()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("disconnect_first", [True, False])
+def test_stop_shares_the_first_drain_observation_with_concurrent_callers(disconnect_first):
+    async def scenario():
+        session = SessionRegistry(_make_deps([])).create("s", "g")
+        first = asyncio.create_task(session.stop())
+        second = asyncio.create_task(session.stop())
+        await asyncio.sleep(0)
+        session.mark_audio_complete(disconnected=disconnect_first)
+        session.mark_audio_complete(disconnected=not disconnect_first)
+        return await asyncio.gather(first, second)
+
+    first, second = asyncio.run(scenario())
+    assert second is first
+    assert first.audio_drain == ("disconnected" if disconnect_first else "confirmed")

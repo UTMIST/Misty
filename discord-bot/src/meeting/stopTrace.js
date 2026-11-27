@@ -1,7 +1,15 @@
 import { randomBytes } from 'node:crypto';
 import { writeFile } from 'node:fs';
 
-const events = new Set(['stop.request', 'stop.response', 'stop.error']);
+const events = new Set([
+  'stop.request',
+  'stop.response',
+  'stop.error',
+  'stop.drain_confirmed',
+  'stop.drain_timed_out',
+  'stop.drain_disconnected',
+  'stop.drain_unknown',
+]);
 
 // One asynchronous write at a time. A slow Railway pipe consumes at most
 // 64 queued records. Report lost observations on the next successful write.

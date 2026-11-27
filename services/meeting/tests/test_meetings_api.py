@@ -25,7 +25,7 @@ class FakeSession:
         self.discard_called = False
         self._segments = [Segment(speaker="alice", start_ms=0, text="hello")]
         self.raise_on_feed_for: set[str] = set()
-        self.audio_complete = False
+        self.audio_end_reason = "unknown"
         self.drops = {}
 
     def feed(self, speaker_id, display_name, opus_payload, ts_ms):
@@ -43,10 +43,12 @@ class FakeSession:
             transcript="[00:00] alice: hello",
             minutes=Minutes(summary="s", decisions=[], action_items=[]),
             pdf_b64="ZmFrZQ==",
+            audio_drain=self.audio_end_reason,
         )
 
-    def mark_audio_complete(self):
-        self.audio_complete = True
+    def mark_audio_complete(self, *, disconnected=False):
+        if self.audio_end_reason == "unknown":
+            self.audio_end_reason = "disconnected" if disconnected else "confirmed"
 
     def note_drop(self, reason, count=1):
         self.drops[reason] = self.drops.get(reason, 0) + count
@@ -246,11 +248,12 @@ def test_ws_disconnect_holds_the_session_so_stop_can_still_finalize(
     assert registry.get("held-session") is session
     # A closed socket cannot deliver more audio, so /stop's end-of-audio barrier
     # must pass immediately instead of waiting out its drain timeout.
-    assert session.audio_complete is True
+    assert session.audio_end_reason == "disconnected"
 
     # ...and the salvage actually works: /stop finalizes the held session.
     resp = client_held.post("/meetings/held-session/stop", headers={"X-API-Key": consumer_key})
     assert resp.status_code == 200
+    assert resp.json()["audio_drain"] == "disconnected"
     assert session.stop_called is True
 
 
@@ -323,7 +326,7 @@ def test_ws_end_of_audio_control_frame_marks_the_session(client, registry, consu
         ws.send_text('{"end_of_audio": true}')
 
     session = registry.sessions["ws-eoa"]
-    assert session.audio_complete is True
+    assert session.audio_end_reason == "confirmed"
     # The audio that preceded it still landed, and the signal itself is not a
     # speaker.
     assert session.feed_calls == [("alice-id", "Alice", b"opus-frame-1", 0)]
@@ -532,3 +535,58 @@ def test_restricted_stop_audit(client, consumer_key, parent, authorized, linked,
     if linked:
         assert record["trace_id"] == "1" * 32 and record["parent_span_id"] == "2" * 16
         assert len(record["span_id"]) == 16 and record["operation"] == "meeting.stop"
+
+
+@pytest.mark.parametrize("marker", ["false", '"false"', "1", "{}"])
+def test_malformed_audio_end_does_not_confirm_drain(client_held, registry, consumer_key, marker):
+    with client_held.websocket_connect("/meetings/malformed-end/stream") as ws:
+        ws.send_json({"key": consumer_key})
+        ws.send_text('{"end_of_audio": ' + marker + "}")
+    response = client_held.post("/meetings/malformed-end/stop", headers={"X-API-Key": consumer_key})
+    assert response.status_code == 200
+    assert response.json()["audio_drain"] == "disconnected"
+
+
+def test_successful_stop_audits_drain_with_trace_parent(client, registry, consumer_key, capsys):
+    import json
+
+    trace_id, client_span = "1" * 32, "2" * 16
+    session = registry.create("confirmed", "g")
+    session.mark_audio_complete()
+    response = client.post(
+        "/meetings/confirmed/stop",
+        headers={
+            "X-API-Key": consumer_key,
+            "traceparent": f"00-{trace_id}-{client_span}-01",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["audio_drain"] == "confirmed"
+    audit = next(
+        json.loads(line) for line in capsys.readouterr().out.splitlines() if '"duration_ms"' in line
+    )
+    assert (audit["trace_id"], audit["parent_span_id"], audit["audio_drain"]) == (
+        trace_id,
+        client_span,
+        "confirmed",
+    )
+
+
+def test_scopeless_key_cannot_link_a_stop(client, store, registry, capsys):
+    import json
+
+    session = registry.create("denied", "g")
+    plaintext, prefix, key_hash = generate_key()
+    store.add(prefix=prefix, key_hash=key_hash, name="test-scope", scopes=[])
+    response = client.post(
+        "/meetings/denied/stop",
+        headers={
+            "X-API-Key": plaintext,
+            "traceparent": "00-" + "1" * 32 + "-" + "2" * 16 + "-01",
+        },
+    )
+    assert response.status_code == 403 and not session.stop_called
+    audit = next(
+        json.loads(line) for line in capsys.readouterr().out.splitlines() if '"duration_ms"' in line
+    )
+    assert not {"trace_id", "span_id", "parent_span_id", "audio_drain"}.intersection(audit)

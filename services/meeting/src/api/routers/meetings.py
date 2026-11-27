@@ -302,10 +302,14 @@ async def stop_meeting(
         if request.record.guild_id != session.guild_id:
             raise HTTPException(422, "record guild does not match session")
         try:
-            return await session.stop(request.title, request.record)
+            report = await session.stop(request.title, request.record)
         except ValueError:
             raise HTTPException(422, "invalid record context") from None
-    return await session.stop(request.title if request else None)
+    else:
+        report = await session.stop(request.title if request else None)
+    if getattr(http_request.state, "audit_extra", None):
+        http_request.state.audit_extra["audio_drain"] = report.audio_drain
+    return report
 
 
 @router.websocket("/meetings/{session_id}/stream")
@@ -377,7 +381,7 @@ async def stream_meeting(
                     control = json.loads(text)
                 except (ValueError, TypeError):
                     continue
-                if isinstance(control, dict) and control.get("end_of_audio"):
+                if isinstance(control, dict) and control.get("end_of_audio") is True:
                     # The bot has stopped recording and sent everything it has.
                     # The socket delivers in order, so reaching this frame means
                     # every audio frame before it has already been fed -- which
@@ -429,7 +433,7 @@ async def stream_meeting(
             # turns stop()'s end-of-audio barrier into an immediate pass
             # instead of a 5s wait plus a "no end-of-audio signal" warning.
             try:
-                session.mark_audio_complete()
+                session.mark_audio_complete(disconnected=True)
             except Exception as e:  # noqa: BLE001 - log, don't crash teardown
                 _logger.warning("mark_audio_complete failed for %s: %s", session_id, e)
             _schedule_disconnect_teardown(registry, session, session_id)
