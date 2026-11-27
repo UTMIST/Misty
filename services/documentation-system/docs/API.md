@@ -171,6 +171,9 @@ Two kinds of key are accepted:
 | `docs:write` | Mutating `/docs` endpoints (`POST`, `PATCH`, `DELETE`) except `POST /docs/index` |
 | `docs:index` | `POST /docs/index` — admin (re-)indexing, which spends embedding-provider budget — and `GET /docs/index/status` |
 | `act-as-user` | Literal additional scope for `X-On-Behalf-Of`, including for admins and writes with person context |
+| `emails:read` | Submitter-scoped `/email-submissions` reads when combined with literal `act-as-user` and `X-On-Behalf-Of` |
+| `emails:write` | `POST /email-submissions/poll` and `/email-submissions/poll-runs/{run_id}` |
+| `emails:admin` | Operator listing/inspection across submitters, terminal failure marking, and notification retries |
 | `admin` | Wildcard for endpoint scopes; does not substitute for literal assertion scopes |
 
 Search always requires person or channel context; see [authorized retrieval](#authorized-retrieval-post-search)
@@ -946,3 +949,48 @@ Discord PDF unless its removal is separately requested. The bot implements
 [link delivery and recovery](../../../discord-bot/docs/meeting-delivery.md).
 Removal notices and deletion of already posted Discord links/PDFs remain manual
 admin operations.
+
+## Forwarded-email submissions
+
+These endpoints own durable forwarded-email intake, active-member identity
+binding, deduplication, and threaded receipt/failure-notice state (#457). Input
+models forbid extra fields and hide submitted values in validation errors;
+responses and audit logs omit message bodies, `untrusted_claimed_headers`,
+`verified_sender_email`, and `outer_message_id`.
+
+| Method/path | Scope | Behavior |
+|---|---|---|
+| `POST /email-submissions/poll?limit=25&max_pages=5` | `emails:write` | Poll unseen `INBOX` messages via connectors, bind active members, send due receipts, prune expired rows |
+| `POST /email-submissions/poll-runs/{run_id}` | `emails:write` | Acquire singleton poller guard (`200` acquired, `409` occupied) |
+| `DELETE /email-submissions/poll-runs/{run_id}` | `emails:write` | Release matching poller guard (`200` released, `409` mismatch/absent) |
+| `GET /email-submissions` | `emails:read` + `act-as-user` + `X-On-Behalf-Of` (or `emails:admin`) | List sanitized submissions (`?status=&receipt_status=`) |
+| `GET /email-submissions/{submission_id}` | `emails:read` + `act-as-user` + `X-On-Behalf-Of` (or `emails:admin`) | Inspect one sanitized submission (`404` when absent or owned by another person) |
+| `POST /email-submissions/{submission_id}/fail` | `emails:admin` | `{error_code}` marks an accepted submission failed and queues one terminal failure notice |
+| `POST /email-submissions/{submission_id}/retry-notifications` | `emails:admin` | `?kind=receipt\|failure_notice` reconciles or retries a due/failed notification |
+
+### Identity, deduplication, and zero-backscatter rules
+
+1. **Mail authentication + active directory member:** `connectors` verifies a
+   single defect-free RFC 5322 `From:` mailbox against the topmost
+   `mx.google.com` `Authentication-Results` (`dmarc=pass` or `dmarc=none` with
+   organizationally aligned `dkim=pass`). `documentation-system` then resolves
+   that address through `team-tracking` (`primary_email` or verified
+   `provider="email"` alias) and requires `active == true`. Unauthenticated,
+   loop/bounce, non-inbox, unknown, and soft-retired senders are recorded in
+   `email_processed_messages` and **never** receive an outbound email.
+2. **Directory outages defer safely:** if `team-tracking` is unreachable or
+   returns 5xx, the message is counted under `directory_deferred`, left
+   unmarked in `email_processed_messages`, and retried on the next poll without
+   advancing the inbox watermark.
+3. **Deduplication vs. independent forwards:** provider/poll retries match on
+   `(mailbox_identity, gmail_message_id)` and MTA duplicates from the same
+   member match on `(mailbox_identity, submitter_person_id, outer_message_id)`.
+   Separate forwards by different members always create independent
+   `EmailSubmission` records.
+4. **Receipts, rate limits, and uncertain sends:** authenticated active members
+   receive a threaded plain-text receipt (or a single `rejected_oversize` /
+   terminal `failed` notice) capped at 5/hour per member and 30/hour globally.
+   Excess sends mark `receipt_status: "suppressed_rate_limit"` while keeping the
+   accepted submission durable. Ambiguous send outcomes (`uncertain: true`)
+   reconcile against `/google/gmail/receipt-check` before any retry so duplicate
+   emails are never sent blindly.

@@ -5,7 +5,7 @@ import httpx
 from pydantic import BaseModel, Field, TypeAdapter
 from typing import Literal
 
-from contracts.directory import DirectoryUnavailable
+from contracts.directory import DirectoryUnavailable, VerifiedMember
 
 _TIMEOUT = httpx.Timeout(5.0)
 
@@ -125,6 +125,42 @@ class HttpDirectoryClient:
         if person_id is not None:
             return person_id
         return self._get_id(f"/people/by-identifier/email/{encoded}")
+
+    def _get_active_member(self, path: str) -> VerifiedMember | None:
+        try:
+            resp = self._client.get(f"{self._base_url}{path}", headers={"X-API-Key": self._api_key})
+        except httpx.HTTPError as e:
+            raise DirectoryUnavailable(f"directory unreachable: {e}") from e
+        if resp.status_code == 404:
+            return None
+        if not (200 <= resp.status_code < 300):
+            raise DirectoryUnavailable(f"directory returned {resp.status_code}")
+        try:
+            body = resp.json()
+            if not isinstance(body, dict) or not isinstance(body.get("active"), bool):
+                raise ValueError("missing active flag")
+            person_id = UUID(body["id"])
+            primary_email = str(body["primary_email"]).strip().lower()
+            if not primary_email:
+                raise ValueError("missing primary_email")
+            raw_name = body.get("display_name")
+            display_name = str(raw_name).strip() if isinstance(raw_name, str) else None
+        except (KeyError, ValueError, TypeError) as e:
+            raise DirectoryUnavailable(f"malformed directory response: {e}") from e
+        if not body["active"]:
+            return None
+        return VerifiedMember(
+            person_id=person_id,
+            display_name=display_name or None,
+            primary_email=primary_email,
+        )
+
+    def get_active_member_by_verified_email(self, email: str) -> VerifiedMember | None:
+        encoded = quote(email.strip().lower(), safe="")
+        member = self._get_active_member(f"/people/by-email/{encoded}")
+        if member is not None:
+            return member
+        return self._get_active_member(f"/people/by-identifier/email/{encoded}")
 
     def get_team_id_by_synced_google_group(self, email: str) -> UUID | None:
         encoded = quote(email.strip().lower(), safe="")

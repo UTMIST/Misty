@@ -63,6 +63,16 @@ class Settings(BaseSettings):
     meeting_doc_create_lease_s: int = Field(default=600, ge=60)
     meeting_record_max_attempts: int = Field(default=8, ge=1)
     meeting_record_retention_days: int = Field(default=365, ge=1)
+    # Forwarded-email intake, receipt quotas, and retention (#457).
+    email_mailbox_identity: str = ""
+    email_initial_lookback_hours: int = Field(default=24, ge=1)
+    email_watermark_overlap_hours: int = Field(default=24, ge=1)
+    email_receipt_lease_s: int = Field(default=300, ge=30)
+    email_receipt_max_attempts: int = Field(default=5, ge=1)
+    email_receipt_member_hourly_limit: int = Field(default=5, ge=1)
+    email_receipt_global_hourly_limit: int = Field(default=30, ge=1)
+    email_failed_payload_days: int = Field(default=7, ge=1)
+    email_submission_retention_days: int = Field(default=365, ge=1)
 
     @model_validator(mode="after")
     def _validate_source_access_windows(self) -> "Settings":

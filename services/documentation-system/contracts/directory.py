@@ -1,5 +1,13 @@
+from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
+
+
+@dataclass(frozen=True)
+class VerifiedMember:
+    person_id: UUID
+    display_name: str | None
+    primary_email: str
 
 
 class DirectoryUnavailable(Exception):
@@ -42,6 +50,11 @@ class DirectoryClient(Protocol):
     def get_person_id_by_verified_email(self, email: str) -> UUID | None:
         """Resolve a primary or verified additional email to a person.
         Returns None for an unknown email; raises DirectoryUnavailable on failure."""
+        ...
+
+    def get_active_member_by_verified_email(self, email: str) -> VerifiedMember | None:
+        """Resolve a primary or verified additional email only when active=True.
+        Returns None for unknown or retired people; raises DirectoryUnavailable on failure."""
         ...
 
     def get_team_id_by_synced_google_group(self, email: str) -> UUID | None:

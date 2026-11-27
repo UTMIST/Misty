@@ -194,6 +194,12 @@ Migration history:
   updating links. `doc_source_url_backfill` retains exact originals for rollback.
   Downgrading to `017` restores only rows still carrying the replacement URL and drops
   that rollback table; later URL edits and newly inserted documents survive.
+- **`019_email_submissions`** — adds `email_poll_run`, `email_inbox_state`,
+  `email_submissions`, `email_processed_messages`, and `email_outbound_sends` for
+  durable forwarded-email intake and rate-limited threaded receipts (#457).
+  Downgrading to `018` drops those five tables cleanly while preserving all
+  catalog, chunk, refresh-guard, and meeting records; stop `email_poll` runners
+  before downgrading.
 
 Downgrading `008` removes the chunk table/index, preserving catalog records and full
 content. The database-level `vector` extension remains installed, even if `008`
@@ -897,3 +903,27 @@ remain the admin's responsibility; automatic Discord cleanup is outside #223.
 The bot's [link delivery runbook](../../../discord-bot/docs/meeting-delivery.md)
 describes saved-message receipts and recovery. Never log record
 payloads or credentials. See the [platform rollout](../../../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).
+
+## Forwarded-email polling
+
+1. Provision separate Google Workspace mailboxes (`misty-staging@utmist.ca` in
+   staging, `misty@utmist.ca` in production) on `connectors` following its
+   [Gmail setup runbook](../../connectors/docs/DEPLOYMENT.md#gmail-forwarding-mailbox-setup),
+   confirming `utmist.ca` custom-domain DKIM and DMARC are enabled.
+2. Add `email-read,email-send` to `documentation-system`'s `connectors_` entry
+   in `connectors` `CONSUMER_KEYS` and redeploy `connectors`.
+3. Set `EMAIL_MAILBOX_IDENTITY` on `documentation-system` (`misty-staging@utmist.ca`
+   or `misty@utmist.ca`) and deploy migration `019`. Ensure `DIRECTORY_API_KEY`
+   retains `people:read` and `identifiers:read`.
+4. Issue a dedicated poller key from `services/documentation-system`:
+   ```bash
+   uv --project . run python -m src.cli issue --name email-poll-staging --scopes emails:write
+   ```
+5. Deploy a dedicated cron service using
+   `/services/documentation-system/railway.email-poll.json` with `DOCS_BASE_URL`,
+   `DOCS_API_KEY`, and secret `EMAIL_POLL_MONITOR_URL` (no database or Google
+   credentials on the runner). Staging defaults to `0 * * * *` (hourly) so Neon
+   Postgres can sleep when idle; configure production as `*/5 * * * *` when
+   activating production rollout. PR previews remain disabled.
+6. For stuck-guard recovery after confirming the old runner and API call have
+   stopped, release the exact run UUID with `DELETE /email-submissions/poll-runs/{run_id}`.

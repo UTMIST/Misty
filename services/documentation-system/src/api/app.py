@@ -28,7 +28,15 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="documentation-system database unavailable")
         return {"status": "ok"}
 
-    from src.api.routers import api_keys, discovery, docs, search, sources, meeting_records
+    from src.api.routers import (
+        api_keys,
+        discovery,
+        docs,
+        email_submissions,
+        meeting_records,
+        search,
+        sources,
+    )
 
     app.include_router(discovery.router)
     app.include_router(docs.router)
@@ -36,6 +44,7 @@ def create_app() -> FastAPI:
     app.include_router(search.router)
     app.include_router(api_keys.router)
     app.include_router(meeting_records.router)
+    app.include_router(email_submissions.router)
     return app
 
 

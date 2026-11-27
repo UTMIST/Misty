@@ -454,3 +454,27 @@ state; see the [API contract](docs/API.md#meeting-records).
 
 The existing connector key additionally needs `meeting-write,meeting-fetch`.
 See [deployment and recovery](docs/DEPLOYMENT.md#meeting-record-persistence).
+
+## Forwarded-email intake configuration (#457)
+
+Forwarded emails delivered to Misty's dedicated Google Workspace mailbox are
+polled over authenticated HTTP through `connectors`, bound to `active=true`
+members (across `primary_email` and verified `provider="email"` aliases),
+deduplicated, and acknowledged via rate-limited threaded plain-text receipts;
+see the [API contract](docs/API.md#forwarded-email-submissions).
+
+| Var | Default | Purpose |
+|---|---|---|
+| `EMAIL_MAILBOX_IDENTITY` | `""` | Expected lowercase mailbox (`misty-staging@utmist.ca` in staging, `misty@utmist.ca` in prod); rejects miswired connectors closed when set |
+| `EMAIL_INITIAL_LOOKBACK_HOURS` | `24` | Initial inbox window before the first completed watermark |
+| `EMAIL_WATERMARK_OVERLAP_HOURS` | `24` | Sliding overlap behind the stored watermark to tolerate arrival skew |
+| `EMAIL_RECEIPT_LEASE_S` | `300` | Send lease before uncertain-send thread reconciliation, minimum 30s |
+| `EMAIL_RECEIPT_MAX_ATTEMPTS` | `5` | Maximum send attempts for a receipt or terminal failure notice |
+| `EMAIL_RECEIPT_MEMBER_HOURLY_LIMIT` | `5` | Max outbound receipt/notice emails per member per hour |
+| `EMAIL_RECEIPT_GLOBAL_HOURLY_LIMIT` | `30` | Max outbound receipt/notice emails across all members per hour |
+| `EMAIL_FAILED_PAYLOAD_DAYS` | `7` | Days before clearing `pending_payload` on failed submissions |
+| `EMAIL_SUBMISSION_RETENTION_DAYS` | `365` | Days before pruning submission records and processed-message markers |
+
+The external `python -m src.email_poll` runner reads `DOCS_BASE_URL`,
+`DOCS_API_KEY` (`emails:write`), and optional `EMAIL_POLL_MONITOR_URL` from the
+process environment; see [deployment](docs/DEPLOYMENT.md#forwarded-email-polling).

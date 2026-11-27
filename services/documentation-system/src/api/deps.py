@@ -12,8 +12,15 @@ from src.directory.http_client import HttpDirectoryClient
 from src.embed.http_client import HttpEmbedder
 from src.embedding import HttpEmbeddingClient
 from src.fetch.registry import FetcherRegistry, default_registry
+from contracts.email import GmailClient
 from contracts.meeting import MeetingWriter
+from src.fetch.gmail import HttpGmailClient
 from src.fetch.meeting import HttpMeetingWriter
+
+
+def get_gmail_client() -> GmailClient:
+    s = get_settings()
+    return HttpGmailClient(s.connectors_base_url, s.connectors_api_key.get_secret_value())
 
 
 def get_meeting_writer() -> MeetingWriter:

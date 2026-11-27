@@ -23,6 +23,7 @@ from tests.chunk_storage_cases import ChunkStorageCases, make_chunk, make_doc
 from tests.ingestion_retrieval_cases import IngestionRetrievalCases
 from tests.retrieval_cases import RetrievalCases
 from tests.fake_embedder import FAKE_MODEL
+from tests.email_submission_cases import EmailSubmissionCases
 from tests.meeting_record_cases import MeetingRecordCases
 
 pytestmark = pytest.mark.skipif(
@@ -31,6 +32,10 @@ pytestmark = pytest.mark.skipif(
 
 
 class TestDocChunks(ChunkStorageCases):
+    pass
+
+
+class TestEmailSubmissions(EmailSubmissionCases):
     pass
 
 
@@ -367,7 +372,14 @@ def adapter(request):
     engine = create_engine(get_settings().database_url, future=True)
     request.addfinalizer(engine.dispose)
     with engine.begin() as conn:
-        conn.execute(text("TRUNCATE doc_grants, doc_tags, docs, api_keys RESTART IDENTITY CASCADE"))
+        conn.execute(
+            text(
+                "TRUNCATE doc_grants, doc_tags, docs, api_keys, "
+                "email_outbound_sends, email_processed_messages, "
+                "email_submissions, email_inbox_state, email_poll_run "
+                "RESTART IDENTITY CASCADE"
+            )
+        )
     return PostgresStorageAdapter(engine)
 
 
