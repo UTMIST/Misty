@@ -289,3 +289,6 @@ The service fetches Google and GitHub text, enumerates Google metadata, and opti
 
 Automatic sharing discovery also exposes [`POST /discover/google`](docs/API.md#post-discovergoogle)
 with a separate `discover` scope. See the [operator/member runbook](../documentation-system/docs/DISCOVERY.md).
+
+The shared telemetry pilot is opt-in through process environment variables.
+[Producer settings and collection runbook](../../docs/OBSERVABILITY-COLLECTION.md)

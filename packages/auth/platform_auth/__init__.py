@@ -16,7 +16,13 @@ from platform_auth.models import (
     AuthedKey,
 )
 
+from platform_auth.telemetry import flush, internal_request, span, trace_headers
+
 __all__ = [
+    "flush",
+    "internal_request",
+    "span",
+    "trace_headers",
     "AuditLogMiddleware",
     "AuthDeps",
     "build_auth",

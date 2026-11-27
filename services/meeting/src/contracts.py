@@ -1,5 +1,5 @@
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
-from typing import Protocol
+from typing import Literal, Protocol
 
 
 class Minutes(BaseModel):
@@ -19,10 +19,14 @@ class TranscriptView(BaseModel):
     segments: list[Segment] = []
 
 
+AudioDrain = Literal["confirmed", "timed_out", "disconnected", "unknown"]
+
+
 class StopResponse(BaseModel):
     transcript: str
     minutes: Minutes
     pdf_b64: str
+    audio_drain: AudioDrain = "unknown"
     record: "RecordResult | None" = None
 
 

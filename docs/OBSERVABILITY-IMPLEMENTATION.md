@@ -12,6 +12,9 @@ The first release lets a maintainer answer “Why did someone get a link to a re
 
 The numbers below are draft references. When filing, use the title, **What**, **Why**, **Area**, and **Done looks like** in the feature/task form. Replace draft blocker numbers with the assigned GitHub issues. Link back to the design for rationale. Ticket 01 can start during design review. The staging trial consumes the agreed design decisions. [Feature/task form](../.github/ISSUE_TEMPLATE/feature_request.yml) · [Design issue #342](https://github.com/UTMIST/Misty/issues/342)
 
+The runnable local collector, producer settings and synthetic fixtures live in the
+[collection runbook](OBSERVABILITY-COLLECTION.md).
+
 ## Trace and collect one recording
 
 ### 01. Publish the event contract and a synthetic recording fixture
