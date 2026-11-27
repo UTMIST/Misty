@@ -151,6 +151,57 @@ class MeetingRecordCases:
         assert created
         return records, writer, clock, r
 
+    def test_recovery_links_only_to_observed_acceptance(self, flow, monkeypatch):
+        from platform_auth import telemetry
+
+        original, writer, clock, legacy = flow
+        received = []
+        monkeypatch.setenv("TELEMETRY_ENABLED", "true")
+        monkeypatch.setenv("TELEMETRY_ENV", "local")
+        monkeypatch.setattr(telemetry, "_emitter", SimpleNamespace(offer=received.append))
+        with telemetry.span("meeting.handoff", service="meeting", traffic="synthetic") as client:
+            record, _ = original.accept(uuid4(), payload(), actor="fixture")
+        first_accept = next(row for row in received if row["operation"] == "catalog.accept")
+        assert record.accept_traceparent.split("-")[2] == first_accept["span_id"]
+        assert not {"accept_traceparent", "accept_traffic"} & record.public().keys()
+
+        fresh = MeetingRecords(
+            original.storage, writer, original.directory, original.settings, now=lambda: clock[0]
+        )
+        writer.fail = "create"
+        fresh.advance(record.meeting_id)
+        assert fresh.storage.get_meeting(record.meeting_id).persistence_status == "create_uncertain"
+        writer.fail = None
+        clock[0] += timedelta(hours=2)
+        with telemetry.span(
+            "catalog.refresh", service="documentation-system", traffic="background"
+        ):
+            fresh.advance(record.meeting_id)
+        assert fresh.storage.get_meeting(record.meeting_id).persistence_status == "saved"
+        assert len(writer.created) == 1
+        ends = [
+            row
+            for row in received
+            if row["operation"] == "catalog.advance" and row["event_name"] == "end"
+        ]
+        assert [row["result"] for row in ends] == ["ambiguous", "confirmed"]
+        assert [row["traffic"] for row in ends] == ["synthetic", "synthetic"]
+        assert all(row["trace_id"] == client.ids["trace_id"] for row in ends)
+        assert all(row["link_span_id"] == first_accept["span_id"] for row in ends)
+        assert len({row["span_id"] for row in ends}) == 2
+
+        fresh.advance(legacy.meeting_id)
+        missing = [row for row in received if row["operation"] == "catalog.advance"][-1]
+        assert "link_span_id" not in missing and "parent_span_id" not in missing
+        assert missing["trace_id"] != client.ids["trace_id"]
+        assert missing["traffic"] == "background"
+        clock[0] += timedelta(days=30)
+        fresh.retry_due(10)
+        expired = fresh.storage.get_meeting(record.meeting_id)
+        assert expired.accept_traceparent is None and expired.accept_traffic is None
+        for private in ("Planning", "Guest", "team@example.org", str(record.meeting_id)):
+            assert private not in json.dumps(received)
+
     @pytest.fixture
     def meeting_api(self, flow):
         from src.api.app import create_app

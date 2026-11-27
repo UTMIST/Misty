@@ -1,3 +1,4 @@
+import { traceMeetingDelivery } from './meetingDelivery.js';
 import { randomUUID } from 'node:crypto';
 import { meetingFilename } from './meetingFilename.js';
 import { meetingRecordNotice } from '../messages/meeting.js';
@@ -14,6 +15,7 @@ export function createMeetingSurface({
   // says nothing is recording, and nobody knows the meeting was lost.
   notify = async () => {},
   deliverRecord,
+  beginTrace,
   now = Date.now,
   genId = randomUUID,
 }) {
@@ -23,12 +25,27 @@ export function createMeetingSurface({
   // stored on the session (not read off the stopping interaction) so the
   // minutes always @-mention the person who asked for them -- including when
   // the recording ends via auto-stop, where there's no interaction at all.
-  async function start({ guildId, voiceChannel, textChannel, requesterId, name, save = true }) {
-    if (sessions.has(guildId)) {
-      return { status: 'already-recording' };
-    }
+  async function start(request) {
+    if (sessions.has(request.guildId)) return { status: 'already-recording' };
 
     const sessionId = genId();
+    const trace = beginTrace?.(sessionId);
+    const { save = true } = request;
+    trace?.mark(save ? 'record.saved_requested' : 'record.pdf_requested');
+    let result;
+    try {
+      result = await startCapture(request, sessionId, trace);
+    } finally {
+      trace?.mark(result?.status === 'recording' ? 'capture.started' : 'capture.start_failed');
+    }
+    return result;
+  }
+
+  async function startCapture(
+    { guildId, voiceChannel, textChannel, requesterId, name, save = true },
+    sessionId,
+    trace,
+  ) {
     // Both are read by teardown, which openStream can invoke before either has
     // been assigned -- hence `let ... = null` rather than a const below.
     let recorder = null;
@@ -101,7 +118,7 @@ export function createMeetingSurface({
       // would double-post the minutes.
       if (sessions.get(guildId)?.sessionId !== sessionId) return;
 
-      const result = await stop(guildId).catch((err) => {
+      const result = await stop(guildId, 'capture.stream_lost').catch((err) => {
         console.error(`meetingSurface: salvage finalize failed for guild ${guildId}:`, err);
         return { status: 'error' };
       });
@@ -169,7 +186,7 @@ export function createMeetingSurface({
           content:
             '⚠️ I lost the voice connection. Wrapping up the recording — the minutes will cover everything up to that point.',
         }).catch((err) => console.error('meetingSurface: voice-lost notify failed:', err));
-        stop(guildId).catch((err) => {
+        stop(guildId, 'capture.voice_lost').catch((err) => {
           console.error(
             `meetingSurface: finalize after voice loss failed for guild ${guildId}:`,
             err,
@@ -181,6 +198,7 @@ export function createMeetingSurface({
     // Register BEFORE awaiting the join, so a teardown firing mid-join can
     // actually find the session and tear it down (it keys off sessionId).
     sessions.set(guildId, {
+      trace,
       sessionId,
       stream,
       recorder,
@@ -255,7 +273,7 @@ export function createMeetingSurface({
     session.voiceChannel = voiceChannel;
     if (!session.save) return;
     session.stopCapture();
-    const stopping = stop(guildId);
+    const stopping = stop(guildId, 'capture.moved');
     notify({
       channel: session.textChannel,
       content:
@@ -264,7 +282,7 @@ export function createMeetingSurface({
     return stopping;
   }
 
-  async function stop(guildId) {
+  async function stop(guildId, reason = 'capture.stop_requested') {
     const session = sessions.get(guildId);
     if (!session) return { status: 'not-recording' };
 
@@ -272,7 +290,10 @@ export function createMeetingSurface({
     // the same guild can't double-run the teardown below.
     sessions.delete(guildId);
 
-    const { sessionId, stream, recorder, textChannel, requesterId, name, startedAt } = session;
+    const { sessionId, trace, stream, recorder, textChannel, requesterId, name, startedAt } =
+      session;
+    trace?.mark(reason);
+    let stageError = 'capture.drain_error';
     try {
       // Order matters: finalize server-side (POST /stop) BEFORE closing the
       // WS. The service treats a WS disconnect with no prior /stop as an
@@ -280,6 +301,8 @@ export function createMeetingSurface({
       // finalize) -- closing the WS first would race the session into being
       // discarded, so the subsequent /stop 404s and we lose the minutes.
       await recorder.stop();
+      trace?.mark('capture.drained');
+      stageError = undefined;
       // Then tell the service that was the last of the audio. This rides the
       // WS behind every frame already sent, so the service can wait for it
       // before finalizing instead of racing the tail. Without it, POST /stop
@@ -289,6 +312,7 @@ export function createMeetingSurface({
       try {
         stream.endAudio();
       } catch (err) {
+        trace?.mark('capture.end_signal_error');
         console.error(`meetingSurface: end-of-audio signal failed for guild ${guildId}:`, err);
       }
       const record = session.save
@@ -301,25 +325,35 @@ export function createMeetingSurface({
             participants: [...session.participants.values()],
           }
         : undefined;
-      const report = await meetingClient.stop(sessionId, {
-        title: name,
-        ...(record ? { record } : {}),
-      });
+      const report = await meetingClient.stop(
+        sessionId,
+        {
+          title: name,
+          ...(record ? { record } : {}),
+        },
+        trace,
+      );
       if (report.record) {
         // Independent of the PDF: a failed attachment must not suppress the
         // durable link, and a failed delivery must not fail finalization.
         let delivery;
         try {
-          delivery = await deliverRecord?.(sessionId);
+          delivery = await deliverRecord?.(sessionId, trace);
         } catch {
           delivery = { status: 'failed' };
         }
+        traceMeetingDelivery(trace, delivery, report.record.status);
+        stageError = 'notice.error';
         const content = meetingRecordNotice(report.record, sessionId, delivery);
         if (content) await notify({ channel: textChannel, content });
       }
+      stageError = 'pdf.error';
+      trace?.mark('pdf.posting');
       await poster({ channel: textChannel, report, requesterId, name, startedAt });
+      trace?.mark('pdf.posted');
       return { status: 'stopped' };
     } catch (err) {
+      if (stageError) trace?.mark(stageError);
       console.error(`meetingSurface: error stopping meeting for guild ${guildId}:`, err);
       return { status: 'error' };
     } finally {

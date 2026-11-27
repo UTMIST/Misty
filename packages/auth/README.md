@@ -6,6 +6,7 @@ Shared API-key auth (keys, scopes, audit) for UTMIST platform services. A pure l
 
 | Name | From | What it is |
 |------|------|------------|
+| `span`, `trace_headers`, `internal_request`, `flush` | `telemetry.py` | Opt-in bounded operational spans and W3C context for authenticated internal dependencies. External SDKs receive no headers. |
 | `build_auth` | `factory.py` | Builds a service's `require_api_key` / `require_scope` / `get_actor` / `get_on_behalf_actor` FastAPI dependencies from its key store + config. |
 | `AuthDeps` | `factory.py` | Dataclass bundling the four dependencies `build_auth` returns. |
 | `AuditLogMiddleware` | `audit.py` | One structured JSON audit line per request to stdout, keyed off `request.state.auth_key`. |

@@ -18,6 +18,7 @@ import { createCommandTools, llmSafe as commandToolsLlmSafe } from './commandToo
 import { resolvePrincipal } from './auth/principal.js';
 import { createHelperActions } from './helperActions.js';
 import { createMeetingClient } from './meeting/meetingClient.js';
+import { createStopTracer } from './meeting/stopTrace.js';
 import { createMeetingSurface } from './meeting/meetingSurface.js';
 import { createRecorder } from './meeting/recorder.js';
 import { createMeetingRecordClient } from './clients/meetingRecordClient.js';
@@ -48,6 +49,7 @@ export function createAppContext(config, { poster, notify, postMeetingLink } = {
     baseUrl: config.docBaseUrl,
     apiKey: config.docApiKey,
   });
+  const beginTrace = config.recordingTraceEnabled && poster ? createStopTracer() : undefined;
   const meetingDelivery = postMeetingLink
     ? createMeetingDelivery({
         records: createMeetingRecordClient({
@@ -55,6 +57,7 @@ export function createAppContext(config, { poster, notify, postMeetingLink } = {
           apiKey: config.docApiKey,
         }),
         post: postMeetingLink,
+        beginTrace,
       })
     : null;
   const verification = createVerificationClient({
@@ -83,9 +86,11 @@ export function createAppContext(config, { poster, notify, postMeetingLink } = {
     const meetingClient = createMeetingClient({
       baseUrl: config.meetingBaseUrl,
       wsUrl: config.meetingWsUrl,
+      beginTrace,
       apiKey: config.meetingApiKey,
     });
     meetingSurface = createMeetingSurface({
+      beginTrace,
       meetingClient,
       makeRecorder: (o) => createRecorder(o),
       poster: poster ?? (async () => {}),

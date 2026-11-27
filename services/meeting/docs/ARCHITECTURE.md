@@ -86,7 +86,7 @@ Two tuning constants govern how words become segments:
 
 The protocol solves it with an explicit signal. After the bot stops recording and has forwarded every captured frame, it sends `{"end_of_audio": true}`. Because the socket delivers **in order**, receiving that frame proves every audio frame before it has already been fed. `stop()` waits for that barrier before finalizing.
 
-The fallback matters as much as the signal: if neither end-of-audio nor a disconnect has been observed, `/stop` proceeds anyway after `AUDIO_DRAIN_TIMEOUT_S` (5 s) and logs a warning. The transcript tail may be short; a missing signal must never hang `/stop`. An observed disconnect marks audio complete and skips this wait.
+The fallback matters as much as the signal: if neither end-of-audio nor a disconnect has been observed, `/stop` proceeds anyway after `AUDIO_DRAIN_TIMEOUT_S` (5 s) and logs a warning. The transcript tail may be short; a missing signal must never hang `/stop`. A disconnect releases this wait and preserves the first observed end reason in the [stop response](API.md#recording-stop-diagnostics).
 
 ## stop() vs discard()
 
@@ -103,7 +103,7 @@ Two teardown paths, and picking the wrong one is expensive:
 
 `discard()` deliberately skips the finalize pipeline: paying for an LLM call plus a PDF render that nobody will read is pure waste.
 
-**A disconnect no longer routes straight to `discard()`.** It used to, and that was a data-loss bug rather than a saving: the transcript is already assembled in memory when the socket dies, so destroying it immediately meant a client whose connection dropped had nothing left to claim — its follow-up `POST /stop` 404'd. Two fully-transcribed production meetings were lost that way in a single morning. A disconnect now **holds** the session for `DISCONNECT_GRACE_S` (default 60 s) and marks end-of-audio. At expiry, `discard()` runs if the session is still registered, even if `/stop` has begun. Starting stop does not cancel the timer, so recovery can still lose an unfinished transcription tail; see the [disconnect contract](API.md#disconnect). Nothing is finalized unless a client requests it.
+**A disconnect no longer routes straight to `discard()`.** It used to, and that was a data-loss bug rather than a saving: the transcript is already assembled in memory when the socket dies, so destroying it immediately meant a client whose connection dropped had nothing left to claim — its follow-up `POST /stop` 404'd. Two fully-transcribed production meetings were lost that way in a single morning. A disconnect now **holds** the session for `DISCONNECT_GRACE_S` (default 60 s) and releases the audio barrier. At expiry, `discard()` runs if the session is still registered, even if `/stop` has begun. Starting stop does not cancel the timer, so recovery can still lose an unfinished transcription tail; see the [disconnect contract](API.md#disconnect). Nothing is finalized unless a client requests it.
 
 The window is short on purpose. A held session keeps its Transcribe streams parked, so this trades a bounded amount of idle AWS state for the ability to recover a meeting; it is not a general-purpose resume mechanism. Reconnecting to a held session is deliberately *not* supported — a second WS connect for a live `session_id` still closes with 1008.
 
@@ -209,3 +209,13 @@ no audio. It acknowledges durability only after a 200/202 catalog response.
 After that, Postgres and the catalog's hourly runner own recovery. See the
 [wire contract](API.md#durable-record-context) and
 [accepted crash window](../../../docs/MEETING-RECORDING.md#hand-off-and-retry-closes-the-stop-gap).
+
+### Recording telemetry
+
+When shared telemetry is enabled, one stop request owns the finalize, audio
+drain, speech flush and report spans. Minute generation and PDF rendering
+have separate results. A successful PDF can contain fallback minutes. The
+finalize span counts omitted speaker flushes separately from discarded frames.
+The handoff spans each authenticated catalog PUT, including retries. A
+confirmed PUT means the catalog accepted responsibility for the record.
+The catalog reports when the document itself has been saved.
