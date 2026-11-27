@@ -77,3 +77,56 @@ def test_measure_and_unsupported_outcomes_are_content_free(events):
 def test_node_and_python_share_the_contract():
     node = Path(__file__).resolve().parents[3] / "discord-bot/src/telemetryContract.json"
     assert json.loads(node.read_text()) == t.CONTRACT
+
+
+def test_sink_stall_and_failure_leave_caller_unblocked():
+    from threading import Event
+
+    entered, release, recovered = Event(), Event(), Event()
+    rows = []
+
+    def write(event):
+        rows.append(event)
+        if len(rows) == 1:
+            entered.set()
+            assert release.wait(2)
+            raise RuntimeError("fixture sink")
+        recovered.set()
+
+    emitter = t.Emitter(write, capacity=1)
+    emitter.offer({})
+    assert entered.wait(2)
+    try:
+        emitter.offer({})
+        emitter.offer({})
+    finally:
+        release.set()
+    assert recovered.wait(2)
+    assert rows[1]["dropped_before"] == 2 and rows[1]["sequence"] == 2
+    assert rows[0]["process_started_at"] == rows[1]["process_started_at"]
+
+
+def test_authenticated_client_parent_and_external_redirect_isolation(events):
+    import httpx
+
+    seen = []
+
+    def receive(request):
+        seen.append((request.url.host, request.headers.get("traceparent")))
+        return httpx.Response(302, headers={"Location": "https://external.invalid/"})
+
+    with httpx.Client(transport=httpx.MockTransport(receive), follow_redirects=True) as http:
+        with t.span("catalog.search", service="documentation-system") as parent:
+            response = t.internal_request(
+                http.get, "https://internal.invalid/private-canary", headers={"X-API-Key": "canary"}
+            )
+        assert response.status_code == 302
+    client = next(
+        row for row in events if row["operation"] == "http.client" and row["event_name"] == "end"
+    )
+    assert client["parent_span_id"] == parent.ids["span_id"]
+    assert seen == [
+        ("internal.invalid", "00-" + client["trace_id"] + "-" + client["span_id"] + "-01")
+    ]
+    assert client["result"] == "failed"
+    assert "canary" not in json.dumps(events)

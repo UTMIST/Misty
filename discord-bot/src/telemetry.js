@@ -16,6 +16,8 @@ export function createTelemetry({
   let writing = false;
   let dropped = 0;
   const processId = hex(8);
+  const processStartedAt = new Date().toISOString();
+  let sequence = 0;
 
   function drain() {
     if (writing || !queue.length) return;
@@ -66,12 +68,15 @@ export function createTelemetry({
         : 'unknown',
     };
     function emit(name, state) {
+      sequence++;
       if (queue.length >= 256) {
         dropped++;
         return;
       }
       queue.push({
         ...base,
+        sequence,
+        process_started_at: processStartedAt,
         event_id: hex(16),
         event_name: name,
         result: state,

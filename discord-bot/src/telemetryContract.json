@@ -17,7 +17,10 @@
       "meeting.drain",
       "meeting.speech_flush",
       "meeting.report",
-      "meeting.handoff"
+      "meeting.handoff",
+      "meeting.minutes",
+      "meeting.pdf",
+      "meeting.handoff_recovery"
     ],
     "documentation-system": [
       "catalog.accept",
@@ -95,6 +98,9 @@
     ],
     "answer.delivery": [
       "part_sent"
+    ],
+    "answer.model": [
+      "tool_round"
     ]
   },
   "measures": {
@@ -116,6 +122,15 @@
       "attempted",
       "item_failed",
       "index_failed"
+    ],
+    "meeting.finalize": [
+      "drop_after_stop_began",
+      "drop_past_max_meeting_ms",
+      "drop_undecodable_frame",
+      "drop_empty_ws_frame",
+      "drop_malformed_ws_frame",
+      "drop_feed_raised",
+      "drop_speaker_finalize_failed"
     ]
   },
   "routes": [
@@ -134,5 +149,40 @@
     "/fetch",
     "/discover/google",
     "other"
+  ],
+  "recording_events": [
+    "stop.request",
+    "stop.response",
+    "stop.error",
+    "stop.drain_confirmed",
+    "stop.drain_timed_out",
+    "stop.drain_disconnected",
+    "stop.drain_unknown",
+    "record.saved_requested",
+    "record.pdf_requested",
+    "capture.started",
+    "capture.start_failed",
+    "capture.stop_requested",
+    "capture.empty_channel",
+    "capture.voice_lost",
+    "capture.stream_lost",
+    "capture.moved",
+    "capture.drained",
+    "capture.drain_error",
+    "capture.end_signal_error",
+    "save.confirmed",
+    "save.pending",
+    "save.failed",
+    "save.uncertain",
+    "save.unavailable",
+    "link.posted",
+    "link.failed",
+    "link.pending",
+    "link.not_attempted",
+    "link.disabled",
+    "pdf.posting",
+    "pdf.posted",
+    "pdf.error",
+    "notice.error"
   ]
 }

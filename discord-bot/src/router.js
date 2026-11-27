@@ -118,6 +118,7 @@ async function execute(intent, { commands, appContext, checks = new Map() }, spa
       channelUsedParent: Boolean(intent.channelUsedParent),
     });
   } catch (err) {
+    span.outcome('failed');
     if (intent.requireLinked) {
       console.error(`Helper command ${intent.commandName} failed`);
       // Let the pending action stop the batch; do not turn an unexpected
