@@ -1,3 +1,4 @@
+import { withSpan } from './telemetry.js';
 import { resolvePrincipal } from './auth/principal.js';
 import { authorize } from './auth/policy.js';
 import { DirectoryUnavailable } from './clients/directoryClient.js';
@@ -42,17 +43,22 @@ function toolsAvailable(appContext, context) {
 }
 
 /** Resolve and authorize a helper-bot caller without depending on a surface. */
-export async function resolveHelperCaller(appContext, discordUserId) {
+export async function resolveHelperCaller(appContext, discordUserId, observe = () => {}) {
   let principal;
   try {
     principal = await resolvePrincipal(appContext.directory, discordUserId);
   } catch (e) {
-    if (e instanceof DirectoryUnavailable) return { ok: false, content: VERIFY_UNAVAILABLE };
+    if (e instanceof DirectoryUnavailable) {
+      observe('unavailable');
+      return { ok: false, content: VERIFY_UNAVAILABLE };
+    }
     throw e;
   }
 
-  if (!authorize('linked', principal).ok || principal.person.active === false)
+  if (!authorize('linked', principal).ok || principal.person.active === false) {
+    observe('denied');
     return { ok: false, content: LINK_PROMPT };
+  }
   return { ok: true, principal };
 }
 
@@ -73,7 +79,14 @@ export async function answerHelperTurns(appContext, turns, principal, destinatio
 }
 
 /** Prepare a reply with a final access check for adapters that send it later. */
-export async function prepareHelperReply(appContext, turns, principal, destination, request) {
+export async function prepareHelperReply(
+  appContext,
+  turns,
+  principal,
+  destination,
+  request,
+  observe = () => {},
+) {
   const context = retrievalContext(destination, principal);
   // Discord history has no trusted provenance for old bot text (including
   // pre-rollout replies, restarts, and answers sent before the flag was disabled).
@@ -84,11 +97,15 @@ export async function prepareHelperReply(appContext, turns, principal, destinati
   if (!toolsAvailable(appContext, context)) {
     let content;
     try {
-      ({ content } = await appContext.helperService.answer({ turns: safeTurns, principal }));
+      ({ content } = await withSpan('answer.model', () =>
+        appContext.helperService.answer({ turns: safeTurns, principal }),
+      ));
     } catch (err) {
-      console.error('helper answer failed:', err.message);
+      observe(err.kind === 'timeout' || err.kind === 'cancelled' ? err.kind : 'failed');
+      console.error('helper answer failed');
       return { content: LLM_UNAVAILABLE };
     }
+    if (content?.trim()) observe('answer');
     return { content: content?.trim() ? content : EMPTY_ANSWER };
   }
 
@@ -104,11 +121,14 @@ export async function prepareHelperReply(appContext, turns, principal, destinati
       context,
       principal,
       request,
+      observe,
     });
     switch (result.outcome) {
       case OUTCOME.ACTION:
+        observe('action');
         return { action: result.action, canPublish: result.canPublish };
       case OUTCOME.ANSWER:
+        observe('answer');
         return {
           content: renderHelperAnswer(result.content, result.citations),
           canPublish: result.canPublish,
@@ -116,6 +136,7 @@ export async function prepareHelperReply(appContext, turns, principal, destinati
       case OUTCOME.EXHAUSTED:
         return { content: COULDNT_COMPLETE };
       case OUTCOME.WITHHELD:
+        observe('withheld');
         return { content: WITHHELD_ANSWER };
       case OUTCOME.INCOMPLETE_ACTION:
         return {
@@ -125,7 +146,8 @@ export async function prepareHelperReply(appContext, turns, principal, destinati
         return { content: EMPTY_ANSWER };
     }
   } catch (err) {
-    console.error('helper tool answer failed:', err.message);
+    observe(err.kind === 'timeout' || err.kind === 'cancelled' ? err.kind : 'failed');
+    console.error('helper tool answer failed');
     return { content: LLM_UNAVAILABLE };
   }
 }

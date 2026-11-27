@@ -22,6 +22,7 @@
 // Callback errors fail closed. These callbacks are never sent to the model.
 
 import { ActionBudgetExceeded, combineHelperActions, MAX_HELPER_ACTIONS } from './helperActions.js';
+import { withSpan } from './telemetry.js';
 import { checkOnce } from './helperChecks.js';
 
 const PREPARATION_CLARIFICATION =
@@ -90,7 +91,7 @@ export function createToolExecutor({
      * @param scopeCheck  optional async () => boolean; false/throw means access
      *                    narrowed. Document evidence is always checked separately.
      */
-    async run({ messages, system, context, principal, scopeCheck, request }) {
+    async run({ messages, system, context, principal, scopeCheck, request, observe = () => {} }) {
       const history = [...messages];
       const citations = [];
       const seen = new Set();
@@ -102,7 +103,13 @@ export function createToolExecutor({
       let exhausted = false;
       let clarifyPreparation = false;
       let deadline = performance.now() + maxDurationMs;
-      const isExhausted = () => exhausted || performance.now() >= deadline;
+      const isExhausted = () => {
+        if (performance.now() >= deadline) {
+          observe('timeout');
+          return true;
+        }
+        return exhausted;
+      };
       // Text answers keep the generation deadline through delivery. A terminal
       // command action adopts the pending UI deadline below, keeping read limits.
       // Abort the client request and stop waiting even if a fake/adapter ignores
@@ -116,6 +123,7 @@ export function createToolExecutor({
             new Promise((_, reject) => {
               timer = setTimeout(
                 () => {
+                  observe('timeout');
                   exhausted = true;
                   controller.abort();
                   reject(new Error('helper deadline reached'));
@@ -188,19 +196,23 @@ export function createToolExecutor({
 
         let res;
         try {
-          res = await withDeadline((signal) =>
-            llmClient.chat({
-              messages: history,
-              system: clarifyPreparation
-                ? [system, PREPARATION_CLARIFICATION].filter(Boolean).join('\n\n')
-                : system,
-              // Replay requires the original definitions even during a final
-              // clarification. The execution gate below rejects further calls.
-              tools: registry.definitions,
-              maxTokens,
-              signal,
-            }),
-          );
+          res = await withSpan('answer.model', async (span) => {
+            const response = await withDeadline((signal) =>
+              llmClient.chat({
+                messages: history,
+                system: clarifyPreparation
+                  ? [system, PREPARATION_CLARIFICATION].filter(Boolean).join('\n\n')
+                  : system,
+                // Replay requires the original definitions even during a final
+                // clarification. The execution gate below rejects further calls.
+                tools: registry.definitions,
+                maxTokens,
+                signal,
+              }),
+            );
+            if (response.stop_reason === 'tool_use') span.mark('tool_round');
+            return response;
+          });
         } catch (error) {
           if (isExhausted()) return { outcome: OUTCOME.EXHAUSTED };
           throw error;
@@ -275,12 +287,16 @@ export function createToolExecutor({
           }
           try {
             if (!(await withDeadline(checkCaller))) return { outcome: OUTCOME.WITHHELD };
-            const out = await handler(call.input, {
-              context,
-              principal,
-              readDocument,
-              request,
-              withDeadline,
+            const out = await withSpan('answer.tools', async (span) => {
+              const result = await handler(call.input, {
+                context,
+                principal,
+                readDocument,
+                request,
+                withDeadline,
+              });
+              if (result?.is_error) span.outcome('failed');
+              return result;
             });
             if (out?.action) {
               actions.push(...(out.action.actions ?? [out.action]));

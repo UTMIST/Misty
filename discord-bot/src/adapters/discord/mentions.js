@@ -1,3 +1,4 @@
+import { withSpan } from '../../telemetry.js';
 import { prepareHelperReply, resolveHelperCaller, WITHHELD_ANSWER } from '../../helperFlow.js';
 import { sendDiscordMessage } from './messages.js';
 import { presentHelperAction } from './helperActions.js';
@@ -127,9 +128,14 @@ export function createHelperRequest(message, appContext, botId) {
 
 // Recheck immediately before each send, including later parts of a long reply.
 // A check failure is terminal for this reply; no remaining source text is sent.
-export async function sendHelperReply(send, reply, { message, appContext } = {}) {
+export async function sendHelperReply(
+  send,
+  reply,
+  { message, appContext, delivered, blocked } = {},
+) {
   if (reply.action) return presentHelperAction(message, send, reply.action, appContext);
   let withheld = false;
+  let sendFailed = false;
   await sendDiscordMessage(async (part) => {
     if (withheld) return;
     if (reply.canPublish) {
@@ -141,10 +147,18 @@ export async function sendHelperReply(send, reply, { message, appContext } = {})
       }
       if (!allowed) {
         withheld = true;
+        blocked?.();
         return send(WITHHELD_ANSWER);
       }
     }
-    return send(part);
+    try {
+      await send(part);
+      // sendDiscordMessage may send its failure notice after a rejected part.
+      if (!sendFailed) delivered?.();
+    } catch (err) {
+      sendFailed = true;
+      throw err;
+    }
   }, reply.content);
 }
 
@@ -279,11 +293,58 @@ async function prependStarterMessage(thread, ordered) {
 // thread it fetches recent history, including the starter message. The flow
 // retains user questions and removes unverified bot answers before model use.
 // Never throws to discord.js.
-export async function handleMention(message, { appContext, botId }) {
-  const question = stripLeadingMention(message.content, botId);
-  if (!question) return; // bare ping, nothing to answer
+async function handleAnswer(message, options, run, question) {
+  if (!question) return;
+  return withSpan('answer', async (span) => {
+    // Only a successfully published model answer can become full or partial.
+    let prepared = 'failed';
+    let parts = 0;
+    const observe = (result) => {
+      prepared = result;
+    };
+    const deliver = (send, reply) =>
+      withSpan('answer.delivery', async (delivery) => {
+        let withheld = false;
+        try {
+          await sendHelperReply(send, reply, {
+            message,
+            appContext: options.appContext,
+            delivered() {
+              if (prepared === 'answer') {
+                parts += 1;
+                delivery.mark('part_sent');
+              }
+            },
+            blocked() {
+              withheld = true;
+            },
+          });
+          if (withheld && parts) prepared = 'partial';
+          else if (prepared === 'answer')
+            prepared = withheld ? 'withheld' : parts ? 'full' : 'failed';
+          delivery.outcome(prepared);
+        } catch {
+          prepared = parts ? 'partial' : 'failed';
+          delivery.outcome(prepared);
+          console.error('Could not deliver helper reply');
+        }
+      });
+    await run(message, options, question, observe, span, deliver);
+    span.outcome(prepared);
+  });
+}
 
-  const caller = await resolveHelperCaller(appContext, message.author.id);
+export function handleMention(message, options) {
+  return handleAnswer(
+    message,
+    options,
+    answerMention,
+    stripLeadingMention(message.content, options.botId),
+  );
+}
+
+async function answerMention(message, { appContext, botId }, question, observe, span, deliver) {
+  const caller = await resolveHelperCaller(appContext, message.author.id, observe);
   if (!caller.ok) {
     await sendDiscordMessage((part) => message.reply(part), caller.content).catch(() => {});
     return;
@@ -293,6 +354,7 @@ export async function handleMention(message, { appContext, botId }) {
   // Reserve before any more awaits; even concurrent mentions share this limit.
   const allowance = appContext.helperRequestLimiter.tryConsume(message.author.id);
   if (!allowance.allowed) {
+    observe('rate_limited');
     await sendDiscordMessage(
       (part) => message.reply(part),
       `Please slow down a little so everyone can use the helper. Try again in ${allowance.retryAfterSeconds} seconds.`,
@@ -300,6 +362,7 @@ export async function handleMention(message, { appContext, botId }) {
     return;
   }
 
+  span.mark('admitted');
   let target;
   let turns;
   try {
@@ -347,23 +410,31 @@ export async function handleMention(message, { appContext, botId }) {
       channelId: channelId ?? null,
     },
     createHelperRequest(message, appContext, botId),
+    observe,
   );
-  await sendHelperReply((part) => target.send(part), reply, { message, appContext }).catch(() =>
-    console.error('Could not deliver helper reply'),
-  );
+  await deliver((part) => target.send(part), reply);
 }
 
-export async function handleDirectMessage(message, { appContext, botId }) {
-  const question = (message.content ?? '').trim();
-  if (!question) return;
+export function handleDirectMessage(message, options) {
+  return handleAnswer(message, options, answerDirectMessage, (message.content ?? '').trim());
+}
 
-  const caller = await resolveHelperCaller(appContext, message.author.id);
+async function answerDirectMessage(
+  message,
+  { appContext, botId },
+  _question,
+  observe,
+  span,
+  deliver,
+) {
+  const caller = await resolveHelperCaller(appContext, message.author.id, observe);
   if (!caller.ok) {
     await sendDiscordMessage((part) => message.reply(part), caller.content).catch(() => {});
     return;
   }
   const allowance = appContext.helperRequestLimiter.tryConsume(message.author.id);
   if (!allowance.allowed) {
+    observe('rate_limited');
     await sendDiscordMessage(
       (part) => message.reply(part),
       `Please slow down a little so everyone can use the helper. Try again in ${allowance.retryAfterSeconds} seconds.`,
@@ -371,6 +442,7 @@ export async function handleDirectMessage(message, { appContext, botId }) {
     return;
   }
 
+  span.mark('admitted');
   let turns;
   try {
     const fetched = await message.channel.messages.fetch({ limit: HISTORY_LIMIT });
@@ -397,8 +469,7 @@ export async function handleDirectMessage(message, { appContext, botId }) {
     caller.principal,
     { kind: 'person' },
     createHelperRequest(message, appContext, botId),
+    observe,
   );
-  await sendHelperReply((part) => message.channel.send(part), reply, { message, appContext }).catch(
-    () => console.error('Could not deliver helper DM reply'),
-  );
+  await deliver((part) => message.channel.send(part), reply);
 }
