@@ -1,4 +1,8 @@
+import json
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from threading import Barrier
+from traceback import format_exception
 from uuid import UUID
 
 import pytest
@@ -10,6 +14,7 @@ from contracts.retrieval import EmbeddingError, RetrievalUnavailable
 from src.api.app import create_app
 from src.api.deps import get_directory, get_embeddings, get_storage
 from src.api.hashing import generate_key
+from src.config import get_settings
 from src.storage.in_memory import InMemoryStorageAdapter
 from tests.retrieval_cases import FIXTURE, P1, T1, T2, embedding, expected_response, seed
 
@@ -123,7 +128,6 @@ def person_headers(keys):
 def test_invalid_body_precedes_scope_and_embedding_calls(ctx, body):
     client, _, _, directory, embeddings, keys = ctx
     # Encode escaped surrogates manually; httpx's normal encoder rejects them locally.
-    import json
 
     response = client.post(
         "/search",
@@ -244,9 +248,6 @@ def test_openapi_includes_strict_contract(ctx):
     ],
 )
 def test_search_outcome_in_actual_request_audit(ctx, monkeypatch, capsys, case_name, outcome):
-    import json
-    from src.config import get_settings
-
     client, adapter, docs, directory, embeddings, keys = ctx
     monkeypatch.setattr(get_settings(), "search_outcome_audit_enabled", outcome is not None)
     name = "alice" if case_name in {"storage-failure", "disabled"} else case_name
@@ -271,7 +272,7 @@ def test_search_outcome_in_actual_request_audit(ctx, monkeypatch, capsys, case_n
         503 if case_name == "storage-failure" else case["response"]["status"]
     )
     captured = capsys.readouterr().out
-    audit = next(json.loads(line) for line in captured.splitlines() if '"duration_ms"' in line)
+    [audit] = search_audits(captured)
     assert audit.get("search_outcome") == outcome
     assert audit["status"] == response.status_code
     for private in (
@@ -281,3 +282,111 @@ def test_search_outcome_in_actual_request_audit(ctx, monkeypatch, capsys, case_n
         "private dependency canary",
     ):
         assert private not in json.dumps(audit)
+
+
+def search_audits(captured):
+    return [
+        record
+        for line in captured.splitlines()
+        if line.startswith("{")
+        and (record := json.loads(line)).get("path") == "/search"
+        and "duration_ms" in record
+    ]
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize(
+    "case,status,outcome",
+    [
+        ("missing_key", 401, "denied"),
+        ("invalid_encoding", 400, "invalid_request"),
+        ("invalid_query", 422, "invalid_request"),
+        ("malformed_hits", 500, "internal_error"),
+        ("unexpected_failure", 500, "internal_error"),
+    ],
+)
+def test_search_error_outcomes(ctx, monkeypatch, capsys, enabled, case, status, outcome):
+    client, adapter, _, directory, embeddings, keys = ctx
+    monkeypatch.setattr(get_settings(), "search_outcome_audit_enabled", enabled)
+    private = "private-query-canary"
+    headers = {} if case == "missing_key" else person_headers(keys)
+    payload = json.dumps({"query": private, **({"k": 0} if case == "invalid_query" else {})})
+    if case == "invalid_encoding":
+        payload = b"\xff"
+    if case == "malformed_hits":
+        monkeypatch.setattr(adapter, "search_chunks", lambda **kwargs: [{"text": private}])
+    if case == "unexpected_failure":
+
+        def fail(**kwargs):
+            raise RuntimeError(private)
+
+        monkeypatch.setattr(adapter, "search_chunks", fail)
+    with TestClient(client.app, raise_server_exceptions=False) as observer:
+        response = observer.post(
+            "/search", content=payload, headers={**headers, "Content-Type": "application/json"}
+        )
+    assert response.status_code == status
+    if status < 500:
+        assert directory.calls == embeddings.calls == 0
+    else:
+        assert response.text == "Internal Server Error"
+    [audit] = search_audits(capsys.readouterr().out)
+    assert audit["status"] == status
+    assert audit.get("search_outcome") == (outcome if enabled else None)
+    assert private not in json.dumps(audit) and keys["person-reader"] not in json.dumps(audit)
+
+
+def test_overlapping_searches_keep_their_own_audit_outcome(ctx, monkeypatch, capsys):
+    client, _, _, _, embeddings, keys = ctx
+    monkeypatch.setattr(get_settings(), "search_outcome_audit_enabled", True)
+    barrier = Barrier(2, timeout=5)
+
+    def embed(query):
+        barrier.wait()
+        if query == "private-temporary-failure":
+            raise EmbeddingError(503)
+        return embedding([1, 0])
+
+    monkeypatch.setattr(embeddings, "embed_query", embed)
+
+    def search_for(key, query):
+        return client.post(
+            "/search",
+            json={"query": query},
+            headers={
+                **person_headers(keys),
+                "X-API-Key": keys[key],
+            },
+        ).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        ok = workers.submit(search_for, "person-reader", "private-success")
+        failed = workers.submit(search_for, "both", "private-temporary-failure")
+        assert (ok.result(), failed.result()) == (200, 503)
+    rows = search_audits(capsys.readouterr().out)
+    assert {(r["key_name"], r["status"], r["search_outcome"]) for r in rows} == {
+        ("person-reader", 200, "results"),
+        ("both", 503, "embedding_error"),
+    }
+    assert len(rows) == len({r["request_id"] for r in rows}) == 2
+    assert "private-" not in json.dumps(rows)
+
+
+@pytest.mark.parametrize("malformed_hits", [True, False])
+def test_unhandled_search_error_keeps_stack_and_redacts_values(ctx, monkeypatch, malformed_hits):
+    client, adapter, _, _, _, keys = ctx
+    private = "synthetic-private-excerpt"
+
+    def broken_search(**kwargs):
+        if malformed_hits:
+            return [{"text": private}]
+        raise RuntimeError(private)
+
+    monkeypatch.setattr(adapter, "search_chunks", broken_search)
+    with pytest.raises(RuntimeError, match="catalog search failed") as caught:
+        client.post("/search", json={"query": "hello"}, headers=person_headers(keys))
+    traceback = "".join(format_exception(caught.value))
+    assert private not in traceback
+    assert "routers/search.py" in traceback
+    if not malformed_hits:
+        assert "in broken_search" in traceback

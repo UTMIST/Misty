@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 
 from contracts.directory import DirectoryClient, DirectoryUnavailable
@@ -27,7 +28,10 @@ from src.config import get_settings
 
 def _observe(request: Request, outcome: str) -> None:
     if get_settings().search_outcome_audit_enabled:
-        request.state.audit_extra = {"search_outcome": outcome}
+        request.state.audit_extra = {
+            **getattr(request.state, "audit_extra", {}),
+            "search_outcome": outcome,
+        }
 
 
 class _SearchRoute(APIRoute):
@@ -37,13 +41,13 @@ class _SearchRoute(APIRoute):
         async def validated(request):
             try:
                 return await handler(request)
-            except HTTPException as exc:
-                if exc.status_code in (401, 403) and not getattr(
-                    request.state, "audit_extra", None
-                ):
-                    _observe(request, "denied")
-                elif exc.status_code == 400 and not getattr(request.state, "audit_extra", None):
-                    _observe(request, "invalid_request")
+            except StarletteHTTPException as exc:
+                # FastAPI also uses Starlette's base exception for unreadable bodies.
+                fallback = {400: "invalid_request", 401: "denied", 403: "denied"}.get(
+                    exc.status_code
+                )
+                if fallback and "search_outcome" not in getattr(request.state, "audit_extra", {}):
+                    _observe(request, fallback)
                 raise
             except RequestValidationError as exc:
                 _observe(request, "invalid_request")
@@ -53,6 +57,12 @@ class _SearchRoute(APIRoute):
                 return Response(
                     json.dumps({"detail": errors}), status_code=422, media_type="application/json"
                 )
+            except Exception as exc:
+                _observe(request, "internal_error")
+                # Save the call sites. Raise outside the handler so framework
+                # traceback formatting cannot include the original values.
+                failure = RuntimeError("catalog search failed").with_traceback(exc.__traceback__)
+            raise failure
 
         return validated
 

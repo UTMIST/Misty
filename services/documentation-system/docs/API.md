@@ -118,6 +118,10 @@ describe the visible serving index. Neither proves complete source coverage.
 `no_channel_teams` means the directory resolved an empty channel scope and no
 search ran. `denied`, `invalid_request`, `directory_unavailable`,
 `embedding_error` and `storage_unavailable` identify other exit paths.
+`internal_error` covers unexpected exceptions, including invalid result data
+that prevents the API from returning a response. The server traceback retains
+the failure location with a fixed error message to protect query and result
+text. Count `results` and `no_hits` only on HTTP 200.
 A missing label is unclassified. For the share of executed index searches
 returning zero hits, use `no_hits / (results + no_hits)` and leave an empty
 denominator blank. Use the existing duration field to compare slow requests.
