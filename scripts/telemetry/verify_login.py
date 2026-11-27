@@ -187,10 +187,7 @@ def verify(work):
             with rows.open("w") as target:
                 for line in path.read_text().splitlines():
                     if EMAIL.split("@")[0] in line:
-                        if '"duration_ms"' in line:
-                            raw_locations.append(name + " legacy audit")
-                        if "HTTP/1.1" in line:
-                            raw_locations.append(name + " HTTP access log")
+                        raw_locations.append(name)
                     target.write(
                         json.dumps({"timestamp": iso(now), "message": line}) + "\n"
                     )
@@ -241,10 +238,7 @@ def verify(work):
             "login.directory",
             "login.send",
         }
-        assert sorted(raw_locations) == [
-            "team-tracking HTTP access log",
-            "team-tracking legacy audit",
-        ]
+        assert not raw_locations, raw_locations
         return {
             "HTTP": {
                 "start": start,

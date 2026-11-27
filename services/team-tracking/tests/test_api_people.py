@@ -148,6 +148,21 @@ def test_get_person_by_email(client):
     assert resp.json()["display_name"] == "Alex"
 
 
+def test_body_lookup_uses_primary_email_and_requires_auth(client):
+    client.post(
+        "/people", json={"display_name": "Alex", "primary_email": "alex@example.org"}, headers=AUTH
+    )
+    lookup = "/people/by-email"
+    body = {"email": "Alex@EXAMPLE.ORG"}
+    expected = client.get("/people/by-email/alex@example.org", headers=AUTH).json()
+    assert client.post(lookup, json=body, headers=AUTH).json() == expected
+    assert (
+        client.post(lookup, json={"email": "absent@example.org"}, headers=AUTH).status_code == 404
+    )
+    assert client.post(lookup, json=body).status_code == 401
+    assert client.post(lookup, json=body | {"extra": True}, headers=AUTH).status_code == 422
+
+
 def test_get_person_by_email_not_found(client):
     resp = client.get("/people/by-email/nobody@utmist.ca", headers=AUTH)
     assert resp.status_code == 404

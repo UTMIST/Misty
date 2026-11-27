@@ -86,7 +86,7 @@ TT_DATABASE_URL="<team-tracking Neon branch>" \
 
 | Scope | Grants |
 |---|---|
-| `people:read` | GET /people, GET /people/{id}, GET /people/by-email/{email}, POST /people/search (email filters also need `identifiers:read`) |
+| `people:read` | GET /people, GET /people/{id}, POST /people/by-email, GET /people/by-email/{email}, POST /people/search (email filters also need `identifiers:read`) |
 | `people:write` | POST /people, PATCH /people/{id} |
 | `people:elevate` | Additional scope for non-`member` creation and any non-null `access_level` in PATCH; see [access-level rules](../README.md#behavior-notes) |
 | `teams:read` | GET /teams, GET /teams/{id}, GET /teams/by-slug/{slug} |

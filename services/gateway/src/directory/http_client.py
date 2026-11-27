@@ -30,10 +30,14 @@ class HttpDirectoryClient:
     def close(self) -> None:
         self._client.close()
 
-    def _get(self, path: str):
+    def _request(self, method: str, path: str, *, body=None):
         try:
-            resp = self._client.get(
-                f"{self._base_url}{path}", headers=trace_headers(), follow_redirects=False
+            resp = self._client.request(
+                method,
+                f"{self._base_url}{path}",
+                headers=trace_headers(),
+                json=body,
+                follow_redirects=False,
             )
         except httpx.HTTPError:
             # Transport exceptions can contain URLs; keep logs free of upstream data.
@@ -51,7 +55,9 @@ class HttpDirectoryClient:
         return result
 
     def get_person_by_github(self, github_login: str) -> dict | None:
-        result = self._get(f"/people/by-identifier/github/{quote(github_login, safe='')}")
+        result = self._request(
+            "GET", f"/people/by-identifier/github/{quote(github_login, safe='')}"
+        )
         if result is not None and (
             not isinstance(result, dict)
             or not isinstance(result.get("id"), str)
@@ -61,13 +67,13 @@ class HttpDirectoryClient:
         return result
 
     def get_person_by_email(self, email: str) -> dict | None:
-        return self._get(f"/people/by-email/{quote(email, safe='')}")
+        return self._request("POST", "/people/by-email", body={"email": email})
 
     def get_person(self, person_id: str) -> dict | None:
-        return self._get(f"/people/{quote(person_id, safe='')}")
+        return self._request("GET", f"/people/{quote(person_id, safe='')}")
 
     def list_identifiers(self, person_id: str) -> list[dict]:
-        result = self._get(f"/people/{quote(person_id, safe='')}/identifiers")
+        result = self._request("GET", f"/people/{quote(person_id, safe='')}/identifiers")
         if result is None:
             return []
         if not isinstance(result, list) or any(

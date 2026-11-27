@@ -134,6 +134,6 @@ trace. Login challenges, code values, addresses, account IDs, network addresses
 and API key values are absent from the typed events. The local three-service
 check uses synthetic input and fake email delivery.
 
-The existing directory lookup includes an email in its URL. The directory's
-legacy request audit and HTTP access log can retain this URL independently
-of the typed event collector.
+Gateway login sends the address in the body of an authenticated
+`POST /people/by-email`. Both services' HTTP access logs and ordinary
+request audits can record the path without exposing the address.
