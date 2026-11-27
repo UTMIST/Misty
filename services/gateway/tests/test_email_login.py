@@ -496,3 +496,39 @@ def test_ambiguous_delivery_failure_never_retries(login, status):
         assert len(calls) == 1
     finally:
         upstream.close()
+
+
+def test_login_spans_keep_private_values_out_and_external_context_disconnected(login, monkeypatch):
+    import json
+    from platform_auth import telemetry
+
+    client, _, _, _ = login
+    events = []
+    monkeypatch.setattr(telemetry._emitter, "offer", events.append)
+    monkeypatch.setenv("TELEMETRY_ENABLED", "true")
+    monkeypatch.setenv("TELEMETRY_ENV", "local")
+    client.headers["traceparent"] = "00-" + "ac" * 16 + "-" + "db" * 8 + "-01"
+    started = start(client)
+    challenge = started.json()["challenge_id"]
+    assert confirm(client, challenge, code="098765").status_code == 400
+    assert confirm(client, challenge).status_code == 200
+    assert confirm(client, challenge).status_code == 400
+    ends = [e for e in events if e["event_name"] == "end"]
+    [accepted] = [e for e in ends if e["operation"] == "login.start"]
+    assert accepted["result"] == "accepted"
+    [sent] = [e for e in ends if e["operation"] == "login.send"]
+    [delivery] = [e for e in ends if e["operation"] == "login.delivery"]
+    assert sent["trace_id"] == delivery["trace_id"] == accepted["trace_id"]
+    assert sent["parent_span_id"] == delivery["span_id"]
+    assert delivery["parent_span_id"] == accepted["span_id"]
+    assert [e["result"] for e in ends if e["operation"] == "login.confirm"] == [
+        "denied",
+        "success",
+        "denied",
+    ]
+    assert [e["result"] for e in ends if e["operation"] == "login.check"] == ["denied", "success"]
+    serialized = json.dumps(events)
+    assert all(
+        value not in serialized
+        for value in (EMAIL, PERSON_ID, challenge, "098765", "192.0.2.1", "ac" * 16)
+    )

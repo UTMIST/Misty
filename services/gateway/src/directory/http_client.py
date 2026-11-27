@@ -2,6 +2,8 @@ from urllib.parse import quote
 
 import httpx
 
+from platform_auth.telemetry import trace_headers
+
 from contracts.directory import DirectoryUnavailable
 
 _TIMEOUT = httpx.Timeout(5.0)
@@ -30,7 +32,9 @@ class HttpDirectoryClient:
 
     def _get(self, path: str):
         try:
-            resp = self._client.get(f"{self._base_url}{path}")
+            resp = self._client.get(
+                f"{self._base_url}{path}", headers=trace_headers(), follow_redirects=False
+            )
         except httpx.HTTPError:
             # Transport exceptions can contain URLs; keep logs free of upstream data.
             raise DirectoryUnavailable("directory unreachable") from None
