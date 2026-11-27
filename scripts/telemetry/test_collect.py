@@ -183,7 +183,7 @@ class CollectorTest(unittest.TestCase):
                 )
                 self.assertNotIn(b"canary", req.data)
                 self.assertEqual(
-                    json.loads(req.data)["variables"]["filter"], "@serviceId:" + SOURCE
+                    json.loads(req.data)["variables"]["filter"], "@service:" + SOURCE
                 )
                 return value
 
@@ -209,6 +209,58 @@ class CollectorTest(unittest.TestCase):
         (self.path / "public").touch(mode=0o644)
         with self.assertRaises(ValueError):
             connect(self.path / "public", "local")
+
+    def test_known_recording_trees_replay_drops_and_incomplete_spans(self):
+        from recording_fixture import examples, FIXTURE
+
+        anchor = NOW - timedelta(minutes=5)
+        records = list(examples(anchor))
+        for service in ("discord-bot", "meeting", "documentation-system"):
+            self.args.service = service
+            self.write(*(row for source, row in records if source == service))
+            stats = self.read()
+            self.assertEqual(stats.get("rejected", 0), 0)
+        self.assertTrue(
+            collect.validate(
+                json.loads(FIXTURE["example_transport"]["message"]), "meeting", "local"
+            )
+        )
+        for n, case in enumerate(FIXTURE["cases"], 1):
+            trace = f"{n:032x}"
+            ends = self.db.execute(
+                "select count(*) from events where trace_id=? and event_name='end'",
+                (trace,),
+            ).fetchone()[0]
+            starts = self.db.execute(
+                "select count(*) from events where trace_id=? and event_name='start'",
+                (trace,),
+            ).fetchone()[0]
+            self.assertEqual(ends, case["expected"]["ends"])
+            self.assertEqual(starts - ends, case["expected"]["unfinished"])
+            for span in case["spans"]:
+                row = self.db.execute(
+                    "select operation,parent_span_id,link_span_id,result from events where trace_id=? and span_id=? order by event_name limit 1",
+                    (trace, f"{span['id']:016x}"),
+                ).fetchone()
+                self.assertEqual(
+                    row,
+                    (
+                        span["op"],
+                        f"{span['parent']:016x}" if "parent" in span else None,
+                        f"{span['link']:016x}" if "link" in span else None,
+                        span["end"] or "started",
+                    ),
+                )
+        self.assertEqual(
+            self.db.execute("select sum(count) from summaries").fetchone(), (9,)
+        )
+
+        def states(time):
+            return {s["service"]: s["state"] for s in collect.status(self.db, time)}
+
+        self.assertEqual(states(NOW)["meeting"], "fresh")
+        self.assertEqual(states(NOW + timedelta(minutes=4))["meeting"], "stale")
+        self.assertEqual(states(NOW)["gateway"], "unknown")
 
     def test_stdout_to_cli_to_summary(self):
         # This invocation uses the real asynchronous Node emitter and two fresh reader processes.

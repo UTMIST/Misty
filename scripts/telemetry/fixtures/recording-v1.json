@@ -1,0 +1,40 @@
+{
+  "schema": "misty.pilot-fixture.v1",
+  "description": "Each case is one recording. The bot root is span 01, stop is 02, recovery is 03. Times are offsets from the supplied UTC anchor.",
+  "example_transport": {
+    "timestamp": "2026-01-12T12:00:01.000Z",
+    "message": "{\"schema\":\"misty.telemetry.v1\",\"environment\":\"local\",\"service\":\"meeting\",\"traffic\":\"synthetic\",\"deployment\":\"unknown\",\"operation\":\"meeting.finalize\",\"result\":\"success\",\"event_name\":\"end\",\"event_id\":\"00000000000000000000000000000001\",\"trace_id\":\"00000000000000000000000000000001\",\"span_id\":\"0000000000000010\",\"parent_span_id\":\"0000000000000002\",\"process_id\":\"0000000000000001\",\"elapsed_ms\":11,\"dropped_before\":0,\"ts\":\"2026-01-12T12:00:00.011Z\"}"
+  },
+  "normal_pdf": [
+    "record.pdf_requested", "capture.started", "capture.stop_requested", "capture.drained",
+    "stop.request", "stop.drain_confirmed", "stop.response", "pdf.posting", "pdf.posted"
+  ],
+  "normal_saved": [
+    "record.saved_requested", "capture.started", "capture.stop_requested", "capture.drained",
+    "stop.request", "stop.drain_confirmed", "stop.response", "pdf.posting", "pdf.posted"
+  ],
+  "cases": [
+    {"name":"normal","base":"normal_pdf","extra":[],"spans":[
+      {"id":16,"op":"meeting.finalize","parent":2,"end":"success"}],
+     "expected":{"workflow":"complete","ends":1,"unfinished":0}},
+    {"name":"retry","base":"normal_saved","extra":["save.confirmed","link.posted"],"spans":[
+      {"id":16,"op":"meeting.finalize","parent":2,"end":"success"},
+      {"id":17,"op":"meeting.handoff","parent":16,"end":"failed"},
+      {"id":18,"op":"meeting.handoff","parent":16,"end":"success"}],
+     "expected":{"workflow":"complete","ends":3,"unfinished":0}},
+    {"name":"cancelled","extra":["record.pdf_requested","capture.started","capture.stop_requested","stop.request"],"spans":[
+      {"id":16,"op":"meeting.finalize","parent":2,"end":"cancelled"}],
+     "expected":{"workflow":"unconfirmed","ends":1,"unfinished":0}},
+    {"name":"interrupted","extra":["record.saved_requested","capture.started","capture.voice_lost","stop.request","stop.drain_disconnected","stop.response","pdf.posted","save.confirmed","link.posted"],"spans":[
+      {"id":16,"op":"meeting.finalize","parent":2,"end":"success"},
+      {"id":17,"op":"meeting.drain","parent":16,"end":"disconnected"}],
+     "expected":{"workflow":"interrupted","ends":2,"unfinished":0}},
+    {"name":"delayed","base":"normal_saved","extra":["save.pending","link.pending"],"later":["save.confirmed","link.posted"],"spans":[
+      {"id":16,"op":"meeting.finalize","parent":2,"end":"success"},
+      {"id":17,"op":"catalog.advance","link":16,"end":"confirmed"}],
+     "expected":{"before_recovery":"unconfirmed","workflow":"complete","ends":2,"unfinished":0}},
+    {"name":"restart","extra":["record.pdf_requested","capture.started","capture.stop_requested","stop.request"],"spans":[
+      {"id":16,"op":"meeting.finalize","parent":2,"end":null}],
+     "expected":{"workflow":"unconfirmed","ends":0,"unfinished":1}}
+  ]
+}

@@ -293,6 +293,9 @@ jobs:
         run: npm ci
       - name: Run tests
         run: npm test
+      - name: Offline telemetry collector and producer replay
+        working-directory: .
+        run: python3 -m unittest discover -s scripts/telemetry -p test_collect.py
       - name: Readiness checker regressions
         working-directory: .
         run: |

@@ -89,6 +89,7 @@ export function createTelemetry({
     const call = {
       traceId,
       spanId,
+      traffic,
       traceparent: `00-${traceId}-${spanId}-01`,
       outcome(value) {
         if (contract.result.includes(value)) result = value;
@@ -121,5 +122,5 @@ export function createTelemetry({
 export const { withSpan } = createTelemetry();
 export function traceHeaders() {
   const parent = context.getStore();
-  return parent ? { traceparent: parent.traceparent } : {};
+  return parent ? { traceparent: parent.traceparent, 'x-misty-traffic': parent.traffic } : {};
 }
