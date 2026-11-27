@@ -3,6 +3,7 @@
 import json
 
 import httpx
+from platform_auth.telemetry import internal_request
 
 from contracts.embedder import RESOLVED_EMBED_MODELS
 from contracts.retrieval import EmbeddingError, QueryEmbedding
@@ -28,7 +29,8 @@ class HttpEmbeddingClient:
         if not self._api_key:
             raise EmbeddingError(503)
         try:
-            response = self._client.post(
+            response = internal_request(
+                self._client.post,
                 f"{self._base_url}/embed",
                 headers={"X-API-Key": self._api_key},
                 json={"inputs": [query], "model": self._model},

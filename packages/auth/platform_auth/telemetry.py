@@ -1,6 +1,7 @@
 """Content-free operational spans shared by internal services and the log reader."""
 
 import asyncio
+import atexit
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -79,10 +80,14 @@ class Emitter:
         self.lock = Lock()
         self.dropped = 0
         self.process_id = token_hex(8)
+        self.process_started_at = stamp()
+        self.offered = 0
         self.worker = None
 
     def offer(self, event):
         with self.lock:
+            self.offered += 1
+            event = dict(event, sequence=self.offered, process_started_at=self.process_started_at)
             if self.worker is None:
                 self.worker = Thread(target=self._run, name="misty-telemetry", daemon=True)
                 self.worker.start()
@@ -109,6 +114,15 @@ class Emitter:
 _emitter = Emitter()
 
 
+def flush(timeout=0.5):
+    """Bound normal CLI shutdown even if the sink stalls forever."""
+    with _emitter.q.all_tasks_done:
+        return _emitter.q.all_tasks_done.wait_for(lambda: _emitter.q.unfinished_tasks == 0, timeout)
+
+
+atexit.register(flush)
+
+
 class Span:
     def __init__(
         self,
@@ -120,6 +134,7 @@ class Span:
         route=None,
         traffic=None,
         started=None,
+        start_ts=None,
     ):
         self.traceparent = None
         self.service = service
@@ -148,7 +163,7 @@ class Span:
         if route is not None:
             self.base["route"] = route if route in CONTRACT["routes"] else "other"
         self.started = started if started is not None else time.monotonic()
-        self._emit("start", "started")
+        self._emit("start", "started", ts=start_ts)
 
     def outcome(self, result):
         if result in CONTRACT["result"]:
@@ -166,7 +181,7 @@ class Span:
         if name in CONTRACT["marks"].get(self.operation, []):
             self._emit(name, "success")
 
-    def _emit(self, name, result):
+    def _emit(self, name, result, ts=None):
         if not self.traceparent:
             return
         try:
@@ -175,8 +190,8 @@ class Span:
                 event_id=token_hex(16),
                 event_name=name,
                 result=result,
-                ts=stamp(),
-                elapsed_ms=int((time.monotonic() - self.started) * 1000),
+                ts=ts or stamp(),
+                elapsed_ms=0 if name == "start" else int((time.monotonic() - self.started) * 1000),
             )
             if name == "end" and self.measures:
                 event["measures"] = self.measures.copy()
@@ -244,6 +259,7 @@ class RequestSpan:
         self.service = service
         self.call = None
         self.started = time.monotonic()
+        self.start_ts = stamp()
         self.lock = Lock()
 
     def get(self):
@@ -256,7 +272,12 @@ class RequestSpan:
                 parent = parse_parent(parents[0]) if trusted and len(parents) == 1 else None
                 route = getattr(self.request.scope.get("route"), "path", "other")
                 self.call = Span(
-                    self.service, "http.request", parent, route=route, started=self.started
+                    self.service,
+                    "http.request",
+                    parent,
+                    route=route,
+                    started=self.started,
+                    start_ts=self.start_ts,
                 )
             return self.call
 
@@ -273,3 +294,21 @@ def request_span(request, logger_name):
         yield ctx
     finally:
         _context.reset(token)
+
+
+def internal_request(send, *args, headers, **kwargs):
+    """Wrap one configured, authenticated internal HTTP call, including its response."""
+    with span("http.client") as call:
+        if not call.traceparent:
+            return send(*args, headers=headers, **kwargs)
+        response = send(
+            *args, headers={**headers, **trace_headers()}, **{**kwargs, "follow_redirects": False}
+        )
+        code = response.status_code
+        if code in (401, 403):
+            call.outcome("denied")
+        elif code == 429:
+            call.outcome("rate_limited")
+        elif code >= 300:
+            call.outcome("failed")
+        return response
