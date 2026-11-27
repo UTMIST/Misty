@@ -102,10 +102,12 @@ class MeetingRecords:
             requester = None
         now = self.now()
         fields = payload.model_dump(exclude={"transcript", "participants"})
+        context = trace_headers()
         record = MeetingRecord(
             meeting_id=meeting_id,
             payload_hash=digest,
-            accept_traceparent=trace_headers().get("traceparent"),
+            accept_traceparent=context.get("traceparent"),
+            accept_traffic=context.get("x-misty-traffic"),
             **fields,
             participants=participants,
             requester_person_id=requester,
@@ -195,6 +197,7 @@ class MeetingRecords:
             service="documentation-system",
             trace_id=parent[0] if parent else uuid4().hex,
             link=link,
+            traffic=(record.accept_traffic if parent else None) or "background",
         )
 
     def _writer_call(self, operation, method, *args, **kwargs):
@@ -472,6 +475,7 @@ class MeetingRecords:
                     "index_pending": False,
                     "pending_payload": None,
                     "accept_traceparent": None,
+                    "accept_traffic": None,
                     "next_reconcile_at": self.now(),
                     "title": None,
                     "summary": None,
@@ -552,7 +556,7 @@ class MeetingRecords:
                 and now >= r.created_at + timedelta(days=30)
                 and not (r.create_lease_until and r.create_lease_until > now)
             ):
-                self._change(r, accept_traceparent=None)
+                self._change(r, accept_traceparent=None, accept_traffic=None)
             times = [
                 t
                 for t in (
