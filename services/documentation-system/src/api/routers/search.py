@@ -2,7 +2,6 @@ import json
 import logging
 import re
 import time
-from functools import wraps
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -40,32 +39,22 @@ def _observe(request: Request, outcome: str) -> None:
 
 
 def _early_outcome(request, outcome):
-    if getattr(request.state, "search_outcome", None):
+    if outcome != "internal_error" and getattr(request.state, "search_outcome", None):
         return
-    with span("catalog.search", service="documentation-system") as call:
-        call.outcome(outcome)
+    if getattr(request.state, "search_call", None) is not None:
         _observe(request, outcome)
-
-
-def _trace_search(handler):
-    @wraps(handler)
-    def traced(*args, **kwargs):
-        request = kwargs["request"]
-        # The framework has authenticated the principal before accepting the
-        # incoming trace from another service.
+    else:
         with span("catalog.search", service="documentation-system") as call:
-            request.state.search_call = call
-            try:
-                return handler(*args, **kwargs)
-            except StarletteHTTPException as exc:
-                if not getattr(request.state, "search_outcome", None):
-                    _observe(request, "denied" if exc.status_code == 403 else "invalid_request")
-                raise
-            except Exception:
-                _observe(request, "internal_error")
-                raise
+            call.outcome(outcome)
+            _observe(request, outcome)
 
-    return traced
+
+async def _trace_search(request: Request, _: AuthedKey = Depends(require_api_key)):
+    # The caller has been authenticated. Keep the span active through response
+    # validation and serialization, including any framework exception.
+    with span("catalog.search", service="documentation-system") as call:
+        request.state.search_call = call
+        yield
 
 
 class _SearchRoute(APIRoute):
@@ -134,7 +123,6 @@ def _warn_on_excluded_docs(storage: StorageAdapter, model: str) -> None:
 
 
 @router.post("/search", response_model=SearchResponse)
-@_trace_search
 def search(
     payload: SearchRequest,
     request: Request,
@@ -145,6 +133,7 @@ def search(
     storage: StorageAdapter = Depends(get_storage),
     directory: DirectoryClient = Depends(get_directory),
     embeddings: EmbeddingClient = Depends(get_embeddings),
+    _: None = Depends(_trace_search, scope="function"),
 ) -> SearchResponse:
     if not (key.has_scope("docs:read") or key.has_scope("docs:read:all")):
         raise HTTPException(403, "missing scope: docs:read")

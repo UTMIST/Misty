@@ -423,3 +423,29 @@ def test_search_trace_does_not_depend_on_legacy_audit(ctx, monkeypatch, case_nam
     assert end["result"] == expected
     assert end["trace_id"] == "ab" * 16
     assert req["json"]["query"] not in json.dumps(events)
+
+
+def test_search_ends_after_framework_serialization(ctx, monkeypatch, capsys):
+    from platform_auth import telemetry
+    import fastapi.routing
+
+    client, _, _, _, _, keys = ctx
+    events = []
+    monkeypatch.setenv("TELEMETRY_ENABLED", "true")
+    monkeypatch.setenv("TELEMETRY_ENV", "local")
+    monkeypatch.setattr(telemetry._emitter, "offer", events.append)
+    monkeypatch.setattr(get_settings(), "search_outcome_audit_enabled", True)
+
+    async def serialization_failure(**kwargs):
+        raise ValueError("private returned excerpt")
+
+    monkeypatch.setattr(fastapi.routing, "serialize_response", serialization_failure)
+    with TestClient(client.app, raise_server_exceptions=False) as http:
+        response = http.post("/search", json={"query": "CPSIF"}, headers=person_headers(keys))
+    assert response.status_code == 500
+    [terminal] = [
+        e for e in events if e["operation"] == "catalog.search" and e["event_name"] == "end"
+    ]
+    assert terminal["result"] == "internal_error"
+    assert search_audits(capsys.readouterr().out)[-1]["search_outcome"] == "internal_error"
+    assert "private returned excerpt" not in str(events)
