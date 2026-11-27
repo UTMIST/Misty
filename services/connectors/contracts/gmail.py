@@ -92,6 +92,7 @@ class GmailReplyResult(StrictModel):
 class GmailReceiptCheckRequest(StrictModel):
     thread_id: GmailId
     receipt_id: UUID
+    sent_after_epoch_s: int | None = Field(default=None, ge=0)
 
 
 class GmailReceiptCheckResult(StrictModel):

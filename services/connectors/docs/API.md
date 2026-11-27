@@ -276,17 +276,18 @@ file is positively identified; cleanup permanently deletes it. An unconfirmed
 
 ## Gmail forwarding mailbox (`/google/gmail`)
 
-All inputs forbid extra fields and hide submitted values in validation errors.
-Callers do not select the mailbox address or sender: configuration binds one
-dedicated Workspace mailbox (`GOOGLE_GMAIL_ADDRESS`) and the authenticated key
-attests the calling service.
+All inputs forbid extra fields, and FastAPI validation error responses strip
+submitted `input` values so private addresses, subjects, and message bodies are
+never echoed on `422`. Callers do not select the mailbox address or sender:
+configuration binds one dedicated Workspace mailbox (`GOOGLE_GMAIL_ADDRESS`) and
+the authenticated key attests the calling service.
 
 | Method/path | Scope | Request / result |
 |---|---|---|
 | `POST /google/gmail/messages/list` | `email-read` | `{after_epoch_s?, page_token?, page_size=50}` → `{mailbox_address, messages: [{message_id, thread_id}], next_page_token}` |
 | `POST /google/gmail/messages/{id}` | `email-read` | Inspect metadata and (when eligible) raw MIME → `GmailInspectResult` |
 | `POST /google/gmail/reply` | `email-send` | `{thread_id, to_email, subject, body_text, in_reply_to?, receipt_id}` → `{sent_message_id, thread_id}` |
-| `POST /google/gmail/receipt-check` | `email-read` | `{thread_id, receipt_id}` → `{sent, sent_message_id?}` |
+| `POST /google/gmail/receipt-check` | `email-read` | `{thread_id, receipt_id, sent_after_epoch_s?}` → `{sent, sent_message_id?}` |
 
 ### Inbound inspection and anti-spoofing
 
@@ -304,8 +305,10 @@ evaluates four gates before downloading raw MIME bytes:
    defect-free RFC 5322 `From:` mailbox (re-verified on the raw MIME message)
    and inspects **only the topmost** `Authentication-Results` header, requiring
    `authserv-id == "mx.google.com"` and either `dmarc=pass` aligned with the
-   `From:` domain (`auth_mechanism: "dmarc_pass"`) or `dmarc=none` with an
-   organizationally aligned `dkim=pass` and no SPF/DKIM failure
+   `From:` organizational domain (`auth_mechanism: "dmarc_pass"`) or
+   `dmarc=none` with an organizationally aligned `dkim=pass` (comparing
+   organizational domains so parent, child, and sibling subdomains align while
+   public suffixes do not) and no SPF/DKIM failure
    (`auth_mechanism: "dkim_aligned_no_dmarc"`). `Resent-From` and
    `X-Forwarded-*` are never used as sender identity. Failures return
    `classification: "rejected_unauthenticated"` with `verified_sender_email: null`.
@@ -314,11 +317,14 @@ evaluates four gates before downloading raw MIME bytes:
    (retaining `verified_sender_email`, `subject`, and `outer_message_id` for a
    single caller-controlled rejection notice) without parsing oversized MIME.
 
-Eligible messages (`classification: "accepted_candidate"`) extract plain text
-(falling back to local HTML-to-text conversion with no external network fetches,
-clamped at `MAX_EMAIL_TEXT_CHARS`, default 500,000 chars), count omitted
-attachments without extracting them, and split the forwarder's top note from
-quoted correspondence and `untrusted_claimed_headers`.
+Eligible messages (`classification: "accepted_candidate"`) prune attachment and
+embedded-message (`message/*`, including `.eml` / `message/rfc822`) subtrees
+before extracting plain text (falling back to local HTML-to-text conversion with
+no external network fetches, falling back to UTF-8 with an
+`unknown charset fallback` warning on unrecognized MIME charsets, and clamping
+at `MAX_EMAIL_TEXT_CHARS`, default 500,000 chars), count omitted attachments
+without extracting them, and split the forwarder's top note from quoted
+correspondence and `untrusted_claimed_headers`.
 
 ### Threaded receipts and error contract
 
@@ -329,6 +335,10 @@ self-replies (`422`). Upstream calls use `num_retries=0` and return content-free
 `detail: {code, uncertain}` errors (`503` unconfigured, `404` missing message or
 thread, `422` invalid reply header/recipient, `502` ambiguous upstream failure
 with `uncertain: true`, `409` definite upstream refusal). After an uncertain
-send, callers must check `POST /google/gmail/receipt-check` before retrying.
+send, callers must check `POST /google/gmail/receipt-check` before retrying;
+receipt verification inspects `thread_id` first and then falls back to scanning
+`SENT` metadata across threads (optionally bounded by `sent_after_epoch_s`),
+failing closed with `receipt_check_inconclusive` (`uncertain: true`) if the
+fallback scan hits its page limit without finding the receipt.
 Audit logs record only message counts, classification codes, or boolean receipt
 presence — never addresses, subjects, headers, or message bodies.

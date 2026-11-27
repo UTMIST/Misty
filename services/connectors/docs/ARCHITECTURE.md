@@ -217,10 +217,15 @@ transport and executes with `num_retries=0`, surfacing `GmailError(code, uncerta
 Like `/fetch`, connectors is **not** the directory authorization boundary here:
 it verifies transport-level mail authentication from `mx.google.com` (checking
 only the topmost `Authentication-Results` header to block pre-injected headers,
-requiring a single defect-free RFC 5322 `From:` mailbox, and enforcing loop and
-`MAX_EMAIL_BYTES` metadata prechecks before downloading raw MIME) and separates
-the forwarder's note from quoted `untrusted_claimed_headers`. `documentation-system`
+requiring a single defect-free RFC 5322 `From:` mailbox, comparing
+organizational domains for relaxed alignment, and enforcing loop and
+`MAX_EMAIL_BYTES` metadata prechecks before downloading raw MIME), prunes
+attachment and `message/*` subtrees before text extraction, and separates the
+forwarder's note from quoted `untrusted_claimed_headers`. `documentation-system`
 resolves whether that authenticated address belongs to an active Misty member,
 owns deduplication and outbound rate limits, and reconciles `uncertain: true`
-reply outcomes via `/google/gmail/receipt-check` (`X-Misty-Receipt-ID` on the
-Gmail thread) before retrying a send.
+reply outcomes via `/google/gmail/receipt-check` (checking `X-Misty-Receipt-ID`
+on the Gmail thread and falling back to a bounded `SENT` metadata scan across
+threads) before retrying a send. FastAPI's `RequestValidationError` handler
+strips submitted `input` values from 422 responses so private email fields are
+never echoed.
