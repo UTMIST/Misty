@@ -83,6 +83,9 @@ Voice capture still requires the real Discord adapter.
 
 ## Investigate one recording
 
+The [recording operator dashboard](../../docs/RECORDING-TELEMETRY.md) shows
+recording cohorts, component timing, restricted traces and alert recovery.
+
 Enable `RECORDING_TRACE_ENABLED=true` on the bot in the selected environment
 and restart it. Filter the restricted bot logs by `schema=misty.recording.v1`.
 Use the time of the incident to find a recording trace, then filter both the
