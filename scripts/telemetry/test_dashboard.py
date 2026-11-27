@@ -16,7 +16,7 @@ from pathlib import Path
 from alerts import discord_send, evaluate, notify
 from dashboard import load_access, make_handler
 from pilot import fixture, seed
-from project import build, iso, percentiles, readonly
+from project import build, iso, percentiles, prune_snapshot, readonly
 
 
 class PilotAcceptance(unittest.TestCase):
@@ -381,6 +381,73 @@ class DashboardTests(unittest.TestCase):
             )
             db.commit()
         self.assertIn("Missing parent or linked span", self.request(ref, "dev")[1])
+
+    def test_offline_snapshot_expiration_and_retained_partial_window(self):
+        original = self.now
+        trace = self.trace
+        ref = "/local/attempt/" + trace
+        self.now = original + timedelta(days=28, hours=22)
+        retained = ref + "?hours=168&end=" + iso(original)
+        status, detail = self.request(retained, "dev")
+        self.assertEqual(status, 200)
+        self.assertIn("retention cutoff", detail)
+        self.assertIn("Snapshot stale", detail)
+        self.now = original + timedelta(days=30)
+        self.assertEqual(self.request(retained, "dev")[0], 400)
+        self.assertEqual(self.request(ref, "dev")[0], 404)
+        self.assertNotIn(trace, self.request("/local/overview", "dev")[1])
+        self.raw.rename(self.root / "offline-collector.sqlite")
+        self.assertEqual(self.request(retained, "lead")[0], 403)
+        status, body = self.request(ref, "dev")
+        self.assertEqual(status, 503)
+        self.assertNotIn(trace, body)
+        with self.assertRaisesRegex(ValueError, "environment mismatch"):
+            prune_snapshot(self.snapshot, "staging", self.now)
+        self.assertIn(trace.encode(), self.snapshot.read_bytes())
+        prune_snapshot(self.snapshot, "local", self.now)
+        with closing(readonly(self.snapshot, "local")) as db:
+            self.assertEqual(
+                db.execute("select count(*) from attempts").fetchone()[0], 0
+            )
+            self.assertEqual(db.execute("select count(*) from spans").fetchone()[0], 0)
+            self.assertEqual(
+                db.execute("select value from meta where key='generated'").fetchone()[
+                    0
+                ],
+                iso(original),
+            )
+        self.assertNotIn(trace.encode(), self.snapshot.read_bytes())
+
+    def test_failed_before_capture_is_visible_and_excluded_from_started(self):
+        trace = f"{1:032x}"
+        with closing(sqlite3.connect(self.raw)) as db:
+            db.execute(
+                "delete from events where trace_id=? and event_name not in ('record.pdf_requested','capture.started')",
+                (trace,),
+            )
+            db.execute(
+                "update events set event_name='capture.start_failed',payload=json_set(payload,'$.event_name','capture.start_failed') where trace_id=? and event_name='capture.started'",
+                (trace,),
+            )
+            db.commit()
+        build(self.raw, self.snapshot, "local", self.now)
+        with (
+            closing(readonly(self.snapshot, "local")) as snap,
+            closing(readonly(self.raw, "local")) as raw,
+        ):
+            row = snap.execute(
+                "select started,outcome from attempts where trace_id=?", (trace,)
+            ).fetchone()
+            self.assertEqual(tuple(row), (0, "observed_error"))
+            self.assertEqual(
+                evaluate(raw, snap, "synthetic", self.now, 60, 3, 1, 300)["recording"][
+                    0
+                ],
+                "unknown",
+            )
+        self.assertIn(
+            "observed_error", self.request("/local/attempt/" + trace, "dev")[1]
+        )
 
     def test_refuse_to_replace_wrong_environment_or_input(self):
         self.assertEqual(

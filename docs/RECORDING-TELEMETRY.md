@@ -55,7 +55,7 @@ python3 scripts/telemetry/project.py --environment local \
   --db "$pilot_dir/raw.sqlite" --snapshot "$pilot_dir/recordings.sqlite"
 ```
 
-The projector rebuilds the last 30 days from validated events into a private temporary snapshot. A successful rebuild replaces the previous snapshot atomically. Schedule a single projector per database. Track command exit status, collector checkpoints, disk use and snapshot age. All page reads use read-only SQLite connections. A snapshot built for another environment causes the request to fail closed.
+The projector rebuilds the last 29 days from validated events into a private temporary snapshot. A successful rebuild replaces the previous snapshot atomically. Schedule a single projector per database. Track command exit status, collector checkpoints, disk use and snapshot age. All page reads use read-only SQLite connections. A snapshot built for another environment causes the request to fail closed.
 
 To rehearse loss of collection, stop polling for longer than the configured stale interval. Keep the dashboard, alert evaluator and retention schedule running. Check that activity becomes unknown and the collection alert opens. Resume the same source and checkpoint, rerun the projector, and check the healthy source advances and the collection incident resolves. Expired Railway history leaves a gap. Recovery cannot reconstruct missing provider logs. To turn off collection permanently, stop the poller and projector, remove the reader credential and erase the private pilot files before their retention limit. To disable producer spans use the producer controls in [the collector and emitter documentation](OBSERVABILITY-COLLECTION.md).
 
@@ -79,7 +79,14 @@ The first acknowledged breach opens an incident. A repeated breach is suppressed
 
 ## Access, retention and rollout decisions
 
-Limit read access to raw and projected SQLite files, temporary copies and backups to the pilot operator. Direct filesystem access bypasses dashboard roles. Keep the host, volume and backups under the same environment boundary. Keep the collector prune job running during collection outages, and rebuild or expire snapshots independently of traffic. Remove offline volumes and backups before their oldest trace reaches 30 days. The local stores constrain raw traces and associated projections to 30 days. A longer-lived aggregate retention period needs an owner decision.
+Limit read access to raw and projected SQLite files, temporary copies and backups to the pilot operator. Direct filesystem access bypasses dashboard roles. Keep the host, volume and backups under the same environment boundary. Run both expiration commands at least daily, even when polling and projection are paused or the raw store is offline. The snapshot prune removes expired rows without advancing its last observation time.
+
+```sh
+python3 scripts/telemetry/collect.py prune --environment local --db "$pilot_dir/raw.sqlite"
+python3 scripts/telemetry/project.py --prune --environment local --snapshot "$pilot_dir/recordings.sqlite"
+```
+
+Each job removes rows older than 29 days. Daily pruning keeps the maximum age at 30 days. The dashboard also limits every observation window to 29 days by its own clock. Remove offline volumes and backups before their oldest trace reaches 30 days. A longer-lived aggregate retention period needs an owner decision.
 
 With the producer disabled and enabled, measure the same synthetic audio workload, output acknowledgments, finalization latency, queue drops, reader lag, database growth, projection wall time and Railway/provider charges. Agree an overhead limit and spend cap with William before enabling a real pilot. No budget, overhead threshold or production rollout has been approved. The staging recording, staging collection interruption and external notification delivery remain deferred. The local replay and HTTP tests exercise the code and its recovery rules.
 

@@ -25,14 +25,27 @@ export function createMeetingSurface({
   // stored on the session (not read off the stopping interaction) so the
   // minutes always @-mention the person who asked for them -- including when
   // the recording ends via auto-stop, where there's no interaction at all.
-  async function start({ guildId, voiceChannel, textChannel, requesterId, name, save = true }) {
-    if (sessions.has(guildId)) {
-      return { status: 'already-recording' };
-    }
+  async function start(request) {
+    if (sessions.has(request.guildId)) return { status: 'already-recording' };
 
     const sessionId = genId();
     const trace = beginTrace?.(sessionId);
+    const { save = true } = request;
     trace?.mark(save ? 'record.saved_requested' : 'record.pdf_requested');
+    let result;
+    try {
+      result = await startCapture(request, sessionId, trace);
+    } finally {
+      trace?.mark(result?.status === 'recording' ? 'capture.started' : 'capture.start_failed');
+    }
+    return result;
+  }
+
+  async function startCapture(
+    { guildId, voiceChannel, textChannel, requesterId, name, save = true },
+    sessionId,
+    trace,
+  ) {
     // Both are read by teardown, which openStream can invoke before either has
     // been assigned -- hence `let ... = null` rather than a const below.
     let recorder = null;
@@ -141,7 +154,6 @@ export function createMeetingSurface({
     // openStream failed synchronously and teardown already ran -- but with no
     // `stream` to close yet, so close it here rather than registering it.
     if (tornDown) {
-      trace?.mark('capture.start_failed');
       await Promise.resolve(stream?.close()).catch(() => {});
       return { status: 'error' };
     }
@@ -217,7 +229,6 @@ export function createMeetingSurface({
       }
       await recorder.start(voiceChannel);
     } catch (err) {
-      trace?.mark('capture.start_failed');
       console.error(`meetingSurface: recorder failed to start for guild ${guildId}:`, err);
       if (sessions.get(guildId)?.sessionId === sessionId) sessions.delete(guildId);
       await Promise.resolve(stream.close()).catch(() => {});
@@ -227,7 +238,6 @@ export function createMeetingSurface({
     // A teardown may have removed us while we were joining.
     if (sessions.get(guildId)?.sessionId !== sessionId) return { status: 'error' };
 
-    trace?.mark('capture.started');
     return { status: 'recording', sessionId };
   }
 
