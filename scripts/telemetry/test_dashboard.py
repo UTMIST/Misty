@@ -364,6 +364,25 @@ class DashboardTests(unittest.TestCase):
             )
         )
 
+    def test_discord_ack_completes_on_time_despite_unconfirmed_catalog_receipt(self):
+        trace = f"{3:032x}"
+        with closing(sqlite3.connect(self.raw)) as db:
+            db.execute(
+                "update events set event_name='link.acknowledged',payload=json_set(payload,'$.event_name','link.acknowledged') where trace_id=? and event_name='link.posted'",
+                (trace,),
+            )
+            db.commit()
+        build(self.raw, self.snapshot, "local", self.now)
+        with closing(readonly(self.snapshot, "local")) as snap:
+            row = snap.execute(
+                "select outcome,link,latency_ms from attempts where trace_id=?",
+                (trace,),
+            ).fetchone()
+            self.assertEqual(tuple(row), ("complete", "link.acknowledged", 60010))
+        self.assertIn(
+            "link.acknowledged", self.request("/local/attempt/" + trace, "dev")[1]
+        )
+
     def test_linked_recovery_and_parent_gap(self):
         with closing(sqlite3.connect(self.raw)) as db:
             db.execute(

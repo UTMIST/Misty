@@ -83,17 +83,19 @@ export function createRecordingProjection() {
       'save.uncertain',
       'save.confirmed',
     );
-    const link = latest(
-      'link.pending',
-      'link.disabled',
-      'link.failed',
-      'link.not_attempted',
-      'link.posted',
-    );
+    // Discord acceptance and the catalog receipt write are distinct. Once
+    // members received the link, a failed bookkeeping retry cannot undo it.
+    const acknowledged = first('link.posted', 'link.acknowledged');
+    const link =
+      acknowledged !== 'unknown'
+        ? acknowledged
+        : latest('link.pending', 'link.disabled', 'link.failed', 'link.not_attempted');
     const pdf = first('pdf.error', 'pdf.posted', 'pdf.posting');
     const outputs =
       mode === 'record.pdf_requested' ||
-      (mode === 'record.saved_requested' && save === 'save.confirmed' && link === 'link.posted');
+      (mode === 'record.saved_requested' &&
+        save === 'save.confirmed' &&
+        acknowledged !== 'unknown');
     const normal = ['capture.empty_channel', 'capture.stop_requested'].includes(stop);
     let outcome = 'unconfirmed';
     if (

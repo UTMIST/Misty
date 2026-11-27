@@ -26,6 +26,7 @@ const events = new Set([
   'save.failed',
   'save.uncertain',
   'save.unavailable',
+  'link.acknowledged',
   'link.posted',
   'link.failed',
   'link.pending',

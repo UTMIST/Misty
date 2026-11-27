@@ -338,7 +338,7 @@ export function createMeetingSurface({
         // durable link, and a failed delivery must not fail finalization.
         let delivery;
         try {
-          delivery = await deliverRecord?.(sessionId);
+          delivery = await deliverRecord?.(sessionId, trace);
         } catch {
           delivery = { status: 'failed' };
         }

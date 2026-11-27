@@ -112,11 +112,16 @@ leave the outcome unconfirmed.
 
 Recovery uses the catalog meeting UUID to correlate later attempts after a
 restart. A delayed pending snapshot cannot reopen a terminal state. A
-subsequent confirmed retry can supersede a failed attempt. Between competing
-terminal observations the report uses the producer UTC timestamp, preferring
-explicit failure on a tie. Clock skew between workers limits that ordering. A failed or uncertain save can prevent a
-link attempt entirely. A failed link attempt can include a failed receipt
-update after Discord accepted the send.
+subsequent confirmed retry can supersede a failed attempt. For competing save
+states the report uses the producer UTC timestamp and prefers explicit
+failure on a tie. Clock skew between workers limits that ordering. A failed
+or uncertain save can prevent a link attempt entirely.
+
+The `link.acknowledged` milestone records Discord acceptance as soon as the
+send returns a message ID. A later catalog receipt failure remains visible
+as a failed delivery attempt. The acknowledgment still counts toward
+member-visible delivery. A successful catalog receipt appears as `link.posted`.
+
 
 The reader accepts allowlisted v1 events. It skips malformed records and
 lines over 2,048 characters, and reads an unterminated last line. It retains a

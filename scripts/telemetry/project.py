@@ -226,7 +226,7 @@ def project_recordings(raw, snap, traffic, cutoff, bot_boot):
                min(case when event_name='capture.started' then ts end) started,
                min(case when event_name in ('capture.stop_requested','capture.empty_channel') then ts end) stopped,
                min(case when event_name='pdf.posted' then ts end) pdf,
-               min(case when event_name='link.posted' then ts end) link,max(ts) last_seen
+               min(case when event_name in ('link.acknowledged','link.posted') then ts end) link,max(ts) last_seen
                from events where trace_id=? and service='discord-bot' and traffic=? and ts>=?""",
                 (r["trace_id"], traffic, cutoff),
             ).fetchone()
