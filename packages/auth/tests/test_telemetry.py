@@ -130,3 +130,32 @@ def test_authenticated_client_parent_and_external_redirect_isolation(events):
     ]
     assert client["result"] == "failed"
     assert "canary" not in json.dumps(events)
+
+
+@pytest.mark.parametrize(
+    "service,actor,bootstrap,parent_ok,labels,expected",
+    [
+        ("meeting", "worker", False, True, ["background"], "background"),
+        ("meeting", "unknown", False, True, ["background"], "member"),
+        ("meeting", "worker", True, True, ["background"], "member"),
+        ("gateway", "worker", False, True, ["synthetic"], "member"),
+        ("meeting", "worker", False, False, ["synthetic"], "member"),
+        ("meeting", "worker", False, True, ["background", "member"], "member"),
+    ],
+)
+def test_internal_traffic_provenance(
+    events, monkeypatch, service, actor, bootstrap, parent_ok, labels, expected
+):
+    monkeypatch.setenv("TELEMETRY_TRUSTED_TRAFFIC_KEYS", "worker")
+    parent = "00-" + "e" * 32 + "-" + "b" * 16 + "-01" if parent_ok else "bad"
+    headers = [(b"traceparent", parent.encode())] + [
+        (b"x-misty-traffic", v.encode()) for v in labels
+    ]
+    request = SimpleNamespace(
+        headers=Headers(raw=headers),
+        state=SimpleNamespace(auth_key=SimpleNamespace(name=actor, is_bootstrap=bootstrap)),
+        scope={},
+    )
+    with t.request_span(request, service + ".audit"):
+        assert t.trace_headers()["x-misty-traffic"] == expected
+    assert events[-1]["traffic"] == expected

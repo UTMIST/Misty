@@ -208,7 +208,9 @@ def active_span():
 
 def trace_headers():
     current = active_span()
-    return {"traceparent": current.traceparent} if current and current.traceparent else {}
+    if not current or not current.traceparent:
+        return {}
+    return {"traceparent": current.traceparent, "x-misty-traffic": current.base["traffic"]}
 
 
 @contextmanager
@@ -270,12 +272,21 @@ class RequestSpan:
                     self.request.state, "auth_key", None
                 )
                 parent = parse_parent(parents[0]) if trusted and len(parents) == 1 else None
+                traffic = None
+                labels = self.request.headers.getlist("x-misty-traffic")
+                if parent and len(labels) == 1 and labels[0] in TRAFFIC:
+                    names = os.getenv("TELEMETRY_TRUSTED_TRAFFIC_KEYS", "").split(",")
+                    if not getattr(trusted, "is_bootstrap", True) and getattr(
+                        trusted, "name", None
+                    ) in {n.strip() for n in names if n.strip()}:
+                        traffic = labels[0]
                 route = getattr(self.request.scope.get("route"), "path", "other")
                 self.call = Span(
                     self.service,
                     "http.request",
                     parent,
                     route=route,
+                    traffic=traffic,
                     started=self.started,
                     start_ts=self.start_ts,
                 )

@@ -56,7 +56,7 @@ def railway_rows(args, start, end):
             "query": QUERY,
             "variables": {
                 "env": args.environment_id,
-                "filter": "@serviceId:" + args.service_id,
+                "filter": "@service:" + args.service_id,
                 "start": iso(start),
                 "end": iso(end),
                 "limit": LIMIT,
