@@ -48,6 +48,7 @@ All configuration is env-driven (`src/config.py`, loaded from the process enviro
 | `LLM_BASE_URL` | `llm_base_url` | `http://localhost:8002` | Platform LLM `/embed` endpoint host. |
 | `LLM_API_KEY` | `llm_api_key` | empty | Secret `embed`-scoped LLM key; missing key keeps catalog operations available but search returns 503. |
 | `SEARCH_EMBED_MODEL` | `search_embed_model` | `openai-embed-3-small` | Query model alias; also supports `openai-embed-3-large`, both at 1536 dimensions. |
+| `SEARCH_OUTCOME_AUDIT_ENABLED` | `search_outcome_audit_enabled` | `false` | Include the search outcome in the existing audit line. |
 | `SEARCH_MIN_COSINE` | `search_min_cosine` | `0.3` | Absolute vector floor in `(0,1]`; complete keyword matches qualify independently. |
 | `EMBED_MODEL` | `embed_model` | unset | Re-embed target alias. Unset (or equal to `SEARCH_EMBED_MODEL`) in normal operation. While it names another model, indexing also builds that model's chunk set beside the served one; see [Re-embedding after a model change](#re-embedding-after-a-model-change-209). |
 | `EMBED_MAX_REQUEST_CHARS` | `embed_max_request_chars` | `400000` | Characters per indexing `/embed` request. Keep at or below the llm service's own limit. |

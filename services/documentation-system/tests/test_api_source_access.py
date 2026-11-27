@@ -533,3 +533,45 @@ def test_hourly_schedule_refreshes_delayed_document_without_hourly_downloads(ctx
     clock[0] = job_start + timedelta(hours=26)
     assert client.post("/docs/source-access/refresh-due", headers=ADMIN).json()["attempted"] == 0
     assert len(fetchers.calls) == 1
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_catalog_summary_only_after_owned_release_and_is_fail_open(ctx, monkeypatch, enabled):
+    from platform_auth import telemetry
+
+    client, store, _, _ = ctx
+    monkeypatch.setenv("TELEMETRY_ENABLED", "true" if enabled else "false")
+    monkeypatch.setenv("TELEMETRY_ENV", "local")
+    events = []
+    monkeypatch.setattr(telemetry._emitter, "offer", events.append)
+    url = "https://docs.google.com/document/d/freshness-private-fixture/edit"
+    assert client.post("/docs", headers=ADMIN, json={"url": url}).status_code == 201
+    path = f"/docs/source-access/refresh-runs/{uuid4()}"
+    assert client.delete(path, headers=ADMIN).status_code == 409
+    assert client.post(path, headers=ADMIN).status_code == 200
+    assert client.delete(path, headers=ADMIN).status_code == 200
+    results = [
+        e for e in events if e["event_name"] == "end" and e["operation"] == "catalog.freshness"
+    ]
+    if enabled:
+        [sample] = results
+        assert sample["result"] == "success"
+        assert sample["traffic"] == "background"
+        assert sample["measures"]["eligible"] == 1
+        assert sample["measures"]["access_current"] == 1
+        assert sample["measures"]["content_current"] == 1
+        assert "freshness-private-fixture" not in str(events)
+    else:
+        assert not events
+    calls = []
+
+    def broken(*args):
+        calls.append(True)
+        raise RuntimeError("sensitive adapter failure")
+
+    monkeypatch.setattr(store, "source_freshness", broken)
+    assert client.post(path, headers=ADMIN).status_code == 200
+    assert client.delete(path, headers=ADMIN).status_code == 200
+    assert bool(calls) == enabled
+    assert client.post(path, headers=ADMIN).status_code == 200
+    assert "sensitive adapter failure" not in str(events)

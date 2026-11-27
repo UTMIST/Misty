@@ -78,3 +78,15 @@ that preserve usage, reset-on-new-instance, and invalid inputs using an injected
 `test/helper-limits-command.test.js` checks the admin runtime control surface.
 `test/config.test.js` checks startup validation and application-context wiring.
 No live Discord connection or paid provider call is needed.
+
+### Answer telemetry
+
+The Discord mention and DM handlers start an answer after finding a nonempty question.
+Admission follows identity, policy and rate checks. Model requests, requested tool
+rounds and executed tool calls have distinct observations. An acknowledged Discord
+send counts as an answer part only when the helper prepared a model answer. A
+fallback notice, action prompt or generated text that happens to match a notice
+cannot change this classification. A rejected second part leaves the first part
+counted and the answer partial. Missing terminal evidence leaves an unknown result.
+The platform [health view](../../docs/OBSERVABILITY-VIEWS.md#workflow-health) defines
+the periods and denominators.

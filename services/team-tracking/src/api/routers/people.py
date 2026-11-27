@@ -10,6 +10,7 @@ from contracts.types import (
     PersonSearch,
     PersonSearchResult,
     PersonUpdate,
+    PrimaryEmailLookup,
     TeamGoogleGroup,
 )
 from src.api.auth import AuthedKey, get_actor, require_scope
@@ -60,18 +61,29 @@ def search_people(
     return storage.search_people(payload)
 
 
-# Declared before /{person_id} (literal-first convention) so "by-email" is
-# not parsed as a UUID.
+def _primary_email(email: str, storage: StorageAdapter) -> Person:
+    person = storage.get_person_by_email(email)
+    if person is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="person not found")
+    return person
+
+
+@router.post("/by-email", response_model=Person)
+def lookup_primary_email(
+    payload: PrimaryEmailLookup,
+    storage: StorageAdapter = Depends(get_storage),
+    _: AuthedKey = Depends(require_scope("people:read")),
+) -> Person:
+    return _primary_email(payload.email, storage)
+
+
 @router.get("/by-email/{email}", response_model=Person)
 def get_person_by_email(
     email: str,
     storage: StorageAdapter = Depends(get_storage),
     _: AuthedKey = Depends(require_scope("people:read")),
 ) -> Person:
-    person = storage.get_person_by_email(email)
-    if person is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="person not found")
-    return person
+    return _primary_email(email, storage)
 
 
 @router.get("/{person_id}", response_model=Person)

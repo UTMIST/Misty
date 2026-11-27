@@ -1,12 +1,16 @@
 import logging
 from asyncio import sleep
+from contextlib import contextmanager
+from functools import wraps
 from datetime import timedelta
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from starlette.concurrency import run_in_threadpool
 
-from contracts.directory import DirectoryClient
+from platform_auth.telemetry import active_span, span, trace_headers
+
+from contracts.directory import DirectoryClient, DirectoryUnavailable
 from contracts.login import (
     EmailConfirmIn,
     EmailConfirmOut,
@@ -17,6 +21,7 @@ from contracts.login import (
     PersonStatusOut,
     VerificationClient,
     VerificationRateLimited,
+    VerificationUnavailable,
 )
 from contracts.storage import StorageAdapter
 from src import login_policy as policy
@@ -26,6 +31,38 @@ from src.config import get_settings
 
 logger = logging.getLogger("gateway.login")
 router = APIRouter(prefix="/v1/auth", tags=["email login"])
+
+
+@contextmanager
+def _component(operation, **options):
+    with span(operation, service="gateway", **options) as call:
+        try:
+            yield call
+        except VerificationRateLimited:
+            call.outcome("cooldown")
+            raise
+        except (DirectoryUnavailable, VerificationUnavailable):
+            call.outcome("unavailable")
+            raise
+        except HTTPException as exc:
+            call.outcome(
+                {400: "denied", 429: "rate_limited", 503: "unavailable"}.get(
+                    exc.status_code, "failed"
+                )
+            )
+            raise
+
+
+def _operation(name):
+    def observe(handler):
+        @wraps(handler)
+        def wrapped(*args, **kwargs):
+            with _component(name):
+                return handler(*args, **kwargs)
+
+        return wrapped
+
+    return observe
 
 
 def _issuer() -> str:
@@ -53,8 +90,6 @@ def _eligible(person: dict | None, email: str | None = None) -> UUID | None:
     if person is None:
         return None
     # Reject malformed upstream data, including truthy strings for active.
-    from contracts.directory import DirectoryUnavailable
-
     try:
         if not isinstance(person, dict) or not isinstance(person.get("id"), str):
             raise ValueError()
@@ -70,21 +105,32 @@ def _eligible(person: dict | None, email: str | None = None) -> UUID | None:
 
 def _send_and_activate(challenge, storage, directory, verification):
     if policy.now() >= challenge.expires_at:
-        return
-    person_id = _eligible(directory.get_person_by_email(challenge.email), challenge.email)
-    if person_id is None or policy.now() >= challenge.expires_at:
-        return
-    verification.request_code(f"gateway-login:{challenge.id}", challenge.email)
-    storage.activate_login(challenge.id, person_id, policy.now())
+        return "expired"
+    with _component("login.directory") as call:
+        person_id = _eligible(directory.get_person_by_email(challenge.email), challenge.email)
+        if person_id is None:
+            call.outcome("ineligible")
+            return "ineligible"
+    if policy.now() >= challenge.expires_at:
+        return "expired"
+    with _component("login.send"):
+        verification.request_code(f"gateway-login:{challenge.id}", challenge.email)
+    return "success" if storage.activate_login(challenge.id, person_id, policy.now()) else "expired"
 
 
-async def _deliver(challenge, storage, directory, verification):
+async def _deliver(challenge, storage, directory, verification, parent=None):
+    with _component("login.delivery", parent=parent) as call:
+        call.outcome(await _attempt_delivery(challenge, storage, directory, verification))
+
+
+async def _attempt_delivery(challenge, storage, directory, verification):
     # Runs after the generic response has been sent. Upstream latency and failures
     # must not disclose account existence. No retries after ambiguous delivery.
     for attempt in range(2):
         try:
-            await run_in_threadpool(_send_and_activate, challenge, storage, directory, verification)
-            return
+            return await run_in_threadpool(
+                _send_and_activate, challenge, storage, directory, verification
+            )
         except VerificationRateLimited as exc:
             # Only an explicit pre-send throttle is safe to retry. Keep the same
             # challenge and quota reservation; never wait in a worker thread.
@@ -94,14 +140,18 @@ async def _deliver(challenge, storage, directory, verification):
             ):
                 await sleep(exc.retry_after)
                 continue
+            result = "cooldown"
+        except (DirectoryUnavailable, VerificationUnavailable):
+            result = "unavailable"
         except Exception:
             # Exceptions may carry URLs, SQL parameters or provider response bodies.
-            pass
+            result = "failed"
         logger.warning("email login delivery failed")
-        return
+        return result
 
 
 @router.post("/email/start", response_model=EmailStartOut, status_code=202)
+@_operation("login.start")
 def start(
     payload: EmailStartIn,
     background: BackgroundTasks,
@@ -118,12 +168,24 @@ def start(
         id=uuid4(), owner=key.name, email=payload.email, created_at=now, expires_at=now + policy.TTL
     )
     if storage.reserve_login(challenge):
-        background.add_task(_deliver, challenge, storage, directory, verification)
+        background.add_task(
+            _deliver,
+            challenge,
+            storage,
+            directory,
+            verification,
+            trace_headers().get("traceparent"),
+        )
+        if call := active_span():
+            call.outcome("accepted")
+    elif call := active_span():
+        call.outcome("rate_limited")
     # Mailbox throttling returns an indistinguishable, nonredeemable challenge.
     return EmailStartOut(challenge_id=challenge.id, issuer=_issuer())
 
 
 @router.post("/email/confirm", response_model=EmailConfirmOut)
+@_operation("login.confirm")
 def confirm(
     payload: EmailConfirmIn,
     response: Response,
@@ -140,16 +202,23 @@ def confirm(
         raise invalid
     # Unknown/inactive/pending challenges take the same private verification
     # path: otherwise latency or an outage's 400/503 difference reveals members.
-    email = verification.confirm_code(
-        f"gateway-login:{challenge.id}", payload.code.get_secret_value()
-    )
+    with _component("login.check") as call:
+        email = verification.confirm_code(
+            f"gateway-login:{challenge.id}", payload.code.get_secret_value()
+        )
+        if email is None:
+            call.outcome("denied")
     if challenge.person_id is None or email != challenge.email:
         raise invalid
-    person_id = _eligible(directory.get_person(str(challenge.person_id)), challenge.email)
+    with _component("login.directory") as call:
+        person_id = _eligible(directory.get_person(str(challenge.person_id)), challenge.email)
+        if person_id != challenge.person_id:
+            call.outcome("ineligible")
     if person_id != challenge.person_id:
         raise invalid
-    if not storage.redeem_login(challenge.id, key.name, policy.now()):
-        raise invalid
+    with _component("login.redeem"):
+        if not storage.redeem_login(challenge.id, key.name, policy.now()):
+            raise invalid
     return EmailConfirmOut(person_id=person_id, email=challenge.email, issuer=_issuer())
 
 
@@ -165,6 +234,7 @@ def issuer(
 
 
 @router.get("/people/{person_id}/status", response_model=PersonStatusOut)
+@_operation("login.status")
 def status(
     person_id: UUID,
     response: Response,
@@ -174,6 +244,8 @@ def status(
 ) -> PersonStatusOut:
     _quota(storage, key, "status")
     response.headers["Cache-Control"] = "no-store"
-    return PersonStatusOut(
-        active=_eligible(directory.get_person(str(person_id))) == person_id, issuer=_issuer()
-    )
+    with _component("login.directory") as call:
+        active = _eligible(directory.get_person(str(person_id))) == person_id
+        if not active:
+            call.outcome("ineligible")
+    return PersonStatusOut(active=active, issuer=_issuer())

@@ -1,6 +1,9 @@
+import { traceHeaders } from '../telemetry.js';
+
 export class LlmUnavailable extends Error {
-  constructor(message) {
+  constructor(message, kind = 'failed') {
     super(message);
+    this.kind = kind;
     this.name = 'LlmUnavailable';
   }
 }
@@ -34,6 +37,8 @@ export function createLlmClient({ baseUrl, apiKey, fetchImpl = fetch, timeoutMs 
 
       const controller = new AbortController();
       const abort = () => controller.abort();
+      const failureKind = () =>
+        signal?.aborted ? 'cancelled' : controller.signal.aborted ? 'timeout' : 'failed';
       signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted) abort();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -42,19 +47,24 @@ export function createLlmClient({ baseUrl, apiKey, fetchImpl = fetch, timeoutMs 
         try {
           resp = await fetchImpl(`${baseUrl}/chat`, {
             method: 'POST',
-            headers,
+            headers: { ...headers, ...traceHeaders() },
+            redirect: 'error',
             body: JSON.stringify(body),
             signal: controller.signal,
           });
         } catch {
-          throw new LlmUnavailable('network error reaching llm service');
+          throw new LlmUnavailable('network error reaching llm service', failureKind());
         }
-        if (!resp.ok) throw new LlmUnavailable(`llm service returned ${resp.status}`);
+        if (!resp.ok)
+          throw new LlmUnavailable(
+            `llm service returned ${resp.status}`,
+            resp.status === 504 ? 'timeout' : 'failed',
+          );
         let data;
         try {
           data = await resp.json();
         } catch {
-          throw new LlmUnavailable('malformed llm response');
+          throw new LlmUnavailable('malformed llm response', failureKind());
         }
         return {
           content: data.content,

@@ -28,6 +28,8 @@ from src.api.deps import (
     get_storage,
     get_target_embedder,
 )
+from platform_auth import telemetry
+from contracts.embedder import RESOLVED_EMBED_MODELS
 from src.content import clamp_content, content_hash
 from src.fetch.registry import FetcherRegistry
 from src.indexing import IndexStatus, index_doc, index_embedders, index_warning
@@ -276,6 +278,25 @@ def release_source_refresh_run(
 ) -> dict[str, UUID]:
     if not storage.release_source_refresh_run(run_id):
         raise HTTPException(status_code=409, detail="source refresh run owner does not match")
+    if telemetry.enabled():
+        # Measure catalog-owned rows after the exact guard is released. Failed
+        # measurements must not change release or cause a runner to retain it.
+        try:
+            with telemetry.span(
+                "catalog.freshness", service="documentation-system", traffic="background"
+            ) as call:
+                now = datetime.now(timezone.utc)
+                settings = get_settings()
+                counts = storage.source_freshness(
+                    sorted(GOOGLE_SOURCE_IDS),
+                    RESOLVED_EMBED_MODELS[settings.search_embed_model],
+                    now - timedelta(hours=settings.source_access_refresh_after_hours),
+                    now,
+                )
+                for name, value in counts.items():
+                    call.measure(name, value)
+        except Exception:
+            pass
     return {"run_id": run_id}
 
 
