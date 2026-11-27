@@ -1,0 +1,188 @@
+{
+  "operations": {
+    "common": [
+      "http.request",
+      "http.client"
+    ],
+    "discord-bot": [
+      "command",
+      "answer",
+      "answer.model",
+      "answer.tools",
+      "answer.delivery"
+    ],
+    "meeting": [
+      "meeting.stop",
+      "meeting.finalize",
+      "meeting.drain",
+      "meeting.speech_flush",
+      "meeting.report",
+      "meeting.handoff",
+      "meeting.minutes",
+      "meeting.pdf",
+      "meeting.handoff_recovery"
+    ],
+    "documentation-system": [
+      "catalog.accept",
+      "catalog.advance",
+      "catalog.reconcile",
+      "catalog.writer_create",
+      "catalog.writer_share",
+      "catalog.writer_search",
+      "catalog.index",
+      "catalog.search",
+      "catalog.discovery",
+      "catalog.refresh",
+      "catalog.freshness"
+    ],
+    "connectors": [
+      "connectors.google_create",
+      "connectors.google_share",
+      "connectors.google_search"
+    ],
+    "gateway": [
+      "login.start",
+      "login.delivery",
+      "login.directory",
+      "login.send",
+      "login.confirm",
+      "login.check",
+      "login.redeem",
+      "login.status"
+    ],
+    "verification": [],
+    "team-tracking": [],
+    "llm": []
+  },
+  "result": [
+    "started",
+    "success",
+    "confirmed",
+    "pending",
+    "failed",
+    "ambiguous",
+    "unavailable",
+    "timed_out",
+    "disconnected",
+    "unknown",
+    "cancelled",
+    "denied",
+    "rate_limited",
+    "full",
+    "partial",
+    "withheld",
+    "timeout",
+    "action",
+    "results",
+    "no_hits",
+    "no_channel_teams",
+    "invalid_request",
+    "directory_unavailable",
+    "embedding_error",
+    "storage_unavailable",
+    "internal_error",
+    "continued",
+    "clean",
+    "gaps",
+    "drained",
+    "incomplete",
+    "accepted",
+    "cooldown",
+    "expired",
+    "ineligible"
+  ],
+  "marks": {
+    "answer": [
+      "admitted",
+      "part_sent"
+    ],
+    "answer.delivery": [
+      "part_sent"
+    ],
+    "answer.model": [
+      "tool_round"
+    ]
+  },
+  "measures": {
+    "catalog.freshness": [
+      "eligible",
+      "content_current",
+      "index_current",
+      "access_current",
+      "content_unknown",
+      "index_unknown",
+      "access_unknown"
+    ],
+    "catalog.discovery": [
+      "attempted",
+      "item_failed",
+      "index_failed"
+    ],
+    "catalog.refresh": [
+      "attempted",
+      "item_failed",
+      "index_failed"
+    ],
+    "meeting.finalize": [
+      "drop_after_stop_began",
+      "drop_past_max_meeting_ms",
+      "drop_undecodable_frame",
+      "drop_empty_ws_frame",
+      "drop_malformed_ws_frame",
+      "drop_feed_raised",
+      "drop_speaker_finalize_failed"
+    ]
+  },
+  "routes": [
+    "/search",
+    "/health",
+    "/health/ready",
+    "/meetings/{session_id}/stop",
+    "/meetings/{session_id}/qna",
+    "/meetings/{session_id}/transcript",
+    "/v1/auth/email/start",
+    "/v1/auth/email/confirm",
+    "/v1/auth/issuer",
+    "/v1/auth/people/{person_id}/status",
+    "/chat",
+    "/embed",
+    "/fetch",
+    "/discover/google",
+    "other"
+  ],
+  "recording_events": [
+    "stop.request",
+    "stop.response",
+    "stop.error",
+    "stop.drain_confirmed",
+    "stop.drain_timed_out",
+    "stop.drain_disconnected",
+    "stop.drain_unknown",
+    "record.saved_requested",
+    "record.pdf_requested",
+    "capture.started",
+    "capture.start_failed",
+    "capture.stop_requested",
+    "capture.empty_channel",
+    "capture.voice_lost",
+    "capture.stream_lost",
+    "capture.moved",
+    "capture.drained",
+    "capture.drain_error",
+    "capture.end_signal_error",
+    "save.confirmed",
+    "save.pending",
+    "save.failed",
+    "save.uncertain",
+    "save.unavailable",
+    "link.posted",
+    "link.failed",
+    "link.pending",
+    "link.not_attempted",
+    "link.disabled",
+    "pdf.posting",
+    "pdf.posted",
+    "pdf.error",
+    "notice.error"
+  ]
+}
