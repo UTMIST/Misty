@@ -8,10 +8,12 @@ import threading
 import unittest
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
+from urllib.request import Request, build_opener
 from pathlib import Path
 
-from alerts import evaluate, notify
+from alerts import discord_send, evaluate, notify
 from dashboard import load_access, make_handler
 from pilot import fixture, seed
 from project import build, iso, percentiles, readonly
@@ -262,6 +264,105 @@ class DashboardTests(unittest.TestCase):
         status, body = self.request("/local/overview", "dev")
         self.assertEqual(status, 503)
         self.assertNotIn(self.trace, body)
+
+    def test_another_traffic_class_cannot_complete_or_resolve_an_incident(self):
+        trace = f"{1:032x}"
+        with closing(sqlite3.connect(self.raw)) as db:
+            db.execute(
+                "update events set traffic='member' where trace_id=? and event_name='pdf.posted'",
+                (trace,),
+            )
+            db.commit()
+        build(self.raw, self.snapshot, "local", self.now)
+        self.assertIn(
+            "<td>unconfirmed</td>", self.request("/local/attempt/" + trace, "dev")[1]
+        )
+        self.assertEqual(
+            self.request("/local/attempt/" + trace + "?traffic=member", "dev")[0], 404
+        )
+        with (
+            closing(readonly(self.raw, "local")) as raw,
+            closing(readonly(self.snapshot, "local")) as snap,
+        ):
+            self.assertEqual(
+                evaluate(raw, snap, "synthetic", self.now, 60, 3, 2, 300)["recording"][
+                    0
+                ],
+                "unknown",
+            )
+
+    def test_discord_wire_payload_and_failed_delivery(self):
+        received = []
+        responses = iter((429, 204, 302, 204))
+
+        class Receiver(BaseHTTPRequestHandler):
+            def do_POST(self):
+                received.append(
+                    json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                )
+                status = next(responses)
+                self.send_response(status)
+                if status == 302:
+                    self.send_header("Location", "/other")
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Receiver)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        class LocalTransport:
+            def __init__(self, redirect_policy):
+                self.receiver = build_opener(redirect_policy)
+
+            def open(self, req, timeout):
+                # Replace only the final network destination with a local listener.
+                if req.full_url != "https://discord.com/api/webhooks/1/fake":
+                    raise AssertionError("unexpected destination")
+                local = Request(
+                    f"http://127.0.0.1:{server.server_port}/messages",
+                    data=req.data,
+                    headers=dict(req.header_items()),
+                )
+                return self.receiver.open(local, timeout=timeout)
+
+        with patch("alerts.build_opener", LocalTransport):
+            deliver = discord_send("https://discord.com/api/webhooks/1/fake")
+            with closing(sqlite3.connect(self.root / "incidents.sqlite")) as state:
+
+                def transition(value):
+                    return notify(
+                        state,
+                        "local",
+                        "synthetic",
+                        {"recording": (value, "fixture")},
+                        now=self.now,
+                        owner="William",
+                        dashboard="http://127.0.0.1:8090",
+                        window=60,
+                        send=deliver,
+                    )
+
+                self.assertEqual(transition("breach"), [("recording", "breach", False)])
+                self.assertEqual(transition("breach"), [("recording", "breach", True)])
+                self.assertEqual(transition("breach"), [])
+                self.assertEqual(
+                    transition("healthy"), [("recording", "recovery", False)]
+                )
+                self.assertEqual(
+                    transition("healthy"), [("recording", "recovery", True)]
+                )
+        self.assertEqual(len(received), 4)
+        self.assertTrue(
+            all(
+                r["allowed_mentions"] == {"parse": []}
+                and self.trace not in r["content"]
+                for r in received
+            )
+        )
 
     def test_linked_recovery_and_parent_gap(self):
         with closing(sqlite3.connect(self.raw)) as db:

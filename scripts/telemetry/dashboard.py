@@ -413,7 +413,7 @@ def report_page(db, raw, env, view, params, role, now, stale):
             body += "<p>No health measurements configured.</p>"
         else:
             body += render_health(
-                raw, traffic, iso(start), iso(end), iso(previous), iso(now)
+                raw, traffic, iso(start), iso(end), iso(previous), iso(now), stale
             )
     else:
         raise LookupError

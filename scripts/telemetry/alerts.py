@@ -27,14 +27,18 @@ def evaluate(raw, snap, traffic, now, window, minimum, failures, max_age):
         r["service"] == "discord-bot" and s == "Current" for r, s in health
     )
     fresh_snapshot = -60 <= (now - parsed(generated)).total_seconds() <= max_age
-    count, bad = snap.execute(
-        """select count(*),coalesce(sum(outcome in ('interrupted','observed_error')),0)
+    count, bad, unsettled = snap.execute(
+        """select count(*),coalesce(sum(outcome in ('interrupted','observed_error')),0),
+            coalesce(sum(outcome in ('open','unconfirmed')),0)
          from attempts where started=1 and traffic=? and cohort>=? and cohort<?""",
         (traffic, iso(now - timedelta(minutes=window)), iso(now)),
     ).fetchone()
     recording = "unknown"
     if fresh_snapshot and recording_source and count >= minimum:
-        recording = "breach" if bad >= failures else "healthy"
+        if bad >= failures:
+            recording = "breach"
+        elif bad + unsettled < failures:
+            recording = "healthy"
     return {
         "collection": (
             "healthy" if healthy and fresh_snapshot else "breach",
@@ -42,7 +46,7 @@ def evaluate(raw, snap, traffic, now, window, minimum, failures, max_age):
         ),
         "recording": (
             recording,
-            f"{bad} interrupted or failed of {count} started in {window} minutes",
+            f"{bad} interrupted or failed of {count} started, {unsettled} unresolved in {window} minutes",
         ),
     }
 

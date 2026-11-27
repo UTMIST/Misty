@@ -61,7 +61,7 @@ To rehearse loss of collection, stop polling for longer than the configured stal
 
 ## Alerts and recovery
 
-The evaluator reads stored observations and supports two groups. Collection health covers the bot, meeting, catalog and connectors plus snapshot freshness in one environment. Recording health counts observed interruptions or errors among started recordings within one traffic class. It needs a fresh bot and snapshot plus the configured minimum started count. Empty or stale cohorts leave an existing recording incident open until new evidence can settle it.
+The evaluator reads stored observations and supports two groups. Collection health covers the bot, meeting, catalog and connectors plus snapshot freshness in one environment. Recording health counts observed interruptions or errors among started recordings within one traffic class. It needs a fresh bot and snapshot plus the configured minimum started count. Empty or stale cohorts leave an existing recording incident open. If unresolved attempts could still put the cohort over the threshold, recovery waits for new evidence.
 
 For a local rehearsal use the sample values below. These thresholds are fixture inputs. William must choose thresholds and an approved destination for any operational environment.
 
