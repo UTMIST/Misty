@@ -241,6 +241,7 @@ meeting_records = Table(
     Column("meeting_id", UUID(as_uuid=True), primary_key=True),
     Column("payload_hash", Text, nullable=False),
     Column("accept_traceparent", Text, nullable=True),
+    Column("accept_traffic", Text, nullable=True),
     Column("version", Integer, nullable=False),
     Column("doc_id", UUID(as_uuid=True), ForeignKey("docs.id"), nullable=True),
     Column("google_document_id", Text, nullable=True, unique=True),

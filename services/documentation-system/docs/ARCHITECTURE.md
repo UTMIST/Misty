@@ -956,6 +956,8 @@ this persistence boundary. No durable PDF copy is retained by the platform.
 
 An accepted meeting may carry an internal trace reference. A retry links
 its own span to that exact acceptance, including after a process restart.
+It carries the accepted traffic class through the writer calls. Older rows
+without a trusted class count as background work during recovery.
 The meeting API omits this reference from responses. Older rows, disabled
 collection and references at least 30 days old produce unlinked work. A
 confirmed catalog save follows the storage commit. Indexing has its own
