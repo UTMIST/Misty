@@ -100,6 +100,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from platform_auth.telemetry import active_span
 from platform_auth import ADMIN_SCOPE, parse_prefix, verify_key
 
 from src.api.auth import require_scope
@@ -283,10 +284,13 @@ async def stop_meeting(
     if len(parents) == 1:
         parent = re.fullmatch(r"00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}", parents[0])
         if parent and int(parent[1], 16) and int(parent[2], 16):
+            observed = active_span()
             http_request.state.audit_extra = {
                 "trace_id": parent[1],
                 "parent_span_id": parent[2],
-                "span_id": secrets.token_hex(8),
+                "span_id": observed.ids["span_id"]
+                if observed and observed.traceparent
+                else secrets.token_hex(8),
                 "operation": "meeting.stop",
             }
     if not _valid_session_id(session_id):
