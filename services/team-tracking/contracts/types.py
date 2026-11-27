@@ -277,6 +277,20 @@ class TeamGoogleGroup(DirectoryBase):
     last_error: str | None = None
     last_synced_at: datetime | None = None
     pending_changes: list[PendingGroupChange] = Field(default_factory=list)
+    # Internal evidence for person reads. A legacy API/cron write changes updated_at
+    # without clearing these columns, so only an exact row version can authorize.
+    rejected_additions: list[str] = Field(default_factory=list, exclude=True)
+    roster_checked_at: datetime | None = Field(default=None, exclude=True)
+
+    @property
+    def permits_individual_lookup(self) -> bool:
+        return bool(
+            self.status == "failed"
+            and self.group_name
+            and not self.pending_changes
+            and self.rejected_additions
+            and self.roster_checked_at == self.updated_at
+        )
 
 
 class ApiKey(DirectoryBase):

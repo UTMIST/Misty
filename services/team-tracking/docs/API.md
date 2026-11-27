@@ -500,14 +500,14 @@ Syncing happens after the response, never inside it: `POST`/`PATCH /teams`, `POS
 | `group_email` | string | The group's address. Fixed once `group_name` is set. |
 | `group_name` | string \| null | Cloud Identity resource (`groups/{id}`); `null` until creation succeeds |
 | `status` | string | `synced`, `needs_external_members`, or `failed` |
-| `last_error` | string \| null | Why the last sync did not converge |
+| `last_error` | string \| null | Sync failure details, or a Drive sign-in note for a covered secondary university address |
 | `last_synced_at` | datetime \| null | Last time a sync fully converged |
 | `pending_changes` | array | Unconfirmed membership writes: `action` (`add`/`remove`), `email`, nullable `membership_name` and `operation_name`; defaults to `[]` |
 | `created_at`, `updated_at`, `created_by`, `updated_by` | | `updated_by` is the key whose write triggered the last sync |
 
 `status` meanings:
 
-- `synced`: Google membership matches Team Tracking as of `last_synced_at`. For active teams, both external-member settings were also verified, even when the group is empty. Retired teams only require membership removal; their settings are left unchanged. A stored result from an older deployment needs a new sync to establish settings verification.
+- `synced`: Google membership covers Team Tracking as of `last_synced_at`. A secondary university address refused by Google can be covered by the same person’s confirmed primary membership under the [group reconciliation rules](ARCHITECTURE.md#managed-google-groups). For active teams, both external-member settings were also verified, even when the group is empty. Retired teams only require membership removal; their settings are left unchanged. A stored result from an older deployment needs a new sync to establish settings verification.
 - `needs_external_members`: settings were verified, but Google still rejected an external addition. Other additions and removals were attempted. Follow the [recovery runbook](DEPLOYMENT.md#external-member-setup-and-recovery) and retry sync.
 - `failed`: group creation/read, settings verification, or a membership change failed or remains unconfirmed. A settings failure holds all new additions but still attempts removals and preserves pending membership writes. `last_error` lists failures separated by `; `. `last_synced_at` remains the historical last success, not evidence the current attempt succeeded. Retry with the sync endpoint.
 
@@ -525,13 +525,23 @@ One team's mapping. **Scope:** `teams:read`. **Errors:** 404 if the team has no 
 
 ### GET /teams/by-synced-google-group/{email}
 
-The team (same body as `GET /teams/{team_id}`) whose managed group has this address, matched case-insensitively. Fails closed for access decisions: it answers only when the team's last sync is `synced`. Retired teams still resolve (check `active` in the body); sync removes managed MEMBER-only memberships but retains owners/managers and existing Drive shares. Retirement alone is not complete access revocation; see [the reconciliation contract](ARCHITECTURE.md#managed-google-groups). **Scope:** `teams:read`.
+The team (same body as `GET /teams/{team_id}`) whose managed group has this address, matched case-insensitively. By default the lookup requires the team's last sync to be `synced`. Retired teams still resolve (check `active` in the body); sync removes managed MEMBER-only memberships but retains owners/managers and existing Drive shares. Retirement alone is not complete access revocation; see [the reconciliation contract](ARCHITECTURE.md#managed-google-groups). **Scope:** `teams:read`.
 
-**Errors:** 404 for an unknown address or a mapping in `needs_external_members` or `failed`. This reads the recorded sync state and makes no Google call.
+For catalog ACL resolution, `?include_individual=true` also maps an active team
+whose sync verified that the only missing memberships were definitively rejected
+additions. This retains a candidate grant for a subsequent person check. Channel
+and meeting audiences still require `synced`.
+
+**Errors:** 404 for an unknown or ineligible mapping. This lookup reads the
+recorded sync state and makes no Google call.
 
 ### GET /people/{person_id}/synced-google-teams
 
 Mappings (same shape as `GET /teams/google-groups`) for the `synced` teams whose Google Group currently contains this person as a MEMBER under their `primary_email` or any verified `email` identifier. Membership is read live from Google, one call per synced team, so it reflects Google even when the directory disagrees. Owners and managers don't count. **Scope:** `people:read`.
+
+With `?include_individual=true`, an active current team member can also receive a
+`failed` mapping if the [individual access checks](ARCHITECTURE.md#individual-access-after-rejected-additions)
+succeed. The person response omits other members' rejection details.
 
 **Errors:** 404 if the person does not exist. 503 if Google Groups is not configured or Google can't be read; there is no partial answer.
 

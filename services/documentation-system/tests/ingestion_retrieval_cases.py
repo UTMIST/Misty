@@ -72,6 +72,7 @@ class Providers:
         }
         self.channel_teams = {T1, T2}
         self.healthy_groups = {T1, T2}
+        self.individual_groups = set()
 
     def handle(self, request):
         self.calls.append((request.url.host, request.url.path))
@@ -96,7 +97,10 @@ class Providers:
             teams = self.memberships[UUID(request.url.params["person_id"])]
             return httpx.Response(200, json=[{"team_id": str(t)} for t in sorted(teams)])
         if path.endswith("/synced-google-teams"):
-            teams = self.source_memberships[UUID(path.split("/")[2])]
+            eligible = self.healthy_groups
+            if request.url.params.get("include_individual") == "true":
+                eligible = eligible | self.individual_groups
+            teams = self.source_memberships[UUID(path.split("/")[2])] & eligible
             return httpx.Response(200, json=[{"team_id": str(t)} for t in sorted(teams)])
         if path.startswith("/people/by-email/"):
             person = next((p for p, email in EMAILS.items() if path.endswith(email)), None)
@@ -107,12 +111,11 @@ class Providers:
                 return httpx.Response(200, json={"id": str(P1)})
             return httpx.Response(404)
         if path.startswith("/teams/by-synced-google-group/"):
+            eligible = self.healthy_groups
+            if request.url.params.get("include_individual") == "true":
+                eligible = eligible | self.individual_groups
             team = next(
-                (
-                    t
-                    for t, email in GROUPS.items()
-                    if path.endswith(email) and t in self.healthy_groups
-                ),
+                (t for t, email in GROUPS.items() if path.endswith(email) and t in eligible),
                 None,
             )
             return httpx.Response(200, json={"id": str(team)}) if team else httpx.Response(404)
@@ -463,6 +466,24 @@ class IngestionRetrievalCases:
             == 200
         )
         flow.citations(flow.search(), doc, LONG)
+
+    def test_partial_group_grant_survives_refresh_only_for_confirmed_people(self, flow):
+        doc = flow.ingest("partial", text="CPSIF team A")
+        other = flow.ingest("other", text="CPSIF team B", source_grants=[permission("team", T2)])
+        flow.providers.healthy_groups.remove(T1)
+        flow.providers.individual_groups.add(T1)
+        flow.providers.memberships[P3] = {T1}  # Missing member is only on the directory roster.
+        flow.refetch(doc)
+        assert flow.ids(P1) == {doc["id"]}
+        assert flow.ids(P3) == set()
+        assert flow.ids("channel") == flow.ids(P2) == {other["id"]}
+        assert flow.client.get(f"/docs/{doc['id']}", headers=flow.headers(P1)).status_code == 200
+        assert flow.client.get(f"/docs/{doc['id']}", headers=flow.headers(P3)).status_code == 404
+        flow.providers.source_memberships[P1].discard(T1)
+        assert flow.ids(P1) == set()
+        flow.providers.source_memberships[P1].add(T1)
+        flow.providers.individual_groups.clear()  # A subsequent ambiguous write blocks the grant.
+        assert flow.ids(P1) == set()
 
     @pytest.mark.parametrize(
         "status,detail", [(503, "temporary"), (403, "forbidden"), (404, "Not Found")]

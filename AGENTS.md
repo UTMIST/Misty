@@ -50,7 +50,7 @@ Violating any of these is a bug even if tests pass.
 - **Errors map by convention.** Storage raises `ValueError` for rule violations; routers translate: duplicate → `409`, bad FK / unknown provider → `400`, `None` return → `404`. Pydantic gives `422`; auth gives `401`/`403`.
 - **Route order matters.** FastAPI matches in declaration order — a literal path (`/by-slug/{slug}`) must be declared **before** a `/{id}` catch-all in the same router, or the literal segment gets parsed as an id.
 - **Pick the right scope** on `require_scope(...)`: reads use `<domain>:read`, writes `<domain>:write`. Privileged operations get their own scope (`people:elevate` — plain `people:write` cannot escalate access level).
-- **Retrieval always has a person or channel context.** `POST /search` must not use the direct-read `SEE_ALL` fallback. Person assertions need literal `act-as-user`; channel assertions need literal `act-as-channel`, including for admins. Resolve channel teams from the authenticated directory API, never model arguments; filter both ranking paths before their candidate limits. See the documentation-system [retrieval contract](services/documentation-system/docs/API.md#authorized-retrieval-post-search).
+- **Retrieval always has a person or channel context.** `POST /search` must not use the direct-read `SEE_ALL` fallback. Person assertions need literal `act-as-user`; channel assertions need literal `act-as-channel`, including for admins. Only person-scoped source reads may use a rejected-add roster verified by team-tracking. Resolve channel teams from the authenticated directory API, never model arguments; filter both ranking paths before their candidate limits. See the documentation-system [retrieval contract](services/documentation-system/docs/API.md#authorized-retrieval-post-search).
 
 ### Migrations
 
@@ -59,7 +59,7 @@ Violating any of these is a bug even if tests pass.
 - **`down_revision` points at the current head**, and `downgrade()` must actually reverse `upgrade()` except for the explicit retirement exceptions below. Verify the round trip: `upgrade head` → `downgrade -1` → `upgrade head`.
 - **Retirement exceptions:** documentation-system [009](services/documentation-system/docs/DEPLOYMENT.md#registry-cleanup-migration-009) and team-tracking [011](services/team-tracking/docs/DEPLOYMENT.md#registry-cleanup-migration-011) intentionally preserve their data cleanup on downgrade; only the registry entries are restored. Follow the linked backup/recovery guidance and verify the round trip with existing rows, checking that unrelated data survives. These exceptions do not waive reversibility for other migrations.
 - **New columns on existing tables are nullable or have a `server_default`**, mirrored in the Pydantic model and both adapters.
-- Current heads: team-tracking **011**, documentation-system **018**, verification **001**, gateway **002**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
+- Current heads: team-tracking **012**, documentation-system **018**, verification **001**, gateway **002**. `llm`, `meeting`, `connectors` have no schema. (Verify before relying on these — `ls services/<service>/migrations/versions/` is authoritative, this line is not.)
 
 ### Configuration
 

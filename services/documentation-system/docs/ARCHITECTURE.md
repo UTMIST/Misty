@@ -773,7 +773,9 @@ document routes continue to construct their existing person/sentinel contexts.
 `DENY`, and missing context before opening a database connection.
 
 Person retrieval resolves both directory membership and confirmed source-group
-membership live, retaining the complete grant rule. Lookup failure returns 503
+membership live. ACL reconciliation retains a group grant when Team Tracking can
+verify individual members after rejected additions. The directory rechecks the
+requester and the managed roster on every such person lookup. Lookup failure returns 503
 instead of partial scope. Channel retrieval calls authenticated
 `/channels/{guild}/{channel}/teams` and `/teams/google-groups`, intersects active
 configured teams with healthy synced groups, and permits only unexpired

@@ -245,12 +245,26 @@ count when any mapping remains unsynced. Inspect those warnings and
 `/team google-status` or `GET /teams/google-groups`; Railway process completion
 alone is not proof that Google membership converged. Failed mappings keep
 their error, pending changes and previous `last_synced_at`, and remain excluded
-from synced-group access lookups. Missing configuration, invalid CLI arguments,
+from team-wide access lookups. Individual access after confirmed rejections is described below. Missing configuration, invalid CLI arguments,
 database errors and unexpected exceptions still fail the process.
 
 API writes sync immediately, but nothing triggers on a date passing, so a
 membership with a future `started_at` or `ended_at` only takes effect in Google
 at the next scheduled run. The scheduled run also retries any team left `failed`.
+
+### Restoring individual access after rejected additions
+
+Apply directory migration **012** before upgrading the API and group-sync cron.
+Existing failed rows have no roster evidence. Run the normal sync for the affected
+team or wait for the scheduled pass. See the [individual lookup contract](API.md#get-peopleperson_idsynced-google-teams).
+The directory supports older catalog clients. An older directory ignores the new
+catalog query flag and continues to require a fully synced group.
+
+If a catalog refresh already dropped the team grant, refetch the affected source
+document or let the scheduled source refresh revisit it. Verify a confirmed
+member can open and search the document in Misty and an uncovered member cannot.
+Check channel visibility separately. Meetings saved with an empty audience remain
+admin-only. For rollback, restore the old API and cron before downgrading to 011.
 
 ### Pending membership changes
 

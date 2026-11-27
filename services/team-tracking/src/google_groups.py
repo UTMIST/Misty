@@ -16,6 +16,7 @@ from contracts.groups import (
     GroupOperationPending,
     GroupProvider,
     GroupProviderError,
+    MembershipIdentityRejected,
 )
 from contracts.storage import StorageAdapter
 from contracts.types import GoogleGroupStatus, PendingGroupChange, Person, Team, TeamGoogleGroup
@@ -31,17 +32,18 @@ EXTERNAL_MEMBERS_HINT = (
 )
 
 
-def desired_emails(storage: StorageAdapter, team_id: UUID) -> set[str]:
-    """Every email of every active person with a membership current today."""
+def desired_members(storage: StorageAdapter, team_id: UUID) -> dict[str, set[str]]:
+    """Map each desired group address to the primary addresses of its active owners."""
     team = storage.get_team(team_id)
     if team is None or not team.active:
-        return set()
-    emails: set[str] = set()
+        return {}
+    owners: dict[str, set[str]] = {}
     for m in storage.list_memberships(team_id=team_id, as_of=date.today()):
         person = storage.get_person(m.person_id)
         if person is not None and person.active:
-            emails |= person_emails(storage, person)
-    return emails
+            for email in person_emails(storage, person):
+                owners.setdefault(email, set()).add(person.primary_email)
+    return owners
 
 
 def person_emails(storage: StorageAdapter, person: Person) -> set[str]:
@@ -51,28 +53,56 @@ def person_emails(storage: StorageAdapter, person: Person) -> set[str]:
     }
 
 
-def synced_team_for_group(storage: StorageAdapter, group_email: str) -> Team | None:
-    """The team whose managed group has this address, only if its last sync
-    fully converged (`synced`). Retired teams still resolve: their synced
-    group is empty, so the mapping grants nobody anything."""
+def synced_team_for_group(
+    storage: StorageAdapter, group_email: str, *, include_individual: bool = False
+) -> Team | None:
+    """Map a Drive ACL principal. Shared audiences always require a fully synced group."""
     addr = group_email.strip().lower()
     for g in storage.list_team_google_groups():
-        if g.group_email.lower() == addr and g.status == "synced":
+        if g.group_email.lower() != addr:
+            continue
+        if g.status == "synced":
             return storage.get_team(g.team_id)
+        if include_individual and g.permits_individual_lookup:
+            team = storage.get_team(g.team_id)
+            if team and team.active:
+                return team
     return None
 
 
+def _confirmed_individual_member(
+    storage: StorageAdapter, groups: GroupProvider, group: TeamGoogleGroup, person: Person
+) -> bool:
+    """Recheck the managed roster and current directory membership for a failed group."""
+    if not person.active or group.team_id not in current_team_ids(storage, person.id):
+        return False
+    listed = groups.list_members(group.group_name).keys()
+    owners = desired_members(storage, group.team_id)
+    if listed - owners.keys() or owners.keys() - listed - set(group.rejected_additions):
+        return False
+    # Primary and verified-alternate addresses occupy separate unique namespaces.
+    # A legacy collision can involve a former member or someone on a different team.
+    for email in listed & person_emails(storage, person):
+        if owners[email] != {person.primary_email}:
+            continue
+        primary = storage.get_person_by_email(email)
+        alternate = storage.get_person_by_identifier("email", email)
+        if {owner.id for owner in (primary, alternate) if owner} == {person.id}:
+            # A sync may have invalidated the evidence while Google was responding.
+            return storage.get_team_google_group(group.team_id) == group
+    return False
+
+
 def synced_groups_containing(
-    storage: StorageAdapter, groups: GroupProvider, person: Person
+    storage: StorageAdapter,
+    groups: GroupProvider,
+    person: Person,
+    *,
+    include_individual: bool = False,
 ) -> list[TeamGoogleGroup]:
-    """Synced groups that Google currently lists the person in, under any of
-    their addresses. Raises GroupProviderError if Google can't be read, so
-    callers fail closed."""
+    """Google-listed memberships. Partial rosters require an explicit individual lookup."""
     emails = person_emails(storage, person)
     found = []
-    # ponytail: one Google list per synced team on every call. Fine at UTMIST's
-    # team count; if it gets slow, cache list_members briefly or use
-    # memberships:lookup per (group, address).
     for g in storage.list_team_google_groups():
         if (
             g.status == "synced"
@@ -80,6 +110,17 @@ def synced_groups_containing(
             and emails & groups.list_members(g.group_name).keys()
         ):
             found.append(g)
+        elif (
+            include_individual
+            and g.permits_individual_lookup
+            and _confirmed_individual_member(storage, groups, g, person)
+        ):
+            # The people:read response does not expose another member's rejected address.
+            found.append(
+                g.model_copy(
+                    update={"last_error": "Some Google membership additions were rejected."}
+                )
+            )
     return found
 
 
@@ -105,7 +146,12 @@ def sync_team(
         email = state.group_email if group_name else f"{team.slug}@{groups.domain}"
         pending = [p.model_copy(deep=True) for p in state.pending_changes] if state else []
 
-        def record(status: GoogleGroupStatus, error: str | None) -> TeamGoogleGroup:
+        def record(
+            status: GoogleGroupStatus,
+            error: str | None,
+            *,
+            rejected_additions: list[str] | None = None,
+        ) -> TeamGoogleGroup:
             return storage.put_team_google_group(
                 team_id,
                 group_email=email,
@@ -119,8 +165,10 @@ def sync_team(
                 ),
                 actor=actor,
                 pending_changes=pending,
+                rejected_additions=rejected_additions,
             )
 
+        verified_omissions = []
         try:
             if group_name is None:
                 group_name = groups.create_group(
@@ -140,7 +188,9 @@ def sync_team(
                 if (p.action == "add" and p.email not in current)
                 or (p.action == "remove" and current.get(p.email) == p.membership_name)
             ]
-            want = desired_emails(storage, team_id)
+            owners = desired_members(storage, team_id)
+            want = owners.keys()
+            rejected_adds: dict[str, str] = {}
             blocked = {p.email for p in pending if p.action == "add" or p.email in want}
             # Each change is independent: one bad address must never block
             # revoking someone else, so removals go first and errors accumulate.
@@ -186,6 +236,14 @@ def sync_team(
                     if existing is None:
                         pending.remove(change)
                     external_blocked = True
+                except MembershipIdentityRejected as e:
+                    if existing is None:
+                        pending.remove(change)
+                    addr = change.email
+                    if change.action == "add":
+                        rejected_adds[addr] = str(e)
+                    else:
+                        errors.append(str(e))
                 except GroupProviderError as e:
                     if existing is None:
                         pending.remove(change)
@@ -193,16 +251,41 @@ def sync_team(
                 else:
                     pending.remove(change)
             errors.extend(f"awaiting Google {p.action} completion for {p.email}" for p in pending)
+            note = None
+            if rejected_adds:
+                if errors or external_blocked:
+                    errors.extend(rejected_adds.values())
+                else:
+                    confirmed = groups.list_members(group_name).keys()
+                    missing = want - confirmed
+                    if confirmed - want or missing - rejected_adds.keys():
+                        errors.extend(rejected_adds.values())
+                        errors.append("expected Google membership not confirmed on readback")
+                    elif missing:
+                        covered = all(
+                            addr.endswith("@mail.utoronto.ca")
+                            and addr not in owners[addr]
+                            and owners[addr] <= confirmed
+                            for addr in missing
+                        )
+                        if covered:
+                            note = (
+                                f"Google declined {len(missing)} secondary university address(es). "
+                                "Use the member's confirmed primary account for Drive access."
+                            )
+                        else:
+                            verified_omissions = sorted(missing)
+                            errors.extend(rejected_adds[addr] for addr in verified_omissions)
             if errors:
                 hint = [EXTERNAL_MEMBERS_HINT] if external_blocked else []
                 status, error = "failed", "; ".join(errors + hint)
             elif external_blocked:
                 status, error = "needs_external_members", EXTERNAL_MEMBERS_HINT
             else:
-                status, error = "synced", None
+                status, error = "synced", note
         except GroupProviderError as e:
             status, error = "failed", str(e)
-        return record(status, error)
+        return record(status, error, rejected_additions=verified_omissions)
 
 
 def current_team_ids(storage: StorageAdapter, person_id: UUID) -> set[UUID]:

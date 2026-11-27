@@ -64,10 +64,11 @@ def list_team_google_groups(
 @router.get("/by-synced-google-group/{email}", response_model=Team)
 def get_team_by_synced_google_group(
     email: str,
+    include_individual: bool = False,
     storage: StorageAdapter = Depends(get_storage),
     _: AuthedKey = Depends(require_scope("teams:read")),
 ) -> Team:
-    team = synced_team_for_group(storage, email)
+    team = synced_team_for_group(storage, email, include_individual=include_individual)
     if team is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="no synced team group")
     return team

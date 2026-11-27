@@ -184,6 +184,8 @@ team_google_groups = Table(
     Column("status", Text, nullable=False),
     Column("last_error", Text, nullable=True),
     Column("last_synced_at", DateTime(timezone=True), nullable=True),
+    Column("rejected_additions", ARRAY(Text), nullable=False, server_default=text("'{}'")),
+    Column("roster_checked_at", DateTime(timezone=True), nullable=True),
     Column("pending_changes", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),

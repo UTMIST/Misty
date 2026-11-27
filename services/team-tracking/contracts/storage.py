@@ -253,10 +253,13 @@ class StorageAdapter(Protocol):
         last_synced_at: datetime | None,
         actor: str,
         pending_changes: list[PendingGroupChange] | None = None,
+        rejected_additions: list[str] | None = None,
     ) -> TeamGoogleGroup:
         """Insert or overwrite the team's row; every field is replaced as given.
         Omitted pending_changes means an empty list. Persist before each Google
         membership write, and retain unresolved writes across sync attempts.
+        Only a roster readback with known rejected adds sets rejected_additions;
+        bind it to this update and clear it on every other write.
         Raises ValueError('team_id not found') for an unknown team."""
         ...
 

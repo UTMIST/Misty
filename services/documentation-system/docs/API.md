@@ -208,7 +208,7 @@ SQL, kept in lockstep by parity tests):
 The doc must carry a valid matching grant — manual `org` (everyone), `person` (that
 person), or manual `team` (a team they're on). Source-derived grants must be unexpired;
 a source-derived `team` grant additionally requires Team Tracking to confirm that person's
-managed Google Group membership is synchronized. Ownership fields provide attribution and
+live Google Group membership. For a partially represented team, the directory also verifies current team membership and the [managed roster](../../team-tracking/docs/ARCHITECTURE.md#individual-access-after-rejected-additions). Ownership fields provide attribution and
 filtering only; neither personal ownership nor membership in the owning team grants access.
 
 Team membership is resolved live from the directory. **If the directory is unreachable,
@@ -407,8 +407,8 @@ is silently skipped.
 If the source has content fetching enabled (`web`, `github`, and the Google sources), the
 service tries to fetch a title and snapshot at ingest. Google responses must also contain a
 complete ACL. User shares resolve only through primary or verified additional emails;
-group shares resolve only through Team Tracking's active, membership-synced managed-group
-mapping. Unknown/external emails, unmapped or legacy groups, domain shares, and link-wide
+group shares resolve through Team Tracking's managed-group lookup for individual access.
+A retained grant still requires live authorization at read time. Unknown/external emails, unmapped or legacy groups, domain shares, and link-wide
 (`anyone`) shares create no grant. A Google fetch with no mapped audience stores no fetched
 title or content. A fetch/ACL failure is non-fatal at ingest: the URL is catalogued with a
 warning and no source-derived access.

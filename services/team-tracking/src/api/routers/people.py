@@ -89,6 +89,7 @@ def get_person(
 @router.get("/{person_id}/synced-google-teams", response_model=list[TeamGoogleGroup])
 def list_synced_google_teams(
     person_id: UUID,
+    include_individual: bool = False,
     storage: StorageAdapter = Depends(get_storage),
     groups: GroupProvider | None = Depends(get_group_provider),
     _: AuthedKey = Depends(require_scope("people:read")),
@@ -102,7 +103,9 @@ def list_synced_google_teams(
             detail="google groups not configured",
         )
     try:
-        return synced_groups_containing(storage, groups, person)
+        return synced_groups_containing(
+            storage, groups, person, include_individual=include_individual
+        )
     except GroupProviderError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

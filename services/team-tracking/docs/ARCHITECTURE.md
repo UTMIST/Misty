@@ -104,7 +104,7 @@ Each team gets a Google Group so Drive documents and channel access can be grant
 
 **Layering.** `contracts/groups.py` defines the `GroupProvider` Protocol. `src/providers/google_groups.py` implements it with the Cloud Identity Groups and Groups Settings APIs, and `src/google_groups.py` holds the reconciler (`sync_team`), which depends only on the two Protocols. Routers schedule syncs and never call Google. `src/api/deps.py` wires the provider, or `None` when the five `GOOGLE_*` settings are unset; with `None`, every sync trigger is a no-op.
 
-**Who is in a team's group.** Every *active* person whose membership is current today (`started_at <= today < ended_at`), with **all** of their addresses: `primary_email` plus every verified `email` identifier. People sign into Drive with whichever Google account they use, so adding every verified address is what makes a share to the group actually work for them. Parent teams do not inherit their sub-teams' members. A retired team keeps its group and existing Drive shares; reconciliation removes managed MEMBER-only memberships. Owners and managers remain, as described below, so retirement alone is not complete access revocation.
+**Who is in a team's group.** Every *active* person whose membership is current today (`started_at <= today < ended_at`), with **all** of their addresses: `primary_email` plus every verified `email` identifier. People sign into Drive with whichever Google account they use, so adding every verified address is what makes a share to the group actually work for them. Misty still attempts each verified address. If Google rejects a secondary `@mail.utoronto.ca` mailbox with membership error 4002 or 2028, the group can be used only after a fresh Google read confirms the same member’s primary address, all other required members, and all removals. The sync records a note to use the primary account for Drive. A missing primary blocks team-wide use. Uncertain writes and unexpected Google errors also block individual use of the failed mapping. Parent teams do not inherit their sub-teams' members. A retired team keeps its group and existing Drive shares; reconciliation removes managed MEMBER-only memberships. Owners and managers remain, as described below, so retirement alone is not complete access revocation.
 
 **Reconcile, not replay.** A sync reads the group's current MEMBER-only memberships from Google, computes the desired set from the directory, and adds or removes the difference. Owners and managers are never touched, so the account that created the group, and anyone given Google-side management, stays. Anything else in the group that the directory doesn't list is removed, which is what "membership is the source of truth" means. Because every run converges from current state, a retry is just another run, and a missed event is fixed by the next one.
 
@@ -159,6 +159,22 @@ Workspace dependency is resolved. See the [credentials and rollout runbook](DEPL
 **Independent changes, confirmed completion.** A sync applies removals before additions and attempts every one even when another fails, so a persistently rejected newcomer can't keep a departed member in the group. Any failure makes the whole sync `failed` with every error in `last_error`. Membership create/delete return an Operation; the provider counts a change as made only when the Operation is `done` with no `error`, or an idempotent already-exists/already-gone result confirms it.
 
 **Unconfirmed writes survive retries.** Before each membership call, the sync stores its intent in `team_google_groups.pending_changes` and marks the mapping `failed`. A confirmed completion or rejection clears a new intent. An unfinished Operation, uncertain transport/server failure, or process crash leaves it persisted, including the operation name when available. Cloud Identity's [API surface](https://docs.cloud.google.com/identity/docs/reference/rest) has no operation-polling method, so the next sync checks for the write's effect: an added address appears, or the exact membership resource being removed disappears. Pending additions are never replayed: the original request could outlive a successful retry and a later revocation. A pending removal can retry against its exact resource while the person remains unwanted; a rejected retry preserves the original pending intent. If the person rejoins, sync waits for the removal's effect before adding them again. Unrelated changes continue, but the mapping cannot become `synced` while anything is pending. Once an effect is observed, sync reconciles against the latest directory membership; a delayed addition for a departed person is removed. Pending changes never expire automatically. See [recovery](DEPLOYMENT.md#pending-membership-changes).
+
+#### Individual access after rejected additions
+
+After a definite membership-add refusal (Google HTTP 400/4002 or 403/2028), sync
+reads the complete managed roster again. It can record the missing addresses for
+individual access only when every omission has a matching refusal, all removals
+have taken effect, settings were verified and there are no pending writes or other
+errors. The mapping retains `failed` when a member lacks coverage. A channel or
+meeting therefore cannot use it as a shared audience.
+
+For an individual lookup, Team Tracking checks the active person's current team
+membership and looks for their verified address on the live Google roster. It
+withholds the group if the roster contains an unexpected member, a new omission,
+or the sync result changes during the lookup. Each sync write replaces the
+recorded evidence. The evidence timestamp must match the row update, so a write
+from an older API or cron also invalidates it.
 
 **Concurrency.** `sync_team` holds a per-team lock from reading membership until it records the result, so a slow sync started before a membership ended can't finish after a newer sync and re-add the person. The lock is `StorageAdapter.lock_team_google_group`: in Postgres a session-level `pg_advisory_lock(hashtext('google-group:<team id>'))` on a dedicated connection, which covers every API worker *and* the separately running `team-tracking-groups sync` cron. A process-local lock in front of it keeps queued syncs in one process from each holding a pool connection while they wait. Both processes must use a direct database endpoint: [Neon's transaction pooler does not support session advisory locks](https://neon.com/docs/connect/connection-pooling#connection-pooling-in-transaction-mode). SQLAlchemy's application connection pool is compatible because the dedicated connection remains checked out for the whole sync.
 
@@ -269,8 +285,10 @@ Two trade-offs worth knowing:
 | `group_email` | text NOT NULL | Fixed once `group_name` is set |
 | `group_name` | text NULL | Cloud Identity `groups/{id}`; null until creation succeeds |
 | `status` | text NOT NULL | `synced` / `needs_external_members` / `failed` (check constraint) |
-| `last_error` | text NULL | Why the last sync did not converge |
+| `last_error` | text NULL | Sync failure details or a sign-in note for a covered university address |
 | `last_synced_at` | timestamptz NULL | Last fully converged sync |
+| `rejected_additions` | text[] DEFAULT `{}` | Confirmed omissions eligible for individual checks |
+| `roster_checked_at` | timestamptz NULL | Identifies the row update that verified these omissions |
 | `pending_changes` | jsonb NOT NULL DEFAULT `[]` | Unconfirmed membership writes; shape is in [API.md](API.md#team-google-groups) |
 
 Written before settings and membership calls and after every sync attempt (upsert on `team_id`). It records the mapping, unconfirmed writes, and last outcome. Google's membership list remains the record of who is actually in the group. See [Managed Google Groups](#managed-google-groups).
@@ -294,6 +312,7 @@ Alembic manages the Postgres schema; migrations are written by hand and kept in 
 - **`009_team_google_groups.py`** — creates `team_google_groups`.
 - **`010_pending_group_changes.py`** — persists unconfirmed membership changes. Downgrade refuses to discard pending changes; resolve them first.
 - **`011_remove_retired_provider.py`** — removes the retired provider and its identifiers. Downgrade restores only the provider vocabulary; see the [backup/recovery caveat](DEPLOYMENT.md#registry-cleanup-migration-011).
+- **`012_group_rejected_additions.py`** — records verified omissions for individual access.
 
 Apply with `uv run alembic upgrade head`; roll back with `uv run alembic downgrade base`.
 
