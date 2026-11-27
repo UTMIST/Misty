@@ -30,6 +30,12 @@ for (const scenario of [
   'pdf rejected',
   'late link',
   'stop unavailable',
+  'server drain timed out',
+  'server stream disconnected',
+  'server omitted drain',
+  'failed recovery',
+  'uncertain recovery',
+  'removed during recovery',
 ]) {
   test(`recording workflow to operator report: ${scenario}`, async () => {
     const lines = [];
@@ -39,12 +45,18 @@ for (const scenario of [
     };
     const beginTrace = createStopTracer({ write });
     const meetingId = randomUUID();
-    let saved = scenario !== 'late link';
+    const recoveryStatus = {
+      'late link': 'saved',
+      'failed recovery': 'failed',
+      'uncertain recovery': 'create_uncertain',
+      'removed during recovery': 'removed',
+    }[scenario];
+    let persistence = recoveryStatus ? 'pending' : 'saved';
     let posted = false;
     const records = {
       get: async () => ({
         meeting_id: meetingId,
-        persistence_status: saved ? 'saved' : 'pending',
+        persistence_status: persistence,
         delivery_status: posted ? 'posted' : 'pending',
       }),
       list: async (status) => (status === 'pending' ? [{ meeting_id: meetingId }] : []),
@@ -69,7 +81,14 @@ for (const scenario of [
           json: async () => ({
             pdf_b64: 'cGRm',
             transcript: 'private-transcript',
-            ...(scenario !== 'pdf only' && { record: { status: saved ? 'saved' : 'pending' } }),
+            ...(scenario !== 'server omitted drain' && {
+              audio_drain:
+                {
+                  'server drain timed out': 'timed_out',
+                  'server stream disconnected': 'disconnected',
+                }[scenario] ?? 'confirmed',
+            }),
+            ...(scenario !== 'pdf only' && { record: { status: persistence } }),
           }),
         };
       },
@@ -118,24 +137,53 @@ for (const scenario of [
     assert.equal(outgoing.span_id, clientSpan);
     assert.ok(lines.some((line) => JSON.parse(line).span_id === outgoing.parent_span_id));
     let report = replay(lines, traceId);
-    if (scenario === 'late link') {
+    if (recoveryStatus) {
       assert.equal(report.outcome, 'unconfirmed');
-      saved = true;
+      persistence = recoveryStatus;
       await createMeetingDelivery({
         records,
         post,
         beginTrace: createStopTracer({ write }),
       }).poll();
       report = replay(lines, traceId);
-      assert.equal(report.link, 'link.posted');
+      const lateSnapshots = lines
+        .map(JSON.parse)
+        .filter((r) => ['save.pending', 'link.pending'].includes(r.event_name))
+        .map((r) => JSON.stringify({ ...r, ts: '2099-01-01T00:00:00.000Z' }));
+      const shuffled = replay([...lateSnapshots, ...lines.toReversed()], traceId);
+      assert.deepEqual(shuffled, report);
+      const expectedSave = {
+        saved: 'save.confirmed',
+        failed: 'save.failed',
+        create_uncertain: 'save.uncertain',
+        removed: 'save.unavailable',
+      };
+      assert.equal(report.save, expectedSave[recoveryStatus]);
+      assert.equal(report.link, recoveryStatus === 'saved' ? 'link.posted' : 'link.not_attempted');
     }
     const expected = {
       'voice lost': 'interrupted',
       'stream lost': 'interrupted',
       'pdf rejected': 'observed_error',
       'stop unavailable': 'observed_error',
+      'server drain timed out': 'observed_error',
+      'server stream disconnected': 'interrupted',
+      'server omitted drain': 'unconfirmed',
+      'failed recovery': 'observed_error',
+      'uncertain recovery': 'unconfirmed',
+      'removed during recovery': 'unconfirmed',
     };
     assert.equal(report.outcome, expected[scenario] ?? 'complete');
+    assert.equal(report.stop_link, 'linked');
+    assert.equal(
+      report.drain,
+      {
+        'stop unavailable': 'unknown',
+        'server omitted drain': 'unknown',
+        'server drain timed out': 'timed_out',
+        'server stream disconnected': 'disconnected',
+      }[scenario] ?? 'confirmed',
+    );
     if (scenario === 'saved') {
       const withoutPdf = lines.filter((line) => JSON.parse(line).event_name !== 'pdf.posted');
       const pdf = JSON.parse(lines.find((line) => JSON.parse(line).event_name === 'pdf.posted'));
@@ -146,11 +194,44 @@ for (const scenario of [
         'link.posted',
         'save.confirmed',
         'stop.response',
+        'stop.request',
+        'stop.drain_confirmed',
         'capture.started',
       ]) {
         const incomplete = lines.filter((line) => JSON.parse(line).event_name !== missing);
         assert.equal(replay(incomplete, traceId).outcome, 'unconfirmed', missing);
       }
+      for (const mutation of [
+        { event: 'stop.response', edits: { parent_span_id: 'ffffffffffffffff' } },
+        { event: 'stop.response', edits: { span_id: 'ffffffffffffffff' } },
+        { event: 'stop.drain_confirmed', edits: { span_id: 'ffffffffffffffff' } },
+        { event: 'pdf.posted', edits: { span_id: 'ffffffffffffffff' } },
+      ]) {
+        const modified = lines.map((line) => {
+          const row = JSON.parse(line);
+          return row.event_name === mutation.event
+            ? JSON.stringify({ ...row, ...mutation.edits })
+            : line;
+        });
+        const damaged = replay(modified, traceId);
+        assert.equal(damaged.stop_link, 'conflict');
+        assert.equal(damaged.outcome, 'unconfirmed');
+      }
+      // A valid-looking receipt prefixed by excessive whitespace is an oversized
+      // input line. Skip it, retain synchronization, and accept a later genuine receipt.
+      const longReceipt = ' '.repeat(256 * 1024) + JSON.stringify(pdf);
+      assert.equal(replay([...withoutPdf, longReceipt], traceId).outcome, 'unconfirmed');
+      assert.equal(
+        replay([...withoutPdf, longReceipt, JSON.stringify(pdf)], traceId).outcome,
+        'complete',
+      );
+      const timeout = {
+        ...JSON.parse(lines.find((line) => JSON.parse(line).event_name === 'stop.drain_confirmed')),
+        event_name: 'stop.drain_timed_out',
+      };
+      const conflictingDrain = replay([...lines, JSON.stringify(timeout)], traceId);
+      assert.equal(conflictingDrain.drain, 'unknown');
+      assert.equal(conflictingDrain.outcome, 'unconfirmed');
     }
     assert.ok(!lines.join('').includes('private-'));
     assert.ok(!lines.join('').includes(meetingId));

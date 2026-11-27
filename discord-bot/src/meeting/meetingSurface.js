@@ -1,3 +1,4 @@
+import { traceMeetingDelivery } from './meetingDelivery.js';
 import { randomUUID } from 'node:crypto';
 import { meetingFilename } from './meetingFilename.js';
 import { meetingRecordNotice } from '../messages/meeting.js';
@@ -331,20 +332,7 @@ export function createMeetingSurface({
         } catch {
           delivery = { status: 'failed' };
         }
-        if (trace) {
-          const status = delivery?.persistenceStatus ?? report.record.status;
-          if (delivery?.status === 'posted' || status === 'saved') trace.mark('save.confirmed');
-          else if (status === 'failed') trace.mark('save.failed');
-          else if (
-            ['handoff_pending', 'pending', 'creating', 'doc_created', 'shared'].includes(status)
-          )
-            trace.mark('save.pending');
-          else if (['removed', 'removing', 'inaccessible'].includes(status))
-            trace.mark('save.unavailable');
-          if (['posted', 'pending', 'failed', 'disabled'].includes(delivery?.status)) {
-            trace.mark(`link.${delivery.status}`);
-          }
-        }
+        traceMeetingDelivery(trace, delivery, report.record.status);
         stageError = 'notice.error';
         const content = meetingRecordNotice(report.record, sessionId, delivery);
         if (content) await notify({ channel: textChannel, content });

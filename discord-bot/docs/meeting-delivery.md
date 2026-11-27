@@ -97,16 +97,28 @@ through the most recent delivery retry.
 node scripts/recording-report.js "$TRACE_ID" < recording.jsonl
 ```
 
-The report combines observed milestones regardless of order or duplicates.
-A normal capture needs a successful stop response and confirmed PDF delivery.
-A saved recording also needs save and link confirmation. Voice loss, stream
-loss, or a move stays visible even after both outputs arrive. A failed link
-attempt can include a failed receipt update after Discord accepted the send.
-Recovery uses the existing catalog meeting UUID to find the same trace after
-restart. The report counts no extra recording for that retry.
+The report reconstructs milestones from duplicate or reordered lines. It links
+the recording span to one stop request and its response using the actual span
+and parent IDs. Missing or conflicting links leave finalization unconfirmed.
+A normal capture needs a linked successful stop, service confirmation that
+the end-of-audio marker arrived, and confirmed PDF delivery. A saved recording
+also needs save and link confirmation. A drain timeout produces an observed
+error. A disconnect or lost voice connection marks the attempt interrupted,
+including after later delivery. Older stop responses without drain evidence
+leave the outcome unconfirmed.
 
-A missing confirmation leaves the result unconfirmed. `dropped_before` in
-a raw bot event counts records lost by the process since its previous successful
-write. It cannot identify which recording lost evidence. The report describes
-the observed bot workflow. It cannot measure missing speech, transcript accuracy,
-or isolate a slow provider inside the meeting service. Keep raw logs restricted.
+Recovery uses the catalog meeting UUID to correlate later attempts after a
+restart. A delayed pending snapshot cannot reopen a terminal state. A
+subsequent confirmed retry can supersede a failed attempt. Between competing
+terminal observations the report uses the producer UTC timestamp, preferring
+explicit failure on a tie. Clock skew between workers limits that ordering. A failed or uncertain save can prevent a
+link attempt entirely. A failed link attempt can include a failed receipt
+update after Discord accepted the send.
+
+The reader accepts allowlisted v1 events. It skips malformed records and
+lines over 2,048 characters, and reads an unterminated last line. It retains a
+fixed number of event labels and span IDs. `dropped_before` counts records
+lost by the bot process since its previous successful write. It cannot identify
+which recording lost evidence. The report describes observed delivery and
+the audio barrier. Missing speech, transcript accuracy, and provider-level
+timing need separate evidence. Keep raw logs restricted.

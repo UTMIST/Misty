@@ -20,10 +20,12 @@ const events = new Set([
   'save.confirmed',
   'save.pending',
   'save.failed',
+  'save.uncertain',
   'save.unavailable',
   'link.posted',
   'link.failed',
   'link.pending',
+  'link.not_attempted',
   'link.disabled',
   'pdf.posting',
   'pdf.posted',
@@ -43,13 +45,17 @@ const fields = new Set([
 ]);
 
 export function isRecordingEvent(record) {
-  const span = /^[0-9a-f]{16}$/;
+  const validId = (value, length) =>
+    typeof value === 'string' &&
+    value.length === length &&
+    /^[0-9a-f]+$/.test(value) &&
+    !/^0+$/.test(value);
   return (
     record?.schema === 'misty.recording.v1' &&
     Object.keys(record).every((key) => fields.has(key)) &&
-    /^[0-9a-f]{32}$/.test(record.trace_id) &&
-    span.test(record.span_id) &&
-    (record.parent_span_id === undefined || span.test(record.parent_span_id)) &&
+    validId(record.trace_id, 32) &&
+    validId(record.span_id, 16) &&
+    (record.parent_span_id === undefined || validId(record.parent_span_id, 16)) &&
     events.has(record.event_name) &&
     typeof record.ts === 'string' &&
     Number.isFinite(Date.parse(record.ts)) &&
