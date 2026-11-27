@@ -159,11 +159,11 @@ class MeetingRecordCases:
         monkeypatch.setenv("TELEMETRY_ENABLED", "true")
         monkeypatch.setenv("TELEMETRY_ENV", "local")
         monkeypatch.setattr(telemetry, "_emitter", SimpleNamespace(offer=received.append))
-        with telemetry.span("meeting.handoff", service="meeting") as client:
+        with telemetry.span("meeting.handoff", service="meeting", traffic="synthetic") as client:
             record, _ = original.accept(uuid4(), payload(), actor="fixture")
         first_accept = next(row for row in received if row["operation"] == "catalog.accept")
         assert record.accept_traceparent.split("-")[2] == first_accept["span_id"]
-        assert "accept_traceparent" not in record.public()
+        assert not {"accept_traceparent", "accept_traffic"} & record.public().keys()
 
         fresh = MeetingRecords(
             original.storage, writer, original.directory, original.settings, now=lambda: clock[0]
@@ -173,7 +173,8 @@ class MeetingRecordCases:
         assert fresh.storage.get_meeting(record.meeting_id).persistence_status == "create_uncertain"
         writer.fail = None
         clock[0] += timedelta(hours=2)
-        fresh.advance(record.meeting_id)
+        with telemetry.span("catalog.refresh", service="documentation-system", traffic="background"):
+            fresh.advance(record.meeting_id)
         assert fresh.storage.get_meeting(record.meeting_id).persistence_status == "saved"
         assert len(writer.created) == 1
         ends = [
@@ -182,6 +183,7 @@ class MeetingRecordCases:
             if row["operation"] == "catalog.advance" and row["event_name"] == "end"
         ]
         assert [row["result"] for row in ends] == ["ambiguous", "confirmed"]
+        assert [row["traffic"] for row in ends] == ["synthetic", "synthetic"]
         assert all(row["trace_id"] == client.ids["trace_id"] for row in ends)
         assert all(row["link_span_id"] == first_accept["span_id"] for row in ends)
         assert len({row["span_id"] for row in ends}) == 2
@@ -190,9 +192,11 @@ class MeetingRecordCases:
         missing = [row for row in received if row["operation"] == "catalog.advance"][-1]
         assert "link_span_id" not in missing and "parent_span_id" not in missing
         assert missing["trace_id"] != client.ids["trace_id"]
+        assert missing["traffic"] == "background"
         clock[0] += timedelta(days=30)
         fresh.retry_due(10)
-        assert fresh.storage.get_meeting(record.meeting_id).accept_traceparent is None
+        expired = fresh.storage.get_meeting(record.meeting_id)
+        assert expired.accept_traceparent is None and expired.accept_traffic is None
         for private in ("Planning", "Guest", "team@example.org", str(record.meeting_id)):
             assert private not in json.dumps(received)
 

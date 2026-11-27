@@ -157,7 +157,9 @@ class CollectorTest(unittest.TestCase):
 
     def test_railway_tags_attributes_saturation_and_credentials(self):
         self.args.command = "railway"
-        p = event()
+        p = event(
+            sequence=3, process_started_at=TS, measures={"drop_empty_ws_frame": 2}
+        )
         row = dict(
             timestamp=TS,
             message="",
@@ -199,10 +201,46 @@ class CollectorTest(unittest.TestCase):
             self.db.execute("select count from summaries").fetchone(), (1,)
         )
 
+    def test_first_failed_page_can_be_replayed_after_restart_with_smaller_windows(self):
+        self.args.command = "railway"
+        self.args.overlap_seconds = 0
+        self.args.until = iso(NOW)
+        with patch.object(
+            collect, "railway_rows", side_effect=collect.ReadFailure("saturated")
+        ) as first:
+            with self.assertRaises(collect.ReadFailure):
+                self.read()
+        start = first.call_args.args[1]
+        self.assertEqual(
+            self.db.execute("select checkpoint from sources").fetchone(), (None,)
+        )
+        self.db.close()
+        self.db = connect(self.path / "data.sqlite", "local")
+        self.addCleanup(self.db.close)
+        # Simulate a restart two minutes later. A newer target end and a
+        # reduced page size must still cover the beginning of the failed page.
+        self.args.until = None
+        self.args.window_seconds = 30
+        row = outer(event())
+        row["timestamp"] = iso(start)
+        with patch.object(collect, "railway_rows", return_value=[row]) as retry:
+            result = self.read(NOW + timedelta(minutes=2))
+        self.assertEqual(
+            retry.call_args.args[1:], (start, start + timedelta(seconds=30))
+        )
+        self.assertEqual(result["added"], 1)
+        self.assertEqual(result["checkpoint"], iso(start + timedelta(seconds=30)))
+
     def test_retention_and_private_mode(self):
         self.write(outer(event()))
         self.read()
         self.assertEqual((self.path / "data.sqlite").stat().st_mode & 0o777, 0o600)
+        # A newly received replay of an expired event must not reset its lifetime.
+        later = NOW + timedelta(days=30)
+        self.args.until = iso(later)
+        self.write({"timestamp": iso(later), "message": json.dumps(event())})
+        self.assertEqual(self.read(later)["rejected"], 1)
+        self.assertFalse(self.db.execute("select * from events").fetchall())
         collect.prune(self.db, NOW + timedelta(days=31))
         self.assertFalse(self.db.execute("select * from events").fetchall())
         self.assertFalse(self.db.execute("select * from summaries").fetchall())
@@ -305,8 +343,23 @@ class CollectorTest(unittest.TestCase):
             "--input",
             str(self.file),
         ]
-        for expected in ("added", "duplicate"):
-            self.assertEqual(json.loads(subprocess.check_output(argv))[expected], 4)
+        self.assertEqual(json.loads(subprocess.check_output(argv))["added"], 4)
+        # Railway GraphQL exposes all structured attribute values as strings,
+        # including modern producers' sequence numbers. Both shapes must deduplicate.
+        self.write(
+            *[
+                {
+                    "timestamp": p["ts"],
+                    "message": "",
+                    "attributes": [
+                        {"key": k, "value": v if isinstance(v, str) else json.dumps(v)}
+                        for k, v in p.items()
+                    ],
+                }
+                for p in rows
+            ]
+        )
+        self.assertEqual(json.loads(subprocess.check_output(argv))["duplicate"], 4)
         summaries = subprocess.check_output(cli + ["summary", *flags]).decode()
         self.assertEqual(
             [json.loads(s)["count"] for s in summaries.splitlines()], [1, 1]

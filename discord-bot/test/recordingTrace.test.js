@@ -29,6 +29,7 @@ for (const scenario of [
   'voice lost',
   'stream lost',
   'pdf rejected',
+  'receipt write failed',
   'late link',
   'stop unavailable',
   'server drain timed out',
@@ -54,6 +55,7 @@ for (const scenario of [
     }[scenario];
     let persistence = recoveryStatus ? 'pending' : 'saved';
     let posted = false;
+    let rejectReceipt = scenario === 'receipt write failed';
     const records = {
       get: async () => ({
         meeting_id: meetingId,
@@ -61,8 +63,9 @@ for (const scenario of [
         delivery_status: posted ? 'posted' : 'pending',
       }),
       list: async (status) => (status === 'pending' ? [{ meeting_id: meetingId }] : []),
-      update: async () => {
-        posted = true;
+      update: async (_id, state) => {
+        if (state === 'posted' && rejectReceipt) throw Error('fixture receipt unavailable');
+        posted = state === 'posted';
         return {};
       },
     };
@@ -162,6 +165,18 @@ for (const scenario of [
       assert.equal(report.save, expectedSave[recoveryStatus]);
       assert.equal(report.link, recoveryStatus === 'saved' ? 'link.posted' : 'link.not_attempted');
     }
+    if (rejectReceipt) {
+      assert.equal(report.link, 'link.acknowledged');
+      assert.ok(report.events.includes('link.failed'));
+      assert.equal(report.outcome, 'complete');
+      assert.equal(posted, false);
+      assert.ok(delivery.hasPendingWork());
+      rejectReceipt = false;
+      await delivery.poll();
+      report = replay(lines, traceId);
+      assert.equal(report.link, 'link.posted');
+      assert.equal(posted, true);
+    }
     const expected = {
       'voice lost': 'interrupted',
       'stream lost': 'interrupted',
@@ -199,7 +214,8 @@ for (const scenario of [
         'stop.drain_confirmed',
         'capture.started',
       ]) {
-        const incomplete = lines.filter((line) => JSON.parse(line).event_name !== missing);
+        const absent = missing === 'link.posted' ? ['link.posted', 'link.acknowledged'] : [missing];
+        const incomplete = lines.filter((line) => !absent.includes(JSON.parse(line).event_name));
         assert.equal(replay(incomplete, traceId).outcome, 'unconfirmed', missing);
       }
       for (const mutation of [

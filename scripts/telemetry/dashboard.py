@@ -180,7 +180,10 @@ def report_page(db, raw, env, view, params, role, now, stale):
                 delivered = sum(
                     r["started"]
                     and r["pdf"] == "pdf.posted"
-                    and (mode == "record.pdf_requested" or r["link"] == "link.posted")
+                    and (
+                        mode == "record.pdf_requested"
+                        or r["link"] in ("link.posted", "link.acknowledged")
+                    )
                     for r in rows
                 )
                 n, median, p95 = percentiles(r["latency_ms"] for r in rows)

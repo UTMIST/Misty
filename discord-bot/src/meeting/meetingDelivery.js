@@ -29,7 +29,7 @@ export function createMeetingDelivery({ records, post, beginTrace }) {
   const awaitingRecovery = new Set();
   let polling;
 
-  async function attempt(meetingId) {
+  async function attempt(meetingId, trace) {
     let record;
     let messageId = unacknowledged.get(meetingId);
     try {
@@ -51,6 +51,7 @@ export function createMeetingDelivery({ records, post, beginTrace }) {
       messageId ??= record.discord_message_id;
       messageId = await post({ ...record, discord_message_id: messageId });
       if (!messageId) throw new Error('missing Discord receipt');
+      trace?.mark('link.acknowledged');
       unacknowledged.set(meetingId, messageId);
       const updated = await records.update(meetingId, 'posted', messageId);
       if (!updated) throw new Error('missing delivery acknowledgement');
@@ -67,9 +68,9 @@ export function createMeetingDelivery({ records, post, beginTrace }) {
     }
   }
 
-  function deliver(meetingId) {
+  function deliver(meetingId, trace) {
     if (inFlight.has(meetingId)) return inFlight.get(meetingId);
-    const task = attempt(meetingId)
+    const task = attempt(meetingId, trace)
       .then((result) => {
         const unfinishedSave =
           result.status === 'pending' &&
@@ -103,7 +104,7 @@ export function createMeetingDelivery({ records, post, beginTrace }) {
       }
       for (const meetingId of pending) {
         const trace = beginTrace?.(meetingId);
-        const result = await deliver(meetingId);
+        const result = await deliver(meetingId, trace);
         traceMeetingDelivery(trace, result);
       }
       return { empty: listed && pending.size === 0 && awaitingRecovery.size === 0 };

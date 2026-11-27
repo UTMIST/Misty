@@ -76,6 +76,9 @@ PersistenceStatus = Literal[
 
 class MeetingRecord(StrictModel):
     meeting_id: UUID
+    accept_traffic: Literal["member", "synthetic", "background"] | None = Field(
+        default=None, repr=False
+    )
     accept_traceparent: str | None = Field(default=None, repr=False)
     payload_hash: str
     version: int = 0
@@ -126,6 +129,7 @@ class MeetingRecord(StrictModel):
                 "payload_hash",
                 "audience_group_emails",
                 "accept_traceparent",
+                "accept_traffic",
             }
         )
 
