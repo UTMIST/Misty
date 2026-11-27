@@ -142,3 +142,57 @@ Keep these results separate from the staging totals.
 Read stored totals once per minute. Show the observation time for each source.
 Leads can see totals. Maintainers can open individual attempts in their environment. Billing reviewers can open invoices.
 Apply the same access rules when a viewer opens a shared link.
+
+## Workflow health
+
+The authenticated environment dashboard serves answer, authorized search, catalog
+and gateway results at `/<environment>/health`. Leads see aggregates. Results in
+the service tables use route templates and operation names. Repeated fixture
+input does not add to the denominator after the collector has stored its event ID.
+The current and previous windows have equal length.
+
+A start selects an attempt into its period. A terminal observed before that
+period ends supplies the result. A missing or conflicting terminal leaves the
+attempt unknown. Admission is a separate positive observation. Full answers
+require Discord to accept all intended parts. The median covers fully delivered
+answers. Tool rounds count model calls that requested tools. Part counts exclude
+notices. Empty search rate divides complete zero-hit searches by successful
+searches with hits plus successful zero-hit searches.
+
+Select background traffic for scheduled catalog runs. The catalog measures content,
+index and access from the same owner-side database snapshot at guard release.
+The view reports the UTC sample time and its age at period end. An absent or failed
+sample, a sample at least 65 minutes old on the hourly schedule, or a newer
+finished run with no sample leaves current document state unknown. Last clean scan
+and last clean refresh remain identifiable after subsequent partial or failed runs.
+
+### Importing local Railway resource samples
+
+Supply an operator-prepared CSV using the following exact header. Use an
+existing private collector database bound to the same environment.
+
+```csv
+environment,service,observed_at,cpu_cores,memory_bytes,deployed_at
+local,gateway,2026-11-27T17:00:00.000Z,0.12,104857600,2026-11-27T16:30:00.000Z
+```
+
+`observed_at` is the source observation time with timezone. `cpu_cores` is
+cores in use, with 1.0 meaning one full core. Convert memory to bytes before
+import. Use the actual deployment timestamp, or leave the last field empty.
+Supply exactly one service-level observation per sample time. Select the environment
+and service first when preparing the export. For multiple replicas, sum matching
+CPU and memory samples at the same timestamp before import. No credentials
+or calls to Railway are required by the importer.
+
+```sh
+python3 scripts/telemetry/resource_metrics.py /private/path/collector.sqlite local samples.csv
+```
+
+The importer accepts at most 10,000 rows and 2 MB, within the last 30 days.
+Conflicting duplicates, invalid counts, future observations, cross-environment
+rows and extra columns reject the import. Exact duplicates can be replayed.
+The resource table shows sample count, arithmetic mean CPU, peak memory in
+MiB, latest source observation, age, and latest reported deployment time.
+These values cover the service across traffic groups. The table reports
+missing samples in each selected window. The offline import does not poll
+Railway or infer deployment times from the first event after a deploy.
