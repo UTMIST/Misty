@@ -155,7 +155,7 @@ export function createAutoStop({
       ) {
         return;
       }
-      Promise.resolve(meetingSurface.stop(guildId)).catch((err) =>
+      Promise.resolve(meetingSurface.stop(guildId, 'capture.empty_channel')).catch((err) =>
         console.error(`auto-stop failed for guild ${guildId}:`, err?.message ?? err),
       );
     }, graceMs);

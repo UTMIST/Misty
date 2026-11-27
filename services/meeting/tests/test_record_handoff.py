@@ -58,9 +58,18 @@ def test_handoff_before_cleanup_and_concurrent_stop_only_finalizes_once():
     asyncio.run(scenario())
 
 
-def test_network_failure_returns_pdf_status_and_retries_exact_payload():
+def test_network_failure_returns_pdf_status_and_retries_exact_payload(monkeypatch):
+    from types import SimpleNamespace
+    from platform_auth import telemetry
+
+    events = []
+    monkeypatch.setenv("TELEMETRY_ENABLED", "true")
+    monkeypatch.setenv("TELEMETRY_ENV", "local")
+    monkeypatch.setattr(telemetry, "_emitter", SimpleNamespace(offer=events.append))
+
     async def scenario():
         calls = []
+        headers = []
         clock = [0]
 
         async def sleep(delay):
@@ -69,6 +78,7 @@ def test_network_failure_returns_pdf_status_and_retries_exact_payload():
 
         def handle(request):
             calls.append(request.content)
+            headers.append(request.headers["traceparent"])
             if len(calls) == 1:
                 return httpx.Response(503)
             return httpx.Response(
@@ -79,11 +89,22 @@ def test_network_failure_returns_pdf_status_and_retries_exact_payload():
             handoff = HttpRecordHandoff(
                 "http://catalog", "key", 30, client=client, sleep=sleep, monotonic=lambda: clock[0]
             )
-            result = await handoff.submit("id", {"transcript": "private"})
+            with telemetry.span("meeting.finalize", service="meeting") as root:
+                result = await handoff.submit("id", {"transcript": "private"})
             assert result.status == "handoff_pending"
             await asyncio.gather(*handoff.tasks)
             assert len(calls) == 2 and calls[0] == calls[1]
             assert not handoff.pending
+            ends = [
+                row
+                for row in events
+                if row["operation"] == "meeting.handoff" and row["event_name"] == "end"
+            ]
+            assert [row["result"] for row in ends] == ["pending", "confirmed"]
+            assert len(set(headers)) == 2
+            assert [header.split("-")[2] for header in headers] == [row["span_id"] for row in ends]
+            assert all(row["trace_id"] == root.ids["trace_id"] for row in ends)
+            assert "private" not in str(events)
 
     asyncio.run(scenario())
 

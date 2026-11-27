@@ -2,6 +2,8 @@ import json
 import logging
 import re
 
+from platform_auth.telemetry import span
+
 from src.contracts import Minutes
 from src.pipeline.llm_client import LlmUnavailable
 
@@ -216,6 +218,11 @@ def _bounded(transcript: str) -> str:
 
 
 def summarize_minutes(transcript: str, llm_client, model=None) -> Minutes:
+    with span("meeting.minutes", service="meeting") as call:
+        return _summarize(transcript, llm_client, model, call)
+
+
+def _summarize(transcript, llm_client, model, call):
     transcript = _bounded(transcript)
     try:
         content = llm_client.chat(
@@ -224,8 +231,9 @@ def summarize_minutes(transcript: str, llm_client, model=None) -> Minutes:
             max_tokens=MINUTES_MAX_TOKENS,
             messages=[{"role": "user", "content": f"Transcript:\n\n{transcript}"}],
         )
-    except LlmUnavailable as exc:
-        _logger.warning("LLM unavailable, returning placeholder minutes: %s", exc)
+    except LlmUnavailable:
+        call.outcome("unavailable")
+        _logger.warning("LLM unavailable, returning placeholder minutes")
         return Minutes(
             summary="(minutes unavailable: LLM service error)", decisions=[], action_items=[]
         )
@@ -240,6 +248,7 @@ def summarize_minutes(transcript: str, llm_client, model=None) -> Minutes:
         # response never closes its fence, so a bare startswith("{") misses
         # ```json blocks and "Here are the minutes:" lead-ins.
         if _looks_like_json_response(fallback):
+            call.outcome("partial")
             _logger.warning(
                 "could not parse or salvage minutes JSON (%s chars); "
                 "returning a placeholder summary",
@@ -250,6 +259,7 @@ def summarize_minutes(transcript: str, llm_client, model=None) -> Minutes:
 
     summary = parsed.get("summary")
     if not isinstance(summary, str):
+        call.outcome("partial")
         # Salvage recovered SOMETHING but not the summary -- truncation landed
         # before that value closed. Keep whatever else survived rather than
         # throwing away a title and decisions the model really did produce.

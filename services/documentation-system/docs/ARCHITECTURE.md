@@ -974,3 +974,12 @@ Index currency requires matching content and title hashes for the serving model.
 Missing content or a legacy set with an unknown title hash leaves index state
 unknown. A document with stored content and no serving set has a missing index.
 The aggregate query never reads document text into the telemetry stream.
+
+### Recording recovery traces
+
+An accepted meeting may carry an internal trace reference. A retry links
+its own span to that exact acceptance, including after a process restart.
+The meeting API omits this reference from responses. Older rows, disabled
+collection and references at least 30 days old produce unlinked work. A
+confirmed catalog save follows the storage commit. Indexing has its own
+result, and an ambiguous Google create remains visible after a later retry.

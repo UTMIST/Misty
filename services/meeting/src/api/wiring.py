@@ -11,6 +11,8 @@ and a real LLM-backed report builder (minutes + PDF).
 from datetime import datetime, timezone
 from functools import lru_cache
 
+from platform_auth.telemetry import span
+
 from src.audio.decoder import OpusStreamDecoder
 from src.config import get_settings
 from src.pipeline.llm_client import LlmClient
@@ -63,7 +65,8 @@ def _build_report_builder():
     def report_builder(segments, meta):
         transcript = assemble_transcript(segments)
         minutes = summarize_minutes(transcript, llm_client)
-        pdf_bytes = render_meeting_pdf(minutes, transcript, meta)
+        with span("meeting.pdf", service="meeting"):
+            pdf_bytes = render_meeting_pdf(minutes, transcript, meta)
         return minutes, pdf_bytes
 
     return report_builder

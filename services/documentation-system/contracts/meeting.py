@@ -76,6 +76,7 @@ PersistenceStatus = Literal[
 
 class MeetingRecord(StrictModel):
     meeting_id: UUID
+    accept_traceparent: str | None = Field(default=None, repr=False)
     payload_hash: str
     version: int = 0
     doc_id: UUID | None = None
@@ -119,7 +120,14 @@ class MeetingRecord(StrictModel):
     updated_by: str
 
     def public(self):
-        return self.model_dump(exclude={"pending_payload", "payload_hash", "audience_group_emails"})
+        return self.model_dump(
+            exclude={
+                "pending_payload",
+                "payload_hash",
+                "audience_group_emails",
+                "accept_traceparent",
+            }
+        )
 
 
 class MeetingRetryResult(StrictModel):

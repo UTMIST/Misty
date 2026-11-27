@@ -209,3 +209,13 @@ no audio. It acknowledges durability only after a 200/202 catalog response.
 After that, Postgres and the catalog's hourly runner own recovery. See the
 [wire contract](API.md#durable-record-context) and
 [accepted crash window](../../../docs/MEETING-RECORDING.md#hand-off-and-retry-closes-the-stop-gap).
+
+### Recording telemetry
+
+When shared telemetry is enabled, one stop request owns the finalize, audio
+drain, speech flush and report spans. Minute generation and PDF rendering
+have separate results. A successful PDF can contain fallback minutes. The
+finalize span counts omitted speaker flushes separately from discarded frames.
+The handoff spans each authenticated catalog PUT, including retries. A
+confirmed PUT means the catalog accepted responsibility for the record.
+The catalog reports when the document itself has been saved.
