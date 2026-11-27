@@ -185,6 +185,7 @@ Migration history:
   Downgrading to `016` refuses if any document has multiple models: first finish
   the [model cleanup](#re-embedding-after-a-model-change-209), stop indexing writers,
   and verify that every doc has at most one model. The downgrade preserves that set.
+- **`019_meeting_trace_context`** adds a nullable internal span reference. The recovery worker can link a later save to its original acceptance for up to 30 days. Existing rows have no reference. The retry job clears expired references. Downgrade drops only this column.
 - **`018_google_source_urls`** — replaces existing Drive file display URLs with native
   Docs/Sheets/Slides editor links, or `/view` links for `gdrive`. Only recognized Drive
   URLs matching the file identity in `url_normalized` qualify, including retired rows.

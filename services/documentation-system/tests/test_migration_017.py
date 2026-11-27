@@ -57,8 +57,6 @@ def test_migration_017_keys_sets_by_model_and_refuses_lossy_downgrade():
     owner = uuid4()
     meeting_doc_id = None
     try:
-        command.downgrade(cfg, "016")
-        assert _primary_key(engine) == ["doc_id", "ordinal"]
         doc = make_doc(adapter)
         chunk = make_chunk()
         adapter.upsert_doc_content(
@@ -92,9 +90,12 @@ def test_migration_017_keys_sets_by_model_and_refuses_lossy_downgrade():
             },
             actor="migration-test",
         )
+        # Seed with the current adapter, then test only the historical transition.
+        command.downgrade(cfg, "016")
+        assert _primary_key(engine) == ["doc_id", "ordinal"]
         baseline = _snapshot(engine)
 
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "017")
         assert _primary_key(engine) == ["doc_id", "embedding_model", "ordinal"]
         assert adapter.list_doc_chunks(doc.id) == [chunk]
         assert _snapshot(engine) == baseline
@@ -118,7 +119,7 @@ def test_migration_017_keys_sets_by_model_and_refuses_lossy_downgrade():
         assert _primary_key(engine) == ["doc_id", "ordinal"]
         assert adapter.list_doc_chunks(doc.id) == [chunk]
         assert _snapshot(engine) == baseline
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "017")
         assert _primary_key(engine) == ["doc_id", "embedding_model", "ordinal"]
         assert _snapshot(engine) == baseline
     finally:

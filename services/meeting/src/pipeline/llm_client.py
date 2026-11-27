@@ -1,4 +1,5 @@
 import httpx
+from platform_auth.telemetry import span, trace_headers
 
 
 class LlmUnavailable(Exception): ...
@@ -21,11 +22,20 @@ class LlmClient:
             body["model"] = model
         if thinking is not None:
             body["thinking"] = thinking
+        with span("http.client", service="meeting") as call:
+            try:
+                return self._send(body)
+            except LlmTimeout:
+                call.outcome("timed_out")
+                raise
+
+    def _send(self, body):
         try:
             r = httpx.post(
                 f"{self._base}/chat",
                 json=body,
-                headers=self._headers,
+                headers=self._headers | trace_headers(),
+                follow_redirects=False,
                 timeout=self._timeout,
             )
             r.raise_for_status()

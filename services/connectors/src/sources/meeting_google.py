@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from io import BytesIO
 from uuid import UUID
 
+from platform_auth.telemetry import span
+
 from contracts.fetch import FetchResponse, SourcePermission
 from contracts.meeting import CreateDoc, GoogleDoc, MeetingWriteError, TaggedDoc
 from src.sources.base import SourceError
@@ -165,10 +167,21 @@ class GoogleMeetingWriter:
                     )
                 )
 
+    @contextmanager
+    def _observed_client(self, operation):
+        with span(operation, service="connectors") as call:
+            try:
+                with self._client() as drive:
+                    yield drive
+            except MeetingWriteError as exc:
+                call.outcome("ambiguous" if exc.uncertain else "failed")
+                raise
+            call.outcome("confirmed")
+
     def create(self, body: CreateDoc) -> GoogleDoc:
         from googleapiclient.http import MediaIoBaseUpload
 
-        with self._client() as drive:
+        with self._observed_client("connectors.google_create") as drive:
             self._check_folder(drive, self.root)  # before any content leaves this process
             folders = self._list(
                 drive,
@@ -216,7 +229,7 @@ class GoogleMeetingWriter:
             )
 
     def search(self, meeting_id: UUID) -> list[TaggedDoc]:
-        with self._client() as drive:
+        with self._observed_client("connectors.google_search") as drive:
             files = self._list(
                 drive, f"appProperties has {{ key='misty_meeting_id' and value='{meeting_id}' }}"
             )
@@ -237,7 +250,7 @@ class GoogleMeetingWriter:
         commenters = {email.strip().lower() for email in commenters}
         if any("@" not in email or any(c.isspace() for c in email) for email in commenters):
             raise MeetingWriteError("invalid_group")
-        with self._client() as drive:
+        with self._observed_client("connectors.google_share") as drive:
             self._tagged(drive, document_id)
             permissions = self._permissions(drive, document_id)
             # Revoke unexpected direct shares before reporting a security failure.

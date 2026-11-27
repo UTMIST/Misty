@@ -1,6 +1,7 @@
 """Content-free failures and validated responses from the connector writer."""
 
 import httpx
+from platform_auth.telemetry import trace_headers
 from pydantic import TypeAdapter
 
 from contracts.fetcher import FetchResult, SourcePermission
@@ -19,7 +20,8 @@ class HttpMeetingWriter:
             response = client.request(
                 method,
                 f"{self.base_url}/google/docs{path}",
-                headers={"X-API-Key": self.api_key},
+                headers={"X-API-Key": self.api_key, **trace_headers()},
+                follow_redirects=False,
                 json=body,
             )
             if response.status_code >= 300:
