@@ -173,6 +173,7 @@
     "/memberships/{membership_id}",
     "/memberships/{membership_id}/end",
     "/people",
+    "/people/by-email",
     "/people/by-email/{email}",
     "/people/by-identifier/{provider}/{external_id}",
     "/people/search",

@@ -1,7 +1,7 @@
 """Aggregate feature and service health on the environment-bound dashboard."""
 
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 import json
 
@@ -33,49 +33,56 @@ def _minutes(stamp, end):
 
 
 def _cohort(db, traffic, start, end):
-    # A start defines the cohort. Terminal-only observations cannot inflate it.
-    # Use only evidence observed by the period boundary, including for comparison.
-    return db.execute(
+    # Complete one-minute buckets use stored counts and latency histograms.
+    # Read projected attempts only at a fractional boundary or when their
+    # lifetime crosses a minute. A terminal after the selected end stays unknown.
+    left = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    rounded = left.replace(second=0, microsecond=0)
+    if rounded != left:
+        rounded += timedelta(minutes=1)
+    first = rounded.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    last = end[:16] + ":00.000Z"
+    rows = db.execute(
         """
-        WITH attempts AS (
-          SELECT trace_id,span_id,service,operation,
-             max(CASE WHEN event_name='start' THEN ts END) AS started,
-             max(CASE WHEN event_name='start' THEN json_extract(payload,'$.route') END) AS route,
-             max(event_name='admitted') AS admitted,
-             count(DISTINCT CASE WHEN event_name='end' THEN result END) AS terminal_states,
-             max(CASE WHEN event_name='end' THEN result END) AS result,
-             max(CASE WHEN event_name='end' THEN elapsed_ms END) AS latency
-          FROM events WHERE traffic=? AND ts>=? AND ts<? AND event_name IN ('start','admitted','end')
-          GROUP BY trace_id,span_id,service,operation
+        with cohort as (
+          select service,operation,route,admitted,result,latency,n from health_minutes
+            where traffic=:traffic and minute>=:first and minute<:last
+          union all
+          select service,operation,route,coalesce(admitted_at<:end,0) as admitted,
+            case when ended<:end and (conflict_at is null or conflict_at>=:end) then result else 'unknown' end,
+            case when ended<:end and (conflict_at is null or conflict_at>=:end) then latency else 0 end,
+            1 from health_runs where traffic=:traffic and started>=:start and started<:end and (sealed=0 or minute<:first or minute>=:last)
         )
-        SELECT service,operation,route,admitted,
-          CASE WHEN terminal_states=1 THEN result ELSE 'unknown' END AS result,
-          count(*) AS n, sum(CASE WHEN terminal_states=1 THEN latency ELSE 0 END) AS total_ms
-        FROM attempts WHERE started IS NOT NULL GROUP BY service,operation,route,admitted,
-          CASE WHEN terminal_states=1 THEN result ELSE 'unknown' END
+        select service,operation,route,admitted,result,latency,sum(n) as n,sum(latency*n) as total_ms
+        from cohort group by service,operation,route,admitted,result,latency
     """,
-        (traffic, start, end),
+        dict(traffic=traffic, first=first, last=last, start=start, end=end),
     ).fetchall()
-
-
-def _answer_latency(db, traffic, start, end):
-    # Median over fully delivered answer attempts in the receipt cohort.
-    return db.execute(
-        """
-        WITH completed AS (
-          SELECT max(CASE WHEN event_name='end' THEN elapsed_ms END) AS ms,
-                 max(event_name='start') AS started, count(DISTINCT CASE WHEN event_name='end' THEN result END) AS states,
-                 max(CASE WHEN event_name='end' THEN result END) AS result
-          FROM events WHERE traffic=? AND operation='answer' AND ts>=? AND ts<?
-          GROUP BY trace_id,span_id
-        ), ranked AS (
-          SELECT ms,row_number() OVER(ORDER BY ms) AS i,count(*) OVER() AS n
-          FROM completed WHERE started AND states=1 AND result='full'
+    # Fold the histogram once into the UI totals while retaining exact full-answer percentiles.
+    groups = {}
+    durations = Counter()
+    for r in rows:
+        key = (r["service"], r["operation"], r["route"], r["admitted"], r["result"])
+        out = groups.setdefault(
+            key,
+            dict(
+                zip(("service", "operation", "route", "admitted", "result"), key),
+                n=0,
+                total_ms=0,
+            ),
         )
-        SELECT avg(ms) FROM ranked WHERE i IN ((n+1)/2,(n+2)/2)
-    """,
-        (traffic, start, end),
-    ).fetchone()[0]
+        out["n"] += r["n"]
+        out["total_ms"] += r["total_ms"]
+        if r["operation"] == "answer" and r["result"] == "full":
+            durations[r["latency"]] += r["n"]
+    count = sum(durations.values())
+    ranks = [(count - 1) // 2, count // 2] if count else []
+    seen = 0
+    middle = 0
+    for elapsed, n in sorted(durations.items()):
+        middle += elapsed * sum(seen <= rank < seen + n for rank in ranks)
+        seen += n
+    return list(groups.values()), middle / 2 if count else None
 
 
 def _outcomes(rows, operation):
@@ -93,15 +100,15 @@ def _catalog(db, traffic, end):
         ("catalog.refresh", "Refresh", "drained"),
     ):
         latest = db.execute(
-            "select ts,result,payload from events where traffic=? and operation=? and event_name='end' and ts<? order by ts desc limit 1",
+            "select ts,result,measures from health_jobs where traffic=? and operation=? and ts<? order by ts desc limit 1",
             (traffic, operation, end),
         ).fetchone()
         success = db.execute(
-            "select max(ts) from events where traffic=? and operation=? and event_name='end' and result=? and ts<?",
+            "select max(ts) from health_jobs where traffic=? and operation=? and result=? and ts<?",
             (traffic, operation, good, end),
         ).fetchone()[0]
         finished = db.execute(
-            "select max(ts) from events where traffic=? and operation=? and event_name='end' and result in (?, 'gaps') and ts<?",
+            "select max(ts) from health_jobs where traffic=? and operation=? and result in (?, 'gaps') and ts<?",
             (traffic, operation, good, end),
         ).fetchone()[0]
         row = (
@@ -124,7 +131,7 @@ def _catalog(db, traffic, end):
             )
         )
         if latest and operation == "catalog.refresh":
-            m = json.loads(latest["payload"]).get("measures", {})
+            m = json.loads(latest["measures"])
             parts.append(
                 _table(
                     ("Attempted", "Item failures", "Index failures"),
@@ -137,7 +144,7 @@ def _catalog(db, traffic, end):
                 )
             )
     last = db.execute(
-        "select ts,result,payload from events where traffic=? and operation='catalog.freshness' and event_name='end' and ts<? order by ts desc limit 1",
+        "select ts,result,measures from health_jobs where traffic=? and operation='catalog.freshness' and ts<? order by ts desc limit 1",
         (traffic, end),
     ).fetchone()
     if not last:
@@ -149,17 +156,15 @@ def _catalog(db, traffic, end):
     parts.append(
         f"<p>Catalog summary at {escape(last['ts'])} · {age} min old at period end.</p>"
     )
-    measures = json.loads(last["payload"]).get("measures", {})
+    measures = json.loads(last["measures"])
     # A newer *finished* refresh need not imply a missing summary: the API
     # samples at guard release just before the runner emits its terminal event.
     # Compare the next refresh START with the sample, after its run has ended.
     missing_after_refresh = db.execute(
         """
-        select 1 from events s join events e using(trace_id,span_id)
-        where s.operation='catalog.refresh' and s.event_name='start' and e.event_name='end'
-        and s.traffic=? and e.traffic=? and s.ts>? and e.ts<? limit 1
+        select 1 from health_jobs where operation='catalog.refresh' and traffic=? and started>? and ts<? limit 1
     """,
-        (traffic, traffic, last["ts"], end),
+        (traffic, last["ts"], end),
     ).fetchone()
 
     if (
@@ -191,9 +196,7 @@ def _resources(db, start, end, previous_start):
     parts = [
         "<h2>Railway resource samples</h2><p>Environment-wide samples across traffic groups.</p>"
     ]
-    if not db.execute(
-        "select 1 from sqlite_master where type='table' and name='railway_samples'"
-    ).fetchone():
+    if not db.execute("select 1 from health_resources limit 1").fetchone():
         return (
             "".join(parts)
             + "<p>No resource samples imported. CPU, memory and deployment time unknown.</p>"
@@ -206,7 +209,7 @@ def _resources(db, start, end, previous_start):
         for service, last, n, cpu, mem, deploy in db.execute(
             """
             select service,max(observed_at),count(*),avg(cpu_cores),max(memory_bytes),max(deployed_at)
-            from railway_samples where observed_at>=? and observed_at<? group by service order by service
+            from health_resources where observed_at>=? and observed_at<? group by service order by service
         """,
             (left, right),
         ):
@@ -246,7 +249,9 @@ def _resources(db, start, end, previous_start):
     )
 
 
-def render_health(db, traffic, start, end, previous_start, now, stale_seconds=300):
+def render_health(
+    db, traffic, start, end, previous_start, now, stale_seconds=300, source_db=None
+):
     parts = ["<h2>Workflow health</h2>"]
     source_status = []
     for service in (
@@ -256,9 +261,14 @@ def render_health(db, traffic, start, end, previous_start, now, stale_seconds=30
         "team-tracking",
         "verification",
     ):
-        state = db.execute(
-            "select last_success,last_error from sources where service=?", (service,)
-        ).fetchone()
+        state = (
+            (source_db or db)
+            .execute(
+                "select last_success,last_error from sources where service=?",
+                (service,),
+            )
+            .fetchone()
+        )
         stamp = state[0] if state else None
         status = (
             "No receipt"
@@ -289,8 +299,8 @@ def render_health(db, traffic, start, end, previous_start, now, stale_seconds=30
         parts.append(
             "<p>Missing or stale sources leave activity unknown. Counts below cover observed events only.</p>"
         )
-    currents = _cohort(db, traffic, start, end)
-    previous = _cohort(db, traffic, previous_start, start)
+    currents, current_median = _cohort(db, traffic, start, end)
+    previous, previous_median = _cohort(db, traffic, previous_start, start)
     summary = []
     searches = []
     components = []
@@ -299,10 +309,10 @@ def render_health(db, traffic, start, end, previous_start, now, stale_seconds=30
     for period, rows in (("Current", currents), ("Previous", previous)):
         left, right = (start, end) if period == "Current" else (previous_start, start)
         answers = _outcomes(rows, "answer")
-        median = _answer_latency(db, traffic, left, right)
+        median = current_median if period == "Current" else previous_median
         marks = dict(
             db.execute(
-                "select event_name,count(*) from events where traffic=? and ts>=? and ts<? and (operation,event_name) in (('answer.model','tool_round'),('answer.delivery','part_sent')) group by event_name",
+                "select name,sum(n) from health_marks where traffic=? and ts>=? and ts<? group by name",
                 (traffic, left, right),
             )
         )

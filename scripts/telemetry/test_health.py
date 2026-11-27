@@ -9,7 +9,9 @@ from tempfile import TemporaryDirectory
 import unittest
 from uuid import uuid4
 
-from health import render_health
+from contextlib import closing
+from dashboard import report_page
+from health_projection import materialize
 from resource_metrics import FIELDS, import_samples
 from store import connect, insert, iso, validate
 
@@ -77,15 +79,57 @@ class HealthTest(unittest.TestCase):
                 insert(self.db, event, service, traffic, event["ts"])
         return trace
 
-    def page(self):
-        return render_health(
-            self.db,
-            "synthetic",
-            iso(self.start),
-            iso(END),
-            iso(self.previous),
-            iso(END),
+    def page(self, end=END):
+        with closing(sqlite3.connect(":memory:")) as snapshot:
+            snapshot.row_factory = sqlite3.Row
+            materialize(self.db, snapshot, iso(END - timedelta(days=29)))
+            snapshot.execute("create table meta(key text,value text)")
+            snapshot.execute("insert into meta values('generated',?)", (iso(END),))
+
+            # The online lead route may inspect the latest source coverage.
+            # Deny every read of the raw events, resource samples or summaries.
+            def authorize(action, table, column, db, trigger):
+                if action == sqlite3.SQLITE_READ and table not in ("meta", "sources"):
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            self.db.set_authorizer(authorize)
+            try:
+                return report_page(
+                    snapshot,
+                    self.db,
+                    "local",
+                    "health",
+                    {"end": iso(end), "hours": "1", "traffic": "synthetic"},
+                    "lead",
+                    END,
+                    300,
+                )
+            finally:
+                self.db.set_authorizer(lambda *_: sqlite3.SQLITE_OK)
+
+    def test_fractional_boundary_and_spans_crossing_minutes(self):
+        stop = END - timedelta(seconds=15)
+        start = stop - timedelta(hours=1)
+        self.attempt(
+            "answer",
+            "full",
+            at=start - timedelta(milliseconds=1),
+            admitted=True,
+            ms=100,
         )
+        self.attempt("answer", "full", at=start, admitted=True, ms=70000)
+        self.attempt(
+            "answer",
+            "partial",
+            at=stop - timedelta(milliseconds=1),
+            admitted=True,
+            ms=500,
+        )
+        page = self.page(stop)
+        self.assertIn("<td>Current</td><td>2</td><td>2</td><td>1</td><td>0</td>", page)
+        self.assertIn("<td>1</td><td>70000</td>", page)
+        self.assertIn("<td>Previous</td><td>1</td><td>1</td><td>0</td>", page)
 
     def test_wireframe_reconciles_and_excludes_other_traffic_and_late_results(self):
         for _ in range(22):

@@ -1,5 +1,7 @@
 """Build an environment-scoped, read-only UI snapshot from the local collector."""
 
+from health_projection import materialize
+
 import argparse
 import fcntl
 import json
@@ -148,6 +150,7 @@ def rebuild(source, output, env, now=None):
             if span[9] is None and row[-1] and boots.get(span[5]) == row[-1]:
                 span[10] = "open"
             snap.execute("insert into spans values(?,?,?,?,?,?,?,?,?,?,?,?)", span)
+        materialize(raw, snap, cutoff)
         snap.commit()
         snap.close()
         os.replace(temporary, output)

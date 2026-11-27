@@ -232,6 +232,8 @@ def verify(work):
                     if p["trace_id"] == e["trace_id"]
                     and p["span_id"] == e["parent_span_id"]
                 ]
+                if e["service"] == "team-tracking":
+                    assert e["route"] in ("/people/by-email", "/people/{person_id}")
                 edges.append((parent["operation"], e["service"], e["result"]))
         assert {a for a, _, _ in edges} == {
             "login.check",

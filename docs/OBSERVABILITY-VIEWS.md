@@ -149,7 +149,11 @@ The authenticated environment dashboard serves answer, authorized search, catalo
 and gateway results at `/<environment>/health`. Leads see aggregates. Results in
 the service tables use route templates and operation names. Repeated fixture
 input does not add to the denominator after the collector has stored its event ID.
-The current and previous windows have equal length.
+The current and previous windows have equal length. The snapshot builder stores
+one-minute count and latency histograms, catalog job and mark summaries, and
+resource samples. For a period boundary inside a minute or an attempt that
+crosses minutes, the reader uses the projected start and terminal times. The
+health request reads the raw store only for current source collection status.
 
 A start selects an attempt into its period. A terminal observed before that
 period ends supplies the result. A missing or conflicting terminal leaves the
