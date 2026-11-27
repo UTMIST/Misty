@@ -19,7 +19,7 @@ SERVICES = sorted(set(CONTRACT["operations"]) - {"common"})
 ENVIRONMENTS = ("local", "staging", "production")
 TRAFFIC = ("synthetic", "member", "background")
 UUID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
-RETENTION = timedelta(days=30)
+RETENTION = timedelta(days=29)
 LEGACY = "misty.recording.v1"
 SHARED = "misty.telemetry.v1"
 BASE = {

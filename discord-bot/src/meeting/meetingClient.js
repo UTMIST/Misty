@@ -1,4 +1,6 @@
 import WsWebSocket from 'ws';
+import { createHttpClient } from '../clients/httpClient.js';
+import { traceHeaders } from '../telemetry.js';
 
 export class MeetingUnavailable extends Error {
   constructor(message) {
@@ -52,6 +54,8 @@ export function createMeetingClient({
   beginTrace,
   qnaTimeoutMs = 75_000,
 }) {
+  const http = createHttpClient({ baseUrl, headers: { 'X-API-Key': apiKey }, fetchImpl });
+
   function encodeFrame(speakerId, tsMs, opusBuffer) {
     const id = Buffer.from(speakerId, 'utf8');
     const head = Buffer.allocUnsafe(2);
@@ -161,9 +165,7 @@ export function createMeetingClient({
   async function getTranscript(sessionId) {
     let resp;
     try {
-      resp = await fetchImpl(`${baseUrl}/meetings/${sessionId}/transcript`, {
-        headers: { 'X-API-Key': apiKey },
-      });
+      resp = await http.send(`/meetings/${sessionId}/transcript`);
     } catch {
       throw new MeetingUnavailable('network error reaching meeting service');
     }
@@ -185,7 +187,7 @@ export function createMeetingClient({
         headers: {
           'X-API-Key': apiKey,
           'Content-Type': 'application/json',
-          ...(span && { traceparent: span.traceparent }),
+          ...(span && { ...traceHeaders(), traceparent: span.traceparent }),
         },
         ...(span && { redirect: 'error' }),
         body: JSON.stringify({ ...(title ? { title } : {}), ...(record ? { record } : {}) }),
@@ -219,9 +221,9 @@ export function createMeetingClient({
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), qnaTimeoutMs);
     try {
-      const resp = await fetchImpl(`${baseUrl}/meetings/${sessionId}/qna`, {
+      const resp = await http.send(`/meetings/${sessionId}/qna`, {
         method: 'POST',
-        headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question }),
         signal: controller.signal,
       });

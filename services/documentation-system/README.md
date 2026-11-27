@@ -455,3 +455,6 @@ state; see the [API contract](docs/API.md#meeting-records).
 
 The existing connector key additionally needs `meeting-write,meeting-fetch`.
 See [deployment and recovery](docs/DEPLOYMENT.md#meeting-record-persistence).
+
+The shared telemetry pilot is opt-in through process environment variables.
+[Producer settings and collection runbook](../../docs/OBSERVABILITY-COLLECTION.md)

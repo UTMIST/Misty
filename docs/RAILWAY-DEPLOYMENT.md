@@ -641,3 +641,9 @@ from save failures and recover after a bot restart; see the bot's
 for failed, inaccessible or unsafe-ACL records. Meeting removal uses an internal
 atomic catalog purge with restoration guards; no public generic catalog-purge
 endpoint is exposed.
+
+## Telemetry pilot
+
+The private collector reads environment logs by service UUID. Configure its
+viewer credential, checkpoints and expiry separately from the application.
+[Collection runbook](OBSERVABILITY-COLLECTION.md)

@@ -940,3 +940,6 @@ so a concurrent edit after the final check can still race with the write.
 This adds `/team update` to normal command registration; deployment's existing
 pre-deploy registration handles it. Existing `memberships:read/write` scopes
 suffice. Deploy #360's resolver before this dependent change.
+
+The shared telemetry pilot is opt-in through process environment variables.
+[Producer settings and collection runbook](../docs/OBSERVABILITY-COLLECTION.md)

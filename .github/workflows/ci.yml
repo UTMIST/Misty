@@ -296,6 +296,9 @@ jobs:
       - name: Recording operator view and incident regressions
         working-directory: .
         run: python3 -m unittest discover -s scripts/telemetry -p test_dashboard.py
+      - name: Offline telemetry collector and producer replay
+        working-directory: .
+        run: python3 -m unittest discover -s scripts/telemetry -p test_collect.py
       - name: Readiness checker regressions
         working-directory: .
         run: |
