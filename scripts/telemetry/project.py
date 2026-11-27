@@ -10,10 +10,12 @@ import os
 import sqlite3
 import subprocess
 import tempfile
-from contextlib import closing
-from datetime import datetime, timedelta, timezone
+from contextlib import closing, contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
+
+from store import RETENTION
 
 ENVIRONMENTS = ("local", "staging", "production")
 TRAFFIC = ("synthetic", "member", "background")
@@ -61,32 +63,72 @@ def percentiles(values):
     return n, median, values[math.ceil(n * 0.95) - 1] if n >= 20 else None
 
 
-def build(source, output, env, now=None):
-    output = Path(output)
+@contextmanager
+def locked_snapshot(output, env):
     directory = output.parent.stat()
     if directory.st_uid != os.getuid() or directory.st_mode & 0o077:
         raise ValueError("snapshot directory must be owner-only")
     fd = os.open(str(output) + ".lock", os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w") as lock:
-        # Serialize rebuilds before opening the read snapshot. An older run
-        # may never replace a fresher projection.
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if output.is_symlink():
+            raise ValueError("snapshot path must be a regular file")
         if output.exists():
-            if Path(source).samefile(output):
-                raise ValueError("source and snapshot must be different files")
             with closing(readonly(output, env)) as previous:
                 if not previous.execute(
                     "select value from meta where key='generated'"
                 ).fetchone():
                     raise ValueError("output must be a recording snapshot")
+        yield
+
+
+def build(source, output, env, now=None):
+    output = Path(output)
+    if output.exists() and Path(source).samefile(output):
+        raise ValueError("source and snapshot must be different files")
+    with locked_snapshot(output, env):
         rebuild(source, output, env, now)
+
+
+def prune_snapshot(output, env, now=None):
+    output = Path(output)
+    cutoff = iso((now or datetime.now(timezone.utc)) - RETENTION)
+    # Independently scheduled during collection and projection outages. Leave
+    # the generation time untouched: expiration does not restore freshness.
+    with (
+        locked_snapshot(output, env),
+        closing(
+            sqlite3.connect(
+                "file:" + quote(str(output.resolve())) + "?mode=rw",
+                uri=True,
+                timeout=10,
+            )
+        ) as db,
+    ):
+        db.execute("pragma secure_delete=on")
+        tables = {
+            r[0]
+            for r in db.execute("select name from sqlite_master where type='table'")
+        }
+        for table, stamp in (
+            ("attempts", "cohort"),
+            ("spans", "start"),
+            ("health_runs", "started"),
+            ("health_minutes", "minute"),
+            ("health_jobs", "ts"),
+            ("health_marks", "ts"),
+            ("health_resources", "observed_at"),
+        ):
+            if table in tables:
+                db.execute(f"delete from {table} where {stamp} < ?", (cutoff,))
+        db.commit()
 
 
 def rebuild(source, output, env, now=None):
     if Path(source).resolve() == Path(output).resolve():
         raise ValueError("source and snapshot must be different files")
     now = now or datetime.now(timezone.utc)
-    cutoff = iso(now - timedelta(days=30))
+    cutoff = iso(now - RETENTION)
     raw = sqlite3.connect("")
     raw.row_factory = sqlite3.Row
     try:
@@ -242,8 +284,17 @@ def project_recordings(raw, snap, traffic, cutoff, bot_boot):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--db", required=True)
+    choice = p.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--db", help="build from the private collector store")
+    choice.add_argument(
+        "--prune",
+        action="store_true",
+        help="expire old snapshot rows even when collection is offline",
+    )
     p.add_argument("--snapshot", required=True)
     p.add_argument("--environment", choices=ENVIRONMENTS, required=True)
     a = p.parse_args()
-    build(a.db, a.snapshot, a.environment)
+    if a.prune:
+        prune_snapshot(a.snapshot, a.environment)
+    else:
+        build(a.db, a.snapshot, a.environment)

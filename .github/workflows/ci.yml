@@ -293,15 +293,9 @@ jobs:
         run: npm ci
       - name: Run tests
         run: npm test
-      - name: Recording operator view and incident regressions
+      - name: Offline telemetry collector, replay and operator regressions
         working-directory: .
-        run: python3 -m unittest discover -s scripts/telemetry -p test_dashboard.py
-      - name: Workflow health projections and resource import
-        working-directory: .
-        run: python3 -m unittest discover -s scripts/telemetry -p test_health.py
-      - name: Offline telemetry collector and producer replay
-        working-directory: .
-        run: python3 -m unittest discover -s scripts/telemetry -p test_collect.py
+        run: python3 -m unittest discover -s scripts/telemetry -p 'test_*.py'
       - name: Readiness checker regressions
         working-directory: .
         run: |

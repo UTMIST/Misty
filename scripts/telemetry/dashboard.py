@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+from store import RETENTION
 from project import ENVIRONMENTS, TRAFFIC, iso, parsed, percentiles, readonly
 
 RUNBOOK = "https://github.com/UTMIST/Misty/blob/staging/docs/RECORDING-TELEMETRY.md"
@@ -96,11 +97,13 @@ def report_page(db, raw, env, view, params, role, now, stale):
         traffic not in TRAFFIC
         or hours not in (1, 6, 24, 168)
         or end > now + timedelta(minutes=1)
-        or end < now - timedelta(days=30) + timedelta(hours=hours * 2)
+        or end <= now - RETENTION
     ):
         raise ValueError("invalid period or traffic")
-    start = end - timedelta(hours=hours)
-    previous = start - timedelta(hours=hours)
+    retention_floor = now - RETENTION
+    previous_full = end - timedelta(hours=2 * hours)
+    start = max(end - timedelta(hours=hours), retention_floor)
+    previous = max(previous_full, retention_floor)
     q = {"traffic": traffic, "hours": hours, "end": iso(end)}
     base = "/" + env + "/"
     flags = sources(raw, now, stale)
@@ -154,6 +157,8 @@ def report_page(db, raw, env, view, params, role, now, stale):
         + filters
         + info
     )
+    if previous_full < retention_floor:
+        body += '<p class="note">The retention cutoff limits the selected or comparison window. Earlier activity is unknown.</p>'
     if aged:
         body += '<p class="note">Snapshot stale. Values below are the last observations.</p>'
     if view == "overview":
@@ -295,7 +300,7 @@ def report_page(db, raw, env, view, params, role, now, stale):
             raise LookupError
         row = db.execute(
             "select * from attempts where trace_id=? and traffic=? and cohort>=? and cohort<?",
-            (trace, traffic, iso(max(start, now - timedelta(days=30))), iso(end)),
+            (trace, traffic, iso(max(start, retention_floor)), iso(end)),
         ).fetchone()
         if not row:
             raise LookupError
@@ -333,9 +338,9 @@ def report_page(db, raw, env, view, params, role, now, stale):
               order by ts,event_id limit 501""",
             (
                 trace,
-                iso(now - timedelta(days=30)),
+                iso(retention_floor),
                 traffic,
-                iso(now - timedelta(days=30)),
+                iso(retention_floor),
                 traffic,
             ),
         ).fetchall()

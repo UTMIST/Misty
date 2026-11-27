@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { runRecordAction } from '../src/adapters/discord/recording.js';
 import { createMeetingSurface } from '../src/meeting/meetingSurface.js';
 import { createMeetingClient } from '../src/meeting/meetingClient.js';
 import { createMeetingDelivery } from '../src/meeting/meetingDelivery.js';
@@ -237,3 +238,48 @@ for (const scenario of [
     assert.ok(!lines.join('').includes(meetingId));
   });
 }
+
+test('denied recording start never enters capture and a failed transport start has a terminal report', async () => {
+  const lines = [];
+  const beginTrace = createStopTracer({
+    write(line, done) {
+      lines.push(line);
+      done();
+    },
+  });
+  let admitted = false;
+  const meetingSurface = createMeetingSurface({
+    beginTrace,
+    meetingClient: {
+      openStream() {
+        throw Error('fixture unavailable');
+      },
+    },
+  });
+  const request = {
+    subcommand: 'start',
+    guildId: 'fixture',
+    requesterId: 'fixture',
+    voiceChannel: { id: 'fixture' },
+    textChannel: {},
+  };
+  const appContext = {
+    meetingSurface,
+    directory: { getPersonByDiscordId: async () => (admitted ? { active: true } : null) },
+  };
+  const command = { auth: 'linked', subcommands: [{ name: 'start' }] };
+  const denied = await runRecordAction(request, appContext, command);
+  assert.ok(denied.ephemeral);
+  assert.deepEqual(lines, []);
+  admitted = true;
+  await assert.rejects(
+    runRecordAction({ ...request, propagateErrors: true }, appContext, command),
+    /Recording start failed/,
+  );
+  const records = lines.map(JSON.parse);
+  assert.deepEqual(
+    records.map((r) => r.event_name),
+    ['record.saved_requested', 'capture.start_failed'],
+  );
+  assert.equal(replay(lines, records[0].trace_id).outcome, 'observed_error');
+});
