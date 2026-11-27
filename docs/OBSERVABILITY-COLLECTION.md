@@ -58,7 +58,8 @@ python3 scripts/telemetry/collect.py railway \
 Schedule a poll for each participating service at least once a minute. A poll
 covers up to 60 seconds, ending five seconds behind wall time, with five seconds
 of overlap. Poll more frequently to catch up after downtime. The first poll starts
-one window before its target end. Supply an explicit historical `--until` to
+one window before its target end. The store pins that starting position before
+reading so that restarting or reducing the window retries the same unread time. Supply an explicit historical `--until` to
 choose an earlier starting location. Supply `--available-since` from the
 provider's actual retention window. If coverage expired, the reader advances from
 the earliest available time and records the gap. Without a supplied provider floor,
