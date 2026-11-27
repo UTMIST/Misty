@@ -138,3 +138,24 @@ See the [platform rollout](../../../docs/RAILWAY-DEPLOYMENT.md#meeting-record-pe
 Google's [upload/conversion guide](https://developers.google.com/workspace/drive/api/guides/manage-uploads)
 and [permission inheritance guide](https://developers.google.com/workspace/drive/api/guides/manage-sharing)
 explain the two boundaries enforced here.
+
+## Gmail forwarding mailbox setup
+
+Use a dedicated Google Workspace mailbox per environment (`misty@utmist.ca` in
+production and `misty-staging@utmist.ca` in staging — never share one mailbox
+or `+` subaddressing across environments), with its own OAuth refresh token
+granted `https://www.googleapis.com/auth/gmail.readonly` and
+`https://www.googleapis.com/auth/gmail.send`. Enable the **Gmail API** on the
+Google Cloud project and set `GOOGLE_GMAIL_ADDRESS`,
+`GOOGLE_GMAIL_OAUTH_CLIENT_ID`, `GOOGLE_GMAIL_OAUTH_CLIENT_SECRET`, and
+`GOOGLE_GMAIL_OAUTH_REFRESH_TOKEN` (all three OAuth values are `SecretStr`).
+Leaving all four empty is a supported running state (`/google/gmail/*` returns
+`503 gmail_not_configured`); partial configuration fails `verify_production_secrets()`
+at boot outside `local`.
+
+Before live acceptance, verify in Google Workspace Admin (*Apps → Google
+Workspace → Gmail → Authenticate email*) that custom-domain DKIM (`d=utmist.ca`)
+and a `_dmarc.utmist.ca` TXT record are active so internal `@utmist.ca` forwards
+do not fall back to unaligned `*.gappssmtp.com` signing keys. Grant
+`email-read,email-send` to `documentation-system`'s connectors consumer key in
+`CONSUMER_KEYS` when enabling forwarded-email polling.

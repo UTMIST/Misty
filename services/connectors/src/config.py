@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     google_oauth_refresh_token: SecretStr = SecretStr("")
     google_meeting_root_folder_id: str = ""
     google_meeting_admin_emails: list[str] = []
+    # Optional dedicated Gmail forwarding mailbox (separate Workspace user OAuth
+    # with gmail.readonly and gmail.send; isolated from the Drive meeting writer).
+    google_gmail_address: str = ""
+    google_gmail_oauth_client_id: SecretStr = SecretStr("")
+    google_gmail_oauth_client_secret: SecretStr = SecretStr("")
+    google_gmail_oauth_refresh_token: SecretStr = SecretStr("")
+    max_email_bytes: int = Field(default=5 * 1024 * 1024, gt=0)
+    max_email_text_chars: int = Field(default=500_000, gt=0, le=1_200_000)
     # Optional GitHub token (a fine-grained, read-only PAT). Empty is valid:
     # public repositories are fetched unauthenticated, so this is never part
     # of verify_production_secrets. SecretStr for the same reason as
@@ -90,6 +98,18 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
     }
     if any(writer_fields.values()):
         insecure.extend(name for name, value in writer_fields.items() if not value)
+    gmail_fields = {
+        "GOOGLE_GMAIL_ADDRESS": settings.google_gmail_address.strip(),
+        "GOOGLE_GMAIL_OAUTH_CLIENT_ID": settings.google_gmail_oauth_client_id.get_secret_value(),
+        "GOOGLE_GMAIL_OAUTH_CLIENT_SECRET": (
+            settings.google_gmail_oauth_client_secret.get_secret_value()
+        ),
+        "GOOGLE_GMAIL_OAUTH_REFRESH_TOKEN": (
+            settings.google_gmail_oauth_refresh_token.get_secret_value()
+        ),
+    }
+    if any(gmail_fields.values()):
+        insecure.extend(name for name, value in gmail_fields.items() if not value)
     if insecure:
         raise RuntimeError(
             f"Refusing to start in connectors_env={settings.connectors_env!r}: "

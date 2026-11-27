@@ -204,3 +204,23 @@ in-memory HTML upload converted in the same Drive create operation; no empty Doc
 is published and retries never replace a human-edited body. See the
 [durable record architecture](../../../docs/MEETING-RECORDING.md#durable-records)
 and [writer API](API.md#meeting-writer-googledocs).
+
+## Gmail forwarding mailbox
+
+`contracts/gmail.py` defines the `GmailMailbox` Protocol; `src/sources/gmail_google.py`
+owns the Google Gmail client and MIME/RFC 8601 parsing, wired in `src/api/deps.py`
+with its own Workspace user OAuth credentials (`gmail.readonly` and `gmail.send`)
+so mailbox access stays isolated from both the read-only Drive service account
+and the `drive.file` meeting writer. Each request builds a fresh `httplib2`
+transport and executes with `num_retries=0`, surfacing `GmailError(code, uncertain)`.
+
+Like `/fetch`, connectors is **not** the directory authorization boundary here:
+it verifies transport-level mail authentication from `mx.google.com` (checking
+only the topmost `Authentication-Results` header to block pre-injected headers,
+requiring a single defect-free RFC 5322 `From:` mailbox, and enforcing loop and
+`MAX_EMAIL_BYTES` metadata prechecks before downloading raw MIME) and separates
+the forwarder's note from quoted `untrusted_claimed_headers`. `documentation-system`
+resolves whether that authenticated address belongs to an active Misty member,
+owns deduplication and outbound rate limits, and reconciles `uncertain: true`
+reply outcomes via `/google/gmail/receipt-check` (`X-Misty-Receipt-ID` on the
+Gmail thread) before retrying a send.

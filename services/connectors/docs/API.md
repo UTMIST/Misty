@@ -9,6 +9,7 @@ Business endpoints require `X-API-Key`. `/health` and the API documentation/sche
 | POST | `/discover/google` | `discover` | List one metadata page of direct shares or folder children |
 | POST | `/fetch` | `fetch` | Fetch a document's text content from a source |
 | POST / PUT / GET / DELETE | `/google/docs` route group | `meeting-write` / `meeting-fetch` | Meeting-Doc operations; see [per-route scopes](#meeting-writer-googledocs) |
+| POST | `/google/gmail` route group | `email-read` / `email-send` | Forwarded-email inbox inspection and threaded receipts; see [Gmail forwarding mailbox](#gmail-forwarding-mailbox-googlegmail) |
 | GET | `/health` | — | Liveness probe |
 
 ## Authentication
@@ -272,3 +273,62 @@ Drive 404 cannot prove deletion, even for the writer: status returns
 `inaccessible`, preserving catalog content for admin investigation. A trashed
 file is positively identified; cleanup permanently deletes it. An unconfirmed
 404 during deletion returns `delete_unconfirmed`, keeping cleanup pending.
+
+## Gmail forwarding mailbox (`/google/gmail`)
+
+All inputs forbid extra fields and hide submitted values in validation errors.
+Callers do not select the mailbox address or sender: configuration binds one
+dedicated Workspace mailbox (`GOOGLE_GMAIL_ADDRESS`) and the authenticated key
+attests the calling service.
+
+| Method/path | Scope | Request / result |
+|---|---|---|
+| `POST /google/gmail/messages/list` | `email-read` | `{after_epoch_s?, page_token?, page_size=50}` → `{mailbox_address, messages: [{message_id, thread_id}], next_page_token}` |
+| `POST /google/gmail/messages/{id}` | `email-read` | Inspect metadata and (when eligible) raw MIME → `GmailInspectResult` |
+| `POST /google/gmail/reply` | `email-send` | `{thread_id, to_email, subject, body_text, in_reply_to?, receipt_id}` → `{sent_message_id, thread_id}` |
+| `POST /google/gmail/receipt-check` | `email-read` | `{thread_id, receipt_id}` → `{sent, sent_message_id?}` |
+
+### Inbound inspection and anti-spoofing
+
+`messages/list` queries `INBOX` only (`includeSpamTrash=false`, excluding
+`chats`, `drafts`, and `sent`). `messages/{id}` fetches metadata first and
+evaluates four gates before downloading raw MIME bytes:
+
+1. **Inbox-only check:** messages missing `INBOX` or carrying `SPAM`, `TRASH`,
+   `SENT`, or `DRAFT` return `classification: "ignored_non_inbox"`.
+2. **Loop and auto-reply guard:** messages from `GOOGLE_GMAIL_ADDRESS`, null
+   bounces (`Return-Path: <>`), `Auto-Submitted` (`!= "no"`),
+   `Precedence: bulk|list|junk|auto_reply`, `X-Autoreply`, `X-Autorespond`,
+   `List-Id`, or `List-Unsubscribe` return `classification: "ignored_loop"`.
+3. **Single `From:` + `mx.google.com` authentication:** requires exactly one
+   defect-free RFC 5322 `From:` mailbox (re-verified on the raw MIME message)
+   and inspects **only the topmost** `Authentication-Results` header, requiring
+   `authserv-id == "mx.google.com"` and either `dmarc=pass` aligned with the
+   `From:` domain (`auth_mechanism: "dmarc_pass"`) or `dmarc=none` with an
+   organizationally aligned `dkim=pass` and no SPF/DKIM failure
+   (`auth_mechanism: "dkim_aligned_no_dmarc"`). `Resent-From` and
+   `X-Forwarded-*` are never used as sender identity. Failures return
+   `classification: "rejected_unauthenticated"` with `verified_sender_email: null`.
+4. **Size precheck and raw byte cap (`MAX_EMAIL_BYTES`, default 5 MiB):**
+   oversized authenticated messages return `classification: "rejected_oversize"`
+   (retaining `verified_sender_email`, `subject`, and `outer_message_id` for a
+   single caller-controlled rejection notice) without parsing oversized MIME.
+
+Eligible messages (`classification: "accepted_candidate"`) extract plain text
+(falling back to local HTML-to-text conversion with no external network fetches,
+clamped at `MAX_EMAIL_TEXT_CHARS`, default 500,000 chars), count omitted
+attachments without extracting them, and split the forwarder's top note from
+quoted correspondence and `untrusted_claimed_headers`.
+
+### Threaded receipts and error contract
+
+`POST /google/gmail/reply` sends plain text from `GOOGLE_GMAIL_ADDRESS` with
+`Auto-Submitted: auto-replied`, `X-Auto-Response-Suppress: All`, and
+`X-Misty-Receipt-ID: <receipt_id>`, rejecting CRLF/NUL header injection and
+self-replies (`422`). Upstream calls use `num_retries=0` and return content-free
+`detail: {code, uncertain}` errors (`503` unconfigured, `404` missing message or
+thread, `422` invalid reply header/recipient, `502` ambiguous upstream failure
+with `uncertain: true`, `409` definite upstream refusal). After an uncertain
+send, callers must check `POST /google/gmail/receipt-check` before retrying.
+Audit logs record only message counts, classification codes, or boolean receipt
+presence — never addresses, subjects, headers, or message bodies.

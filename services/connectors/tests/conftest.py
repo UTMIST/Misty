@@ -35,7 +35,11 @@ def _clear_settings_cache(_no_dotenv):
     get_settings.cache_clear()
     deps._key_store.cache_clear()
     deps._source_registry.cache_clear()
+    deps.get_meeting_writer.cache_clear()
+    deps.get_gmail_mailbox.cache_clear()
     yield
     get_settings.cache_clear()
     deps._key_store.cache_clear()
     deps._source_registry.cache_clear()
+    deps.get_meeting_writer.cache_clear()
+    deps.get_gmail_mailbox.cache_clear()
