@@ -37,7 +37,7 @@ def test_ranks_distinct_filtered_terms_with_overlap_casefold_and_ties():
 
 
 def test_numeric_only_unicode_and_ordinals_are_filtered():
-    text = "Ⅷ Ⅷ １２ 1,234th 2ND ² 12.45 20-30 Scene3"
+    text = "Ⅷ Ⅷ ½ ½ １２ 1,234th 2ND ² 12.45 20-30 Scene3"
     snapshot = _rank([VocabularyChunk(UUID(int=1), 0, 0, len(text), text)])
     assert [(c.key, c.count) for c in snapshot.candidates] == [("scene3", 1)]
 

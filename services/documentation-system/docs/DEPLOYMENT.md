@@ -915,13 +915,25 @@ whole terms that the dictionaries would remove. Files have one term per line
 and may contain blank lines and full-line `#` comments. The job records hashes
 of the effective lists and the ranking rule version.
 
-After verifying the first restricted report, configure one dedicated staging
-Railway service using the repo root and
-`/services/documentation-system/railway.vocabulary.json`. It runs Mondays at
-07:00 UTC. Use the same database and served model as the staging catalog, and
-let the catalog service own migrations. No provider keys, public domain, or
-extra volume is required. The config leaves scheduling disabled outside staging, including PR previews
-that inherit from staging.
+After migration 019 is deployed and the first restricted report is verified,
+create one dedicated staging service in the Railway dashboard. Use repository
+`UTMIST/Misty`, branch `staging`, the repository root as build context, and
+`services/documentation-system/Dockerfile`. Set one replica, no HTTP healthcheck,
+no pre-deploy command, and no automatic restart. Use the same database and served
+model as the staging catalog. The catalog service owns migrations. No provider
+keys, public domain, or extra volume is required.
+
+Use this start command. It checks Railway's environment name before touching
+the database, even if the worker is copied into a PR preview.
+
+```sh
+sh -c 'if [ "${RAILWAY_ENVIRONMENT_NAME:-}" = staging ]; then exec doc-vocabulary; fi'
+```
+
+Set the staging cron to Mondays at 07:00 UTC (`0 7 * * 1`). Verify the deployed
+revision, start command, and schedule. Pause the cron to disable the job.
+See [Railway cron jobs](https://docs.railway.com/cron-jobs)
+and [provided variables](https://docs.railway.com/variables/reference).
 
 Monitor the command's exit status and aggregate completion counts, and check for a
 successful row each week. A duplicate trigger in the same UTC week exits
