@@ -1,4 +1,6 @@
 import WsWebSocket from 'ws';
+import { createHttpClient } from '../clients/httpClient.js';
+import { traceHeaders } from '../telemetry.js';
 
 export class MeetingUnavailable extends Error {
   constructor(message) {
@@ -49,8 +51,11 @@ export function createMeetingClient({
   apiKey,
   WebSocketImpl = WsWebSocket,
   fetchImpl = fetch,
+  beginTrace,
   qnaTimeoutMs = 75_000,
 }) {
+  const http = createHttpClient({ baseUrl, headers: { 'X-API-Key': apiKey }, fetchImpl });
+
   function encodeFrame(speakerId, tsMs, opusBuffer) {
     const id = Buffer.from(speakerId, 'utf8');
     const head = Buffer.allocUnsafe(2);
@@ -160,9 +165,7 @@ export function createMeetingClient({
   async function getTranscript(sessionId) {
     let resp;
     try {
-      resp = await fetchImpl(`${baseUrl}/meetings/${sessionId}/transcript`, {
-        headers: { 'X-API-Key': apiKey },
-      });
+      resp = await http.send(`/meetings/${sessionId}/transcript`);
     } catch {
       throw new MeetingUnavailable('network error reaching meeting service');
     }
@@ -174,21 +177,42 @@ export function createMeetingClient({
     }
   }
 
-  async function stop(sessionId, { title, record } = {}) {
+  async function stop(sessionId, { title, record } = {}, parent) {
+    const span = parent?.child() ?? beginTrace?.();
+    span?.mark('stop.request');
     let resp;
     try {
       resp = await fetchImpl(`${baseUrl}/meetings/${sessionId}/stop`, {
         method: 'POST',
-        headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+        headers: {
+          'X-API-Key': apiKey,
+          'Content-Type': 'application/json',
+          ...(span && { ...traceHeaders(), traceparent: span.traceparent }),
+        },
+        ...(span && { redirect: 'error' }),
         body: JSON.stringify({ ...(title ? { title } : {}), ...(record ? { record } : {}) }),
       });
     } catch {
+      span?.mark('stop.error');
       throw new MeetingUnavailable('network error reaching meeting service');
     }
-    if (!resp.ok) throw new MeetingUnavailable(`meeting service returned ${resp.status}`);
+    if (!resp.ok) {
+      span?.mark('stop.error');
+      throw new MeetingUnavailable(`meeting service returned ${resp.status}`);
+    }
     try {
-      return await resp.json();
+      const report = await resp.json();
+      if (span) {
+        const drain = report?.audio_drain;
+        const observed = ['confirmed', 'timed_out', 'disconnected'].includes(drain)
+          ? drain
+          : 'unknown';
+        span.mark(`stop.drain_${observed}`);
+        span.mark('stop.response');
+      }
+      return report;
     } catch {
+      span?.mark('stop.error');
       throw new MeetingUnavailable('malformed meeting service response');
     }
   }
@@ -197,9 +221,9 @@ export function createMeetingClient({
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), qnaTimeoutMs);
     try {
-      const resp = await fetchImpl(`${baseUrl}/meetings/${sessionId}/qna`, {
+      const resp = await http.send(`/meetings/${sessionId}/qna`, {
         method: 'POST',
-        headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question }),
         signal: controller.signal,
       });

@@ -91,7 +91,16 @@ import re
 import secrets
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from platform_auth.telemetry import active_span
 from platform_auth import ADMIN_SCOPE, parse_prefix, verify_key
 
 from src.api.auth import require_scope
@@ -264,10 +273,26 @@ async def ask_meeting(
 @router.post("/meetings/{session_id}/stop", response_model=StopResponse)
 async def stop_meeting(
     session_id: str,
+    http_request: Request,
     request: StopRequest | None = None,
     _key=Depends(require_scope(MEETINGS_SCOPE)),
     registry: SessionRegistry = Depends(get_session_registry),
 ) -> StopResponse:
+    # Auth and scope checks have succeeded. Only accept the pilot's W3C v00
+    # context. Never copy the header itself into logs or downstream requests.
+    parents = http_request.headers.getlist("traceparent")
+    if len(parents) == 1:
+        parent = re.fullmatch(r"00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}", parents[0])
+        if parent and int(parent[1], 16) and int(parent[2], 16):
+            observed = active_span()
+            http_request.state.audit_extra = {
+                "trace_id": parent[1],
+                "parent_span_id": parent[2],
+                "span_id": observed.ids["span_id"]
+                if observed and observed.traceparent
+                else secrets.token_hex(8),
+                "operation": "meeting.stop",
+            }
     if not _valid_session_id(session_id):
         raise HTTPException(status_code=400, detail="invalid session_id")
     session = registry.get(session_id)
@@ -281,10 +306,14 @@ async def stop_meeting(
         if request.record.guild_id != session.guild_id:
             raise HTTPException(422, "record guild does not match session")
         try:
-            return await session.stop(request.title, request.record)
+            report = await session.stop(request.title, request.record)
         except ValueError:
             raise HTTPException(422, "invalid record context") from None
-    return await session.stop(request.title if request else None)
+    else:
+        report = await session.stop(request.title if request else None)
+    if getattr(http_request.state, "audit_extra", None):
+        http_request.state.audit_extra["audio_drain"] = report.audio_drain
+    return report
 
 
 @router.websocket("/meetings/{session_id}/stream")
@@ -356,7 +385,7 @@ async def stream_meeting(
                     control = json.loads(text)
                 except (ValueError, TypeError):
                     continue
-                if isinstance(control, dict) and control.get("end_of_audio"):
+                if isinstance(control, dict) and control.get("end_of_audio") is True:
                     # The bot has stopped recording and sent everything it has.
                     # The socket delivers in order, so reaching this frame means
                     # every audio frame before it has already been fed -- which
@@ -408,7 +437,7 @@ async def stream_meeting(
             # turns stop()'s end-of-audio barrier into an immediate pass
             # instead of a 5s wait plus a "no end-of-audio signal" warning.
             try:
-                session.mark_audio_complete()
+                session.mark_audio_complete(disconnected=True)
             except Exception as e:  # noqa: BLE001 - log, don't crash teardown
                 _logger.warning("mark_audio_complete failed for %s: %s", session_id, e)
             _schedule_disconnect_teardown(registry, session, session_id)
