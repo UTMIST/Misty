@@ -1,4 +1,5 @@
 import httpx
+from platform_auth.telemetry import internal_request
 
 from contracts.embedder import (
     RESOLVED_EMBED_MODELS,
@@ -87,7 +88,8 @@ class HttpEmbedder:
 
     def _embed_batch(self, batch: list[str]) -> list[tuple[float, ...]]:
         try:
-            resp = self._client.post(
+            resp = internal_request(
+                self._client.post,
                 f"{self._base_url}/embed",
                 json={"inputs": batch, "model": self._alias},
                 headers={"X-API-Key": self._api_key},
