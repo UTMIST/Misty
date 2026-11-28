@@ -37,7 +37,7 @@ _TECHNICAL = [
 _TOKEN = regex.compile(
     r"[\p{L}\p{N}][\p{L}\p{N}\p{M}]*(?:(?:[-'’]|(?<=\d)[.,](?=\d))[\p{L}\p{N}][\p{L}\p{N}\p{M}]*)*"
 )
-_NUMBER = regex.compile(r"\p{N}+(?:[.,-]\p{N}+)*(?:st|nd|rd|th)?")
+_NUMBER = regex.compile(r"(?:\p{N}\p{M}*)+(?:[.,'’-](?:\p{N}\p{M}*)+)*(?:st|nd|rd|th)?")
 # Prevent an unbroken ID or encoded blob spanning chunks from becoming a term.
 _MAX_TERM_CHARS = 256
 _RULE_VERSION = "1"
