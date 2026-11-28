@@ -15,6 +15,12 @@
         "startCommand": "doc-vocabulary",
         "cronSchedule": "0 7 * * 1"
       }
+    },
+    "pr": {
+      "deploy": {
+        "startCommand": "python -c \"print('Vocabulary ranking disabled in PR previews')\"",
+        "cronSchedule": null
+      }
     }
   }
 }

@@ -36,6 +36,12 @@ def test_ranks_distinct_filtered_terms_with_overlap_casefold_and_ties():
     assert _rank(rows, {"gnn", "eigenai"}).snapshot_id == snapshot.snapshot_id
 
 
+def test_numeric_only_unicode_and_ordinals_are_filtered():
+    text = "Ⅷ Ⅷ １２ 1,234th 2ND ² 12.45 20-30 Scene3"
+    snapshot = _rank([VocabularyChunk(UUID(int=1), 0, 0, len(text), text)])
+    assert [(c.key, c.count) for c in snapshot.candidates] == [("scene3", 1)]
+
+
 def test_offsets_join_adjacent_chunks_but_not_across_gaps_or_documents():
     one, two = UUID(int=1), UUID(int=2)
     rows = [

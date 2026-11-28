@@ -14,6 +14,7 @@ from pathlib import Path
 import regex
 from sqlalchemy.exc import SQLAlchemyError
 
+from contracts.embedder import RESOLVED_EMBED_MODELS
 from contracts.vocabulary import (
     VocabularyCandidate,
     VocabularyChunk,
@@ -23,11 +24,6 @@ from contracts.vocabulary import (
 from src.api.deps import get_storage
 from src.config import get_settings
 
-# Catalog rows store the provider's resolved name, not the configuration alias.
-_MODELS = {
-    "openai-embed-3-small": "text-embedding-3-small",
-    "openai-embed-3-large": "text-embedding-3-large",
-}
 _ENGLISH = [
     Path(f"/usr/share/dict/{locale}-english-large")
     for locale in ("american", "british", "canadian")
@@ -100,8 +96,14 @@ def rank_snapshot(
             for match in _TOKEN.finditer(text):
                 spelling = match[0]
                 key = _key(spelling)
-                if key not in excluded and not _NUMBER.fullmatch(key):
-                    forms[key][spelling] += 1
+                # NFKC can turn numeric characters such as Ⅷ into letters.
+                if (
+                    key in excluded
+                    or _NUMBER.fullmatch(key)
+                    or _NUMBER.fullmatch(spelling.casefold())
+                ):
+                    continue
+                forms[key][spelling] += 1
 
     counts = {key: sum(spellings.values()) for key, spellings in forms.items()}
     top = sorted(counts, key=lambda key: (-counts[key], key))[: (len(counts) + 4) // 5]
@@ -153,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         snapshot = get_storage().record_vocabulary_week(
-            week, _MODELS[get_settings().search_embed_model], build
+            week, RESOLVED_EMBED_MODELS[get_settings().search_embed_model], build
         )
     except VocabularyRunBusy:
         print(f"vocabulary week={week} status=busy")

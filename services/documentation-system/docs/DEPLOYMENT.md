@@ -920,7 +920,8 @@ Railway service using the repo root and
 `/services/documentation-system/railway.vocabulary.json`. It runs Mondays at
 07:00 UTC. Use the same database and served model as the staging catalog, and
 let the catalog service own migrations. No provider keys, public domain, or
-extra volume is required. The config leaves scheduling disabled outside staging.
+extra volume is required. The config leaves scheduling disabled outside staging, including PR previews
+that inherit from staging.
 
 Monitor the command's exit status and aggregate completion counts, and check for a
 successful row each week. A duplicate trigger in the same UTC week exits
