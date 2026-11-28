@@ -95,6 +95,8 @@ class EmailSubmissions:
         *,
         limit: int = 25,
         max_pages: int = 5,
+        page_token: str | None = None,
+        advance_watermark: bool = True,
         actor: str,
         disconnected=None,
     ) -> EmailPollResult:
@@ -111,7 +113,13 @@ class EmailSubmissions:
         if watermark is not None:
             after_dt = watermark - timedelta(hours=self.settings.email_watermark_overlap_hours)
         else:
-            after_dt = now - timedelta(hours=self.settings.email_initial_lookback_hours)
+            # Persist the first scan's lower bound before processing so a deferred
+            # message on poll #1 stays inside the window even if recovery takes >24h.
+            initial_bound = now - timedelta(hours=self.settings.email_initial_lookback_hours)
+            if expected_mb:
+                self.storage.set_email_inbox_watermark(expected_mb, initial_bound, actor=actor)
+                watermark = initial_bound
+            after_dt = initial_bound
         after_epoch = max(0, int(after_dt.timestamp()))
 
         counts: dict[str, int] = {
@@ -132,8 +140,9 @@ class EmailSubmissions:
             "expired_cleaned": cleaned,
         }
 
-        page_token: str | None = None
-        seen_tokens: set[str] = set()
+        cursor_token: str | None = page_token
+        seen_tokens: set[str] = {page_token} if page_token is not None else set()
+        resume_token: str | None = None
         inspected_unseen = 0
         pages = 0
         hit_budget = False
@@ -142,10 +151,12 @@ class EmailSubmissions:
         while pages < max_pages and inspected_unseen < limit:
             if disconnected and disconnected():
                 hit_budget = True
+                resume_token = cursor_token
                 break
+            current_page_token = cursor_token
             page = self.gmail.list_messages(
                 after_epoch_s=after_epoch,
-                page_token=page_token,
+                page_token=current_page_token,
                 page_size=min(100, max(10, limit)),
             )
             pages += 1
@@ -155,41 +166,50 @@ class EmailSubmissions:
             if active_mailbox is None:
                 active_mailbox = mailbox
                 existing_wm = self.storage.get_email_inbox_watermark(mailbox)
-                if existing_wm is not None and watermark is None:
+                if existing_wm is not None:
                     watermark = existing_wm
+                else:
+                    self.storage.set_email_inbox_watermark(mailbox, after_dt, actor=actor)
+                    watermark = after_dt
 
             counts["listed"] += len(page.messages)
+            stopped_mid_page = False
             for ref in page.messages:
-                if inspected_unseen >= limit:
+                if inspected_unseen >= limit or (disconnected and disconnected()):
                     hit_budget = True
-                    break
-                if disconnected and disconnected():
-                    hit_budget = True
+                    stopped_mid_page = True
                     break
                 if self.storage.is_email_message_processed(mailbox, ref.message_id):
                     continue
                 inspected_unseen += 1
                 self._process_one(mailbox, ref.message_id, counts=counts, actor=actor)
 
-            if hit_budget or page.next_page_token is None:
-                if page.next_page_token is not None:
-                    hit_budget = True
+            if stopped_mid_page:
+                resume_token = current_page_token
+                break
+            if page.next_page_token is None:
+                resume_token = None
                 break
             if page.next_page_token in seen_tokens:
                 raise GmailError("gmail_repeated_page_token")
             seen_tokens.add(page.next_page_token)
-            page_token = page.next_page_token
-        else:
-            hit_budget = True
+            cursor_token = page.next_page_token
+            if pages >= max_pages or inspected_unseen >= limit:
+                hit_budget = True
+                resume_token = cursor_token
+                break
 
         all_clean = (
-            not hit_budget and counts["directory_deferred"] == 0 and counts["inspect_failed"] == 0
+            not hit_budget
+            and resume_token is None
+            and counts["directory_deferred"] == 0
+            and counts["inspect_failed"] == 0
         )
-        if all_clean and active_mailbox is not None:
+        if all_clean and advance_watermark and active_mailbox is not None:
             self.storage.set_email_inbox_watermark(active_mailbox, now, actor=actor)
 
         self.retry_due_notifications(limit=limit, actor=actor, counts=counts)
-        return EmailPollResult(**counts, complete=all_clean)
+        return EmailPollResult(**counts, complete=all_clean, next_page_token=resume_token)
 
     def _process_one(
         self,
@@ -439,7 +459,7 @@ class EmailSubmissions:
                     sub,
                     {
                         status_f: "uncertain",
-                        "last_error": exc.code,
+                        "notification_last_error": exc.code,
                         "next_attempt_at": backoff,
                     },
                     actor=actor,
@@ -455,7 +475,7 @@ class EmailSubmissions:
                         sent_at_f: now,
                         msg_id_f: found_id,
                         lease_f: None,
-                        "last_error": None,
+                        "notification_last_error": None,
                         "next_attempt_at": self._remaining_due(sub, finished_kind=kind, now=now),
                     },
                     actor=actor,
@@ -544,7 +564,7 @@ class EmailSubmissions:
                     {
                         status_f: "uncertain",
                         lease_f: None,
-                        "last_error": exc.code,
+                        "notification_last_error": exc.code,
                         "next_attempt_at": backoff,
                     },
                     actor=actor,
@@ -560,7 +580,7 @@ class EmailSubmissions:
                     status_f: "failed" if exhausted else "pending",
                     attempt_id_f: None,
                     lease_f: None,
-                    "last_error": exc.code,
+                    "notification_last_error": exc.code,
                     "next_attempt_at": (
                         self._remaining_due(leased, finished_kind=kind, now=now)
                         if exhausted
@@ -581,7 +601,7 @@ class EmailSubmissions:
                 sent_at_f: now,
                 msg_id_f: sent_id,
                 lease_f: None,
-                "last_error": None,
+                "notification_last_error": None,
                 "next_attempt_at": self._remaining_due(leased, finished_kind=kind, now=now),
             },
             actor=actor,

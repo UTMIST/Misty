@@ -102,6 +102,7 @@ def upgrade() -> None:
         sa.Column("failure_notice_gmail_message_id", sa.Text(), nullable=True),
         sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_error", sa.Text(), nullable=True),
+        sa.Column("notification_last_error", sa.Text(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("created_by", sa.Text(), nullable=False),

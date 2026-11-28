@@ -1,5 +1,4 @@
 import json
-import logging
 from uuid import uuid4
 
 import httpx
@@ -45,7 +44,7 @@ def _issue_key(storage, name: str, scopes: list[str]) -> str:
     return plain
 
 
-def test_api_visibility_submitter_isolation_and_pii_free_audit_logs(caplog):
+def test_api_visibility_submitter_isolation_and_pii_free_audit_logs(capsys):
     storage = InMemoryStorageAdapter(build_seed_sources())
     clock = Clock()
     gmail = FakeGmailClient()
@@ -83,7 +82,7 @@ def test_api_visibility_submitter_isolation_and_pii_free_audit_logs(caplog):
     app.dependency_overrides[get_directory] = lambda: directory
     app.dependency_overrides[get_email_service] = lambda: svc
 
-    caplog.set_level(logging.INFO, logger="documentation_system.audit")
+    capsys.readouterr()
     with TestClient(app) as client:
         # Guard lifecycle
         run_id = str(uuid4())
@@ -172,42 +171,70 @@ def test_api_visibility_submitter_isolation_and_pii_free_audit_logs(caplog):
         )
         assert fail_resp.status_code == 200
         assert fail_resp.json()["status"] == "failed"
+        assert fail_resp.json()["last_error"] == "doc_writer_denied"
         assert fail_resp.json()["failure_notice_status"] == "sent"
 
-    audit_text = "\n".join(r.getMessage() for r in caplog.records)
+    audit_text = capsys.readouterr().out
+    assert "/email-submissions/poll" in audit_text
     assert "alice@utmist.ca" not in audit_text
     assert "Private Partnership Budget" not in audit_text
     assert "Room booked" not in audit_text
 
 
-def test_http_directory_active_member_enforces_active_flag_and_alias_fallback():
+def test_http_directory_active_member_uses_post_search_without_emails_in_url():
+    seen_requests: list[tuple[str, str, dict]] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        raw_path = request.url.raw_path.decode("ascii")
-        if raw_path == "/people/by-email/retired%40utmist.ca":
+        body = json.loads(request.content.decode("utf-8")) if request.content else {}
+        seen_requests.append((request.method, str(request.url.path), body))
+        assert request.method == "POST"
+        assert request.url.path == "/people/search"
+        assert body.get("active_only") is True
+        email = body.get("email")
+        if email in {"retired@utmist.ca", "outsider@external.example"}:
+            return httpx.Response(
+                200,
+                json={"matches": [], "has_more": False, "needs_disambiguation": False},
+            )
+        if email == "alias@utoronto.ca":
             return httpx.Response(
                 200,
                 json={
-                    "id": str(uuid4()),
-                    "display_name": "Retired Member",
-                    "primary_email": "retired@utmist.ca",
-                    "active": False,
+                    "matches": [
+                        {
+                            "id": str(ALICE_ID),
+                            "display_name": "Alice Chen",
+                            "primary_email": "alice@utmist.ca",
+                            "active": True,
+                        }
+                    ],
+                    "has_more": False,
+                    "needs_disambiguation": False,
                 },
             )
-        if raw_path == "/people/by-identifier/email/retired%40utmist.ca":
-            return httpx.Response(404, json={"detail": "not found"})
-        if raw_path == "/people/by-email/alias%40utoronto.ca":
-            return httpx.Response(404, json={"detail": "not found"})
-        if raw_path == "/people/by-identifier/email/alias%40utoronto.ca":
+        if email == "ambiguous@utmist.ca":
             return httpx.Response(
                 200,
                 json={
-                    "id": str(ALICE_ID),
-                    "display_name": "Alice Chen",
-                    "primary_email": "alice@utmist.ca",
-                    "active": True,
+                    "matches": [
+                        {
+                            "id": str(ALICE_ID),
+                            "display_name": "Alice Chen",
+                            "primary_email": "alice@utmist.ca",
+                            "active": True,
+                        },
+                        {
+                            "id": str(BOB_ID),
+                            "display_name": "Bob Li",
+                            "primary_email": "bob@utmist.ca",
+                            "active": True,
+                        },
+                    ],
+                    "has_more": False,
+                    "needs_disambiguation": True,
                 },
             )
-        if raw_path == "/people/by-email/outage%40utmist.ca":
+        if email == "outage@utmist.ca":
             return httpx.Response(503, json={"detail": "down"})
         return httpx.Response(404)
 
@@ -217,10 +244,15 @@ def test_http_directory_active_member_enforces_active_flag_and_alias_fallback():
         client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
     assert client.get_active_member_by_verified_email("retired@utmist.ca") is None
+    assert client.get_active_member_by_verified_email("outsider@external.example") is None
     member = client.get_active_member_by_verified_email("alias@utoronto.ca")
     assert member is not None and member.person_id == ALICE_ID
     with pytest.raises(DirectoryUnavailable):
+        client.get_active_member_by_verified_email("ambiguous@utmist.ca")
+    with pytest.raises(DirectoryUnavailable):
         client.get_active_member_by_verified_email("outage@utmist.ca")
+    # Confirm no email address ever appeared in a URL path.
+    assert all(path == "/people/search" for _, path, _ in seen_requests)
 
 
 def test_http_gmail_client_normalizes_errors_without_leaking_upstream_text():
@@ -352,3 +384,174 @@ def test_email_poll_runner_checks_scopes_acquires_guard_and_pings_monitor():
     ]
     assert "doc_test_secret" not in json.dumps(summary)
     assert "hc-ping.com" not in json.dumps(summary)
+
+
+def test_email_poll_runner_releases_guard_on_completed_failures_and_resumes_pagination():
+    base_env = {
+        "DOCS_BASE_URL": "http://docs.local",
+        "DOCS_API_KEY": "doc_test_secret",
+        "EMAIL_POLL_MONITOR_URL": "https://hc-ping.com/11111111-1111-1111-1111-111111111111",
+    }
+
+    def empty_batch(**overrides):
+        return {
+            "listed": 0,
+            "accepted": 0,
+            "duplicates": 0,
+            "rejected_oversize": 0,
+            "ignored_non_inbox": 0,
+            "ignored_loop": 0,
+            "rejected_unauthenticated": 0,
+            "ignored_unknown_sender": 0,
+            "directory_deferred": 0,
+            "inspect_failed": 0,
+            "receipts_attempted": 0,
+            "receipts_sent": 0,
+            "receipts_suppressed": 0,
+            "receipts_failed": 0,
+            "expired_cleaned": 0,
+            "complete": True,
+            "next_page_token": None,
+        } | overrides
+
+    # 1. Completed HTTP 502 releases guard so the next run is not locked out.
+    events_502: list[str] = []
+
+    def handler_502(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api-keys/self":
+            return httpx.Response(200, json={"name": "poller", "scopes": ["emails:write"]})
+        if request.url.path.startswith("/email-submissions/poll-runs/"):
+            events_502.append(f"{request.method}:guard")
+            return httpx.Response(200, json={"run_id": str(uuid4())})
+        if request.url.path == "/email-submissions/poll":
+            return httpx.Response(502, json={"detail": {"code": "gmail_503", "uncertain": True}})
+        return httpx.Response(404)
+
+    mon_502: list[str] = []
+    code, summary = run_poll(
+        ["--require-monitor"],
+        env=base_env,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler_502)),
+        monitor_client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: (mon_502.append(r.url.path), httpx.Response(200, text="OK"))[1]
+            )
+        ),
+    )
+    assert code == 2
+    assert summary["guard_released"] is True
+    assert events_502 == ["POST:guard", "DELETE:guard"]
+    assert mon_502[-1].endswith("/fail")
+
+    # 2. Max-batches exhaustion also releases the guard.
+    events_max: list[str] = []
+
+    def handler_max(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api-keys/self":
+            return httpx.Response(200, json={"name": "poller", "scopes": ["emails:write"]})
+        if request.url.path.startswith("/email-submissions/poll-runs/"):
+            events_max.append(f"{request.method}:guard")
+            return httpx.Response(200, json={"run_id": str(uuid4())})
+        if request.url.path == "/email-submissions/poll":
+            return httpx.Response(
+                200, json=empty_batch(listed=25, complete=False, next_page_token="page2")
+            )
+        return httpx.Response(404)
+
+    code, summary = run_poll(
+        ["--max-batches", "1"],
+        env=base_env,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler_max)),
+        monitor_client=httpx.Client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, text="OK"))
+        ),
+    )
+    assert code == 2
+    assert summary["guard_released"] is True
+    assert events_max == ["POST:guard", "DELETE:guard"]
+
+    # 3. Uncertain transport timeout retains the guard (API may still be executing).
+    events_to: list[str] = []
+
+    def handler_to(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api-keys/self":
+            return httpx.Response(200, json={"name": "poller", "scopes": ["emails:write"]})
+        if request.url.path.startswith("/email-submissions/poll-runs/"):
+            events_to.append(f"{request.method}:guard")
+            return httpx.Response(200, json={"run_id": str(uuid4())})
+        if request.url.path == "/email-submissions/poll":
+            raise httpx.ReadTimeout("timed out")
+        return httpx.Response(404)
+
+    code, summary = run_poll(
+        [],
+        env=base_env,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler_to)),
+        monitor_client=httpx.Client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, text="OK"))
+        ),
+    )
+    assert code == 2
+    assert summary["guard_released"] is False
+    assert events_to == ["POST:guard"]
+
+    # 4. Guard release failure after a drained run pings /fail and exits nonzero.
+    mon_rel: list[str] = []
+
+    def handler_rel_fail(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api-keys/self":
+            return httpx.Response(200, json={"name": "poller", "scopes": ["emails:write"]})
+        if request.url.path.startswith("/email-submissions/poll-runs/"):
+            if request.method == "POST":
+                return httpx.Response(200, json={"run_id": str(uuid4())})
+            return httpx.Response(500)
+        if request.url.path == "/email-submissions/poll":
+            return httpx.Response(200, json=empty_batch(listed=1, accepted=1, complete=True))
+        return httpx.Response(404)
+
+    code, summary = run_poll(
+        ["--require-monitor"],
+        env=base_env,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler_rel_fail)),
+        monitor_client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: (mon_rel.append(r.url.path), httpx.Response(200, text="OK"))[1]
+            )
+        ),
+    )
+    assert code == 2
+    assert summary["guard_released"] is False
+    assert "release" in summary["error"]
+    assert mon_rel[-1].endswith("/fail")
+
+    # 5. Runner carries page_token across batches until drained.
+    seen_tokens: list[str | None] = []
+
+    def handler_paged(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api-keys/self":
+            return httpx.Response(200, json={"name": "poller", "scopes": ["emails:write"]})
+        if request.url.path.startswith("/email-submissions/poll-runs/"):
+            return httpx.Response(200, json={"run_id": str(uuid4())})
+        if request.url.path == "/email-submissions/poll":
+            tok = request.url.params.get("page_token")
+            seen_tokens.append(tok)
+            if tok is None:
+                return httpx.Response(
+                    200, json=empty_batch(listed=125, complete=False, next_page_token="125")
+                )
+            return httpx.Response(
+                200, json=empty_batch(listed=1, accepted=1, complete=True, next_page_token=None)
+            )
+        return httpx.Response(404)
+
+    code, summary = run_poll(
+        [],
+        env=base_env,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler_paged)),
+        monitor_client=httpx.Client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, text="OK"))
+        ),
+    )
+    assert code == 0
+    assert summary["batches"] == 2 and summary["accepted"] == 1 and summary["drained"] is True
+    assert seen_tokens == [None, "125"]

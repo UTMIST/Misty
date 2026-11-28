@@ -134,6 +134,7 @@ class EmailSubmission(StrictModel):
     failure_notice_gmail_message_id: str | None = None
     next_attempt_at: AwareDatetime | None = None
     last_error: str | None = None
+    notification_last_error: str | None = None
     created_at: AwareDatetime
     updated_at: AwareDatetime
     created_by: str
@@ -166,6 +167,7 @@ class EmailPollResult(StrictModel):
     receipts_failed: int = Field(default=0, strict=True, ge=0)
     expired_cleaned: int = Field(default=0, strict=True, ge=0)
     complete: bool = True
+    next_page_token: str | None = Field(default=None, min_length=1, max_length=4096)
 
 
 class GmailError(Exception):

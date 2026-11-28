@@ -90,6 +90,8 @@ def poll_email_submissions(
     request: Request,
     limit: int = Query(default=25, ge=1, le=100),
     max_pages: int = Query(default=5, ge=1, le=20),
+    page_token: str | None = Query(default=None, min_length=1, max_length=4096),
+    advance_watermark: bool = Query(default=True),
     actor: str = Depends(get_actor),
     _: AuthedKey = Depends(require_scope("emails:write")),
     service: EmailSubmissions = Depends(get_email_service),
@@ -98,6 +100,8 @@ def poll_email_submissions(
         result = service.poll(
             limit=limit,
             max_pages=max_pages,
+            page_token=page_token,
+            advance_watermark=advance_watermark,
             actor=actor,
             disconnected=lambda: from_thread.run(request.is_disconnected),
         )

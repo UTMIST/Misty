@@ -338,6 +338,7 @@ email_submissions = Table(
     Column("failure_notice_gmail_message_id", Text, nullable=True),
     Column("next_attempt_at", DateTime(timezone=True), nullable=True),
     Column("last_error", Text, nullable=True),
+    Column("notification_last_error", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     Column("created_by", Text, nullable=False),

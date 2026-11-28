@@ -960,7 +960,7 @@ responses and audit logs omit message bodies, `untrusted_claimed_headers`,
 
 | Method/path | Scope | Behavior |
 |---|---|---|
-| `POST /email-submissions/poll?limit=25&max_pages=5` | `emails:write` | Poll unseen `INBOX` messages via connectors, bind active members, send due receipts, prune expired rows |
+| `POST /email-submissions/poll?limit=25&max_pages=5&page_token=&advance_watermark=true` | `emails:write` | Poll unseen `INBOX` messages via connectors (returning `next_page_token` to resume pagination across batches), bind active members, send due receipts, prune expired rows |
 | `POST /email-submissions/poll-runs/{run_id}` | `emails:write` | Acquire singleton poller guard (`200` acquired, `409` occupied) |
 | `DELETE /email-submissions/poll-runs/{run_id}` | `emails:write` | Release matching poller guard (`200` released, `409` mismatch/absent) |
 | `GET /email-submissions` | `emails:read` + `act-as-user` + `X-On-Behalf-Of` (or `emails:admin`) | List sanitized submissions (`?status=&receipt_status=`) |
@@ -974,14 +974,19 @@ responses and audit logs omit message bodies, `untrusted_claimed_headers`,
    single defect-free RFC 5322 `From:` mailbox against the topmost
    `mx.google.com` `Authentication-Results` (`dmarc=pass` or `dmarc=none` with
    organizationally aligned `dkim=pass`). `documentation-system` then resolves
-   that address through `team-tracking` (`primary_email` or verified
-   `provider="email"` alias) and requires `active == true`. Unauthenticated,
-   loop/bounce, non-inbox, unknown, and soft-retired senders are recorded in
-   `email_processed_messages` and **never** receive an outbound email.
-2. **Directory outages defer safely:** if `team-tracking` is unreachable or
-   returns 5xx, the message is counted under `directory_deferred`, left
-   unmarked in `email_processed_messages`, and retried on the next poll without
-   advancing the inbox watermark.
+   that address through `team-tracking`'s `POST /people/search` JSON endpoint
+   (`primary_email` or verified `provider="email"` alias, `active_only=true`)
+   so sender addresses never appear in Team Tracking URLs or audit logs.
+   Unauthenticated, loop/bounce, non-inbox, unknown, and soft-retired senders
+   are recorded in `email_processed_messages` and **never** receive an outbound
+   email.
+2. **Directory outages defer safely:** before processing begins on a brand-new
+   mailbox, `poll` persists the initial lookback lower bound as the starting
+   watermark so deferred messages stay eligible even if recovery takes more
+   than 24 hours. If `team-tracking` is unreachable or returns 5xx, the message
+   is counted under `directory_deferred`, left unmarked in
+   `email_processed_messages`, and retried on the next poll without advancing
+   the watermark.
 3. **Deduplication vs. independent forwards:** provider/poll retries match on
    `(mailbox_identity, gmail_message_id)` and MTA duplicates from the same
    member match on `(mailbox_identity, submitter_person_id, outer_message_id)`.
@@ -993,4 +998,6 @@ responses and audit logs omit message bodies, `untrusted_claimed_headers`,
    Excess sends mark `receipt_status: "suppressed_rate_limit"` while keeping the
    accepted submission durable. Ambiguous send outcomes (`uncertain: true`)
    reconcile against `/google/gmail/receipt-check` before any retry so duplicate
-   emails are never sent blindly.
+   emails are never sent blindly. Notification errors are tracked in
+   `notification_last_error` so sending or retrying a failure notice never
+   overwrites or clears the submission's `last_error`.

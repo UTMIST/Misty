@@ -289,20 +289,111 @@ class EmailSubmissionCases:
         assert owners == {ALICE_ID, BOB_ID}
 
     def test_directory_outage_defers_message_without_dropping_it(self, email_flow):
-        svc, gmail, directory, _ = email_flow
-        gmail.add(make_candidate("msg_defer", sender="alice@utmist.ca"))
+        svc, gmail, directory, clock = email_flow
+        gmail.add(
+            make_candidate(
+                "msg_defer",
+                thread_id="thr_d",
+                sender="alice@utmist.ca",
+                received_at=clock() - timedelta(hours=2),
+            )
+        )
         directory.down = True
+        t0 = clock()
 
         deferred = svc.poll(actor="email-poller")
         assert deferred.directory_deferred == 1
         assert deferred.complete is False
-        assert svc.storage.get_email_inbox_watermark(MAILBOX) is None
+        # Initial lower bound persisted before processing so recovery >24h later still sees it.
+        initial_wm = svc.storage.get_email_inbox_watermark(MAILBOX)
+        assert initial_wm == t0 - timedelta(hours=svc.settings.email_initial_lookback_hours)
         assert not svc.storage.is_email_message_processed(MAILBOX, "msg_defer")
 
+        # Directory recovers 25 hours later (> 24h initial lookback); message must still drain.
+        clock.advance(hours=25)
         directory.down = False
         recovered = svc.poll(actor="email-poller")
         assert recovered.accepted == 1 and recovered.complete is True
         assert svc.storage.is_email_message_processed(MAILBOX, "msg_defer")
+        assert svc.storage.get_email_inbox_watermark(MAILBOX) == clock()
+
+    def test_backlog_larger_than_one_scan_window_drains_across_batches(self, email_flow):
+        svc, gmail, _, clock = email_flow
+        # Pre-seed 125 already-processed messages + 1 unseen message #126 (5 pages of 25 + 1).
+        for idx in range(126):
+            mid = f"msg_backlog_{idx:03d}"
+            gmail.add(
+                make_candidate(
+                    mid,
+                    thread_id=f"thr_b_{idx:03d}",
+                    sender="alice@utmist.ca",
+                    outer_message_id=f"<backlog-{idx}@utmist.ca>",
+                )
+            )
+            if idx < 125:
+                svc.storage.record_processed_email_message(
+                    MAILBOX, mid, outcome="accepted", processed_at=clock()
+                )
+
+        t0 = clock()
+        batch1 = svc.poll(limit=25, max_pages=5, actor="email-poller")
+        assert batch1.listed == 125
+        assert batch1.accepted == 0
+        assert batch1.complete is False
+        assert batch1.next_page_token == "125"
+        # Watermark stays at initial lower bound until the full backlog finishes.
+        assert svc.storage.get_email_inbox_watermark(MAILBOX) == t0 - timedelta(
+            hours=svc.settings.email_initial_lookback_hours
+        )
+
+        batch2 = svc.poll(
+            limit=25,
+            max_pages=5,
+            page_token=batch1.next_page_token,
+            actor="email-poller",
+        )
+        assert batch2.listed == 1
+        assert batch2.accepted == 1
+        assert batch2.complete is True
+        assert batch2.next_page_token is None
+        assert svc.storage.is_email_message_processed(MAILBOX, "msg_backlog_125")
+        assert svc.storage.get_email_inbox_watermark(MAILBOX) == t0
+
+    def test_failure_notice_preserves_submission_last_error_across_retries_and_success(
+        self, email_flow
+    ):
+        svc, gmail, _, clock = email_flow
+        gmail.add(
+            make_candidate(
+                "msg_fail_keep",
+                thread_id="thr_fk",
+                sender="bob@utmist.ca",
+                outer_message_id="<fk@utmist.ca>",
+            )
+        )
+        svc.poll(actor="email-poller")
+        sub = svc.storage.list_email_submissions(submitter_person_id=BOB_ID)[0]
+
+        # First failure-notice send fails with a definite Gmail error; submission last_error stays intact.
+        gmail.fail_send = GmailError("gmail_403", uncertain=False)
+        failed = svc.mark_failed(sub.submission_id, error_code="doc_writer_denied", actor="admin")
+        assert failed is not None
+        assert failed.status == "failed"
+        assert failed.last_error == "doc_writer_denied"
+        assert failed.notification_last_error == "gmail_403"
+        assert failed.failure_notice_status == "pending"
+
+        # Retry succeeds: notification_last_error clears, last_error stays "doc_writer_denied",
+        # and the delivered failure notice reports the real processing error.
+        gmail.fail_send = None
+        clock.advance(minutes=2)
+        svc.poll(actor="email-poller")
+        after = svc.storage.get_email_submission(sub.submission_id)
+        assert after is not None
+        assert after.failure_notice_status == "sent"
+        assert after.last_error == "doc_writer_denied"
+        assert after.notification_last_error is None
+        assert "doc_writer_denied" in gmail.sent_replies[-1]["body_text"]
 
     def test_uncertain_receipt_reconciles_existing_send_without_duplicate_email(self, email_flow):
         svc, gmail, _, clock = email_flow

@@ -126,41 +126,55 @@ class HttpDirectoryClient:
             return person_id
         return self._get_id(f"/people/by-identifier/email/{encoded}")
 
-    def _get_active_member(self, path: str) -> VerifiedMember | None:
+    def get_active_member_by_verified_email(self, email: str) -> VerifiedMember | None:
+        # POST /people/search matches both primary_email and provider="email"
+        # verified aliases in the request body so outsider/member addresses
+        # never appear in Team Tracking URLs, access logs, or audit logs.
+        normalized = email.strip().lower()
+        if not normalized or "\x00" in normalized:
+            return None
         try:
-            resp = self._client.get(f"{self._base_url}{path}", headers={"X-API-Key": self._api_key})
+            resp = self._client.post(
+                f"{self._base_url}/people/search",
+                json={"email": normalized, "active_only": True, "limit": 2},
+                headers={"X-API-Key": self._api_key},
+            )
         except httpx.HTTPError as e:
             raise DirectoryUnavailable(f"directory unreachable: {e}") from e
-        if resp.status_code == 404:
-            return None
         if not (200 <= resp.status_code < 300):
             raise DirectoryUnavailable(f"directory returned {resp.status_code}")
         try:
             body = resp.json()
-            if not isinstance(body, dict) or not isinstance(body.get("active"), bool):
+            if not isinstance(body, dict) or not isinstance(body.get("matches"), list):
+                raise ValueError("missing matches list")
+            matches = body["matches"]
+            has_more = bool(body.get("has_more", False))
+            needs_disambiguation = bool(body.get("needs_disambiguation", False))
+        except (KeyError, ValueError, TypeError) as e:
+            raise DirectoryUnavailable(f"malformed directory response: {e}") from e
+        if not matches:
+            return None
+        if len(matches) > 1 or has_more or needs_disambiguation:
+            raise DirectoryUnavailable("ambiguous directory email match")
+        item = matches[0]
+        try:
+            if not isinstance(item, dict) or not isinstance(item.get("active"), bool):
                 raise ValueError("missing active flag")
-            person_id = UUID(body["id"])
-            primary_email = str(body["primary_email"]).strip().lower()
+            person_id = UUID(item["id"])
+            primary_email = str(item["primary_email"]).strip().lower()
             if not primary_email:
                 raise ValueError("missing primary_email")
-            raw_name = body.get("display_name")
+            raw_name = item.get("display_name")
             display_name = str(raw_name).strip() if isinstance(raw_name, str) else None
         except (KeyError, ValueError, TypeError) as e:
             raise DirectoryUnavailable(f"malformed directory response: {e}") from e
-        if not body["active"]:
+        if not item["active"]:
             return None
         return VerifiedMember(
             person_id=person_id,
             display_name=display_name or None,
             primary_email=primary_email,
         )
-
-    def get_active_member_by_verified_email(self, email: str) -> VerifiedMember | None:
-        encoded = quote(email.strip().lower(), safe="")
-        member = self._get_active_member(f"/people/by-email/{encoded}")
-        if member is not None:
-            return member
-        return self._get_active_member(f"/people/by-identifier/email/{encoded}")
 
     def get_team_id_by_synced_google_group(self, email: str) -> UUID | None:
         encoded = quote(email.strip().lower(), safe="")

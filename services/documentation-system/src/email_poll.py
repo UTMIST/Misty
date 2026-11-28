@@ -27,9 +27,16 @@ MONITOR_TIMEOUT_SECONDS = 10.0
 class EmailPollError(Exception):
     """Sanitized operational error; never carries upstream response bodies or addresses."""
 
+    def __init__(self, message: str, *, uncertain: bool = False) -> None:
+        super().__init__(message)
+        self.uncertain = uncertain
+
 
 class EmailPollTimeout(EmailPollError):
     """HTTP phase timed out; the API may still be processing the batch."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, uncertain=True)
 
 
 class EmailPollBudgetExpired(EmailPollError):
@@ -130,7 +137,9 @@ class DocsEmailClient:
         except httpx.TimeoutException:
             raise EmailPollTimeout(f"{method} {path} timed out; request was not retried") from None
         except httpx.HTTPError:
-            raise EmailPollError(f"{method} {path} failed; request was not retried") from None
+            raise EmailPollError(
+                f"{method} {path} failed; request was not retried", uncertain=True
+            ) from None
         return response
 
     def check_scope(self, *, timeout: float) -> None:
@@ -161,19 +170,33 @@ class DocsEmailClient:
         except EmailPollError:
             return False
 
-    def poll_batch(self, *, limit: int, max_pages: int, timeout: float) -> EmailPollResult:
-        resp = self._request(
-            "POST",
-            POLL_PATH,
-            params={"limit": limit, "max_pages": max_pages},
-            timeout=timeout,
-        )
+    def poll_batch(
+        self,
+        *,
+        limit: int,
+        max_pages: int,
+        page_token: str | None = None,
+        advance_watermark: bool = True,
+        timeout: float,
+    ) -> EmailPollResult:
+        params: dict[str, object] = {
+            "limit": limit,
+            "max_pages": max_pages,
+            "advance_watermark": str(advance_watermark).lower(),
+        }
+        if page_token is not None:
+            params["page_token"] = page_token
+        resp = self._request("POST", POLL_PATH, params=params, timeout=timeout)
         if resp.status_code != 200:
-            raise EmailPollError(f"POST {POLL_PATH} returned HTTP {resp.status_code}")
+            raise EmailPollError(
+                f"POST {POLL_PATH} returned HTTP {resp.status_code}", uncertain=False
+            )
         try:
             return EmailPollResult.model_validate(resp.json())
         except (ValueError, ValidationError):
-            raise EmailPollError(f"POST {POLL_PATH} returned invalid response shape") from None
+            raise EmailPollError(
+                f"POST {POLL_PATH} returned invalid response shape", uncertain=False
+            ) from None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -232,6 +255,7 @@ def run_poll(
     own_http = http_client is None
     client_http = http_client or httpx.Client()
     acquired = False
+    release_safe = True
     started_ok = True
     deadline = clock() + args.max_seconds
 
@@ -246,6 +270,9 @@ def run_poll(
             if not started_ok:
                 report.monitor_failed = True
 
+        page_token: str | None = None
+        seen_tokens: set[str] = set()
+        scan_clean = True
         for _ in range(args.max_batches):
             remaining = deadline - clock()
             if remaining <= 0:
@@ -254,6 +281,8 @@ def run_poll(
             batch = api.poll_batch(
                 limit=args.batch_size,
                 max_pages=args.max_pages,
+                page_token=page_token,
+                advance_watermark=scan_clean,
                 timeout=min(args.timeout, remaining),
             )
             report.batches += 1
@@ -275,20 +304,44 @@ def run_poll(
                 "expired_cleaned",
             ):
                 setattr(report, field, getattr(report, field) + getattr(batch, field))
-            if batch.complete:
+            if batch.directory_deferred or batch.inspect_failed:
+                scan_clean = False
+            if batch.next_page_token is not None:
+                if batch.next_page_token in seen_tokens:
+                    raise EmailPollError("repeated inbox page_token from API")
+                seen_tokens.add(batch.next_page_token)
+                page_token = batch.next_page_token
+                continue
+            if batch.complete and scan_clean:
                 report.drained = True
+                break
+            made_progress = (
+                batch.accepted
+                + batch.duplicates
+                + batch.rejected_oversize
+                + batch.ignored_non_inbox
+                + batch.ignored_loop
+                + batch.rejected_unauthenticated
+                + batch.ignored_unknown_sender
+            )
+            if made_progress == 0:
+                report.error = "inbox scan completed with deferred or failed inspections"
                 break
         else:
             report.error = "max-batches reached before inbox drained"
     except EmailPollError as exc:
         report.error = str(exc)
+        if exc.uncertain:
+            release_safe = False
     finally:
-        if acquired and (report.drained or report.budget_exhausted):
+        if acquired and release_safe:
             report.guard_released = api.release_guard(run_id, timeout=min(args.timeout, 15.0))
+            if not report.guard_released:
+                report.error = report.error or "failed to release email poll guard"
         if monitor_url:
             if not acquired:
                 _ping_monitor(monitor_url, "/fail", run_id=run_id, client=monitor_client)
-            elif report.drained and not report.error and started_ok:
+            elif report.drained and report.guard_released and not report.error and started_ok:
                 if not _ping_monitor(monitor_url, "", run_id=run_id, client=monitor_client):
                     report.monitor_failed = True
             else:
