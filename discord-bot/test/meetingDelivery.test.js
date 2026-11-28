@@ -131,24 +131,152 @@ test('poll continues after one bad record and attempts each failed record once p
   assert.deepEqual(attempts, ['bad', 'meeting-1']);
 });
 
-test('startup recovery and ten-minute timer share the same poll', async () => {
-  let calls = 0;
+async function schedule(delivery) {
+  let clock = 0;
   let tick;
-  let delay;
-  startMeetingDelivery(
-    { poll: async () => calls++ },
-    {
-      setIntervalImpl: (callback, milliseconds) => {
-        tick = callback;
-        delay = milliseconds;
-        return { unref() {} };
-      },
+  let cleared = false;
+  const timer = { unref() {} };
+  const stop = startMeetingDelivery(delivery, {
+    now: () => clock,
+    setIntervalImpl: (callback, milliseconds) => {
+      tick = callback;
+      assert.equal(milliseconds, 600_000);
+      return timer;
     },
-  );
+    clearIntervalImpl: (value) => {
+      assert.equal(value, timer);
+      cleared = true;
+    },
+  });
+  await new Promise(setImmediate);
+  return {
+    async advance(minutes) {
+      clock += minutes * 60_000;
+      await tick();
+    },
+    stop() {
+      stop();
+      assert.equal(cleared, true);
+    },
+  };
+}
+
+test('empty recovery backs off to hourly without catalog requests on skipped ticks', async () => {
+  const f = setup({ delivery_status: 'posted' });
+  let lists = 0;
+  f.records.list = async () => {
+    lists++;
+    return [];
+  };
+  const timer = await schedule(createMeetingDelivery(f));
+  assert.equal(lists, 2); // Immediate startup recovery.
+  await timer.advance(10);
+  assert.equal(lists, 2);
+  await timer.advance(10);
+  assert.equal(lists, 4); // 20-minute empty interval.
+  await timer.advance(30);
+  assert.equal(lists, 4);
+  await timer.advance(10);
+  assert.equal(lists, 6); // 40-minute empty interval.
+  await timer.advance(50);
+  assert.equal(lists, 6);
+  await timer.advance(10);
+  assert.equal(lists, 8); // 60-minute cap.
+  await timer.advance(60);
+  assert.equal(lists, 10);
+  timer.stop();
+  await timer.advance(60);
+  assert.equal(lists, 10);
+});
+
+test('an immediate delivery failure interrupts idle backoff at the next ten-minute tick', async () => {
+  const f = setup({ delivery_status: 'posted' });
+  let broken = true;
+  const delivery = createMeetingDelivery({
+    ...f,
+    post: (record) => {
+      if (broken) throw new Error('Discord denied');
+      return f.post(record);
+    },
+  });
+  const timer = await schedule(delivery);
+  await timer.advance(20);
+  await timer.advance(40);
+  f.record.delivery_status = 'pending';
+  assert.equal((await delivery.deliver('meeting-1')).status, 'failed');
+  broken = false;
+  await timer.advance(10);
+  assert.equal(f.posts.length, 1);
+  assert.equal(f.record.delivery_status, 'posted');
+  assert.equal(delivery.hasPendingWork(), false);
+});
+
+test('a known unfinished save is retried even when saved-record lists are empty', async () => {
+  const f = setup({ persistence_status: 'pending' });
+  f.records.list = async () => [];
+  const delivery = createMeetingDelivery(f);
+  await delivery.deliver('meeting-1');
+  const timer = await schedule(delivery);
+  assert.equal(f.posts.length, 0);
+  f.record.persistence_status = 'saved';
+  await timer.advance(10);
+  assert.equal(f.posts.length, 1);
+  assert.equal(delivery.hasPendingWork(), false);
+});
+
+test('terminal persistence outcomes do not keep empty recovery awake', async () => {
+  for (const persistence_status of ['failed', 'inaccessible', 'removed', 'create_uncertain']) {
+    const f = setup({ persistence_status });
+    const delivery = createMeetingDelivery(f);
+    await delivery.deliver('meeting-1');
+    assert.equal(delivery.hasPendingWork(), false, persistence_status);
+  }
+});
+
+test('a missing record stops fast retries and leaves later discovery to the saved-record scan', async () => {
+  const f = setup({ persistence_status: 'pending' });
+  f.records.list = async () => [];
+  const delivery = createMeetingDelivery(f);
+  await delivery.deliver('meeting-1');
+  assert.equal(delivery.hasPendingWork(), true);
+  f.records.get = async () => null;
+  await delivery.poll();
+  assert.equal(delivery.hasPendingWork(), false);
+  assert.deepEqual(await delivery.poll(), { empty: true });
+});
+
+test('a failed listing is not treated as empty and retries after ten minutes', async () => {
+  for (const failingStatus of ['pending', 'failed']) {
+    const f = setup();
+    let lists = 0;
+    f.records.list = async (status) => {
+      lists++;
+      if (status === failingStatus) throw new Error('catalog down');
+      return [];
+    };
+    const timer = await schedule(createMeetingDelivery(f));
+    assert.equal(lists, 2);
+    await timer.advance(10);
+    assert.equal(lists, 4);
+  }
+});
+
+test('timer ticks do not overlap a slow recovery and teardown prevents later polls', async () => {
+  let finish;
+  let calls = 0;
+  const timer = await schedule({
+    hasPendingWork: () => false,
+    poll: () => {
+      calls++;
+      return new Promise((resolve) => (finish = resolve));
+    },
+  });
+  await timer.advance(10);
   assert.equal(calls, 1);
-  assert.equal(delay, 600_000);
-  tick();
-  assert.equal(calls, 2);
+  timer.stop();
+  finish({ empty: true });
+  await timer.advance(60);
+  assert.equal(calls, 1);
 });
 
 test('notices distinguish failed persistence, pending handoff, removal and failed delivery', () => {

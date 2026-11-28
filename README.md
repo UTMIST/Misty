@@ -44,10 +44,10 @@ Root [`VERSION`](VERSION) identifies the platform release candidate; immutable
 | [team-tracking](services/team-tracking/README.md) | People, teams, memberships, identities, channel scopes and managed Google Groups | Directory for the bot, catalog and gateway; Google Groups sync requires its own OAuth setup. |
 | [documentation-system](services/documentation-system/README.md) | Catalog, indexed full text, authorized search, source grants and durable meeting records | Used by `/doc`, helper document questions, discovery/refresh jobs and the meeting hand-off. |
 | [llm](services/llm/README.md) | Stateless chat, client-executed tool transport and embeddings | Bot helper, meeting minutes/Q&A and catalog embeddings; providers configured per operation. |
-| [verification](services/verification/README.md) | Email ownership codes | The bot uses it for account linking and additional verified emails. |
+| [verification](services/verification/README.md) | Email ownership codes | Bot account linking and additional verified emails; gateway login uses a separate scoped `vf_` key in `CONSUMER_KEYS`. |
 | [meeting](services/meeting/README.md) | Live transcription, minutes/PDF and live Q&A | `/record` and `/qna`; completed text can be handed to the catalog. One process owns live sessions. |
 | [connectors](services/connectors/README.md) | Google/GitHub fetch, Google discovery and meeting-Doc operations | Catalog consumer with separate read, discovery and writer scopes/credentials; no local database. |
-| [gateway](services/gateway/README.md) | Scoped public API backed by private services | `GET /v1/resolve/discord/{github_login}`; external consumers need an issued `gw_` key. |
+| [gateway](services/gateway/README.md) | Scoped public API backed by private services | Discord identity resolution and opt-in email login for active directory members; external consumers need an issued `gw_` key with the operation's scopes. |
 | [discord-bot](discord-bot/README.md) | Slash commands, mention/DM helper, voice recording and local web playground | Commands register globally. Live Q&A remains in progress; helper tools require explicit activation. |
 
 This is the implemented surface. Use the [deployment runbook](docs/RAILWAY-DEPLOYMENT.md)
@@ -58,7 +58,8 @@ tables. The catalog calls the directory for ownership and access context,
 connectors for source content/ACLs, and llm for embeddings. Meeting calls llm
 for minutes and hands saved text to the catalog, which uses the connector's
 Google writer. The bot calls the internal APIs; gateway exposes curated public
-operations backed by the directory. Ownership-label lookup can degrade during
+operations backed by the directory and email login backed by private verification.
+Ownership-label lookup can degrade during
 a directory outage, while authorized retrieval fails closed. Each of the four
 database-backed services owns its database; llm, meeting and connectors have none.
 
@@ -186,7 +187,7 @@ All seven services are built the same way on purpose — learning one gives you 
 
 - **`contracts/` Protocol boundary.** Each service has a `contracts/` package of Pydantic domain types plus `Protocol` interfaces. Application code depends on the Protocols, never on a concrete implementation.
 - **Swappable storage adapters.** `InMemoryStorageAdapter` for fast tests, `PostgresStorageAdapter` for real runs — both satisfy the same Protocol. Tests use in-memory; a small integration test suite gates the Postgres adapter too.
-- **Scoped API-key auth.** Protected HTTP endpoints use `X-API-Key`; health and API schema/UI routes remain unauthenticated within the service’s network exposure. Keys are argon2-hashed with a set of per-resource scopes (`people:read`, `teams:write`, `chat`, `meetings`, `fetch`, etc.). This machinery is implemented once in the shared [`packages/auth`](packages/auth) (`platform_auth`) library and consumed by all seven services through a thin shim (`src/api/auth.py`, plus `hashing.py` for the services that mint their own keys) that binds its own key prefix and config. Anything the library exposes ready-to-use — `AuditLogMiddleware`, for one — is imported from `platform_auth` directly; a per-service file earns its place only by binding something. team-tracking, documentation-system, and gateway store consumer keys in their own `api_keys` tables; `llm`, `meeting`, and `connectors` seed them from a `CONSUMER_KEYS` JSON env var instead, so rotating one there is a redeploy.
+- **Scoped API-key auth.** Protected HTTP endpoints use `X-API-Key`; health and API schema/UI routes remain unauthenticated within the service’s network exposure. Keys are argon2-hashed with a set of per-resource scopes (`people:read`, `teams:write`, `chat`, `meetings`, `fetch`, etc.). This machinery is implemented once in the shared [`packages/auth`](packages/auth) (`platform_auth`) library and consumed by all seven services through a thin shim (`src/api/auth.py`, plus `hashing.py` for the services that mint their own keys) that binds its own key prefix and config. Anything the library exposes ready-to-use — `AuditLogMiddleware`, for one — is imported from `platform_auth` directly; a per-service file earns its place only by binding something. team-tracking, documentation-system, and gateway store consumer keys in their own `api_keys` tables; `llm`, `meeting`, `connectors`, and `verification` seed them from a `CONSUMER_KEYS` JSON env var instead, so rotating one there is a redeploy.
 - **Credentials are `SecretStr`, never `str`.** Every credential field in a service's `Settings` is `pydantic.SecretStr`, so it renders as `**********` in any repr, log line, traceback, or failing assertion diff — a plain `str` once printed a real Google private key into a transcript. Unwrap with `.get_secret_value()` at the boundary; `platform_auth` still takes plain `str`. See [`packages/auth/README.md` → Credential config convention](packages/auth/README.md#credential-config-convention) for the one way forgetting to unwrap fails _silently_ rather than loudly.
 - **Attested actor.** The `created_by`/`updated_by` on every audit field is the authenticated key's own name — a caller can't claim to be someone else.
 - **Per-request audit log.** Middleware emits one JSON line per request with the resolved actor, endpoint, status, and duration.

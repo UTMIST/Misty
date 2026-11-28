@@ -74,7 +74,7 @@ def _response(output=None, **fields):
 
 
 @contextmanager
-def _boundary(payloads=None, *, status=200, transport_error=None, raw=None):
+def _boundary(payloads=None, *, default_model=_MODEL, status=200, transport_error=None, raw=None):
     payloads = payloads or [_response()]
     calls = []
 
@@ -97,7 +97,10 @@ def _boundary(payloads=None, *, status=200, transport_error=None, raw=None):
         ) as sdk:
             yield (
                 OpenAIChatProvider(
-                    api_key="synthetic-openai-key", default_model=_MODEL, timeout_s=3, client=sdk
+                    api_key="synthetic-openai-key",
+                    default_model=default_model,
+                    timeout_s=3,
+                    client=sdk,
                 ),
                 calls,
             )
@@ -112,8 +115,10 @@ def _route(provider, monkeypatch, store=None):
 
 
 @pytest.mark.parametrize("thinking,effort", [(True, "medium"), (False, "low")])
-def test_text_request_and_legacy_response_through_real_sdk(monkeypatch, thinking, effort):
-    with _boundary() as (provider, calls):
+@pytest.mark.parametrize("model", [_MODEL, "gpt-6.2-sol"])
+def test_text_request_and_legacy_response_through_real_sdk(monkeypatch, thinking, effort, model):
+    monkeypatch.setenv("LLM_MODEL", model)
+    with _boundary([_response(model=model)], default_model=model) as (provider, calls):
         client = _route(provider, monkeypatch)
         response = client.post(
             "/chat",
@@ -123,7 +128,6 @@ def test_text_request_and_legacy_response_through_real_sdk(monkeypatch, thinking
                     {"role": "assistant", "content": "hello"},
                     {"role": "user", "content": "continue"},
                 ],
-                "model": _MODEL,
                 "system": "Be concise",
                 "max_tokens": 1000,
                 "thinking": thinking,
@@ -132,13 +136,13 @@ def test_text_request_and_legacy_response_through_real_sdk(monkeypatch, thinking
     assert response.status_code == 200
     assert response.json() == {
         "content": "hello",
-        "model": _MODEL,
+        "model": model,
         "stop_reason": "end_turn",
         "usage": {"input_tokens": 11, "output_tokens": 7},
     }
     assert calls == [
         {
-            "model": _MODEL,
+            "model": model,
             "input": [
                 {"role": "user", "content": "hi"},
                 {"role": "assistant", "content": "hello"},
@@ -153,21 +157,29 @@ def test_text_request_and_legacy_response_through_real_sdk(monkeypatch, thinking
     ]
 
 
-def test_parallel_tool_roundtrip_preserves_state_results_and_phase(monkeypatch, capsys):
-    first = _response(
+@pytest.mark.parametrize("model", [_MODEL, "gpt-6.2-sol"])
+def test_parallel_tool_roundtrip_preserves_state_results_and_phase(monkeypatch, capsys, model):
+    tool_call_response = _response(
         [
             _STATE,
             _message("Checking", "commentary"),
             _CALL,
             {**_CALL, "id": "fc_2", "call_id": "call_2"},
-        ]
+        ],
+        model=model,
     )
-    with _boundary([first, _response([_message("Done", "final_answer")])]) as (provider, calls):
+    final_response = _response([_message("Done", "final_answer")], model=model)
+    with _boundary([tool_call_response, final_response]) as (provider, calls):
         client = _route(provider, monkeypatch)
-        body = {"messages": [{"role": "user", "content": "PRIVATE-PROMPT"}], "tools": [_TOOL]}
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": "PRIVATE-PROMPT"}],
+            "tools": [_TOOL],
+        }
         response = client.post("/chat", json=body)
         assert response.status_code == 200
         turn = response.json()
+        assert turn["model"] == model
         assert turn["stop_reason"] == "tool_use"
         assert turn["content"] == "Checking"
         assert turn["content_blocks"][0] == {
@@ -197,6 +209,8 @@ def test_parallel_tool_roundtrip_preserves_state_results_and_phase(monkeypatch, 
         ]
         final = client.post("/chat", json=body)
     assert final.status_code == 200
+    assert final.json()["model"] == model
+    assert [call["model"] for call in calls] == [model, model]
     assert final.json()["content_blocks"] == [
         {"type": "text", "text": "Done", "phase": "final_answer"}
     ]
@@ -416,6 +430,7 @@ def test_incomplete_responses_never_expose_executable_calls(monkeypatch, caplog,
         {"usage": {"input_tokens": 11, "output_tokens": "7"}},
         {"status": "failed", "error": {"message": "PRIVATE-UPSTREAM"}},
         {"model": "unrequested-model"},
+        {"model": "gpt-6.2-sol"},  # Supported, but this request selected 6.1.
         {"status": "in_progress"},
         {"status": "future_status"},
         {"status": "completed", "incomplete_details": {"reason": "max_messages"}},

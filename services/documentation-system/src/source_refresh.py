@@ -347,19 +347,17 @@ def main(argv: list[str] | None = None) -> int:
             if monitor:
                 event = "success" if report.exit_code == 0 and not monitor_failed else "fail"
                 monitor_failed = not monitor.ping(event) or monitor_failed
-            # Budget exhaustion releases only our owner after the final ping,
-            # even if the API is still working or monitoring failed. Other
-            # uncertain outcomes retain the guard for operator inspection.
-            if guard_acquired and (
-                report.budget_exhausted or (not report.error and not monitor_failed)
-            ):
+            # Completed API work releases our owner even if monitoring failed.
+            # Budget exhaustion also releases it; other uncertain API outcomes
+            # retain the guard for operator inspection.
+            if guard_acquired and (report.budget_exhausted or report.exit_code == 0):
                 try:
                     client.release_run(run_id)
                     guard_released = True
                 except RefreshError as exc:
                     report.error = str(exc)
                     if monitor:
-                        monitor_failed = not monitor.ping("fail")
+                        monitor_failed = not monitor.ping("fail") or monitor_failed
     except RefreshError as exc:
         report.error = str(exc)
     if monitor_failed:

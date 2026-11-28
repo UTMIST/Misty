@@ -13,7 +13,7 @@
     "staging": {
       "deploy": {
         "startCommand": "python -m src.discovery --require-monitor",
-        "cronSchedule": "*/15 * * * *"
+        "cronSchedule": "0 * * * *"
       }
     },
     "pr": {

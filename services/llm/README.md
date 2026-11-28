@@ -117,9 +117,9 @@ Append the printed JSON object to the service's `CONSUMER_KEYS` array and redepl
 |-------|------|-------|
 | `messages` | `[{role, content}]` | Required, non-empty. `role` is `user` or `assistant`; `content` is non-empty text or structured blocks. |
 | `system` | string \| null | Optional system prompt. |
-| `model` | string \| null | Optional. Defaults to `LLM_MODEL`; must belong to the selected provider’s [catalog](docs/API.md#post-chat). |
+| `model` | string \| null | Optional. Defaults to `LLM_MODEL`. OpenAI accepts `gpt-6.1-sol` and `gpt-6.2-sol`. See the [provider catalog](docs/API.md#post-chat). |
 | `max_tokens` | int | Default `16000`; OpenAI `16`–`64000`, Bedrock `1`–`64000`. |
-| `thinking` | bool \| null | Defaults to `THINKING_DEFAULT`; GPT-6.1 Sol maps true/false to medium/low. |
+| `thinking` | bool \| null | Defaults to `THINKING_DEFAULT`. Both OpenAI models map true/false to medium/low. |
 | `tools` | list \| null | Optional client-executed tool definitions; see the [tool-use contract](docs/API.md#client-executed-tools). |
 
 **Response** (`ChatResponse`): `{ "content", "model", "stop_reason", "usage": { "input_tokens", "output_tokens" } }` for legacy text-only requests. Tool or structured-message requests additionally return ordered `content_blocks` for stateless continuation.
@@ -176,7 +176,7 @@ llm/
 
 ### Chat providers
 
-`openai` (default) uses GPT-6.1 Sol through the Responses API. It reuses the existing
+`openai` uses the Responses API and defaults to GPT-6.1 Sol. It reuses the existing
 OpenAI key and SDK. No consumer endpoint or auth changes are needed. See the
 [provider architecture](docs/ARCHITECTURE.md#openai-chat-default) and
 [deployment steps](docs/DEPLOYMENT.md#switching-chat-to-openai).

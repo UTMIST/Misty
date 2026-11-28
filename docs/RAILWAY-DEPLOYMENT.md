@@ -14,13 +14,22 @@ Railway + Neon dashboards / CLIs.
 | `llm` | `/` | **none** | — | Stateless OpenAI chat/embedding API with optional Bedrock chat; keys from `CONSUMER_KEYS`. |
 | `meeting` | `/` | **none** | — | **Stateful in-memory**; keys from `CONSUMER_KEYS`. See the single-replica warning in step 2, and the WebSocket keepalive note in the Notes section — its `startCommand` is the one that isn't the plain template. |
 | `connectors` | `/` | **none** | — | Stateless outbound adapter (Google Drive/Docs); keys from `CONSUMER_KEYS`. Recommended to deploy before `documentation-system` (not required) — see its `CONNECTORS_API_KEY` note in step 3. |
-| `gateway` | `/` | Neon (own project) | `alembic upgrade head` | Public scoped reads; one replica. See [gateway setup](../services/gateway/docs/DEPLOYMENT.md). |
+| `gateway` | `/` | Neon (own project) | `alembic upgrade head` | Public scoped reads and optional email login; one replica. See [gateway setup](../services/gateway/docs/DEPLOYMENT.md). |
 | `discord-bot` | `discord-bot` | none | `node src/registerCommands.js` | Node Discord frontend. Pre-deploy registers the slash commands with Discord (step 5). |
 
 The gateway receives a public HTTPS domain. All other services remain **private**
 and reach each other as `<service>.railway.internal:<PORT>`. Gateway credentials,
 consumer keys, proxy settings, and verification are covered in its
 [deployment runbook](../services/gateway/docs/DEPLOYMENT.md).
+Email login requires gateway migration002, `EMAIL_LOGIN_ENABLED`, private
+`VERIFICATION_BASE_URL`/`VERIFICATION_API_KEY`, a scoped `vf_` entry in verification
+`CONSUMER_KEYS`, directory `people:read`, and compute `auth:email`/`auth:status`.
+Set gateway `GATEWAY_ENV` explicitly; compute verifies the matching issuer and
+pins its gateway origin/environment to a separate database per environment.
+Deploy verification’s cooldown `Retry-After` support before gateway retry support.
+Size `LOGIN_STATUS_PER_MINUTE` and `EDGE_REQUESTS_PER_MINUTE` together using
+[enablement](../services/gateway/docs/DEPLOYMENT.md#enable-email-login); keep the
+one-worker limit and the compute eligibility cache unchanged.
 
 For the optional persistent `dev` environment used to test one PR at a
 time with a dedicated Discord bot, see [PR previews](pr-previews.md). That
@@ -614,7 +623,8 @@ Deploy order for the durable Google Doc path:
    `DOC_API_KEY`. In each originating text channel/thread grant the bot View
    Channel, Read Message History and Send Messages/Send Messages in Threads.
    On Discord readiness the bot recovers saved records with pending/failed
-   delivery, then polls every ten minutes. No new cron or Google key is needed.
+   delivery, then uses [adaptive recovery polling](../discord-bot/docs/meeting-delivery.md#recovery).
+   No new cron or Google key is needed.
 
 Rollout checks use a consented staging meeting: explicit and empty-channel stop,
 Doc sections and full transcript, native MIME type and configured destination,

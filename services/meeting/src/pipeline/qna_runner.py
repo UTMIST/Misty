@@ -53,7 +53,10 @@ class QnaRunner:
         job.add_done_callback(lambda _: self._slots.release())
         future = asyncio.wrap_future(job)
         future.add_done_callback(_observe_result)
-        return await asyncio.shield(future)
+        # Cancelling this wait leaves the worker running. shield() can also
+        # report its eventual exception to the event loop after cancellation.
+        await asyncio.wait((future,))
+        return future.result()
 
     def close(self) -> None:
         self._closed = True

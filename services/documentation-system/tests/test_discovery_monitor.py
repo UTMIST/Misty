@@ -411,7 +411,7 @@ def test_railway_only_schedules_monitored_staging_runs():
     assert "src.discovery" not in config["deploy"]["startCommand"]
     staging = config["environments"]["staging"]["deploy"]
     assert staging["startCommand"] == "python -m src.discovery --require-monitor"
-    assert staging["cronSchedule"] == "*/15 * * * *"
+    assert staging["cronSchedule"] == "0 * * * *"
     preview = config["environments"]["pr"]["deploy"]
     assert preview["cronSchedule"] is None
     assert "src.discovery" not in preview["startCommand"]

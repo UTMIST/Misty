@@ -17,9 +17,10 @@ inspection. Misty uses read-only Google API scopes and never changes your sharin
 
 No per-file `/doc add` or folder registration is required. Supported descendants,
 including nested folders and later additions, are discovered on recurring scans.
-The proposed schedule is every 15 minutes. Small scans normally import on the next
-run plus fetch/index time; large scans continue across runs, so this is not a
-15-minute latency guarantee. Staging must measure actual latency before release.
+Production discovery uses a 15-minute schedule; staging runs hourly to reduce idle
+database wake-ups. Small scans normally import on the next run plus fetch/index
+time; large scans continue across runs, so neither cadence is a latency guarantee.
+Staging must measure actual latency before release.
 
 Sharing with Misty does **not** make a document visible to everyone. Intended people
 also need their own source permission and a primary/verified matching email in the
@@ -75,13 +76,17 @@ retirement for that purpose.
    `services/documentation-system/railway.discovery.json`, repository-root build
    context and the same revision as the APIs. The configuration disables schedules
    outside staging, including PR previews. Staging runs
-   `python -m src.discovery --require-monitor` every 15 minutes, one replica, no HTTP healthcheck,
+   `python -m src.discovery --require-monitor` hourly (`0 * * * *`), one replica, no HTTP healthcheck,
    pre-deploy migration, or automatic failure restart.
    If Railway rejects the legacy config-file setting, apply these same values to
    the dedicated service and read them back after deployment. The staging service
-   currently uses explicit settings and an uploaded build, not a GitHub source
-   connection; merging a PR does not update that runner automatically. Verify the
-   deployed revision, command, schedule and retained volume separately.
+   follows `staging` through its GitHub source connection and uses explicit Railway
+   settings. Merging updates runner code; verify the deployed revision, command,
+   schedule and retained volume separately.
+   When changing the staging cadence, update the invocation monitor's cron below
+   with the runner schedule; retain its 30-minute grace and the separate completion
+   check. Production's 15-minute discovery and the hourly source-access refresh
+   schedules are independent of this staging setting.
 4. Attach a persistent volume at `/data`, set
    `DISCOVERY_STATE_PATH=/data/discovery-state.json` and an explicit
    `DISCOVERY_IDENTITY` identifying this environment and connector account. Set both
@@ -174,7 +179,7 @@ coverage gap in the rollout issue; do not infer one from CODEOWNERS or issue ass
 
 | Check | Timing | Runner setting | Signal |
 |---|---|---|---|
-| `Misty staging discovery runs` | Cron `*/15 * * * *`, UTC; 30-minute grace | `DISCOVERY_MONITOR_URL` | `/start` after acquiring the checkpoint lock; success only on exit 0, otherwise `/fail` |
+| `Misty staging discovery runs` | Cron `0 * * * *`, UTC; 30-minute grace | `DISCOVERY_MONITOR_URL` | `/start` after acquiring the checkpoint lock; success only on exit 0, otherwise `/fail` |
 | `Misty staging discovery completion` | Simple period 23 hours; grace 1 hour | `DISCOVERY_COMPLETION_MONITOR_URL` | Success only after a newly completed clean scan has been checkpointed; no start/failure pings |
 
 The first check reports exit 2, overlaps, missed invocations and runs stuck for

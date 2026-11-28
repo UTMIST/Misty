@@ -528,10 +528,12 @@ def test_monitor_outage_never_replays_refresh_or_reports_success(
         monkeypatch.setattr(source_refresh, "DocsApiClient", lambda **kw: client)
         assert main([]) == 2
     assert sum(r.url.path == source_refresh.REFRESH_PATH for r in requests) == 1
-    assert all(r.method != "DELETE" for r in requests)  # Delivery is uncertain; retain ownership.
+    assert requests[-1].method == "DELETE"  # API work completed despite monitor failure.
     assert events == ["start", "fail" if fail_event == "start" else "success"]
     finish = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert finish["monitor_failed"] is True
+    assert finish["guard_released"] is True
+    assert requests[-1].url.path.endswith(finish["run_id"])
     assert finish["failed"] == item_failed
     assert finish["outcome"] == "failed" and finish["level"] == "error"
 
@@ -641,9 +643,18 @@ def test_overlapping_runner_cannot_mask_or_release_a_stuck_run(monkeypatch, bloc
 
 @pytest.mark.parametrize(
     "fault",
-    ["acquire_timeout", "acquire_ack", "api_timeout", "start", "success", "release_timeout"],
+    [
+        "acquire_timeout",
+        "acquire_ack",
+        "api_timeout",
+        "meeting_timeout",
+        "start",
+        "success",
+        "release_timeout",
+        "monitor_release_timeout",
+    ],
 )
-def test_uncertain_completion_retains_guard_until_operator_recovery(monkeypatch, fault):
+def test_guard_recovery_depends_on_api_completion(monkeypatch, capsys, fault):
     from fastapi.testclient import TestClient
 
     from src.api.app import create_app
@@ -653,7 +664,7 @@ def test_uncertain_completion_retains_guard_until_operator_recovery(monkeypatch,
     from tests.test_api_indexing import _key
 
     store = InMemoryStorageAdapter(seed_sources=build_seed_sources())
-    headers = _key(store, "docs:write")
+    headers = _key(store, "docs:write", "meetings:write")
     token = headers["X-API-Key"]
     monkeypatch.setenv("DOCS_API_KEY", token)
     monkeypatch.setenv("SOURCE_REFRESH_MONITOR_URL", "https://monitor.test/private-token")
@@ -663,6 +674,8 @@ def test_uncertain_completion_retains_guard_until_operator_recovery(monkeypatch,
 
     def ping(self, event):
         events.append((self.run_id, event))
+        if fault == "monitor_release_timeout" and event == "success":
+            return False
         return event != fault
 
     monkeypatch.setattr(RunMonitor, "ping", ping)
@@ -670,7 +683,9 @@ def test_uncertain_completion_retains_guard_until_operator_recovery(monkeypatch,
         original_request = http.request
 
         def request(method, url, **kwargs):
-            if fault == "release_timeout" and method == "DELETE":
+            if fault in {"release_timeout", "monitor_release_timeout"} and method == "DELETE":
+                raise httpx.ReadTimeout("private request detail")
+            if fault == "meeting_timeout" and "/meeting-records/retry-due" in url:
                 raise httpx.ReadTimeout("private request detail")
             response = original_request(method, url, **kwargs)
             if method == "POST" and "refresh-runs/" in url and response.status_code == 200:
@@ -690,19 +705,28 @@ def test_uncertain_completion_retains_guard_until_operator_recovery(monkeypatch,
                 base_url="http://testserver", api_key=SecretStr(token), client=http
             ),
         )
-        assert main([]) == 2
+        assert main(["--meeting-records"] if fault == "meeting_timeout" else []) == 2
+        finish = json.loads(capsys.readouterr().out.splitlines()[-1])
+        released = fault in {"start", "success"}
+        assert finish["guard_released"] is released
+        assert finish["monitor_failed"] is (released or fault == "monitor_release_timeout")
         owner = events[0][0]
         assert events[-1][1] == ("success" if fault == "success" else "fail")
-        boundary = len(events)
-        assert main([]) == 2
-        assert [event for _, event in events[boundary:]] == ["fail"]
-        # Recovery after inspection allows the next run, including after ping failure.
+        if not released:
+            boundary = len(events)
+            assert main([]) == 2
+            assert [event for _, event in events[boundary:]] == ["fail"]
         monkeypatch.setattr(http, "request", original_request)
-        assert (
-            http.delete(f"/docs/source-access/refresh-runs/{owner}", headers=headers).status_code
-            == 200
-        )
+        if not released:
+            # Only uncertain API outcomes need operator recovery after inspection.
+            assert (
+                http.delete(
+                    f"/docs/source-access/refresh-runs/{owner}", headers=headers
+                ).status_code
+                == 200
+            )
         monkeypatch.setattr(RunMonitor, "ping", lambda self, event: True)
+        # Monitor-only failures must allow the next run without manual lock cleanup.
         assert main([]) == 0
 
 

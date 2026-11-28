@@ -72,6 +72,9 @@ The cost is a genuine (small) race: mail delivered, then the write fails. The us
 So only the newest code is ever live: reissuing invalidates the previous one implicitly, with no cleanup pass and no way for two valid codes to coexist for one subject.
 
 Note the asymmetry: the **rate limit is keyed by email**, the **row is keyed by subject**. That's on purpose — the limit protects the *mailbox* from being flooded across whatever subjects an attacker invents, while the row models "the one proof in flight for this subject."
+A throttled request returns `Retry-After` rounded up to the remaining whole
+seconds before any send. Gateway can defer that specific failure without
+bypassing the mailbox limit; unknown errors must not authorize a retry.
 
 ## The confirm state machine
 
@@ -110,11 +113,19 @@ Two caveats worth knowing rather than assuming:
 - **No test actually exercises concurrency.** The increment tests in both adapter suites are sequential, so a read-modify-write regression in `postgres.py` would pass them. The atomicity here rests on the single `UPDATE ... RETURNING` statement, not on test coverage — which is exactly why the statement shape matters and shouldn't be "simplified".
 - **`InMemoryVerificationStore` is a read → `model_copy` → write**, i.e. the shape this section calls disqualifying. That's acceptable because it backs single-threaded tests, never production — but don't read it as the reference implementation of this invariant. `postgres.py` is.
 
-## Auth: env-key-only, on purpose
+## Auth: scoped consumers and bootstrap compatibility
 
-verification is the one service with a database but **no key table**. `NullApiKeyStore` short-circuits every key lookup, so only the bootstrap `API_KEY` authenticates. The `vf_` envelope is reserved but unused — which means the env key must be a plain opaque string, *not* shaped like that envelope.
+verification has a database but no key table. Its `CONSUMER_KEYS` configuration
+seeds an `InMemoryKeyStore` with argon2-hashed, scoped `vf_` keys at boot. This
+supports a distinct gateway identity without sharing the bot's bootstrap key.
+Malformed configuration prevents startup. Removing a consumer and redeploying
+revokes it; adding a second key supports an overlap window during rotation.
 
-The reasoning: there is exactly one consumer (the Discord bot). Issuing per-consumer keys would be ceremony without benefit — a CLI, a table, a migration, and a revoke path, all to manage one key. If a second consumer ever appears, a real `ApiKeyStore` drops in behind the same protocol with no route changes.
+The bootstrap `API_KEY` remains for existing bot compatibility. It carries `admin`
+and must not resemble the `vf_` envelope. Both endpoints still require
+`verification:write`. The gateway is responsible for login-specific eligibility,
+concurrency admission, and single-use redemption; this service's confirm state
+machine remains unchanged for existing callers.
 
 ## Email backends
 

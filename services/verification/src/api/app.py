@@ -3,10 +3,12 @@ from fastapi import FastAPI
 from platform_auth import AuditLogMiddleware
 
 from src.config import verify_production_secrets
+from src.api.deps import get_key_store
 
 
 def create_app() -> FastAPI:
     verify_production_secrets()
+    get_key_store()  # Validate scoped credentials at boot, before serving requests.
 
     app = FastAPI(
         title="UTMIST verification",

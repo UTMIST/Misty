@@ -1,6 +1,6 @@
 """Chat model catalog shared by wire validation, configuration, and providers."""
 
-OPENAI_MODELS = {"gpt-6.1-sol"}
+OPENAI_MODELS = {"gpt-6.1-sol", "gpt-6.2-sol"}
 BEDROCK_MODELS = {"claude-sonnet-4-6", "claude-opus-4-6"}
 MODELS_BY_PROVIDER = {
     "openai": OPENAI_MODELS,
