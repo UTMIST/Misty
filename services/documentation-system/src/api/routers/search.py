@@ -1,4 +1,4 @@
-import json
+import asyncio
 import logging
 import re
 import time
@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.responses import Response
+from starlette.requests import ClientDisconnect
+from starlette.responses import JSONResponse
 
 from contracts.directory import DirectoryClient, DirectoryUnavailable
 from contracts.retrieval import (
@@ -39,7 +40,9 @@ def _observe(request: Request, outcome: str) -> None:
 
 
 def _early_outcome(request, outcome):
-    if outcome != "internal_error" and getattr(request.state, "search_outcome", None):
+    if outcome not in {"internal_error", "cancelled"} and getattr(
+        request.state, "search_outcome", None
+    ):
         return
     if getattr(request.state, "search_call", None) is not None:
         _observe(request, outcome)
@@ -62,9 +65,22 @@ class _SearchRoute(APIRoute):
         handler = super().get_route_handler()
 
         async def validated(request):
+            if get_settings().search_outcome_audit_enabled:
+                request.state.audit_cancel_extra = {"search_outcome": "cancelled"}
             try:
-                return await handler(request)
+                response = await handler(request)
+                # Only count a completed search after FastAPI has validated
+                # and serialized its response, before the ASGI transport sends it.
+                _observe(request, request.state.search_result)
+                return response
+            except asyncio.CancelledError:
+                _early_outcome(request, "cancelled")
+                raise
             except StarletteHTTPException as exc:
+                # FastAPI wraps a disconnected request body in a generic 400.
+                if isinstance(exc.__cause__, ClientDisconnect):
+                    _early_outcome(request, "cancelled")
+                    raise HTTPException(499, "client disconnected") from None
                 # FastAPI also uses Starlette's base exception for unreadable bodies.
                 fallback = {400: "invalid_request", 401: "denied", 403: "denied"}.get(
                     exc.status_code
@@ -72,13 +88,21 @@ class _SearchRoute(APIRoute):
                 if fallback:
                     _early_outcome(request, fallback)
                 raise
-            except RequestValidationError as exc:
+            except RequestValidationError:
                 _early_outcome(request, "invalid_request")
-                # FastAPI's default error response echoes invalid Unicode input
-                # and fails to encode it. Keep the detail shape without input.
-                errors = [{k: error[k] for k in ("type", "loc", "msg")} for error in exc.errors()]
-                return Response(
-                    json.dumps({"detail": errors}), status_code=422, media_type="application/json"
+                # Extra-field names, error messages and invalid values may all
+                # contain caller data, including text that cannot encode as UTF-8.
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "detail": [
+                            {
+                                "type": "value_error",
+                                "loc": ["body"],
+                                "msg": "Invalid search request",
+                            }
+                        ]
+                    },
                 )
             except Exception as exc:
                 _early_outcome(request, "internal_error")
@@ -162,7 +186,7 @@ def search(
         _observe(request, "directory_unavailable")
         raise HTTPException(503, "retrieval scope unavailable") from None
     if isinstance(visibility, Channel) and not visibility.source_team_ids:
-        _observe(request, "no_channel_teams")
+        request.state.search_result = "no_channel_teams"
         return SearchResponse(results=[])
     try:
         embedding = embeddings.embed_query(payload.query)
@@ -182,5 +206,5 @@ def search(
         raise HTTPException(503, "retrieval storage unavailable") from None
     _warn_on_excluded_docs(storage, embedding.model)
     response = SearchResponse(results=results)
-    _observe(request, "results" if results else "no_hits")
+    request.state.search_result = "results" if results else "no_hits"
     return response

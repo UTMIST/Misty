@@ -152,15 +152,13 @@ CREATE TABLE IF NOT EXISTS events(
 CREATE INDEX IF NOT EXISTS event_time ON events(ts);
 CREATE INDEX IF NOT EXISTS trace ON events(trace_id,span_id);
 CREATE UNIQUE INDEX IF NOT EXISTS span_start ON events(trace_id,span_id) WHERE event_name='start';
-CREATE UNIQUE INDEX IF NOT EXISTS span_end_observation ON events(trace_id,span_id,ts,result)
- WHERE event_name='end';
 CREATE TABLE IF NOT EXISTS sources(
  service TEXT PRIMARY KEY, checkpoint TEXT,observed_at TEXT,last_success TEXT,last_error TEXT,
  gaps INTEGER NOT NULL DEFAULT 0,rejected INTEGER NOT NULL DEFAULT 0,drops INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS summaries(
  service TEXT NOT NULL,traffic TEXT NOT NULL,operation TEXT NOT NULL,result TEXT NOT NULL,bucket TEXT NOT NULL,
- count INTEGER NOT NULL,total_ms INTEGER NOT NULL,max_ms INTEGER NOT NULL,
+ count INTEGER NOT NULL,total_ms INTEGER NOT NULL,max_ms INTEGER NOT NULL,latency_count INTEGER NOT NULL,
  PRIMARY KEY(service,traffic,operation,result,bucket)
 );
 """
@@ -190,9 +188,33 @@ def connect(path, env):
         db.executescript(SCHEMA)
         with db:
             bind(db, "environment", env)
-            # Older stores accepted at most one end per span. Their existing
-            # receipts and summaries are correct until new evidence is replayed.
+            old = db.execute(
+                "select sql from sqlite_master where name='span_end_observation'"
+            ).fetchone()
+            if old and "elapsed_ms" not in old[0]:
+                db.execute("drop index span_end_observation")
             db.execute("drop index if exists terminal")
+            # Canonical payload JSON sorts the measure names; missing and empty
+            # measures carry identical evidence.
+            db.execute("""create unique index if not exists span_end_observation on
+                events(trace_id,span_id,ts,result,elapsed_ms,coalesce(json_extract(payload,'$.measures'),'{}'))
+                where event_name='end'""")
+            if "latency_count" not in {
+                r[1] for r in db.execute("pragma table_info(summaries)")
+            }:
+                db.execute(
+                    "alter table summaries add column latency_count integer not null default 0"
+                )
+                db.execute("update summaries set latency_count=count")
+                # Reconcile preexisting disagreements. Older collectors also
+                # discarded the entire first partial hour although some rows survived.
+                affected = db.execute("""select distinct service,traffic,operation,hour from (
+                    select service,traffic,operation,substr(min(ts),1,13) hour from events
+                    where event_name='end' group by trace_id,span_id having count(*)>1)
+                    union select service,traffic,operation,substr(ts,1,13) from events
+                    where event_name='end' and substr(ts,1,13)=(select substr(min(ts),1,13) from events)""")
+                for key in affected:
+                    rebuild_summary_hour(db, *key)
         return db
     except BaseException:
         db.close()
@@ -210,20 +232,35 @@ def bind(db, key, expected):
 
 def prune(db, now):
     cutoff = iso(now - RETENTION)
-    # Drop the partially expired summary hour as its contributing spans age out.
+    hour = cutoff[:13]
     with db:
+        # An expiring end can change the first surviving hour or resolve a
+        # disagreement. Recompute only the affected groups that retain evidence.
+        if not db.in_transaction:
+            db.execute("begin immediate")
+        groups = db.execute(
+            """select distinct service,traffic,operation,substr(first_kept,1,13) from (
+                 select old.service,old.traffic,old.operation,
+                   (select min(peer.ts) from events peer where peer.trace_id=old.trace_id
+                      and peer.span_id=old.span_id and peer.event_name='end' and peer.ts>=:cutoff) first_kept
+                 from events old indexed by event_time where old.ts<:cutoff and old.event_name='end'
+               ) where first_kept is not null
+               union select distinct service,traffic,operation,substr(ts,1,13) from events indexed by event_time
+                 where event_name='end' and ts>=:hour and ts<:cutoff""",
+            {"cutoff": cutoff, "hour": hour + ":00:00.000Z"},
+        ).fetchall()
         db.execute("delete from events where ts < ?", (cutoff,))
         if db.execute(
             "select 1 from sqlite_master where type='table' and name='railway_samples'"
         ).fetchone():
             db.execute("delete from railway_samples where observed_at < ?", (cutoff,))
-        db.execute(
-            "delete from summaries where bucket <= ?", (cutoff[:13] + ":00:00.000Z",)
-        )
+        db.execute("delete from summaries where bucket < ?", (hour + ":00:00.000Z",))
+        for key in groups:
+            rebuild_summary_hour(db, *key)
 
 
 def rebuild_summary_hour(db, service, traffic, operation, hour):
-    """Reconcile this hour after a second terminal observation for a span."""
+    """Rebuild one group from its retained terminal evidence."""
     bucket = hour + ":00:00.000Z"
     stop = iso(utc(bucket) + timedelta(hours=1))
     key = dict(
@@ -234,26 +271,27 @@ def rebuild_summary_hour(db, service, traffic, operation, hour):
            and operation=:operation and bucket=:bucket""",
         key,
     )
-    # Attribute each span to its earliest terminal observation. A disagreement
-    # supplies one unknown outcome and no latency. Recompute the group's max
-    # too: the disputed span could have supplied the previous maximum.
+    # Group all terminal observations of each span under its earliest end.
+    # A consistent result survives conflicting timings. Only a consistent
+    # result and elapsed value supply a latency sample.
     db.execute(
-        """with first_ends as (
-             select e.*, exists (
-               select 1 from events peer where peer.trace_id=e.trace_id and peer.span_id=e.span_id
-                 and peer.event_name='end' and peer.result!=e.result
-             ) disputed
-             from events e where e.service=:service and e.traffic=:traffic and e.operation=:operation
+        """with observations as (
+             select min(peer.result) lo,max(peer.result) hi,
+                    min(peer.elapsed_ms) shortest,max(peer.elapsed_ms) longest
+             from events e indexed by event_time join events peer on peer.trace_id=e.trace_id and peer.span_id=e.span_id
+               and peer.event_name='end'
+             where e.service=:service and e.traffic=:traffic and e.operation=:operation
                and e.event_name='end' and e.ts>=:bucket and e.ts<:stop and not exists (
                  select 1 from events prior where prior.trace_id=e.trace_id and prior.span_id=e.span_id
-                   and prior.event_name='end' and (prior.ts,prior.event_id)<(e.ts,e.event_id)
-               )
+                   and prior.event_name='end' and (prior.ts,prior.event_id)<(e.ts,e.event_id))
+             group by e.trace_id,e.span_id
            ), outcomes as (
-             select case when disputed then 'unknown' else result end outcome,
-                    case when disputed then 0 else elapsed_ms end elapsed from first_ends
+             select case when lo=hi then lo else 'unknown' end outcome,
+                    case when lo=hi and shortest=longest then shortest end elapsed from observations
            )
-           insert into summaries select :service,:traffic,:operation,outcome,:bucket,
-             count(*),sum(elapsed),max(elapsed) from outcomes group by outcome""",
+           insert into summaries(service,traffic,operation,result,bucket,count,total_ms,max_ms,latency_count)
+           select :service,:traffic,:operation,outcome,:bucket,count(*),coalesce(sum(elapsed),0),
+                  coalesce(max(elapsed),0),count(elapsed) from outcomes group by outcome""",
         key,
     )
 
@@ -281,43 +319,50 @@ def insert(db, p, service, traffic, received):
         p.get("deployment", "unknown"),
         payload,
     )
-    terminal = p["schema"] == SHARED and p["event_name"] == "end"
+    replay = db.execute(
+        "select payload from events where event_id=?", (event_id,)
+    ).fetchone()
+    if replay:
+        return ("duplicate" if replay[0] == payload else "rejected"), 0
+    shared = p["schema"] == SHARED
+    span_ids = (p["trace_id"], p["span_id"])
+    if (
+        shared
+        and db.execute(
+            """select 1 from events where trace_id=? and span_id=?
+           and (service,traffic,operation)!=(?,?,?) and json_extract(payload,'$.schema')=?
+           limit 1""",
+            (*span_ids, service, p["traffic"], p["operation"], SHARED),
+        ).fetchone()
+    ):
+        return "rejected", 0
+    terminal = shared and p["event_name"] == "end"
     previous = None
     if terminal:
         previous = db.execute(
-            """select ts,service,traffic,operation,result from events where trace_id=? and span_id=?
-               and event_name='end' order by ts,event_id limit 1""",
-            (p["trace_id"], p["span_id"]),
+            """select min(ts),min(result),max(result),min(elapsed_ms),max(elapsed_ms)
+               from events where trace_id=? and span_id=? and event_name='end' group by trace_id,span_id""",
+            span_ids,
         ).fetchone()
-        if previous and tuple(previous[1:4]) != (service, p["traffic"], p["operation"]):
-            return "rejected", 0
-    added = db.execute(
+    if not db.execute(
         "insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values
-    ).rowcount
-    if not added:
-        existing = db.execute(
-            "select payload from events where event_id=?", (event_id,)
-        ).fetchone()
-        return ("duplicate" if existing and existing[0] == payload else "rejected"), 0
+    ).rowcount:
+        return "rejected", 0
     if previous:
-        moves_first = ts < previous[0]
-        new_dispute = (
-            result != previous[4]
-            and not db.execute(
-                """select 1 from events where trace_id=? and span_id=? and event_name='end'
-               and result!=? and event_id!=? limit 1""",
-                (p["trace_id"], p["span_id"], previous[4], event_id),
-            ).fetchone()
+        first_ts, lo, hi, shortest, longest = previous
+        moves_hour = ts[:13] < first_ts[:13]
+        new_dispute = lo == hi and (
+            result != lo or (shortest == longest and shortest != p["elapsed_ms"])
         )
-        if moves_first or new_dispute:
+        if moves_hour or new_dispute:
             # An out-of-order earlier end can move the span to a different hour.
-            for hour in {previous[0][:13], min(ts, previous[0])[:13]}:
+            for hour in {first_ts[:13], min(ts, first_ts)[:13]}:
                 rebuild_summary_hour(db, service, p["traffic"], p["operation"], hour)
     elif terminal:
         db.execute(
-            """insert into summaries values(?,?,?,?,?,1,?,?)
+            """insert into summaries(service,traffic,operation,result,bucket,count,total_ms,max_ms,latency_count) values(?,?,?,?,?,1,?,?,1)
                      on conflict(service,traffic,operation,result,bucket) do update set
-                     count=count+1,total_ms=total_ms+excluded.total_ms,max_ms=max(max_ms,excluded.max_ms)""",
+                     count=count+1,latency_count=latency_count+1,total_ms=total_ms+excluded.total_ms,max_ms=max(max_ms,excluded.max_ms)""",
             (
                 service,
                 p["traffic"],

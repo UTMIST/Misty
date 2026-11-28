@@ -8,6 +8,28 @@ import json
 from dashboard_ui import sources
 
 
+ANSWER_OUTCOMES = (
+    "full",
+    "partial",
+    "withheld",
+    "denied",
+    "rate_limited",
+    "timeout",
+    "cancelled",
+    "action",
+    "failed",
+    "unavailable",
+)
+HTTP_OUTCOMES = (
+    "success",
+    "denied",
+    "rate_limited",
+    "invalid_request",
+    "failed",
+    "cancelled",
+)
+
+
 def _table(headings, rows):
     def cells(values, tag):
         return "".join(f"<{tag}>{escape(str(value))}</{tag}>" for value in values)
@@ -44,18 +66,25 @@ def _cohort(db, traffic, start, end):
         rounded += timedelta(minutes=1)
     first = rounded.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     last = end[:16] + ":00.000Z"
+    # Snapshots produced by the earlier projector have no separate timing conflict.
+    has_latency_conflict = any(
+        r[1] == "latency_conflict_at"
+        for r in db.execute("pragma table_info(health_runs)")
+    )
+    timing = "latency_conflict_at" if has_latency_conflict else "null"
     rows = db.execute(
-        """
+        f"""
         with cohort as (
           select service,operation,route,admitted,result,latency,n from health_minutes
             where traffic=:traffic and minute>=:first and minute<:last
           union all
           select service,operation,route,coalesce(admitted_at<:end,0) as admitted,
             case when ended<:end and (conflict_at is null or conflict_at>=:end) then result else 'unknown' end,
-            case when ended<:end and (conflict_at is null or conflict_at>=:end) then latency else 0 end,
+            case when ended<:end and (conflict_at is null or conflict_at>=:end)
+                 and ({timing} is null or {timing}>=:end) then latency else -1 end,
             1 from health_runs where traffic=:traffic and started>=:start and started<:end and (sealed=0 or minute<:first or minute>=:last)
         )
-        select service,operation,route,admitted,result,latency,sum(n) as n,sum(latency*n) as total_ms
+        select service,operation,route,admitted,result,latency,sum(n) as n
         from cohort group by service,operation,route,admitted,result,latency
     """,
         dict(traffic=traffic, first=first, last=last, start=start, end=end),
@@ -71,10 +100,14 @@ def _cohort(db, traffic, start, end):
                 zip(("service", "operation", "route", "admitted", "result"), key),
                 n=0,
                 total_ms=0,
+                latency_n=0,
             ),
         )
         out["n"] += r["n"]
-        out["total_ms"] += r["total_ms"]
+        if r["latency"] < 0 or r["result"] == "unknown":
+            continue
+        out["total_ms"] += r["latency"] * r["n"]
+        out["latency_n"] += r["n"]
         if r["operation"] == "answer" and r["result"] == "full":
             durations[r["latency"]] += r["n"]
     count = sum(durations.values())
@@ -99,14 +132,15 @@ def _catalog(db, traffic, end):
     parts = ["<h2>Catalog evidence</h2>"]
     # Snapshots built before collection could retain a conflicting end have
     # no conflict_at column. Keep serving them until the next atomic rebuild.
-    has_conflict = any(
-        row[1] == "conflict_at" for row in db.execute("pragma table_info(health_jobs)")
+    fields = {row[1] for row in db.execute("pragma table_info(health_jobs)")}
+    conflict = "conflict_at" if "conflict_at" in fields else "null"
+    measures_conflict = (
+        "measures_conflict_at" if "measures_conflict_at" in fields else "null"
     )
-    conflict = "conflict_at" if has_conflict else "null"
     jobs = f"""with jobs as (
       select operation,started,case when {conflict}<:end then {conflict} else ts end as ts,
         case when {conflict}<:end then 'unknown' else result end as result,
-        case when {conflict}<:end then '{{}}' else measures end as measures
+        case when {conflict}<:end or {measures_conflict}<:end then '{{}}' else measures end as measures
       from health_jobs where traffic=:traffic and ts<:end and operation=:operation
     ) """
     bounds = {"end": end, "traffic": traffic}
@@ -355,30 +389,26 @@ def render_health(
                 period,
                 marks.get("tool_round", 0),
                 marks.get("part_sent", 0),
-                answers["full"],
+                sum(
+                    r["latency_n"]
+                    for r in rows
+                    if r["operation"] == "answer" and r["result"] == "full"
+                ),
                 round(median) if median is not None else "—",
             )
         )
         accepted = sum(
             r["n"] for r in rows if r["operation"] == "answer" and r["admitted"]
         )
+        answer_total = sum(answers.values())
+        classified = [answers[outcome] for outcome in ANSWER_OUTCOMES]
         summary.append(
-            [period, sum(answers.values()), accepted]
-            + [
-                answers[k]
-                for k in (
-                    "full",
-                    "partial",
-                    "withheld",
-                    "denied",
-                    "rate_limited",
-                    "timeout",
-                    "cancelled",
-                    "action",
-                    "failed",
-                    "unavailable",
-                    "unknown",
-                )
+            [
+                period,
+                answer_total,
+                accepted,
+                *classified,
+                answer_total - sum(classified),
             ]
         )
         search = _outcomes(rows, "catalog.search")
@@ -423,8 +453,12 @@ def render_health(
             if op == "http.request":
                 key = (r["service"], r["route"] or "other")
                 totals = route_counts.setdefault(key, Counter())
-                totals[result] += n
-                totals["duration"] += r["total_ms"]
+                if result in HTTP_OUTCOMES:
+                    totals[result] += n
+                    totals["duration"] += r["total_ms"]
+                    totals["timed"] += r["latency_n"]
+                else:
+                    totals["unknown"] += n
             elif op.startswith(("answer.", "login.", "catalog.")):
                 components.append(
                     (
@@ -433,26 +467,26 @@ def render_health(
                         op,
                         result,
                         n,
-                        "—" if result == "unknown" else round(r["total_ms"] / n),
+                        r["latency_n"],
+                        round(r["total_ms"] / r["latency_n"])
+                        if r["latency_n"]
+                        else "—",
                     )
                 )
         for (service, route), values in sorted(route_counts.items()):
-            elapsed = values.pop("duration")
+            elapsed = values.pop("duration", 0)
+            timed = values.pop("timed", 0)
             all_count = sum(values.values())
-            finished = all_count - values["unknown"]
             routes.append(
                 (
                     period,
                     service,
                     route,
                     all_count,
-                    values["denied"],
-                    values["rate_limited"],
-                    values["invalid_request"],
-                    values["failed"],
-                    values["cancelled"],
+                    *(values[outcome] for outcome in HTTP_OUTCOMES),
                     values["unknown"],
-                    round(elapsed / finished) if finished else "—",
+                    timed,
+                    round(elapsed / timed) if timed else "—",
                 )
             )
     parts.append(
@@ -512,7 +546,15 @@ def render_health(
         "<h2>Workflow components</h2>"
         + (
             _table(
-                ("Period", "Service", "Operation", "Result", "Calls", "Mean ms"),
+                (
+                    "Period",
+                    "Service",
+                    "Operation",
+                    "Result",
+                    "Calls",
+                    "Timed",
+                    "Mean ms",
+                ),
                 components,
             )
             if components
@@ -528,13 +570,15 @@ def render_health(
                     "Service",
                     "Template",
                     "Requests",
+                    "Success",
                     "Denied",
                     "Rate limited",
                     "Invalid",
                     "Server error",
                     "Cancelled",
                     "Unknown",
-                    "Mean finished ms",
+                    "Timed",
+                    "Mean ms",
                 ),
                 routes,
             )

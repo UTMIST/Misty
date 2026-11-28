@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { handleDirectMessage } from '../src/adapters/discord/mentions.js';
 import { createToolExecutor } from '../src/toolExecutor.js';
+import { createHttpClient } from '../src/clients/httpClient.js';
 import { createLlmClient } from '../src/clients/llmClient.js';
 
 const cases = [
@@ -99,6 +100,18 @@ async function attempt(kind) {
 
 if (process.argv[2] === '--emit') {
   for (const kind of cases) await attempt(kind);
+  const client = createHttpClient({
+    baseUrl: 'http://fixture.invalid',
+    timeoutMs: 5,
+    fetchImpl: async (_url, { signal }) => {
+      signal.throwIfAborted();
+      await new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    },
+  });
+  await assert.rejects(client.send('/'));
+  await assert.rejects(client.send('/', { signal: AbortSignal.abort() }));
 } else {
   test('Discord admission, tool rounds and acknowledged multipart delivery stay content-free', () => {
     for (const enabled of ['true', 'false']) {
@@ -122,6 +135,13 @@ if (process.argv[2] === '--emit') {
         assert.equal(events.length, 0);
         continue;
       }
+      const standaloneCalls = events.filter(
+        (e) => e.operation === 'http.client' && e.event_name === 'end' && !e.parent_span_id,
+      );
+      assert.deepEqual(
+        standaloneCalls.map((e) => e.result),
+        ['timeout', 'cancelled'],
+      );
       const ends = events.filter((e) => e.operation === 'answer' && e.event_name === 'end');
       assert.deepEqual(
         ends.map((e) => e.result),

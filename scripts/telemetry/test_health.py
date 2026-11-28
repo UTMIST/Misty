@@ -1,6 +1,7 @@
 """Wireframe denominators, source age, route grouping and private resource import."""
 
 import csv
+from argparse import Namespace
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
@@ -10,6 +11,7 @@ import unittest
 from uuid import uuid4
 
 from contextlib import closing
+from collect import pull
 from dashboard import report_page
 from health_projection import materialize
 from resource_metrics import FIELDS, import_samples
@@ -181,12 +183,58 @@ class HealthTest(unittest.TestCase):
         for result in ("failed", "cancelled", "unknown"):
             self.assertIn(f"<td>catalog.search</td><td>{result}</td><td>1</td>", page)
         self.assertIn(
-            "<td>/v1/auth/email/start</td><td>6</td><td>1</td><td>1</td><td>0</td><td>1</td><td>1</td><td>1</td><td>4600</td>",
+            "<td>/v1/auth/email/start</td><td>6</td><td>1</td><td>1</td><td>1</td><td>0</td><td>1</td><td>1</td><td>1</td><td>5</td><td>4600</td>",
             page,
         )
         self.assertNotIn(lost, page)
         self.assertIn("No resource samples imported", page)
         self.assertIn("Missing or stale sources", page)
+
+    def test_unclassified_outcomes_and_cross_minute_route_latency(self):
+        self.attempt("answer", "success", admitted=True)
+        for result, ms in (("success", 100), ("unknown", 70000), ("full", 150)):
+            self.attempt(
+                "http.request",
+                result,
+                ms=ms,
+                service="gateway",
+                route="/v1/auth/email/start",
+            )
+        page = self.page()
+        self.assertIn(
+            "<td>Current</td><td>1</td><td>1</td>"
+            + "<td>0</td>" * 10
+            + "<td>1</td></tr>",
+            page,
+        )
+        self.assertIn(
+            "<td>/v1/auth/email/start</td><td>3</td><td>1</td>"
+            + "<td>0</td>" * 5
+            + "<td>2</td><td>1</td><td>100</td></tr>",
+            page,
+        )
+
+    def test_successful_poll_after_a_gap_reports_freshness_and_missing_history(self):
+        with TemporaryDirectory() as folder:
+            events = Path(folder) / "empty.jsonl"
+            events.touch()
+            args = Namespace(
+                command="import",
+                input=events,
+                environment="local",
+                service="gateway",
+                traffic="synthetic",
+                until=iso(END - timedelta(hours=2)),
+                available_since=None,
+            )
+            pull(self.db, args, END)
+            args.until = iso(END)
+            args.available_since = iso(END - timedelta(hours=1))
+            self.assertEqual(pull(self.db, args, END)["gaps"], 1)
+        self.assertIn(
+            f"<td>gateway</td><td>{iso(END)}</td><td>Current</td><td>1</td>",
+            self.page(),
+        )
 
     def test_freshness_uses_real_summaries_and_detects_a_missed_run(self):
         values = {

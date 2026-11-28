@@ -10,10 +10,10 @@ def materialize(raw, snap, cutoff):
           result text, latency integer, n integer,
           primary key(traffic,minute,service,operation,route,admitted,result,latency)) without rowid;
         create table health_runs(traffic text, started text, minute text, sealed integer,
-          service text,operation text,route text,admitted_at text,ended text,result text,latency integer,conflict_at text);
+          service text,operation text,route text,admitted_at text,ended text,result text,latency integer,conflict_at text,latency_conflict_at text);
         create index health_bounds on health_runs(traffic,started);
         create index health_crossings on health_runs(traffic,sealed,started);
-        create table health_jobs(traffic text,operation text,ts text,started text,result text,measures text,conflict_at text);
+        create table health_jobs(traffic text,operation text,ts text,started text,result text,measures text,conflict_at text,measures_conflict_at text);
         create index job_end on health_jobs(traffic,operation,ts);
         create table health_marks(traffic text,ts text,name text,n integer, primary key(traffic,ts,name)) without rowid;
         create table health_resources(service text,observed_at text,cpu_cores real,memory_bytes integer,deployed_at text,
@@ -35,6 +35,7 @@ def materialize(raw, snap, cutoff):
         start = admitted = ended = conflict = result = None
         route = ""
         latency = 0
+        latency_conflict = measures_conflict = None
         last = None
         job_measures = None
         for row in group:
@@ -46,19 +47,22 @@ def materialize(raw, snap, cutoff):
             elif name == "admitted" and admitted is None:
                 admitted = ts
             elif name == "end":
+                measures = None
+                if op in ("catalog.discovery", "catalog.refresh", "catalog.freshness"):
+                    measures = json.dumps(
+                        json.loads(payload).get("measures", {}),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
                 if ended is None:
-                    ended, result, latency = ts, value, elapsed
-                    if op in (
-                        "catalog.discovery",
-                        "catalog.refresh",
-                        "catalog.freshness",
-                    ):
-                        job_measures = json.dumps(
-                            json.loads(payload).get("measures", {}),
-                            separators=(",", ":"),
-                        )
-                elif value != result and conflict is None:
-                    conflict = ts
+                    ended, result, latency, job_measures = ts, value, elapsed, measures
+                else:
+                    if value != result and conflict is None:
+                        conflict = ts
+                    if elapsed != latency and latency_conflict is None:
+                        latency_conflict = ts
+                    if measures != job_measures and measures_conflict is None:
+                        measures_conflict = ts
             elif (op, name) in (
                 ("answer.model", "tool_round"),
                 ("answer.delivery", "part_sent"),
@@ -70,15 +74,24 @@ def materialize(raw, snap, cutoff):
                 )
         if job_measures is not None:
             snap.execute(
-                "insert into health_jobs values(?,?,?,?,?,?,?)",
-                (traffic, op, ended, start, result, job_measures, conflict),
+                "insert into health_jobs values(?,?,?,?,?,?,?,?)",
+                (
+                    traffic,
+                    op,
+                    ended,
+                    start,
+                    result,
+                    job_measures,
+                    conflict,
+                    measures_conflict,
+                ),
             )
         if not start:
             continue
         minute = start[:16] + ":00.000Z"
         sealed = int(last[:16] == start[:16])
         snap.execute(
-            "insert into health_runs values(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "insert into health_runs values(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 traffic,
                 start,
@@ -92,6 +105,7 @@ def materialize(raw, snap, cutoff):
                 result,
                 latency,
                 conflict,
+                latency_conflict,
             ),
         )
         if sealed:
@@ -107,7 +121,12 @@ def materialize(raw, snap, cutoff):
                     route,
                     int(admitted is not None),
                     known,
-                    latency if known != "unknown" else 0,
+                    latency
+                    if ended
+                    and not conflict
+                    and not latency_conflict
+                    and known != "unknown"
+                    else -1,
                 ),
             )
     if raw.execute(

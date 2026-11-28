@@ -121,7 +121,10 @@ search ran. `denied`, `invalid_request`, `directory_unavailable`,
 `internal_error` covers unexpected exceptions, including invalid result data
 that prevents the API from returning a response. The server traceback retains
 the failure location with a fixed error message to protect query and result
-text. Count `results` and `no_hits` only on HTTP 200.
+text. Results count after FastAPI validates and serializes the response. An ASGI
+request cancelled before that point records `cancelled`. A client disconnect
+observed during upload also records `cancelled` and a local HTTP status of 499.
+Successful serialization does not confirm delivery to the caller. Count `results` and `no_hits` only on HTTP 200.
 A missing label is unclassified. For the share of executed index searches
 returning zero hits, use `no_hits / (results + no_hits)` and leave an empty
 denominator blank. Use the existing duration field to compare slow requests.
@@ -148,7 +151,7 @@ for the portable normalization and database query trade-off.
 | Missing, conflicting, or incomplete context | 400, `{"detail":"provide exactly one person or channel context"}` |
 | Malformed person UUID | 400, `{"detail":"X-On-Behalf-Of must be a UUID"}` |
 | Malformed channel IDs | 400, `{"detail":"channel IDs must be decimal snowflakes"}` |
-| Invalid body | 422, Pydantic detail list (`type`, `loc`, `msg`; input omitted) |
+| Invalid body | 422, fixed validation detail with a body location and no submitted values or field names |
 | Directory unreachable, unauthorized, or malformed | 503, `{"detail":"retrieval scope unavailable"}` |
 | Query embedding failure / malformed or incompatible embedding | 502, `{"detail":"query embedding unavailable"}` |
 | Embedding rate limit or unconfigured dependency | 503, same embedding detail |

@@ -18,20 +18,34 @@ export function createHttpClient({
     const { headers: perCall, ...rest } = options;
     const mergedHeaders = perCall ? { ...headers, ...perCall } : headers;
 
-    let controller;
+    const caller = rest.signal;
+    const controller = timeoutMs === undefined ? undefined : new AbortController();
+    const signal = controller?.signal ?? caller;
+    const cancel = () => controller.abort(caller.reason);
     let timer;
-    if (timeoutMs !== undefined) {
-      controller = new AbortController();
-      timer = setTimeout(() => controller.abort(), timeoutMs);
+    if (controller) {
+      if (caller?.aborted) cancel();
+      else caller?.addEventListener('abort', cancel, { once: true });
+      timer = setTimeout(
+        () => controller.abort(new DOMException('Service request timed out', 'TimeoutError')),
+        timeoutMs,
+      );
     }
     try {
       return await withSpan('http.client', async (span) => {
-        const response = await fetchImpl(`${baseUrl}${path}`, {
-          ...rest,
-          headers: span.traceparent ? { ...mergedHeaders, ...traceHeaders() } : mergedHeaders,
-          redirect: 'error',
-          ...(controller ? { signal: controller.signal } : {}),
-        });
+        let response;
+        try {
+          response = await fetchImpl(`${baseUrl}${path}`, {
+            ...rest,
+            headers: span.traceparent ? { ...mergedHeaders, ...traceHeaders() } : mergedHeaders,
+            redirect: 'error',
+            ...(signal && { signal }),
+          });
+        } catch (error) {
+          if (signal?.aborted)
+            span.outcome(signal.reason?.name === 'TimeoutError' ? 'timeout' : 'cancelled');
+          throw error;
+        }
         if (response.status >= 400)
           span.outcome(
             response.status === 429
@@ -46,6 +60,7 @@ export function createHttpClient({
       throw networkError();
     } finally {
       if (timer) clearTimeout(timer);
+      if (controller) caller?.removeEventListener('abort', cancel);
     }
   }
 

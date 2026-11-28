@@ -83,7 +83,7 @@ python3 scripts/telemetry/collect.py prune --environment staging --db /path/to/p
 
 Run prune independently at least daily, including when polling is disabled.
 Raw events and aggregates expire at 29 days to allow a daily cleanup before the
-30-day maximum. The oldest partial hour may disappear from summaries first.
+30-day maximum. Pruning recomputes the oldest partial hour from retained observations.
 Use the same expiry schedule for snapshots and backups. Monitor the cleanup job
 outside this DB. Delete or expire the volume on retirement. Manual copies and
 provider log retention have separate controls. If the collector host is offline
@@ -109,7 +109,20 @@ The pilot emits all eligible observations. Required workflow marks and terminal
 component spans stay unsampled. Missing terminal evidence gives an unknown
 outcome. Partial trees remain visible. Process sequence gaps and reported drops
 are evidence of loss. A replay uses the immutable event ID (or an exact recording
-payload digest). A second end for one span cannot inflate component totals.
+payload digest). The first shared event binds its span to one service,
+traffic class, and operation. Later receipts with a different value are
+rejected. To repair a store that already contains mixed spans from an older
+collector, reimport the original receipts into a new private database while
+they remain within retention.
+
+The hourly summary counts each span once at its earliest
+retained end. Conflicting results count as one unknown. Matching results with
+different elapsed times keep their result and supply no latency sample.
+`latency_count` counts timed spans. Divide `total_ms` by `latency_count` for
+mean latency. When `latency_count` is zero, `total_ms` and `max_ms` are zero
+and the latency is unknown. A real zero-duration observation has a positive
+sample count. Conflicting catalog measure payloads leave the job’s counts
+unknown while preserving any agreed result.
 
 | Signal and source | Owner | Unit and denominator | Allowed dimensions | Expected freshness |
 | --- | --- | --- | --- | --- |

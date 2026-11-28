@@ -120,15 +120,36 @@ test('timeoutMs arms an AbortController and the abort surfaces as networkError',
     // never resolves on its own — only the AbortController can end it.
     fetchImpl: (url, opts) =>
       new Promise((_resolve, reject) => {
-        gotSignal = !!opts.signal;
-        opts.signal.addEventListener('abort', () => reject(new Error('aborted')));
+        gotSignal = opts.signal;
+        opts.signal.addEventListener('abort', () => reject(opts.signal.reason));
       }),
   });
   await assert.rejects(
     () => send('/x'),
     (e) => e instanceof TypeA,
   );
-  assert.equal(gotSignal, true);
+  assert.equal(gotSignal.reason.name, 'TimeoutError');
+});
+
+test('a caller cancellation reaches the transport even with a client timeout', async () => {
+  const controller = new AbortController();
+  let received;
+  const { send } = createHttpClient({
+    baseUrl: 'http://svc',
+    headers: {},
+    timeoutMs: 100,
+    fetchImpl: async (_url, { signal }) => {
+      received = signal;
+      await new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    },
+    networkError: () => new TypeA(),
+  });
+  const pending = send('/x', { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(pending, TypeA);
+  assert.equal(received.reason, controller.signal.reason);
 });
 
 test('authenticated requests refuse cross-origin redirects with telemetry on and off', async (t) => {

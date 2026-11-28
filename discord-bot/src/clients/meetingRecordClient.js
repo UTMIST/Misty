@@ -14,7 +14,10 @@ export function createMeetingRecordClient({ baseUrl, apiKey, fetchImpl = fetch }
   async function request(path, options) {
     // Keep the deadline active until the JSON body has also been consumed.
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
+    const timer = setTimeout(
+      () => controller.abort(new DOMException('Meeting record request timed out', 'TimeoutError')),
+      10_000,
+    );
     try {
       const response = await send(path, { ...options, signal: controller.signal });
       if (response.status === 404) return null;

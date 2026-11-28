@@ -449,3 +449,242 @@ def test_search_ends_after_framework_serialization(ctx, monkeypatch, capsys):
     assert terminal["result"] == "internal_error"
     assert search_audits(capsys.readouterr().out)[-1]["search_outcome"] == "internal_error"
     assert "private returned excerpt" not in str(events)
+
+
+def test_search_invalid_field_name_is_private_in_http_and_trace(ctx, capsys, monkeypatch):
+    from platform_auth import telemetry
+
+    client, _, _, directory, embeddings, keys = ctx
+    monkeypatch.setenv("TELEMETRY_ENABLED", "true")
+    monkeypatch.setenv("TELEMETRY_ENV", "local")
+    private = "private-search-address@example.org"
+    response = client.post(
+        "/search",
+        json={"query": "public", private: "private-search-extra-value"},
+        headers=person_headers(keys),
+    )
+    assert response.status_code == 422
+    assert directory.calls == embeddings.calls == 0
+    assert telemetry.flush(2)
+    emitted = capsys.readouterr().out
+    rows = [json.loads(line) for line in emitted.splitlines() if line.startswith("{")]
+    search = [
+        r for r in rows if r.get("operation") == "catalog.search" and r["event_name"] == "end"
+    ]
+    assert len(search) == 1 and search[0]["result"] == "invalid_request"
+    assert private not in response.text and private not in emitted
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("stage", ["body", "embed", "response"])
+def test_search_cancellation_emits_one_cancelled_outcome(ctx, capsys, monkeypatch, stage, enabled):
+    import asyncio
+    from threading import Event
+
+    import fastapi.routing
+    import httpx
+
+    from platform_auth import telemetry
+
+    client, _, _, directory, embeddings, keys = ctx
+    monkeypatch.setenv("TELEMETRY_ENABLED", "true")
+    monkeypatch.setenv("TELEMETRY_ENV", "local")
+    monkeypatch.setattr(get_settings(), "search_outcome_audit_enabled", enabled)
+    gate = asyncio.Event()
+    worker_started = Event()
+    release_worker = Event()
+    original_embed = embeddings.embed_query
+
+    def slow_embed(query):
+        worker_started.set()
+        assert release_worker.wait(3)
+        return original_embed(query)
+
+    async def pause_serialization(**kwargs):
+        gate.set()
+        await asyncio.Future()
+
+    async def body():
+        yield b'{"query":'
+        gate.set()
+        await asyncio.Future()
+
+    if stage == "embed":
+        monkeypatch.setattr(embeddings, "embed_query", slow_embed)
+    if stage == "response":
+        monkeypatch.setattr(fastapi.routing, "serialize_response", pause_serialization)
+
+    async def cancelled_request():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=client.app), base_url="http://local.test"
+        ) as http:
+            send = (
+                {"content": body()}
+                if stage == "body"
+                else {"json": {"query": "private-slow-query"}}
+            )
+            task = asyncio.create_task(
+                http.post(
+                    "/search",
+                    **send,
+                    headers={**person_headers(keys), "Content-Type": "application/json"},
+                )
+            )
+            try:
+                if stage == "embed":
+                    assert await asyncio.to_thread(worker_started.wait, 2)
+                else:
+                    await asyncio.wait_for(gate.wait(), 3)
+                task.cancel()
+                await asyncio.sleep(0)
+            finally:
+                release_worker.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 3)
+
+    asyncio.run(cancelled_request())
+    assert telemetry.flush(2)
+    emitted = capsys.readouterr().out
+    events = [json.loads(line) for line in emitted.splitlines() if line.startswith("{")]
+    ends = [(e["operation"], e["result"]) for e in events if e.get("event_name") == "end"]
+    assert sorted(ends) == [("catalog.search", "cancelled"), ("http.request", "cancelled")]
+    [audit] = search_audits(emitted)
+    assert audit["status"] == 499
+    assert audit.get("search_outcome") == ("cancelled" if enabled else None)
+    if stage == "body":
+        assert directory.calls == embeddings.calls == 0
+    else:
+        assert embeddings.calls == 1
+    assert "private-slow-query" not in emitted
+
+
+def test_collector_replay_counts_each_search_and_isolates_untrusted_trace(
+    ctx, tmp_path, capsys, monkeypatch
+):
+    import sqlite3
+    import subprocess
+    import sys
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    from platform_auth import telemetry
+
+    client, _, _, _, _, keys = ctx
+    monkeypatch.setenv("TELEMETRY_ENABLED", "true")
+    monkeypatch.setenv("TELEMETRY_ENV", "local")
+    monkeypatch.setenv("TELEMETRY_TRAFFIC", "synthetic")
+    forge = "1234" * 8
+    parent = "dcba" * 8
+    headers = {**person_headers(keys), "traceparent": f"00-{parent}-{'41' * 8}-01"}
+    assert client.post("/search", headers=headers, json={"query": "CPSIF"}).status_code == 200
+    assert (
+        client.post("/search", headers=headers, json={"query": "unrelated galaxies"}).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/search", headers=headers, json={"query": "private-input", "k": 999}
+        ).status_code
+        == 422
+    )
+    response = client.post(
+        "/search",
+        headers={"traceparent": f"00-{forge}-{'31' * 8}-01"},
+        json={"query": "private-input"},
+    )
+    assert response.status_code == 401
+    assert telemetry.flush(2)
+    lines = capsys.readouterr().out.splitlines()
+    stamp = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    wire = tmp_path / "wire.jsonl"
+    wire.write_text(
+        "".join(json.dumps({"timestamp": stamp, "message": line}) + "\n" for line in lines)
+    )
+    db_path = tmp_path / "search.sqlite"
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve().parents[3] / "scripts/telemetry/collect.py"),
+        "import",
+        "--db",
+        str(db_path),
+        "--environment",
+        "local",
+        "--service",
+        "documentation-system",
+        "--traffic",
+        "synthetic",
+        "--input",
+        str(wire),
+        "--until",
+        stamp,
+    ]
+    first, replay = [
+        json.loads(subprocess.check_output(command, text=True, timeout=10)) for _ in range(2)
+    ]
+    assert first.get("rejected", 0) == replay.get("added", 0) == 0
+    assert first["added"] == replay["duplicate"]
+    with sqlite3.connect(db_path) as db:
+        pairs = db.execute("""
+            select search.result,search.trace_id,search.span_id,root.span_id from events search
+              join events root on root.event_name='end' and root.operation='http.request'
+                and root.trace_id=search.trace_id and root.span_id=search.parent_span_id
+             where search.operation='catalog.search' and search.event_name='end'""").fetchall()
+        totals = dict(
+            db.execute(
+                "select result,sum(count) from summaries where operation='catalog.search' group by result"
+            )
+        )
+        dump = "\n".join(db.iterdump())
+    assert totals == {"denied": 1, "invalid_request": 1, "no_hits": 1, "results": 1}
+    assert len(pairs) == len({row[2] for row in pairs}) == len({row[3] for row in pairs}) == 4
+    for result, trace, _, _ in pairs:
+        if result == "denied":
+            assert trace not in (forge, parent)
+        else:
+            assert trace == parent
+    for private in (forge, "private-input", str(P1), keys["person-reader"], "person-reader"):
+        assert private not in dump
+
+
+def test_search_upload_disconnect_uses_network_event_not_task_cancellation(
+    ctx, capsys, monkeypatch
+):
+    import asyncio
+    from platform_auth import telemetry
+
+    client, _, _, directory, embeddings, keys = ctx
+    monkeypatch.setenv("TELEMETRY_ENABLED", "true")
+    monkeypatch.setenv("TELEMETRY_ENV", "local")
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/search",
+        "raw_path": b"/search",
+        "query_string": b"",
+        "http_version": "1.1",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"x-api-key", keys["person-reader"].encode()),
+        ],
+    }
+    inbound = iter([{"type": "http.request", "body": b'{"query":"partial', "more_body": True}])
+
+    async def receive():
+        return next(inbound, {"type": "http.disconnect"})
+
+    async def send(message):
+        pass
+
+    asyncio.run(client.app(scope, receive, send))
+    assert directory.calls == embeddings.calls == 0
+    assert telemetry.flush(2)
+    events = [
+        json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")
+    ]
+    assert sorted(
+        (e["operation"], e["result"]) for e in events if e.get("event_name") == "end"
+    ) == [("catalog.search", "cancelled"), ("http.request", "cancelled")]
+    [audit] = [row for row in events if row.get("path") == "/search" and "status" in row]
+    assert audit["status"] == 499

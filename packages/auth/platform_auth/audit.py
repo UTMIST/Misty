@@ -61,8 +61,9 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
 
     Consumer contract: a route may set ``request.state.audit_extra`` to a
     dict of additional fields to merge into the log entry. Keys that collide
-    with reserved core fields (see ``_RESERVED_AUDIT_KEYS``) are ignored, and
-    values that are not JSON-native are stringified (via ``default=str``)
+    with reserved core fields (see ``_RESERVED_AUDIT_KEYS``) are ignored.
+    On cancellation, a route can override its extra fields with
+    ``request.state.audit_cancel_extra``. Values that are not JSON-native are stringified (via ``default=str``)
     rather than causing the whole line to be dropped.
     """
 
@@ -122,8 +123,13 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
                     "remote": remote,
                 }
                 extra = getattr(request.state, "audit_extra", None)
-                if isinstance(extra, dict):
-                    for k, v in extra.items():
+                cancelled = (
+                    getattr(request.state, "audit_cancel_extra", None) if status == 499 else None
+                )
+                for fields in (extra, cancelled):
+                    if not isinstance(fields, dict):
+                        continue
+                    for k, v in fields.items():
                         key = str(k)  # keys must be JSON strings; default= only covers values
                         if key not in _RESERVED_AUDIT_KEYS:
                             entry[key] = v

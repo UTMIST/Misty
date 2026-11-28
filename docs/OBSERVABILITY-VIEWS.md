@@ -155,16 +155,22 @@ resource samples. For a period boundary inside a minute or an attempt that
 crosses minutes, the reader uses the projected start and terminal times. The
 health request reads the raw store only for current source collection status.
 Source rows include the collector's historical gaps, dropped events and rejected
-events. These lifetime counts can cover periods outside the selected window.
+events. A successful poll after a gap updates freshness and keeps the gap count.
+These lifetime counts can cover periods outside the selected window.
 
 A start selects an attempt into its period. A terminal observed before that
-period ends supplies the result. A missing or conflicting terminal leaves the
-attempt unknown. Admission is a separate positive observation. Full answers
-require Discord to accept all intended parts. The median covers fully delivered
-answers. Tool rounds count model calls that requested tools. Part counts exclude
-notices. Empty search rate divides complete zero-hit searches by successful
-searches with hits plus successful zero-hit searches. Failures, cancellations, and
-unknown outcomes each count toward total searches and are excluded from this rate.
+period ends supplies the result. A missing terminal or conflicting results leave
+the attempt unknown. Agreeing results with different durations retain the outcome
+and contribute no latency sample. Disputed catalog counts display as unknown.
+
+Admission is a separate positive observation. Full answers require Discord to
+accept all intended parts. An unrecognized answer or HTTP outcome counts as
+unknown. The Timed column gives the denominator for each latency mean. The median
+covers fully delivered answers with agreed timings. Tool rounds count model calls
+that requested tools. Part counts exclude notices. Empty search rate divides
+complete zero-hit searches by successful searches with hits plus successful
+zero-hit searches. Failures, cancellations, and unknown outcomes each count
+toward total searches and are excluded from this rate.
 
 Select background traffic for scheduled catalog runs. The catalog measures content,
 index and access from the same owner-side database snapshot at guard release.

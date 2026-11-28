@@ -38,7 +38,7 @@ a{color:#0e675c;text-underline-offset:.18em}header a{color:#c7e4db}
 form{display:flex;gap:.9rem;align-items:end;flex-wrap:wrap}label{display:grid;gap:.15rem;font-size:.85rem}
 button,select,input{border:1px solid #92a7a5;border-radius:4px;padding:.4rem;font:inherit}
 button{background:#2d605c;color:white;padding-inline:1rem}table{border-collapse:collapse;width:100%;background:white}
-th,td{text-align:left;padding:.55rem .75rem;border-bottom:1px solid #d4ddda;overflow-wrap:anywhere}
+th,td{text-align:left;padding:.55rem .75rem;border-bottom:1px solid #d4ddda;overflow-wrap:break-word}
 th{background:#e1ebe6}p{max-width:95ch}.note{border-left:4px solid #ba7622;padding:.4rem .8rem;background:#fff4df}
 .scroll{overflow-x:auto}code{font-size:.92em}button:focus,a:focus{outline:3px solid #c76b18}
 """

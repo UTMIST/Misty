@@ -118,7 +118,9 @@ def test_interrupted_request_preserves_exception_and_closes_span_once(
         started = asyncio.Event()
 
         @app.get("/health")
-        async def handler():
+        async def handler(request: Request):
+            request.state.audit_extra = {"outcome": "running"}
+            request.state.audit_cancel_extra = {"outcome": "cancelled", "status": 200}
             started.set()
             if error_type is asyncio.CancelledError:
                 await asyncio.Future()
@@ -137,6 +139,7 @@ def test_interrupted_request_preserves_exception_and_closes_span_once(
     asyncio.run(exercise())
     entry = json.loads(capsys.readouterr().out)
     assert entry["status"] == status
+    assert entry["outcome"] == ("cancelled" if status == 499 else "running")
     assert [(r["event_name"], r["result"]) for r in rows] == (
         [("start", "started"), ("end", result)] if enabled else []
     )

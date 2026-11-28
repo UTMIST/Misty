@@ -819,7 +819,10 @@ Authorized search emits one platform outcome per request when shared telemetry
 is enabled, independently of the optional search audit field. A completed query
 with no hits contributes to the empty-search rate. Missing channel configuration,
 denials and upstream failures have their own results. Search spans start after
-authentication, with separate observations for early framework rejections.
+authentication, with separate observations for early framework rejections and
+cancellations. Completed results are recorded after FastAPI response validation
+and serialization. Cancellation before that boundary produces one cancelled
+search, even if the embedding worker finishes later.
 
 Discovery and source refresh create background spans. Discovery distinguishes a
 clean traversal, gaps, a continuation, and failure. Refresh records attempted

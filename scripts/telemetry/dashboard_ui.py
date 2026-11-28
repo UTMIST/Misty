@@ -53,7 +53,9 @@ def sources(db, end, max_age):
     ).fetchall()
 
     def condition(r):
-        if r["last_error"]:
+        # window_expired accompanies a successful checkpoint; its unread
+        # interval is already counted in the source's historical gaps.
+        if r["last_error"] and r["last_error"] != "window_expired":
             return "Read failed"
         if not r["last_success"]:
             return "No successful read"
