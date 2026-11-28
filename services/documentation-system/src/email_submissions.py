@@ -427,7 +427,11 @@ class EmailSubmissions:
         if cur_attempt_id is not None and cur_status in {"uncertain", "sending"}:
             try:
                 found_id = self.gmail.check_receipt(
-                    thread_id=sub.gmail_thread_id, receipt_id=cur_attempt_id
+                    thread_id=sub.gmail_thread_id,
+                    receipt_id=cur_attempt_id,
+                    sent_after_epoch_s=max(
+                        0, int((sub.created_at - timedelta(hours=1)).timestamp())
+                    ),
                 )
             except GmailError as exc:
                 backoff = now + timedelta(seconds=_backoff_seconds(max(1, cur_attempts)))

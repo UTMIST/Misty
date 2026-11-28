@@ -224,6 +224,8 @@ def test_http_directory_active_member_enforces_active_flag_and_alias_fallback():
 
 
 def test_http_gmail_client_normalizes_errors_without_leaking_upstream_text():
+    seen_receipt_payloads: list[dict] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/messages/list"):
             return httpx.Response(
@@ -232,6 +234,12 @@ def test_http_gmail_client_normalizes_errors_without_leaking_upstream_text():
             )
         if request.url.path.endswith("/reply"):
             return httpx.Response(502, text="raw upstream body with private address")
+        if request.url.path.endswith("/receipt-check"):
+            seen_receipt_payloads.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(
+                502,
+                json={"detail": {"code": "receipt_check_inconclusive", "uncertain": True}},
+            )
         return httpx.Response(404)
 
     gclient = HttpGmailClient(
@@ -254,6 +262,33 @@ def test_http_gmail_client_normalizes_errors_without_leaking_upstream_text():
         )
     assert exc2.value.uncertain is True
     assert "private address" not in str(exc2.value)
+
+    rid = uuid4()
+    with pytest.raises(GmailError) as exc3:
+        gclient.check_receipt(thread_id="thr_1", receipt_id=rid, sent_after_epoch_s=1700000000)
+    assert exc3.value.code == "receipt_check_inconclusive" and exc3.value.uncertain is True
+    assert seen_receipt_payloads == [
+        {
+            "thread_id": "thr_1",
+            "receipt_id": str(rid),
+            "sent_after_epoch_s": 1700000000,
+        }
+    ]
+
+
+def test_422_validation_errors_strip_submitted_input():
+    storage = InMemoryStorageAdapter(build_seed_sources())
+    app = create_app()
+    app.dependency_overrides[get_storage] = lambda: storage
+    with TestClient(app) as client:
+        resp = client.post(
+            f"/email-submissions/{uuid4()}/fail",
+            headers=AUTH,
+            json={"error_code": "SECRET_MARKER_" + ("x" * 150)},
+        )
+        assert resp.status_code == 422
+        assert all("input" not in err for err in resp.json()["detail"])
+        assert "SECRET_MARKER_" not in resp.text
 
 
 def test_email_poll_runner_checks_scopes_acquires_guard_and_pings_monitor():

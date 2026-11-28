@@ -193,4 +193,10 @@ class GmailClient(Protocol):
         receipt_id: UUID,
     ) -> str: ...
 
-    def check_receipt(self, *, thread_id: str, receipt_id: UUID) -> str | None: ...
+    def check_receipt(
+        self,
+        *,
+        thread_id: str,
+        receipt_id: UUID,
+        sent_after_epoch_s: int | None = None,
+    ) -> str | None: ...

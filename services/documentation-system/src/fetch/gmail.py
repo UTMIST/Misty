@@ -26,6 +26,7 @@ _ALLOWED_CODES = frozenset(
         "invalid_reply_body",
         "invalid_recipient",
         "self_reply_forbidden",
+        "receipt_check_inconclusive",
     }
 )
 _GMAIL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
@@ -114,12 +115,20 @@ class HttpGmailClient:
             raise GmailError("invalid_reply_response", uncertain=True)
         return sent_id
 
-    def check_receipt(self, *, thread_id: str, receipt_id: UUID) -> str | None:
-        data = self._call(
-            "POST",
-            "/receipt-check",
-            {"thread_id": thread_id, "receipt_id": str(receipt_id)},
-        )
+    def check_receipt(
+        self,
+        *,
+        thread_id: str,
+        receipt_id: UUID,
+        sent_after_epoch_s: int | None = None,
+    ) -> str | None:
+        payload: dict[str, object] = {
+            "thread_id": thread_id,
+            "receipt_id": str(receipt_id),
+        }
+        if sent_after_epoch_s is not None:
+            payload["sent_after_epoch_s"] = sent_after_epoch_s
+        data = self._call("POST", "/receipt-check", payload)
         if not isinstance(data, dict) or not isinstance(data.get("sent"), bool):
             raise GmailError("invalid_receipt_check_response")
         if not data["sent"]:

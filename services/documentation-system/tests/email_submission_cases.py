@@ -58,6 +58,7 @@ class FakeGmailClient:
         self.messages: dict[str, GmailInspectResult] = {}
         self.order: list[str] = []
         self.sent_replies: list[dict] = []
+        self.check_calls: list[dict] = []
         self.receipt_lookup: dict[tuple[str, UUID], str] = {}
         self.fail_send: GmailError | None = None
         self.fail_check: GmailError | None = None
@@ -111,7 +112,14 @@ class FakeGmailClient:
         self.receipt_lookup[(thread_id, receipt_id)] = sent_id
         return sent_id
 
-    def check_receipt(self, *, thread_id, receipt_id) -> str | None:
+    def check_receipt(self, *, thread_id, receipt_id, sent_after_epoch_s=None) -> str | None:
+        self.check_calls.append(
+            {
+                "thread_id": thread_id,
+                "receipt_id": receipt_id,
+                "sent_after_epoch_s": sent_after_epoch_s,
+            }
+        )
         if self.fail_check is not None:
             raise self.fail_check
         return self.receipt_lookup.get((thread_id, receipt_id))
