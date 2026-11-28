@@ -16,6 +16,7 @@ from contracts.types import (
     SourceGrant,
 )
 from contracts.visibility import ActorContext, RetrievalContext, SEE_ALL
+from contracts.email import EmailSubmission
 from contracts.meeting import MeetingRecord
 from contracts.fetcher import FetchResult
 
@@ -137,6 +138,96 @@ class StorageAdapter(Protocol):
 
     def release_source_refresh_run(self, run_id: UUID) -> bool:
         """Release only a matching owner; False leaves the current owner unchanged."""
+        ...
+
+    def acquire_email_poll_run(self, run_id: UUID, *, actor: str) -> bool:
+        """Atomically claim the single email-poller slot; False if occupied."""
+        ...
+
+    def release_email_poll_run(self, run_id: UUID) -> bool:
+        """Release only a matching email-poller owner; False leaves current owner."""
+        ...
+
+    def get_email_inbox_watermark(self, mailbox_identity: str) -> datetime | None:
+        """Last clean completed scan watermark for mailbox_identity, or None."""
+        ...
+
+    def set_email_inbox_watermark(
+        self, mailbox_identity: str, watermark_at: datetime, *, actor: str
+    ) -> None:
+        """Upsert the clean completed scan watermark for mailbox_identity."""
+        ...
+
+    def is_email_message_processed(self, mailbox_identity: str, gmail_message_id: str) -> bool:
+        """Return True if (mailbox_identity, gmail_message_id) has already been handled."""
+        ...
+
+    def record_processed_email_message(
+        self,
+        mailbox_identity: str,
+        gmail_message_id: str,
+        *,
+        outcome: str,
+        processed_at: datetime,
+        submission_id: UUID | None = None,
+    ) -> bool:
+        """Idempotently record a handled Gmail message; False if already recorded."""
+        ...
+
+    def put_email_submission(self, submission: EmailSubmission) -> tuple[EmailSubmission, bool]:
+        """Atomically insert or deduplicate a submission.
+
+        Deduplicates retries on (mailbox_identity, gmail_message_id) and MTA
+        duplicate deliveries from the SAME person on
+        (mailbox_identity, submitter_person_id, outer_message_id). Separate
+        forwards by different people always create independent rows.
+        Returns (stored_or_existing, created).
+        """
+        ...
+
+    def get_email_submission(self, submission_id: UUID) -> EmailSubmission | None: ...
+
+    def list_email_submissions(
+        self,
+        *,
+        submitter_person_id: UUID | None = None,
+        status: str | None = None,
+        receipt_status: str | None = None,
+    ) -> list[EmailSubmission]:
+        """Detached submissions in (created_at, submission_id) order."""
+        ...
+
+    def change_email_submission(
+        self,
+        submission: EmailSubmission,
+        values: dict,
+        *,
+        actor: str,
+        now: datetime | None = None,
+    ) -> EmailSubmission | None:
+        """Atomic compare-and-swap on version; None on conflict or missing."""
+        ...
+
+    def reserve_email_outbound_send(
+        self,
+        *,
+        person_id: UUID,
+        now: datetime,
+        member_hourly_limit: int,
+        global_hourly_limit: int,
+    ) -> bool:
+        """Atomically reserve one outbound receipt/notice budget slot within 1h."""
+        ...
+
+    def prune_expired_email_records(
+        self,
+        *,
+        now: datetime,
+        failed_payload_days: int,
+        retention_days: int,
+        actor: str,
+    ) -> int:
+        """Clear pending_payload on stale failed rows and delete expired rows."""
         ...
 
     def get_doc_by_google_file_id(self, file_id: str) -> Doc | None:

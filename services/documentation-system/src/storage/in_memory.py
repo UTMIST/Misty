@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import sqrt
 from threading import Lock
 from uuid import UUID, uuid4
@@ -23,7 +23,9 @@ from src.content import content_hash
 from src.google_identity import google_file_id
 from src.retrieval import candidate_limit, fuse, keyword_density, validate_search
 from src.storage.chunks import validate_chunks_for_content, validate_doc_chunks
+from contracts.email import EmailSubmission
 from contracts.meeting import MeetingRecord
+from src.storage.email import changed_email_submission
 from src.storage.meeting import changed, catalog_values
 
 
@@ -52,6 +54,13 @@ class InMemoryStorageAdapter:
         self._chunks: dict[UUID, dict[str, list[DocChunk]]] = {}
         self._source_refresh_lock = Lock()
         self._source_refresh_run: UUID | None = None
+        self._email_poll_lock = Lock()
+        self._email_poll_run: UUID | None = None
+        self._email_lock = Lock()
+        self._email_watermarks: dict[str, datetime] = {}
+        self._email_processed: dict[tuple[str, str], tuple[str, datetime, UUID | None]] = {}
+        self._email_submissions: dict[UUID, EmailSubmission] = {}
+        self._email_outbound_sends: list[tuple[UUID, datetime]] = []
         self._meeting_lock = Lock()
         self._meetings: dict[UUID, MeetingRecord] = {}
 
@@ -215,6 +224,164 @@ class InMemoryStorageAdapter:
                 return False
             self._source_refresh_run = None
             return True
+
+    def acquire_email_poll_run(self, run_id: UUID, *, actor: str) -> bool:
+        with self._email_poll_lock:
+            if self._email_poll_run is not None:
+                return False
+            self._email_poll_run = run_id
+            return True
+
+    def release_email_poll_run(self, run_id: UUID) -> bool:
+        with self._email_poll_lock:
+            if self._email_poll_run != run_id:
+                return False
+            self._email_poll_run = None
+            return True
+
+    def get_email_inbox_watermark(self, mailbox_identity: str) -> datetime | None:
+        with self._email_lock:
+            return self._email_watermarks.get(mailbox_identity)
+
+    def set_email_inbox_watermark(
+        self, mailbox_identity: str, watermark_at: datetime, *, actor: str
+    ) -> None:
+        with self._email_lock:
+            self._email_watermarks[mailbox_identity] = watermark_at
+
+    def is_email_message_processed(self, mailbox_identity: str, gmail_message_id: str) -> bool:
+        with self._email_lock:
+            return (mailbox_identity, gmail_message_id) in self._email_processed
+
+    def record_processed_email_message(
+        self,
+        mailbox_identity: str,
+        gmail_message_id: str,
+        *,
+        outcome: str,
+        processed_at: datetime,
+        submission_id: UUID | None = None,
+    ) -> bool:
+        with self._email_lock:
+            key = (mailbox_identity, gmail_message_id)
+            if key in self._email_processed:
+                return False
+            self._email_processed[key] = (outcome, processed_at, submission_id)
+            return True
+
+    def put_email_submission(self, submission: EmailSubmission) -> tuple[EmailSubmission, bool]:
+        with self._email_lock:
+            for existing in self._email_submissions.values():
+                if (
+                    existing.mailbox_identity == submission.mailbox_identity
+                    and existing.gmail_message_id == submission.gmail_message_id
+                ):
+                    return existing.model_copy(deep=True), False
+                if (
+                    submission.outer_message_id is not None
+                    and existing.mailbox_identity == submission.mailbox_identity
+                    and existing.submitter_person_id == submission.submitter_person_id
+                    and existing.outer_message_id == submission.outer_message_id
+                ):
+                    return existing.model_copy(deep=True), False
+            if submission.submission_id in self._email_submissions:
+                raise ValueError("email submission_id already exists")
+            stored = submission.model_copy(deep=True)
+            self._email_submissions[stored.submission_id] = stored
+            return stored.model_copy(deep=True), True
+
+    def get_email_submission(self, submission_id: UUID) -> EmailSubmission | None:
+        with self._email_lock:
+            found = self._email_submissions.get(submission_id)
+            return found.model_copy(deep=True) if found else None
+
+    def list_email_submissions(
+        self,
+        *,
+        submitter_person_id: UUID | None = None,
+        status: str | None = None,
+        receipt_status: str | None = None,
+    ) -> list[EmailSubmission]:
+        with self._email_lock:
+            items = [
+                s.model_copy(deep=True)
+                for s in self._email_submissions.values()
+                if (submitter_person_id is None or s.submitter_person_id == submitter_person_id)
+                and (status is None or s.status == status)
+                and (receipt_status is None or s.receipt_status == receipt_status)
+            ]
+        return sorted(items, key=lambda s: (s.created_at, s.submission_id))
+
+    def change_email_submission(
+        self,
+        submission: EmailSubmission,
+        values: dict,
+        *,
+        actor: str,
+        now: datetime | None = None,
+    ) -> EmailSubmission | None:
+        with self._email_lock:
+            current = self._email_submissions.get(submission.submission_id)
+            if current is None or current.version != submission.version:
+                return None
+            updated = changed_email_submission(current, values, actor, now=now)
+            self._email_submissions[submission.submission_id] = updated
+            return updated.model_copy(deep=True)
+
+    def reserve_email_outbound_send(
+        self,
+        *,
+        person_id: UUID,
+        now: datetime,
+        member_hourly_limit: int,
+        global_hourly_limit: int,
+    ) -> bool:
+        cutoff = now - timedelta(hours=1)
+        with self._email_lock:
+            recent = [(pid, ts) for pid, ts in self._email_outbound_sends if ts > cutoff]
+            member_count = sum(1 for pid, _ in recent if pid == person_id)
+            if len(recent) >= global_hourly_limit or member_count >= member_hourly_limit:
+                return False
+            self._email_outbound_sends.append((person_id, now))
+            return True
+
+    def prune_expired_email_records(
+        self,
+        *,
+        now: datetime,
+        failed_payload_days: int,
+        retention_days: int,
+        actor: str,
+    ) -> int:
+        payload_cutoff = now - timedelta(days=failed_payload_days)
+        retention_cutoff = now - timedelta(days=retention_days)
+        send_cutoff = now - timedelta(hours=24)
+        cleaned = 0
+        with self._email_lock:
+            for sid, sub in list(self._email_submissions.items()):
+                if sub.created_at <= retention_cutoff:
+                    del self._email_submissions[sid]
+                    cleaned += 1
+                    continue
+                if (
+                    sub.pending_payload is not None
+                    and sub.failed_at is not None
+                    and sub.failed_at <= payload_cutoff
+                    and (sub.status == "failed" or sub.persistence_status == "failed")
+                ):
+                    self._email_submissions[sid] = changed_email_submission(
+                        sub, {"pending_payload": None}, actor, now=now
+                    )
+                    cleaned += 1
+            for key, (outcome, pat, ref_sid) in list(self._email_processed.items()):
+                if pat <= retention_cutoff:
+                    del self._email_processed[key]
+                elif ref_sid is not None and ref_sid not in self._email_submissions:
+                    self._email_processed[key] = (outcome, pat, None)
+            self._email_outbound_sends = [
+                (pid, ts) for pid, ts in self._email_outbound_sends if ts > send_cutoff
+            ]
+        return cleaned
 
     def _hydrate(self, doc: Doc) -> Doc:
         data = doc.model_dump()

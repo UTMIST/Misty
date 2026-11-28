@@ -1,8 +1,8 @@
 import sys
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Float,
@@ -52,11 +52,18 @@ from src.storage.schema import (
     doc_grants,
     doc_tags,
     docs,
+    email_inbox_state,
+    email_outbound_sends,
+    email_poll_run,
+    email_processed_messages,
+    email_submissions,
     source_refresh_run,
     sources,
     meeting_records,
 )
+from contracts.email import EmailSubmission
 from contracts.meeting import MeetingRecord
+from src.storage.email import changed_email_submission
 from src.storage.meeting import changed, catalog_values
 
 
@@ -399,6 +406,308 @@ class PostgresStorageAdapter:
                 ).scalar_one_or_none()
                 is not None
             )
+
+    def acquire_email_poll_run(self, run_id: UUID, *, actor: str) -> bool:
+        with self._engine.begin() as conn:
+            return (
+                conn.execute(
+                    pg_insert(email_poll_run)
+                    .values(singleton=True, run_id=run_id, created_by=actor)
+                    .on_conflict_do_nothing()
+                    .returning(email_poll_run.c.run_id)
+                ).scalar_one_or_none()
+                is not None
+            )
+
+    def release_email_poll_run(self, run_id: UUID) -> bool:
+        with self._engine.begin() as conn:
+            return (
+                conn.execute(
+                    delete(email_poll_run)
+                    .where(email_poll_run.c.run_id == run_id)
+                    .returning(email_poll_run.c.run_id)
+                ).scalar_one_or_none()
+                is not None
+            )
+
+    def get_email_inbox_watermark(self, mailbox_identity: str) -> datetime | None:
+        with self._engine.connect() as conn:
+            return conn.execute(
+                select(email_inbox_state.c.watermark_at).where(
+                    email_inbox_state.c.mailbox_identity == mailbox_identity
+                )
+            ).scalar_one_or_none()
+
+    def set_email_inbox_watermark(
+        self, mailbox_identity: str, watermark_at: datetime, *, actor: str
+    ) -> None:
+        now = _now()
+        with self._engine.begin() as conn:
+            conn.execute(
+                pg_insert(email_inbox_state)
+                .values(
+                    mailbox_identity=mailbox_identity,
+                    watermark_at=watermark_at,
+                    updated_at=now,
+                    updated_by=actor,
+                )
+                .on_conflict_do_update(
+                    index_elements=[email_inbox_state.c.mailbox_identity],
+                    set_={
+                        "watermark_at": watermark_at,
+                        "updated_at": now,
+                        "updated_by": actor,
+                    },
+                )
+            )
+
+    def is_email_message_processed(self, mailbox_identity: str, gmail_message_id: str) -> bool:
+        with self._engine.connect() as conn:
+            return (
+                conn.execute(
+                    select(email_processed_messages.c.gmail_message_id).where(
+                        email_processed_messages.c.mailbox_identity == mailbox_identity,
+                        email_processed_messages.c.gmail_message_id == gmail_message_id,
+                    )
+                ).scalar_one_or_none()
+                is not None
+            )
+
+    def record_processed_email_message(
+        self,
+        mailbox_identity: str,
+        gmail_message_id: str,
+        *,
+        outcome: str,
+        processed_at: datetime,
+        submission_id: UUID | None = None,
+    ) -> bool:
+        with self._engine.begin() as conn:
+            return (
+                conn.execute(
+                    pg_insert(email_processed_messages)
+                    .values(
+                        mailbox_identity=mailbox_identity,
+                        gmail_message_id=gmail_message_id,
+                        outcome=outcome,
+                        submission_id=submission_id,
+                        processed_at=processed_at,
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=[
+                            email_processed_messages.c.mailbox_identity,
+                            email_processed_messages.c.gmail_message_id,
+                        ]
+                    )
+                    .returning(email_processed_messages.c.gmail_message_id)
+                ).scalar_one_or_none()
+                is not None
+            )
+
+    def put_email_submission(self, submission: EmailSubmission) -> tuple[EmailSubmission, bool]:
+        lock_key = int.from_bytes(
+            sha256(f"email-submission:{submission.mailbox_identity}".encode()).digest()[:8],
+            signed=True,
+        )
+        with self._engine.begin() as conn:
+            conn.execute(select(func.pg_advisory_xact_lock(lock_key)))
+            match_clauses = [
+                and_(
+                    email_submissions.c.mailbox_identity == submission.mailbox_identity,
+                    email_submissions.c.gmail_message_id == submission.gmail_message_id,
+                )
+            ]
+            if submission.outer_message_id is not None:
+                match_clauses.append(
+                    and_(
+                        email_submissions.c.mailbox_identity == submission.mailbox_identity,
+                        email_submissions.c.submitter_person_id == submission.submitter_person_id,
+                        email_submissions.c.outer_message_id == submission.outer_message_id,
+                    )
+                )
+            existing_row = (
+                conn.execute(select(email_submissions).where(or_(*match_clauses)))
+                .mappings()
+                .first()
+            )
+            if existing_row is not None:
+                return EmailSubmission.model_validate(dict(existing_row)), False
+            if (
+                conn.execute(
+                    select(email_submissions.c.submission_id).where(
+                        email_submissions.c.submission_id == submission.submission_id
+                    )
+                ).scalar_one_or_none()
+                is not None
+            ):
+                raise ValueError("email submission_id already exists")
+            row = (
+                conn.execute(
+                    insert(email_submissions)
+                    .values(
+                        **submission.model_dump(mode="python", exclude={"pending_payload"}),
+                        pending_payload=submission.pending_payload,
+                    )
+                    .returning(email_submissions)
+                )
+                .mappings()
+                .one()
+            )
+            return EmailSubmission.model_validate(dict(row)), True
+
+    def get_email_submission(self, submission_id: UUID) -> EmailSubmission | None:
+        with self._engine.connect() as conn:
+            row = (
+                conn.execute(
+                    select(email_submissions).where(
+                        email_submissions.c.submission_id == submission_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            return EmailSubmission.model_validate(dict(row)) if row else None
+
+    def list_email_submissions(
+        self,
+        *,
+        submitter_person_id: UUID | None = None,
+        status: str | None = None,
+        receipt_status: str | None = None,
+    ) -> list[EmailSubmission]:
+        stmt = select(email_submissions)
+        if submitter_person_id is not None:
+            stmt = stmt.where(email_submissions.c.submitter_person_id == submitter_person_id)
+        if status is not None:
+            stmt = stmt.where(email_submissions.c.status == status)
+        if receipt_status is not None:
+            stmt = stmt.where(email_submissions.c.receipt_status == receipt_status)
+        stmt = stmt.order_by(email_submissions.c.created_at, email_submissions.c.submission_id)
+        with self._engine.connect() as conn:
+            return [
+                EmailSubmission.model_validate(dict(row)) for row in conn.execute(stmt).mappings()
+            ]
+
+    def change_email_submission(
+        self,
+        submission: EmailSubmission,
+        values: dict,
+        *,
+        actor: str,
+        now: datetime | None = None,
+    ) -> EmailSubmission | None:
+        updated = changed_email_submission(submission, values, actor, now=now)
+        with self._engine.begin() as conn:
+            row = (
+                conn.execute(
+                    update(email_submissions)
+                    .where(
+                        email_submissions.c.submission_id == submission.submission_id,
+                        email_submissions.c.version == submission.version,
+                    )
+                    .values(
+                        **updated.model_dump(mode="python", exclude={"pending_payload"}),
+                        pending_payload=updated.pending_payload,
+                    )
+                    .returning(email_submissions)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            return EmailSubmission.model_validate(dict(row)) if row else None
+
+    def reserve_email_outbound_send(
+        self,
+        *,
+        person_id: UUID,
+        now: datetime,
+        member_hourly_limit: int,
+        global_hourly_limit: int,
+    ) -> bool:
+        lock_key = int.from_bytes(
+            sha256(b"email-outbound-rate-limit").digest()[:8],
+            signed=True,
+        )
+        cutoff = now - timedelta(hours=1)
+        with self._engine.begin() as conn:
+            conn.execute(select(func.pg_advisory_xact_lock(lock_key)))
+            global_count = conn.execute(
+                select(func.count())
+                .select_from(email_outbound_sends)
+                .where(email_outbound_sends.c.sent_at > cutoff)
+            ).scalar_one()
+            member_count = conn.execute(
+                select(func.count())
+                .select_from(email_outbound_sends)
+                .where(
+                    email_outbound_sends.c.person_id == person_id,
+                    email_outbound_sends.c.sent_at > cutoff,
+                )
+            ).scalar_one()
+            if global_count >= global_hourly_limit or member_count >= member_hourly_limit:
+                return False
+            conn.execute(
+                insert(email_outbound_sends).values(
+                    id=uuid4(),
+                    person_id=person_id,
+                    sent_at=now,
+                )
+            )
+            return True
+
+    def prune_expired_email_records(
+        self,
+        *,
+        now: datetime,
+        failed_payload_days: int,
+        retention_days: int,
+        actor: str,
+    ) -> int:
+        payload_cutoff = now - timedelta(days=failed_payload_days)
+        retention_cutoff = now - timedelta(days=retention_days)
+        send_cutoff = now - timedelta(hours=24)
+        with self._engine.begin() as conn:
+            deleted = len(
+                conn.execute(
+                    delete(email_submissions)
+                    .where(email_submissions.c.created_at <= retention_cutoff)
+                    .returning(email_submissions.c.submission_id)
+                )
+                .scalars()
+                .all()
+            )
+            cleared = len(
+                conn.execute(
+                    update(email_submissions)
+                    .where(
+                        email_submissions.c.pending_payload.is_not(None),
+                        email_submissions.c.failed_at.is_not(None),
+                        email_submissions.c.failed_at <= payload_cutoff,
+                        or_(
+                            email_submissions.c.status == "failed",
+                            email_submissions.c.persistence_status == "failed",
+                        ),
+                    )
+                    .values(
+                        pending_payload=None,
+                        version=email_submissions.c.version + 1,
+                        updated_at=now,
+                        updated_by=actor,
+                    )
+                    .returning(email_submissions.c.submission_id)
+                )
+                .scalars()
+                .all()
+            )
+            conn.execute(
+                delete(email_processed_messages).where(
+                    email_processed_messages.c.processed_at <= retention_cutoff
+                )
+            )
+            conn.execute(
+                delete(email_outbound_sends).where(email_outbound_sends.c.sent_at <= send_cutoff)
+            )
+            return deleted + cleared
 
     def is_ready(self) -> bool:
         try:

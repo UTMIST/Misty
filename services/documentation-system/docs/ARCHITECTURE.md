@@ -951,3 +951,38 @@ Generation-time decisions/action items/participants remain separate fields;
 readable content follows current Google edits. Google creation is a single HTML
 conversion and later retries never write that body. Audio stays entirely outside
 this persistence boundary. No durable PDF copy is retained by the platform.
+
+## Forwarded-email submissions (#457)
+
+`contracts/email.py` defines `EmailSubmission`, `EmailPollResult`, and the
+`GmailClient` Protocol; `src/fetch/gmail.py` implements the HTTP client to
+`connectors` `/google/gmail/*`, and `src/email_submissions.py` orchestrates
+polling, active-member resolution, deduplication, and receipt delivery.
+
+Migration `019` adds five tables mirrored in both storage adapters:
+
+- `email_poll_run` — singleton runner guard (same contract as `source_refresh_run`).
+- `email_inbox_state` — per-mailbox clean-scan watermark queried with a 24-hour
+  overlap (`EMAIL_WATERMARK_OVERLAP_HOURS`) so arrival-order skew cannot skip
+  mail, while `EMAIL_INITIAL_LOOKBACK_HOURS` bounds first-boot lookback.
+- `email_processed_messages` — records every handled `(mailbox_identity, gmail_message_id)`
+  so non-inbox, loop, unauthenticated, and unknown-sender messages are skipped
+  without mutating Gmail labels (`gmail.readonly` + `gmail.send` suffice).
+- `email_submissions` — stores verified transport attribution in typed columns
+  and keeps the forwarder's note, quoted correspondence, omitted-attachment
+  metadata, and `untrusted_claimed_headers` inside `pending_payload` (`repr=False`,
+  excluded from `.public()`), ready for Google Doc creation (#458). Unique
+  constraints deduplicate `(mailbox_identity, gmail_message_id)` and
+  `(mailbox_identity, submitter_person_id, outer_message_id)` while keeping
+  forwards from distinct members independent.
+- `email_outbound_sends` — enforces durable per-member and global hourly receipt
+  budgets under a transaction-scoped advisory lock in Postgres (process lock in
+  memory).
+
+`HttpDirectoryClient.get_active_member_by_verified_email` inspects the full
+`Person` record on `/people/by-email/{email}` and `/people/by-identifier/email/{email}`
+and rejects `active == false`, unlike source-ACL attribution on historical
+documents. Transient directory failures leave messages unmarked and hold back
+the watermark so the next poll retries cleanly. Failed submission payloads clear
+after `EMAIL_FAILED_PAYLOAD_DAYS` (7 days) while retaining metadata until
+`EMAIL_SUBMISSION_RETENTION_DAYS` (365 days).
