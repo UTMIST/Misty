@@ -793,3 +793,9 @@ def test_pg_stale_sync_in_another_process_cannot_readd_a_revoked_member(clean_db
     state = api.get_team_google_group(team.id)
     assert groups.members[state.group_name] == {}
     assert (state.status, state.updated_by) == ("synced", "api")
+
+
+def test_github_mapping_contract(adapter):
+    from github_mapping_contract import check_github_mapping_contract
+
+    check_github_mapping_contract(adapter)

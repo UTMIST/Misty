@@ -23,6 +23,9 @@ def create_app() -> FastAPI:
     app.include_router(fetch_router.router)
     app.include_router(discovery.router)
     app.include_router(meeting.router)
+    from src.api.routers import github_teams
+
+    app.include_router(github_teams.router)
 
     @app.get("/health")
     def health() -> dict[str, str]:

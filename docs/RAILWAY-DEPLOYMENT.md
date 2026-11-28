@@ -639,3 +639,9 @@ from save failures and recover after a bot restart; see the bot's
 for failed, inaccessible or unsafe-ACL records. Meeting removal uses an internal
 atomic catalog purge with restoration guards; no public generic catalog-purge
 endpoint is exposed.
+
+## Managed GitHub team mapping (#405)
+
+Apply directory migration 012, then configure the separate connector/admin keys
+and stable organization ID before enabling management. See the
+[service runbook](../services/team-tracking/docs/GITHUB-TEAMS.md).

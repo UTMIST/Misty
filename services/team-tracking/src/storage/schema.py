@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     MetaData,
     Table,
     Text,
@@ -192,5 +193,26 @@ team_google_groups = Table(
     CheckConstraint(
         "status IN ('synced', 'needs_external_members', 'failed')",
         name="ck_team_google_groups_status",
+    ),
+)
+
+
+team_github_mappings = Table(
+    "team_github_mappings",
+    metadata,
+    Column("team_id", UUID(as_uuid=True), ForeignKey("teams.id"), primary_key=True),
+    Column("organization_id", Text, nullable=False),
+    Column("github_team_id", Text, nullable=True),
+    Column("slug", Text),
+    Column("name", Text),
+    Column("status", Text, nullable=False, server_default=text("'pending'")),
+    Column("version", Integer, nullable=False, server_default=text("1")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("created_by", Text, nullable=False),
+    Column("updated_by", Text, nullable=False),
+    UniqueConstraint("organization_id", "github_team_id", name="uq_github_team_identity"),
+    CheckConstraint(
+        "status IN ('pending', 'retryable', 'active', 'inactive')", name="ck_github_mapping_status"
     ),
 )

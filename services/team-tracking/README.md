@@ -277,3 +277,14 @@ The directory has two storage adapters, scoped API-key auth, identity mapping, a
 - **General policy engine** — the API enforces key scopes and privileged-write rules; consumers derive their application permissions from directory identities and memberships.
 - **Standalone web admin UI** — admins can already manage people and teams through the [Discord commands](../../discord-bot/README.md#commands). Other admin clients must use the authenticated API.
 - **Pagination** — list endpoints return all matching rows. Adequate for UTMIST's roster size; add limit/offset when needed.
+
+### Managed GitHub team mapping (#405)
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `CONNECTORS_URL` | empty | Internal connector URL; enables GitHub team mapping with the following settings |
+| `CONNECTORS_API_KEY` | empty | Secret connector key with `github-teams:read` and `github-teams:manage` |
+| `GITHUB_ORGANIZATION_ID` | `0` | Stable UTMIST organization ID; zero disables management |
+
+See [the admin contract and recovery guide](docs/GITHUB-TEAMS.md).
+This foundation does not synchronize memberships or grant repository access.

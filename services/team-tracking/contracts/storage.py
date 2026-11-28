@@ -28,6 +28,9 @@ from contracts.types import (
 )
 
 
+from contracts.github import GitHubTeamMapping
+
+
 class StorageAdapter(Protocol):
     """Stable internal contract between the API and the persistence layer.
 
@@ -263,4 +266,35 @@ class StorageAdapter(Protocol):
     def lock_team_google_group(self, team_id: UUID) -> AbstractContextManager[None]:
         """Exclusive per-team lock, held across one whole sync. Must exclude
         every process sharing this storage (API workers and the CLI cron)."""
+        ...
+
+    def get_github_mapping(self, team_id: UUID) -> GitHubTeamMapping | None:
+        """Read mapping, with retired teams projected inactive. No provider effects."""
+        ...
+
+    def reserve_github_mapping(
+        self, team_id: UUID, organization_id: int, *, actor: str, github_team_id: int | None = None
+    ) -> GitHubTeamMapping:
+        """Reserve before provision/adoption; atomically reclaim only retryable rows."""
+        ...
+
+    def mark_github_mapping_retryable(self, team_id: UUID, version: int, *, actor: str) -> None:
+        """Mark only this pending, unbound attempt retryable after definitive rejection."""
+        ...
+
+    def finish_github_mapping(
+        self,
+        team_id: UUID,
+        organization_id: int,
+        github_team_id: int,
+        slug: str,
+        name: str,
+        *,
+        actor: str,
+    ) -> GitHubTeamMapping:
+        """Complete pending reservation or refresh same identity. Unique even if inactive."""
+        ...
+
+    def deactivate_github_mapping(self, team_id: UUID, *, actor: str) -> GitHubTeamMapping | None:
+        """Soft-disable and increment version; never delete a GitHub team."""
         ...

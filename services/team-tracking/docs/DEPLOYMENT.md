@@ -366,3 +366,7 @@ Most of these are only worth the work if a compliance requirement forces them.
 Deletes the retired provider's current-state identity rows before removing its registry row.
 Downgrade restores only the registry entry; it does not undo the data cleanup.
 Use a database backup to recover the previous assignments.
+
+## Managed GitHub team mappings (#405)
+
+See [the HTTP contract, adoption policy and recovery guide](GITHUB-TEAMS.md).

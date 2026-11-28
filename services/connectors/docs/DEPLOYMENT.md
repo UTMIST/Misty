@@ -138,3 +138,7 @@ See the [platform rollout](../../../docs/RAILWAY-DEPLOYMENT.md#meeting-record-pe
 Google's [upload/conversion guide](https://developers.google.com/workspace/drive/api/guides/manage-uploads)
 and [permission inheritance guide](https://developers.google.com/workspace/drive/api/guides/manage-sharing)
 explain the two boundaries enforced here.
+
+## Managed GitHub team mappings (#405)
+
+See [the HTTP contract, adoption policy and recovery guide](../../team-tracking/docs/GITHUB-TEAMS.md).

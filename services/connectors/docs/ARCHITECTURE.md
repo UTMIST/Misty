@@ -204,3 +204,7 @@ in-memory HTML upload converted in the same Drive create operation; no empty Doc
 is published and retries never replace a human-edited body. See the
 [durable record architecture](../../../docs/MEETING-RECORDING.md#durable-records)
 and [writer API](API.md#meeting-writer-googledocs).
+
+## Managed GitHub team mappings (#405)
+
+See [the HTTP contract, adoption policy and recovery guide](../../team-tracking/docs/GITHUB-TEAMS.md).

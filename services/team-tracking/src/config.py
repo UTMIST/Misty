@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The built-in dev secret. Only acceptable when tt_env == "local"; any other
@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     # a partial set refuses to boot (see verify_production_secrets). The OAuth
     # grant is a user refresh token for the group-owning account, not a
     # service account — see docs/DEPLOYMENT.md.
+    connectors_url: str = ""
+    connectors_api_key: SecretStr = SecretStr("")
+    github_organization_id: int = Field(default=0, ge=0)
     google_groups_customer_id: str = ""
     google_groups_domain: str = ""
     google_oauth_client_id: str = ""
@@ -67,6 +70,15 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
     if any(google.values()) and not all(google.values()):
         missing = ", ".join(k for k, v in google.items() if not v)
         raise RuntimeError(f"Google Groups is partially configured; also set: {missing}")
+    fields = [
+        settings.connectors_url,
+        settings.connectors_api_key.get_secret_value(),
+        settings.github_organization_id,
+    ]
+    if any(fields) and not all(fields):
+        raise RuntimeError(
+            "GitHub team mapping requires CONNECTORS_URL, CONNECTORS_API_KEY, GITHUB_ORGANIZATION_ID"
+        )
     if settings.tt_env == "local":
         return
     insecure: list[str] = []
