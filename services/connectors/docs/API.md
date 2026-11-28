@@ -277,10 +277,13 @@ file is positively identified; cleanup permanently deletes it. An unconfirmed
 ## Gmail forwarding mailbox (`/google/gmail`)
 
 All inputs forbid extra fields, and FastAPI validation error responses strip
-submitted `input` values so private addresses, subjects, and message bodies are
-never echoed on `422`. Callers do not select the mailbox address or sender:
-configuration binds one dedicated Workspace mailbox (`GOOGLE_GMAIL_ADDRESS`) and
-the authenticated key attests the calling service.
+submitted `input` values and redact caller-supplied extra field names so private
+addresses, subjects, and message bodies are never echoed on `422`. Callers do
+not select the mailbox address or sender: configuration binds one dedicated
+Workspace mailbox (`GOOGLE_GMAIL_ADDRESS`), every operation verifies
+`users.getProfile(userId="me")` matches `GOOGLE_GMAIL_ADDRESS` before reading or
+sending (`503 gmail_mailbox_mismatch` on mismatch), and the authenticated key
+attests the calling service.
 
 | Method/path | Scope | Request / result |
 |---|---|---|
@@ -306,24 +309,29 @@ evaluates four gates before downloading raw MIME bytes:
    and inspects **only the topmost** `Authentication-Results` header, requiring
    `authserv-id == "mx.google.com"` and either `dmarc=pass` aligned with the
    `From:` organizational domain (`auth_mechanism: "dmarc_pass"`) or
-   `dmarc=none` with an organizationally aligned `dkim=pass` (comparing
-   organizational domains so parent, child, and sibling subdomains align while
-   public suffixes do not) and no SPF/DKIM failure
-   (`auth_mechanism: "dkim_aligned_no_dmarc"`). `Resent-From` and
-   `X-Forwarded-*` are never used as sender identity. Failures return
-   `classification: "rejected_unauthenticated"` with `verified_sender_email: null`.
-4. **Size precheck and raw byte cap (`MAX_EMAIL_BYTES`, default 5 MiB):**
-   oversized authenticated messages return `classification: "rejected_oversize"`
-   (retaining `verified_sender_email`, `subject`, and `outer_message_id` for a
-   single caller-controlled rejection notice) without parsing oversized MIME.
+   `dmarc=none` with an organizationally aligned `dkim=pass` and no SPF/DKIM
+   failure (`auth_mechanism: "dkim_aligned_no_dmarc"`). Organizational-domain
+   boundaries are resolved against the authoritative Mozilla Public Suffix List
+   (ICANN + private sections) and fail closed when the boundary is unknown.
+   `Resent-From` and `X-Forwarded-*` are never used as sender identity. Failures
+   return `classification: "rejected_unauthenticated"` with
+   `verified_sender_email: null`.
+4. **Size precheck and streamed raw byte cap (`MAX_EMAIL_BYTES`, default 5 MiB):**
+   oversized authenticated messages are rejected via metadata precheck or while
+   streaming the `format=raw` response before buffering, returning
+   `classification: "rejected_oversize"` (retaining `verified_sender_email`,
+   `subject`, and `outer_message_id` for a single caller-controlled rejection
+   notice) without parsing oversized MIME.
 
 Eligible messages (`classification: "accepted_candidate"`) prune attachment and
-embedded-message (`message/*`, including `.eml` / `message/rfc822`) subtrees
-before extracting plain text (falling back to local HTML-to-text conversion with
-no external network fetches, falling back to UTF-8 with an
-`unknown charset fallback` warning on unrecognized MIME charsets, and clamping
-at `MAX_EMAIL_TEXT_CHARS`, default 500,000 chars), count omitted attachments
-without extracting them, and split the forwarder's top note from quoted
+embedded-message (`message/*`, including root-level and nested `.eml` /
+`message/rfc822`) subtrees before extracting body text (selecting non-empty
+`text/plain` first, falling back to local HTML-to-text conversion when plain
+text is absent or whitespace-only with no external network fetches, falling back
+to UTF-8 with an `unknown charset fallback` warning on unrecognized MIME
+charsets, and clamping at `MAX_EMAIL_TEXT_CHARS`, default 500,000 chars), count
+all omitted attachments (even when `omitted_attachments` detail entries cap at
+200) without extracting them, and split the forwarder's top note from quoted
 correspondence and `untrusted_claimed_headers`.
 
 ### Threaded receipts and error contract
@@ -331,14 +339,19 @@ correspondence and `untrusted_claimed_headers`.
 `POST /google/gmail/reply` sends plain text from `GOOGLE_GMAIL_ADDRESS` with
 `Auto-Submitted: auto-replied`, `X-Auto-Response-Suppress: All`, and
 `X-Misty-Receipt-ID: <receipt_id>`, rejecting CRLF/NUL header injection and
-self-replies (`422`). Upstream calls use `num_retries=0` and return content-free
-`detail: {code, uncertain}` errors (`503` unconfigured, `404` missing message or
-thread, `422` invalid reply header/recipient, `502` ambiguous upstream failure
-with `uncertain: true`, `409` definite upstream refusal). After an uncertain
-send, callers must check `POST /google/gmail/receipt-check` before retrying;
-receipt verification inspects `thread_id` first and then falls back to scanning
-`SENT` metadata across threads (optionally bounded by `sent_after_epoch_s`),
-failing closed with `receipt_check_inconclusive` (`uncertain: true`) if the
+self-replies (`422`). Upstream calls use a no-retry `httpx` transport
+(`retries=0`, `num_retries=0`) so a lost send response surfaces immediately as
+an ambiguous error instead of silently sending a second POST, returning
+content-free `detail: {code, uncertain}` errors (`503` unconfigured or mailbox
+identity mismatch, `404` missing message or thread, `422` invalid reply
+header/recipient, `502` ambiguous upstream failure with `uncertain: true`, `409`
+definite upstream refusal). After an uncertain send, callers must check
+`POST /google/gmail/receipt-check` before retrying; receipt verification
+requires `SENT` provenance (excluding `DRAFT` and non-`SENT` messages), inspects
+`thread_id` first, and then falls back to scanning `SENT` metadata across
+threads with `includeSpamTrash=true` (optionally bounded by
+`sent_after_epoch_s`), failing closed with `receipt_check_inconclusive`
+(`uncertain: true`) if a listed candidate disappears during inspection or if the
 fallback scan hits its page limit without finding the receipt.
 Audit logs record only message counts, classification codes, or boolean receipt
 presence — never addresses, subjects, headers, or message bodies.

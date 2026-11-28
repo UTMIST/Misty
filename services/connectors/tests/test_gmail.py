@@ -6,6 +6,7 @@ import json
 from uuid import uuid4
 
 import httplib2
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from googleapiclient.errors import HttpError
@@ -77,6 +78,11 @@ class FakeUsers:
     def __init__(self, gmail):
         self.g = gmail
 
+    def getProfile(self, *, userId):
+        assert userId == "me"
+        self.g.profile_calls.append(userId)
+        return FakeRequest({"emailAddress": self.g.profile_email})
+
     def messages(self):
         return FakeMessages(self.g)
 
@@ -86,6 +92,8 @@ class FakeUsers:
 
 class FakeGmail:
     def __init__(self):
+        self.profile_email = MISTY_ADDR
+        self.profile_calls = []
         self.list_calls = []
         self.get_calls = []
         self.sent_calls = []
@@ -293,11 +301,11 @@ def test_header_smuggling_and_alignment_attacks_rejected_before_raw_download(
 
 def test_display_name_spoof_resolves_actual_addr_spec_and_ignores_resent_from():
     gmail = FakeGmail()
-    # Attacker owns evil.example (so evil.example passes DMARC), sets display name AND
+    # Attacker owns evil.com (so evil.com passes DMARC), sets display name AND
     # Resent-From / X-Forwarded-To to impersonate a Misty member.
     gmail.metadata["msg_1"], gmail.raw["msg_1"] = make_raw_email(
-        from_headers=('"president@utmist.ca" <attacker@evil.example>',),
-        auth_headers=("mx.google.com; dmarc=pass header.from=evil.example",),
+        from_headers=('"president@utmist.ca" <attacker@evil.com>',),
+        auth_headers=("mx.google.com; dmarc=pass header.from=evil.com",),
         extra_headers=(
             ("Resent-From", "president@utmist.ca"),
             ("X-Forwarded-To", "president@utmist.ca"),
@@ -305,8 +313,8 @@ def test_display_name_spoof_resolves_actual_addr_spec_and_ignores_resent_from():
     )
     res = build_mailbox(gmail).inspect_message("msg_1")
     assert res.classification == "accepted_candidate"
-    # Must resolve strictly to attacker@evil.example so directory lookup rejects it!
-    assert res.verified_sender_email == "attacker@evil.example"
+    # Must resolve strictly to attacker@evil.com so directory lookup rejects it!
+    assert res.verified_sender_email == "attacker@evil.com"
 
 
 def test_raw_mime_from_discrepancy_is_rejected():
@@ -482,6 +490,7 @@ def test_send_reply_sets_loop_headers_rejects_injection_and_checks_receipt():
         "messages": [
             {
                 "id": "sent_1",
+                "labelIds": ["SENT"],
                 "payload": {"headers": [{"name": "X-Misty-Receipt-ID", "value": str(rid)}]},
             }
         ],
@@ -773,6 +782,22 @@ def test_unknown_mime_charset_falls_back_to_utf8_with_warning():
         ("member@a.on.ca", "b.on.ca", "rejected_unauthenticated"),
         # Distinct multi-tenant hosting domains must NOT align
         ("member@tenant-a.github.io", "tenant-b.github.io", "rejected_unauthenticated"),
+        # Authoritative PSL boundaries beyond common suffixes must NOT align
+        ("member@a.asn.au", "b.asn.au", "rejected_unauthenticated"),
+        ("member@a.school.nz", "b.school.nz", "rejected_unauthenticated"),
+        (
+            "member@a.s3.us-east-1.amazonaws.com",
+            "b.s3.us-east-1.amazonaws.com",
+            "rejected_unauthenticated",
+        ),
+        ("member@a.myshopify.com", "b.myshopify.com", "rejected_unauthenticated"),
+        # PSL wildcard rule (*.ck) separates distinct registrants
+        ("member@a.b.ck", "c.b.ck", "rejected_unauthenticated"),
+        # PSL exception rule (!www.ck) allows alignment under www.ck
+        ("member@mail.www.ck", "www.ck", "accepted_candidate"),
+        # Unknown TLD / suffix boundary fails closed
+        ("member@a.shared.unknown-tld", "b.shared.unknown-tld", "rejected_unauthenticated"),
+        ("member@org.unknown-tld", "org.unknown-tld", "rejected_unauthenticated"),
     ],
 )
 def test_relaxed_dkim_organizational_domain_alignment(from_addr, dkim_domain, expected):
@@ -801,6 +826,7 @@ def test_receipt_check_recovers_sent_receipt_from_another_thread_and_fails_close
     }
     gmail.metadata["sent_other_thread"] = {
         "id": "sent_other_thread",
+        "labelIds": ["SENT"],
         "payload": {"headers": [{"name": "X-Misty-Receipt-ID", "value": str(rid)}]},
     }
 
@@ -812,6 +838,7 @@ def test_receipt_check_recovers_sent_receipt_from_another_thread_and_fails_close
     assert found.sent is True
     assert found.sent_message_id == "sent_other_thread"
     assert gmail.list_calls[-1]["labelIds"] == ["SENT"]
+    assert gmail.list_calls[-1]["includeSpamTrash"] is True
     assert gmail.list_calls[-1]["q"] == "after:1700000000"
 
     # Also recovers when original thread returns 404.
@@ -878,3 +905,320 @@ def test_http_422_responses_strip_private_input_on_overlong_and_malformed_reques
         )
         assert bad_json.status_code == 422
         assert "SECRET-BROKEN-JSON-PAYLOAD" not in bad_json.text
+
+        # Caller-supplied extra field names must be redacted from 422 error locations.
+        extra_field = client.post(
+            "/google/gmail/reply",
+            headers=AUTH,
+            json={
+                "thread_id": "thr_1",
+                "to_email": "alex@utmist.ca",
+                "subject": "Re: Receipt",
+                "body_text": "Saved.",
+                "receipt_id": str(uuid4()),
+                "SECRET-CALLER-SUPPLIED-FIELD-NAME": "sensitive-val",
+            },
+        )
+        assert extra_field.status_code == 422
+        assert "SECRET-CALLER-SUPPLIED-FIELD-NAME" not in extra_field.text
+        assert "sensitive-val" not in extra_field.text
+        assert any(err.get("loc") == ["body", "<redacted>"] for err in extra_field.json()["detail"])
+
+
+def test_send_reply_issues_single_post_when_response_is_lost():
+    """P1 regression: real Gmail SDK + GmailHttp must never retry POST on lost response."""
+    send_posts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal send_posts
+        if request.url.path.endswith("/users/me/profile"):
+            return httpx.Response(200, json={"emailAddress": MISTY_ADDR})
+        if request.url.path.endswith("/users/me/messages/send"):
+            send_posts += 1
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    mb = GoogleGmailMailbox(
+        address=MISTY_ADDR,
+        http_transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(GmailError) as exc_info:
+        mb.send_reply(
+            GmailReplyRequest(
+                thread_id="thr_1",
+                to_email="alex@utmist.ca",
+                subject="Re: Sponsor",
+                body_text="Received.",
+                receipt_id=uuid4(),
+            )
+        )
+    assert exc_info.value.code == "gmail_transport"
+    assert exc_info.value.uncertain is True
+    assert send_posts == 1
+
+
+def test_raw_download_is_bounded_before_buffering_over_streaming_transport():
+    """Streaming cap stops oversized format=raw responses before reading the full body."""
+    meta, _ = make_raw_email(plain_body="Small metadata estimate", size_estimate=100)
+    chunks_yielded = 0
+
+    class CountingStream(httpx.SyncByteStream):
+        def __iter__(self):
+            nonlocal chunks_yielded
+            yield b'{"id":"msg_1","threadId":"thr_1","raw":"'
+            for _ in range(200):
+                chunks_yielded += 1
+                yield b"A" * 4096
+            yield b'"}'
+
+    class StreamingTransport(httpx.BaseTransport):
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/users/me/profile"):
+                return httpx.Response(200, json={"emailAddress": MISTY_ADDR})
+            if request.url.path.endswith("/users/me/messages/msg_1"):
+                if "format=metadata" in str(request.url):
+                    return httpx.Response(200, json=meta)
+                if "format=raw" in str(request.url):
+                    assert request.headers.get("accept-encoding") == "identity"
+                    return httpx.Response(200, stream=CountingStream())
+            raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    mb = GoogleGmailMailbox(
+        address=MISTY_ADDR,
+        max_email_bytes=1024,
+        http_transport=StreamingTransport(),
+    )
+    res = mb.inspect_message("msg_1")
+    assert res.classification == "rejected_oversize"
+    assert res.verified_sender_email == "alex.chen@mail.utoronto.ca"
+    assert res.subject == "Fwd: Sponsor Commitment 2026"
+    # Stopped well before consuming all 200 chunks (~800 KiB).
+    assert chunks_yielded < 30
+
+
+def test_mailbox_identity_mismatch_fails_closed_before_reading_or_sending():
+    gmail = FakeGmail()
+    gmail.profile_email = "misty-staging@utmist.ca"
+    gmail.metadata["msg_1"], gmail.raw["msg_1"] = make_raw_email()
+    mb = build_mailbox(gmail)
+
+    with pytest.raises(GmailError) as list_exc:
+        mb.list_messages(GmailListRequest())
+    assert list_exc.value.code == "gmail_mailbox_mismatch"
+    assert list_exc.value.uncertain is False
+    assert not gmail.list_calls
+
+    with pytest.raises(GmailError) as inspect_exc:
+        mb.inspect_message("msg_1")
+    assert inspect_exc.value.code == "gmail_mailbox_mismatch"
+    assert not gmail.get_calls
+
+    with pytest.raises(GmailError) as send_exc:
+        mb.send_reply(
+            GmailReplyRequest(
+                thread_id="thr_1",
+                to_email="alex@utmist.ca",
+                subject="Re: Test",
+                body_text="Hello",
+                receipt_id=uuid4(),
+            )
+        )
+    assert send_exc.value.code == "gmail_mailbox_mismatch"
+    assert not gmail.sent_calls
+
+    with pytest.raises(GmailError) as check_exc:
+        mb.check_receipt(GmailReceiptCheckRequest(thread_id="thr_1", receipt_id=uuid4()))
+    assert check_exc.value.code == "gmail_mailbox_mismatch"
+    assert not gmail.thread_calls
+
+    # HTTP layer maps mailbox mismatch to 503 with uncertain=false.
+    app = create_app()
+    app.dependency_overrides[get_gmail_mailbox] = lambda: mb
+    with TestClient(app) as client:
+        resp = client.post("/google/gmail/messages/list", headers=AUTH, json={})
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == {"code": "gmail_mailbox_mismatch", "uncertain": False}
+
+
+def test_root_level_embedded_mail_and_root_attachment_are_omitted():
+    """P1 regression: MIME root message/rfc822 or attachment must never become forwarder_note."""
+    raw_rfc822 = (
+        b"Authentication-Results: mx.google.com; dmarc=pass header.from=utmist.ca\r\n"
+        b"From: member@utmist.ca\r\n"
+        b"To: misty@utmist.ca\r\n"
+        b"Subject: Fwd: Embedded root\r\n"
+        b"Message-ID: <root-eml-1@utmist.ca>\r\n"
+        b"Content-Type: message/rfc822\r\n"
+        b"\r\n"
+        b"From: attacker@evil.com\r\n"
+        b"Subject: Inner\r\n"
+        b"\r\n"
+        b"Share with finance team\r\n\r\n"
+        b"---------- Forwarded message ---------\r\n"
+        b"Inner body.\r\n"
+    )
+    parsed = email.message_from_bytes(raw_rfc822, policy=email.policy.default)
+    meta = {
+        "id": "msg_root_eml",
+        "threadId": "thr_root_eml",
+        "labelIds": ["INBOX"],
+        "internalDate": INTERNAL_MS,
+        "sizeEstimate": len(raw_rfc822),
+        "payload": {"headers": [{"name": k, "value": v} for k, v in parsed.items()]},
+    }
+    raw_b64 = base64.urlsafe_b64encode(raw_rfc822).decode("ascii").rstrip("=")
+
+    gmail = FakeGmail()
+    gmail.metadata["msg_root_eml"] = meta
+    gmail.raw["msg_root_eml"] = {"id": "msg_root_eml", "threadId": "thr_root_eml", "raw": raw_b64}
+
+    res = build_mailbox(gmail).inspect_message("msg_root_eml")
+    assert res.classification == "accepted_candidate"
+    assert res.forwarder_note == ""
+    assert res.forwarded_body == ""
+    assert res.omitted_attachment_count == 1
+    assert res.omitted_attachments[0].content_type == "message/rfc822"
+    assert "attachments omitted" in res.warnings
+
+    # Root-level Content-Disposition: attachment is also omitted.
+    raw_att = (
+        b"Authentication-Results: mx.google.com; dmarc=pass header.from=utmist.ca\r\n"
+        b"From: member@utmist.ca\r\n"
+        b"To: misty@utmist.ca\r\n"
+        b"Subject: Attached root\r\n"
+        b"Message-ID: <root-att-1@utmist.ca>\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n"
+        b'Content-Disposition: attachment; filename="note.txt"\r\n'
+        b"\r\n"
+        b"Should never be treated as body.\r\n"
+    )
+    parsed_att = email.message_from_bytes(raw_att, policy=email.policy.default)
+    gmail.metadata["msg_root_att"] = {
+        "id": "msg_root_att",
+        "threadId": "thr_root_att",
+        "labelIds": ["INBOX"],
+        "internalDate": INTERNAL_MS,
+        "sizeEstimate": len(raw_att),
+        "payload": {"headers": [{"name": k, "value": v} for k, v in parsed_att.items()]},
+    }
+    gmail.raw["msg_root_att"] = {
+        "id": "msg_root_att",
+        "threadId": "thr_root_att",
+        "raw": base64.urlsafe_b64encode(raw_att).decode("ascii").rstrip("="),
+    }
+    res_att = build_mailbox(gmail).inspect_message("msg_root_att")
+    assert res_att.classification == "accepted_candidate"
+    assert res_att.forwarder_note == ""
+    assert res_att.forwarded_body == ""
+    assert res_att.omitted_attachment_count == 1
+    assert "attachments omitted" in res_att.warnings
+
+
+def test_whitespace_only_plain_part_falls_back_to_usable_html_part():
+    gmail = FakeGmail()
+    gmail.metadata["msg_1"], gmail.raw["msg_1"] = make_raw_email(
+        plain_body="   \r\n\t  \n ",
+        html_body="<html><body><p>Useful HTML body from sponsor.</p></body></html>",
+    )
+    res = build_mailbox(gmail).inspect_message("msg_1")
+    assert res.classification == "accepted_candidate"
+    assert "Useful HTML body from sponsor." in res.forwarded_body
+    assert "converted from html" in res.warnings
+
+
+def test_omitted_attachment_count_exceeds_detail_list_cap():
+    outer = EmailMessage()
+    outer["Authentication-Results"] = "mx.google.com; dmarc=pass header.from=utmist.ca"
+    outer["From"] = "member@utmist.ca"
+    outer["To"] = MISTY_ADDR
+    outer["Subject"] = "Many attachments"
+    outer["Message-ID"] = "<many-att-1@utmist.ca>"
+    outer.set_content("Forwarded summary.")
+    for idx in range(205):
+        outer.add_attachment(
+            b"x",
+            maintype="application",
+            subtype="octet-stream",
+            filename=f"f{idx}.bin",
+        )
+    raw_bytes = outer.as_bytes()
+    gmail = FakeGmail()
+    gmail.metadata["msg_many"] = {
+        "id": "msg_many",
+        "threadId": "thr_many",
+        "labelIds": ["INBOX"],
+        "internalDate": INTERNAL_MS,
+        "sizeEstimate": len(raw_bytes),
+        "payload": {"headers": [{"name": k, "value": v} for k, v in outer.items()]},
+    }
+    gmail.raw["msg_many"] = {
+        "id": "msg_many",
+        "threadId": "thr_many",
+        "raw": base64.urlsafe_b64encode(raw_bytes).decode("ascii").rstrip("="),
+    }
+
+    res = build_mailbox(gmail).inspect_message("msg_many")
+    assert res.classification == "accepted_candidate"
+    assert res.omitted_attachment_count == 205
+    assert len(res.omitted_attachments) == 200
+    assert "attachments omitted" in res.warnings
+
+
+def test_receipt_check_requires_sent_label_includes_trash_and_preserves_disappearing_uncertainty():
+    gmail = FakeGmail()
+    mb = build_mailbox(gmail)
+    rid = uuid4()
+
+    # 1. A DRAFT (or INBOX) message with the receipt header must NOT count as sent.
+    gmail.threads["thr_1"] = {
+        "id": "thr_1",
+        "messages": [
+            {
+                "id": "draft_1",
+                "labelIds": ["DRAFT"],
+                "payload": {"headers": [{"name": "X-Misty-Receipt-ID", "value": str(rid)}]},
+            },
+            {
+                "id": "inbox_1",
+                "labelIds": ["INBOX"],
+                "payload": {"headers": [{"name": "X-Misty-Receipt-ID", "value": str(rid)}]},
+            },
+        ],
+    }
+    gmail.list_response = {"messages": []}
+    res_draft = mb.check_receipt(GmailReceiptCheckRequest(thread_id="thr_1", receipt_id=rid))
+    assert res_draft.sent is False
+
+    # 2. A trashed SENT receipt IS discovered because SENT fallback sets includeSpamTrash=True.
+    gmail.list_response = {"messages": [{"id": "sent_trashed", "threadId": "thr_other"}]}
+    gmail.metadata["sent_trashed"] = {
+        "id": "sent_trashed",
+        "labelIds": ["SENT", "TRASH"],
+        "payload": {"headers": [{"name": "X-Misty-Receipt-ID", "value": str(rid)}]},
+    }
+    res_trashed = mb.check_receipt(GmailReceiptCheckRequest(thread_id="thr_1", receipt_id=rid))
+    assert res_trashed.sent is True
+    assert res_trashed.sent_message_id == "sent_trashed"
+    assert gmail.list_calls[-1]["includeSpamTrash"] is True
+
+    # 3. A disappearing SENT candidate (404 between list and get) prevents a clean sent=False.
+    def raise_404():
+        raise HttpError(httplib2.Response({"status": "404"}), b"not found")
+
+    gmail.list_response = {"messages": [{"id": "vanished_1", "threadId": "thr_other"}]}
+    gmail.metadata["vanished_1"] = raise_404
+    with pytest.raises(GmailError) as exc_info:
+        mb.check_receipt(GmailReceiptCheckRequest(thread_id="thr_1", receipt_id=rid))
+    assert exc_info.value.code == "receipt_check_inconclusive"
+    assert exc_info.value.uncertain is True
+
+    # 4. If a later SENT candidate matches despite an earlier 404, still returns sent=True.
+    gmail.list_response = {
+        "messages": [
+            {"id": "vanished_1", "threadId": "thr_other"},
+            {"id": "sent_trashed", "threadId": "thr_other"},
+        ]
+    }
+    res_recovered = mb.check_receipt(GmailReceiptCheckRequest(thread_id="thr_1", receipt_id=rid))
+    assert res_recovered.sent is True
+    assert res_recovered.sent_message_id == "sent_trashed"

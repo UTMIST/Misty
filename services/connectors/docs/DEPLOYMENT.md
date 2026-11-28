@@ -151,11 +151,15 @@ Google Cloud project and set `GOOGLE_GMAIL_ADDRESS`,
 `GOOGLE_GMAIL_OAUTH_REFRESH_TOKEN` (all three OAuth values are `SecretStr`).
 Leaving all four empty is a supported running state (`/google/gmail/*` returns
 `503 gmail_not_configured`); partial configuration fails `verify_production_secrets()`
-at boot outside `local`.
+at boot outside `local`. Every Gmail operation verifies
+`users.getProfile(userId="me")` matches `GOOGLE_GMAIL_ADDRESS` before reading or
+sending (`503 gmail_mailbox_mismatch` if the OAuth credentials belong to a
+different mailbox).
 
 Before live acceptance, verify in Google Workspace Admin (*Apps → Google
 Workspace → Gmail → Authenticate email*) that custom-domain DKIM (`d=utmist.ca`)
 and a `_dmarc.utmist.ca` TXT record are active so internal `@utmist.ca` forwards
 do not fall back to unaligned `*.gappssmtp.com` signing keys. Grant
 `email-read,email-send` to `documentation-system`'s connectors consumer key in
-`CONSUMER_KEYS` when enabling forwarded-email polling.
+`CONSUMER_KEYS` when enabling forwarded-email polling; see also the platform
+[Railway environment table](../../../docs/RAILWAY-DEPLOYMENT.md#3-environment-variables).

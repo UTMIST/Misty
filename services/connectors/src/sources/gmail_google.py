@@ -9,6 +9,8 @@ import email.policy
 from html.parser import HTMLParser
 import re
 
+from publicsuffixlist import PublicSuffixList
+
 from contracts.gmail import (
     AuthMechanism,
     ClaimedHeaders,
@@ -23,6 +25,7 @@ from contracts.gmail import (
     GmailReplyResult,
     OmittedAttachment,
 )
+from src.sources.google_http import GmailHttp, GmailRawTooLarge
 
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -48,167 +51,9 @@ _METADATA_HEADERS = [
     "Authentication-Results",
 ]
 
-# Multi-label ICANN public suffixes and shared multi-tenant hosting suffixes that
-# must never count as a single shared organizational domain during relaxed
-# DMARC / DKIM alignment checks.
-_MULTI_LABEL_PUBLIC_SUFFIXES = frozenset(
-    {
-        "co.uk",
-        "org.uk",
-        "ac.uk",
-        "gov.uk",
-        "me.uk",
-        "ltd.uk",
-        "plc.uk",
-        "sch.uk",
-        "nhs.uk",
-        "on.ca",
-        "qc.ca",
-        "bc.ca",
-        "ab.ca",
-        "mb.ca",
-        "nb.ca",
-        "nf.ca",
-        "nl.ca",
-        "ns.ca",
-        "nt.ca",
-        "nu.ca",
-        "pe.ca",
-        "sk.ca",
-        "yk.ca",
-        "gc.ca",
-        "gov.ca",
-        "com.au",
-        "edu.au",
-        "org.au",
-        "net.au",
-        "gov.au",
-        "co.nz",
-        "ac.nz",
-        "org.nz",
-        "govt.nz",
-        "co.jp",
-        "ac.jp",
-        "or.jp",
-        "ne.jp",
-        "go.jp",
-        "co.kr",
-        "ac.kr",
-        "or.kr",
-        "go.kr",
-        "com.br",
-        "org.br",
-        "net.br",
-        "gov.br",
-        "edu.br",
-        "com.mx",
-        "org.mx",
-        "edu.mx",
-        "gob.mx",
-        "com.ar",
-        "org.ar",
-        "edu.ar",
-        "gob.ar",
-        "com.co",
-        "edu.co",
-        "org.co",
-        "com.pe",
-        "edu.pe",
-        "edu.cn",
-        "com.cn",
-        "org.cn",
-        "net.cn",
-        "gov.cn",
-        "com.tw",
-        "edu.tw",
-        "org.tw",
-        "gov.tw",
-        "com.hk",
-        "edu.hk",
-        "org.hk",
-        "gov.hk",
-        "com.sg",
-        "edu.sg",
-        "org.sg",
-        "gov.sg",
-        "com.my",
-        "edu.my",
-        "org.my",
-        "ac.in",
-        "co.in",
-        "org.in",
-        "net.in",
-        "gov.in",
-        "edu.in",
-        "co.za",
-        "ac.za",
-        "org.za",
-        "gov.za",
-        "co.il",
-        "ac.il",
-        "org.il",
-        "gov.il",
-        "com.tr",
-        "edu.tr",
-        "org.tr",
-        "gov.tr",
-        "com.pl",
-        "net.pl",
-        "org.pl",
-        "edu.pl",
-        "com.es",
-        "nom.es",
-        "org.es",
-        "gob.es",
-        "edu.es",
-        "co.id",
-        "ac.id",
-        "or.id",
-        "co.th",
-        "ac.th",
-        "or.th",
-        "in.th",
-        "com.vn",
-        "edu.vn",
-        "com.ph",
-        "edu.ph",
-        "com.ng",
-        "edu.ng",
-        "org.ng",
-        "co.ke",
-        "ac.ke",
-        "or.ke",
-        "com.eg",
-        "edu.eg",
-        "com.sa",
-        "edu.sa",
-        "com.pk",
-        "edu.pk",
-        "com.bd",
-        "edu.bd",
-        "com.ua",
-        "org.ua",
-        # Common multi-tenant hosting suffixes (PSL private section)
-        "github.io",
-        "gitlab.io",
-        "pages.dev",
-        "workers.dev",
-        "appspot.com",
-        "web.app",
-        "firebaseapp.com",
-        "herokuapp.com",
-        "vercel.app",
-        "netlify.app",
-        "railway.app",
-        "fly.dev",
-        "onrender.com",
-        "cloudfront.net",
-        "s3.amazonaws.com",
-        "azurewebsites.net",
-        "blogspot.com",
-        "wordpress.com",
-    }
-)
+# Authoritative Mozilla Public Suffix List (ICANN + private sections); unknown
+# TLD/suffix boundaries fail closed rather than falling back to labels[-2:].
+_PSL = PublicSuffixList(accept_unknown=False)
 _RECEIPT_FALLBACK_MAX_PAGES = 5
 
 _MSG_ID_RE = re.compile(r"^<[^\s\r\n\x00<>]{1,996}>$")
@@ -230,6 +75,8 @@ def _execute(request):
 
     try:
         return request.execute(num_retries=0)
+    except GmailRawTooLarge:
+        raise
     except HttpError as exc:
         status = exc.resp.status
         if status == 404:
@@ -289,15 +136,13 @@ def _normalize_domain(domain: str) -> str | None:
 
 
 def _organizational_domain(domain: str) -> str | None:
-    """Derive the registrable organizational domain using offline public-suffix boundaries."""
-    labels = domain.split(".")
-    if len(labels) < 2 or domain in _MULTI_LABEL_PUBLIC_SUFFIXES:
-        return None
-    for idx in range(1, len(labels) - 1):
-        suffix = ".".join(labels[idx:])
-        if suffix in _MULTI_LABEL_PUBLIC_SUFFIXES:
-            return ".".join(labels[idx - 1 :])
-    return ".".join(labels[-2:])
+    """Derive the registrable organizational domain from the authoritative PSL.
+
+    Covers both ICANN and private PSL rules (exact, wildcard, and exceptions)
+    and fails closed (returns None) when the boundary is unknown or the domain
+    is itself a public suffix.
+    """
+    return _PSL.privatesuffix(domain) or None
 
 
 def _domains_align(authenticated_domain: str | None, from_domain: str) -> bool:
@@ -550,13 +395,16 @@ def _decode_text_part(part: EmailMessage) -> tuple[str, bool]:
 
 def _extract_body_and_attachments(
     msg: EmailMessage, *, max_text_chars: int
-) -> tuple[str, bool, list[OmittedAttachment], list[str]]:
+) -> tuple[str, bool, int, list[OmittedAttachment], list[str]]:
     plain_parts: list[str] = []
     html_parts: list[str] = []
+    omitted_count = 0
     attachments: list[OmittedAttachment] = []
     warnings: list[str] = []
 
     def _record_omitted(part: EmailMessage, ctype: str) -> None:
+        nonlocal omitted_count
+        omitted_count += 1
         if len(attachments) < 200:
             attachments.append(
                 OmittedAttachment(content_type=ctype[:255], size_bytes=_part_size_bytes(part))
@@ -564,15 +412,16 @@ def _extract_body_and_attachments(
         if "attachments omitted" not in warnings:
             warnings.append("attachments omitted")
 
-    def _visit(part: EmailMessage, *, is_root: bool) -> None:
+    def _visit(part: EmailMessage) -> None:
         ctype = (part.get_content_type() or "application/octet-stream").lower()
         disp = (part.get_content_disposition() or "").lower()
         has_filename = bool(part.get_filename())
 
-        # Prune attachment and embedded-message subtrees (including message/rfc822
-        # .eml attachments, which are multipart in Python's email package) BEFORE
-        # recursing so attached correspondence can never leak into forwarder_note.
-        if not is_root and (disp == "attachment" or has_filename or ctype.startswith("message/")):
+        # Prune attachment and embedded-message subtrees (including root-level
+        # or nested message/rfc822 .eml entities, which Python's email package
+        # treats as multipart) BEFORE recursing so encapsulated correspondence
+        # can never leak into forwarder_note.
+        if disp == "attachment" or has_filename or ctype.startswith("message/"):
             _record_omitted(part, ctype)
             return
 
@@ -581,7 +430,7 @@ def _extract_body_and_attachments(
             if isinstance(children, list):
                 for child in children:
                     if isinstance(child, Message):
-                        _visit(child, is_root=False)
+                        _visit(child)
             return
 
         if ctype not in {"text/plain", "text/html"}:
@@ -596,12 +445,14 @@ def _extract_body_and_attachments(
         else:
             html_parts.append(content)
 
-    _visit(msg, is_root=True)
+    _visit(msg)
 
-    if plain_parts:
-        combined = "\n\n".join(p.strip() for p in plain_parts if p.strip())
+    plain_text = "\n\n".join(p.strip() for p in plain_parts if p.strip())
+    if plain_text:
+        combined = plain_text
     elif html_parts:
-        combined = "\n\n".join(_html_to_text(h) for h in html_parts if h.strip())
+        html_chunks = [_html_to_text(h) for h in html_parts if h.strip()]
+        combined = "\n\n".join(chunk for chunk in html_chunks if chunk)
         if combined:
             warnings.append("converted from html")
     else:
@@ -614,7 +465,7 @@ def _extract_body_and_attachments(
         truncated = True
         warnings.append("content truncated")
 
-    return combined, truncated, attachments, warnings
+    return combined, truncated, omitted_count, attachments, warnings
 
 
 def _header_map(headers: list[dict]) -> dict[str, list[str]]:
@@ -664,6 +515,7 @@ class GoogleGmailMailbox:
         max_email_text_chars: int = 500_000,
         timeout: float = 30.0,
         gmail=None,
+        http_transport=None,
     ) -> None:
         self.address = address.strip().lower()
         self._client_id = client_id
@@ -673,6 +525,20 @@ class GoogleGmailMailbox:
         self.max_email_text_chars = max_email_text_chars
         self._timeout = timeout
         self._gmail = gmail
+        self._http_transport = http_transport
+
+    def _verify_mailbox_identity(self, gmail) -> str:
+        """Bind every operation to the authenticated OAuth mailbox identity."""
+        profile = _execute(gmail.users().getProfile(userId="me"))
+        if not isinstance(profile, dict):
+            raise GmailError("gmail_invalid_response")
+        parsed = _parse_single_mailbox(str(profile.get("emailAddress") or ""))
+        if parsed is None:
+            raise GmailError("gmail_invalid_response")
+        verified_email, _ = parsed
+        if verified_email != self.address:
+            raise GmailError("gmail_mailbox_mismatch", uncertain=False)
+        return verified_email
 
     @contextmanager
     def _client(self):
@@ -680,33 +546,47 @@ class GoogleGmailMailbox:
         if not parsed:
             raise GmailError("gmail_not_configured")
         if self._gmail is not None:
+            self._verify_mailbox_identity(self._gmail)
             yield self._gmail
             return
-        if not all((self._client_id, self._client_secret, self._refresh_token)):
-            raise GmailError("gmail_not_configured")
-        import google_auth_httplib2
-        import httplib2
-        from google.oauth2.credentials import Credentials
         from googleapiclient.discovery import build
 
-        credentials = Credentials(
-            None,
-            refresh_token=self._refresh_token,
-            client_id=self._client_id,
-            client_secret=self._client_secret,
-            token_uri="https://oauth2.googleapis.com/token",
-            scopes=GMAIL_SCOPES,
+        raw_http = GmailHttp(
+            max_email_bytes=self.max_email_bytes,
+            timeout=self._timeout,
+            transport=self._http_transport,
         )
-        # Fresh transport per request: httplib2 is not thread safe.
+        if self._http_transport is not None and not all(
+            (self._client_id, self._client_secret, self._refresh_token)
+        ):
+            http = raw_http
+        else:
+            if not all((self._client_id, self._client_secret, self._refresh_token)):
+                raw_http.close()
+                raise GmailError("gmail_not_configured")
+            import google_auth_httplib2
+            from google.oauth2.credentials import Credentials
+
+            credentials = Credentials(
+                None,
+                refresh_token=self._refresh_token,
+                client_id=self._client_id,
+                client_secret=self._client_secret,
+                token_uri="https://oauth2.googleapis.com/token",
+                scopes=GMAIL_SCOPES,
+            )
+            http = google_auth_httplib2.AuthorizedHttp(credentials, http=raw_http)
+
+        # Fresh no-retry bounded transport per request: avoids thread-safety
+        # issues, prevents httplib2 POST retries, and caps raw downloads.
         gmail = build(
             "gmail",
             "v1",
             cache_discovery=False,
-            http=google_auth_httplib2.AuthorizedHttp(
-                credentials, http=httplib2.Http(timeout=self._timeout)
-            ),
+            http=http,
         )
         try:
+            self._verify_mailbox_identity(gmail)
             yield gmail
         finally:
             gmail.close()
@@ -871,9 +751,22 @@ class GoogleGmailMailbox:
                     subject=subject,
                 )
 
-            raw_resp = _execute(
-                gmail.users().messages().get(userId="me", id=message_id, format="raw")
-            )
+            try:
+                raw_resp = _execute(
+                    gmail.users().messages().get(userId="me", id=message_id, format="raw")
+                )
+            except GmailRawTooLarge:
+                return GmailInspectResult(
+                    classification="rejected_oversize",
+                    mailbox_address=self.address,
+                    message_id=message_id,
+                    thread_id=tid,
+                    received_at=received_at,
+                    verified_sender_email=sender_email,
+                    auth_mechanism=auth_mech,
+                    outer_message_id=outer_msg_id,
+                    subject=subject,
+                )
 
         if not isinstance(raw_resp, dict) or not isinstance(raw_resp.get("raw"), str):
             raise GmailError("gmail_invalid_response")
@@ -932,7 +825,7 @@ class GoogleGmailMailbox:
                 received_at=received_at,
             )
 
-        extracted, truncated, attachments, warnings = _extract_body_and_attachments(
+        extracted, truncated, omitted_count, attachments, warnings = _extract_body_and_attachments(
             mime_msg, max_text_chars=self.max_email_text_chars
         )
         note, forwarded, has_delim, claimed = _split_forwarded_message(extracted)
@@ -951,7 +844,7 @@ class GoogleGmailMailbox:
             forwarded_body=forwarded,
             delimiter_detected=has_delim,
             truncated=truncated,
-            omitted_attachment_count=len(attachments),
+            omitted_attachment_count=omitted_count,
             omitted_attachments=attachments,
             untrusted_claimed_headers=claimed,
             warnings=warnings,
@@ -974,11 +867,10 @@ class GoogleGmailMailbox:
 
         if body.in_reply_to is not None and not _MSG_ID_RE.match(body.in_reply_to):
             raise GmailError("invalid_reply_header")
+        if self.address and recipient_email == self.address:
+            raise GmailError("self_reply_forbidden")
 
         with self._client() as gmail:
-            if recipient_email == self.address:
-                raise GmailError("self_reply_forbidden")
-
             message = EmailMessage()
             message["From"] = self.address
             message["To"] = recipient_email
@@ -1007,9 +899,20 @@ class GoogleGmailMailbox:
         return GmailReplyResult(sent_message_id=sent_id, thread_id=sent_tid)
 
     @staticmethod
-    def _match_receipt_header(msg: object, target: str) -> str | None:
+    def _is_sent_message(msg: object) -> bool:
         if not isinstance(msg, dict):
+            return False
+        raw_labels = msg.get("labelIds")
+        if not isinstance(raw_labels, list):
+            return False
+        labels = {str(lbl) for lbl in raw_labels}
+        return "SENT" in labels and "DRAFT" not in labels
+
+    @classmethod
+    def _match_receipt_header(cls, msg: object, target: str) -> str | None:
+        if not cls._is_sent_message(msg):
             return None
+        assert isinstance(msg, dict)
         mid = str(msg.get("id") or "")
         payload = msg.get("payload") or {}
         headers = payload.get("headers") if isinstance(payload, dict) else []
@@ -1027,7 +930,7 @@ class GoogleGmailMailbox:
 
     def check_receipt(self, body: GmailReceiptCheckRequest) -> GmailReceiptCheckResult:
         target = str(body.receipt_id)
-        checked_ids: set[str] = set()
+        checked_sent_ids: set[str] = set()
         with self._client() as gmail:
             try:
                 thread = _execute(
@@ -1052,23 +955,29 @@ class GoogleGmailMailbox:
                 raise GmailError("gmail_invalid_response")
 
             for msg in messages:
-                if isinstance(msg, dict) and isinstance(msg.get("id"), str):
-                    checked_ids.add(msg["id"])
+                if (
+                    isinstance(msg, dict)
+                    and isinstance(msg.get("id"), str)
+                    and self._is_sent_message(msg)
+                ):
+                    checked_sent_ids.add(msg["id"])
                 matched_id = self._match_receipt_header(msg, target)
                 if matched_id is not None:
                     return GmailReceiptCheckResult(sent=True, sent_message_id=matched_id)
 
             # Fallback independent of thread_id: if Gmail placed the reply into a
             # different thread (e.g., missing In-Reply-To, subject drift, or thread
-            # splitting) and the send timed out, scan SENT metadata across threads.
+            # splitting) or a sent receipt was trashed, scan SENT metadata across
+            # threads (including spam/trash).
             page_token: str | None = None
             seen_tokens: set[str] = set()
+            had_incomplete_candidate = False
             for _ in range(_RECEIPT_FALLBACK_MAX_PAGES):
                 list_kwargs: dict[str, object] = {
                     "userId": "me",
                     "labelIds": ["SENT"],
                     "maxResults": 100,
-                    "includeSpamTrash": False,
+                    "includeSpamTrash": True,
                 }
                 if body.sent_after_epoch_s is not None:
                     list_kwargs["q"] = f"after:{body.sent_after_epoch_s}"
@@ -1088,9 +997,9 @@ class GoogleGmailMailbox:
                     mid = str(item.get("id") or "")
                     if not _GMAIL_ID_RE.match(mid):
                         raise GmailError("gmail_invalid_response")
-                    if mid in checked_ids:
+                    if mid in checked_sent_ids:
                         continue
-                    checked_ids.add(mid)
+                    checked_sent_ids.add(mid)
                     try:
                         meta = _execute(
                             gmail.users()
@@ -1104,6 +1013,10 @@ class GoogleGmailMailbox:
                         )
                     except GmailError as exc:
                         if exc.code == "gmail_not_found":
+                            # Candidate disappeared between list and get: keep
+                            # scanning in case another SENT message matches, but
+                            # never assert a clean sent=False after an incomplete scan.
+                            had_incomplete_candidate = True
                             continue
                         raise
                     matched_id = self._match_receipt_header(meta, target)
@@ -1112,6 +1025,8 @@ class GoogleGmailMailbox:
 
                 next_token = resp.get("nextPageToken")
                 if next_token is None:
+                    if had_incomplete_candidate:
+                        raise GmailError("receipt_check_inconclusive", uncertain=True)
                     return GmailReceiptCheckResult(sent=False)
                 if not isinstance(next_token, str) or not (1 <= len(next_token) <= 4096):
                     raise GmailError("gmail_invalid_response")

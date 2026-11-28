@@ -10,15 +10,23 @@ from platform_auth import AuditLogMiddleware
 from src.config import verify_production_secrets
 
 _STRIPPED_VALIDATION_CTX_KEYS = frozenset({"input", "value", "error"})
+_LOC_SOURCE_PREFIXES = frozenset({"body", "query", "header", "cookie", "path"})
 
 
 def _sanitize_validation_errors(errors: Sequence[Any]) -> list[dict[str, Any]]:
-    """Strip submitted values from FastAPI 422 details so private content is never echoed."""
+    """Strip submitted values and caller-supplied extra field names from 422 details."""
     sanitized: list[dict[str, Any]] = []
     for err in errors:
         if not isinstance(err, dict):
             continue
         cleaned = {k: v for k, v in err.items() if k != "input"}
+        if cleaned.get("type") == "extra_forbidden":
+            loc = cleaned.get("loc")
+            if isinstance(loc, (list, tuple)) and loc:
+                if len(loc) > 1 and str(loc[0]) in _LOC_SOURCE_PREFIXES:
+                    cleaned["loc"] = [loc[0], "<redacted>"]
+                else:
+                    cleaned["loc"] = ["<redacted>"]
         ctx = cleaned.get("ctx")
         if isinstance(ctx, dict):
             safe_ctx = {

@@ -28,7 +28,7 @@ def _call(fn, *args):
     try:
         return fn(*args)
     except GmailError as exc:
-        if exc.code == "gmail_not_configured":
+        if exc.code in {"gmail_not_configured", "gmail_mailbox_mismatch"}:
             status = 503
         elif exc.code == "gmail_not_found":
             status = 404
