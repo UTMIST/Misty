@@ -106,7 +106,7 @@ Each team gets a Google Group so Drive documents and channel access can be grant
 
 **Who is in a team's group.** Every *active* person whose membership is current today (`started_at <= today < ended_at`), with **all** of their addresses: `primary_email` plus every verified `email` identifier. People sign into Drive with whichever Google account they use, so adding every verified address is what makes a share to the group actually work for them. Misty still attempts each verified address. If Google rejects a secondary `@mail.utoronto.ca` mailbox with membership error 4002 or 2028, the group can be used only after a fresh Google read confirms the same member’s primary address, all other required members, and all removals. The sync records a note to use the primary account for Drive. A missing primary, uncertain write or unexpected Google error still blocks the mapping. Parent teams do not inherit their sub-teams' members. A retired team keeps its group and existing Drive shares; reconciliation removes managed MEMBER-only memberships. Owners and managers remain, as described below, so retirement alone is not complete access revocation.
 
-**Reconcile, not replay.** A sync reads the group's current MEMBER-only memberships from Google, computes the desired set from the directory, and adds or removes the difference. Owners and managers are never touched, so the account that created the group, and anyone given Google-side management, stays. Anything else in the group that the directory doesn't list is removed, which is what "membership is the source of truth" means. Because every run converges from current state, a retry is just another run, and a missed event is fixed by the next one.
+**Reconcile, not replay.** A sync adds desired addresses missing from Google's roster and removes only plain MEMBER memberships outside the desired set. OWNER and MANAGER memberships count as present, including when confirming the primary account for a rejected university address. Misty leaves those memberships under Google-side management. Because every run converges from current state, a retry is just another run, and a missed event is fixed by the next one.
 
 **Triggers.**
 
@@ -166,8 +166,7 @@ each file from its effective permissions.
 ```text
 Skip an unknown team or a retired team without an existing group.
 Get or create the managed group and read its current roster. If either fails, finish as failed.
-Use only memberships with exactly the MEMBER role in both roster reads.
-Exclude OWNER and MANAGER memberships from coverage and removal.
+Track plain MEMBER memberships separately from OWNER and MANAGER addresses.
 
 Desired addresses = primary and verified emails of active people with current
                     memberships in this active team (empty for a retired team).
@@ -175,7 +174,7 @@ For each desired address, track the primary emails of all people it belongs to.
 
 Resolve pending writes whose effects are visible and honor the remaining retry guards.
 For an active team, configure and verify both external-member settings.
-Attempt permitted removals of current addresses outside the desired set.
+Attempt permitted removals of plain MEMBER addresses outside the desired set.
 If settings verified, attempt permitted additions of missing desired addresses.
 
 Eligible rejections = additions classified as identity errors (HTTP 400 / 4002
@@ -187,8 +186,8 @@ If Google blocked an external addition, finish as failed when eligible rejection
   also occurred, otherwise needs_external_members.
 If there are no eligible rejections, finish as synced with confirmed changes.
 
-Read a fresh MEMBER-only roster. If the read fails, finish as failed.
-If the roster has any address outside the desired set, finish as failed.
+Read a fresh roster including MEMBER, OWNER and MANAGER. If the read fails, finish as failed.
+If any plain MEMBER address is outside the desired set, finish as failed.
 For each missing desired address, require an eligible rejection and every linked
   person's primary address in the fresh roster. If either is absent, finish as failed.
 Finish as synced.

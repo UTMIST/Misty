@@ -79,7 +79,7 @@ def synced_groups_containing(
         if (
             g.status == "synced"
             and g.group_name
-            and emails & groups.list_members(g.group_name).keys()
+            and emails & groups.list_members(g.group_name).managed.keys()
         ):
             found.append(g)
     return found
@@ -128,7 +128,8 @@ def sync_team(
                 group_name = groups.create_group(
                     email, team.label, f"Managed by Misty team-tracking (team {team.id})"
                 )
-            current = groups.list_members(group_name)
+            roster = groups.list_members(group_name)
+            current = roster.managed
             # Cloud Identity has no operations.get method. A missing addition
             # or still-present removal is unresolved, even if today's desired
             # membership has reversed. An addition cannot be replayed safely:
@@ -165,7 +166,7 @@ def sync_team(
                 for addr in sorted(current.keys() - want - blocked)
             ] + [
                 PendingGroupChange(action="add", email=addr)
-                for addr in sorted(want - current.keys() - blocked)
+                for addr in sorted(want - roster.addresses - blocked)
             ]
             for change in changes:
                 if change.action == "add" and not settings_ready:
@@ -216,10 +217,11 @@ def sync_team(
                 else:
                     # Only the same person's observed primary membership can cover a rejected alias.
                     # Verify the entire roster again, including removals, before publishing this mapping.
-                    confirmed = groups.list_members(group_name).keys()
+                    readback = groups.list_members(group_name)
+                    confirmed = readback.addresses
                     missing = want - confirmed
                     covered = {addr for addr in rejected_aliases if owners[addr] <= confirmed}
-                    if confirmed - want or missing - covered:
+                    if readback.managed.keys() - want or missing - covered:
                         errors.extend(rejected_aliases.values())
                         errors.append("expected Google membership not confirmed on readback")
                     elif missing:

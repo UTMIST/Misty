@@ -5,7 +5,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from conftest import build_seed_providers, build_seed_role_kinds
-from contracts.groups import ExternalMembersDisabled, GroupOperationPending, GroupProviderError
+from contracts.groups import (
+    ExternalMembersDisabled,
+    GroupOperationPending,
+    GroupProviderError,
+    GroupRoster,
+)
 from contracts.types import PersonCreate, PersonUpdate, TeamCreate, TeamMembershipCreate, TeamUpdate
 from src.api.app import create_app
 from src.api.deps import get_group_provider, get_storage
@@ -46,7 +51,7 @@ class FakeGroups:
 
     def list_members(self, group_name):
         self._maybe_fail("list_members")
-        return dict(self.members[group_name])
+        return GroupRoster(dict(self.members[group_name]), set(self.owners[group_name]))
 
     def ensure_external_members(self, group_email):
         assert group_email in self.groups
@@ -377,6 +382,7 @@ def test_synced_google_teams_reads_google_live(client, storage, groups):
     storage.add_person_email(UUID(person["id"]), "ada@alumni.ca", actor="t")
     assert [g["team_id"] for g in client.get(url, headers=AUTH).json()] == [ml["id"]]
     groups.members[name] = {}
+    groups.owners[name].add(person["primary_email"])
     assert client.get(url, headers=AUTH).json() == []
 
     groups.fail = "list_members"
@@ -483,7 +489,7 @@ def test_provider_unfinished_operation_is_an_error():
         p.create_group("ml@utmist.example", "ML", "marker")
 
 
-def test_provider_lists_only_plain_members_across_pages():
+def test_provider_separates_managed_and_elevated_members_across_pages():
     p, s = _provider(
         FakeResponse(
             200,
@@ -496,7 +502,7 @@ def test_provider_lists_only_plain_members_across_pages():
                     },
                     {
                         "name": "m/2",
-                        "preferredMemberKey": {"id": "owner@x"},
+                        "preferredMemberKey": {"id": "Owner@x"},
                         "roles": [{"name": "MEMBER"}, {"name": "OWNER"}],
                     },
                 ],
@@ -516,7 +522,9 @@ def test_provider_lists_only_plain_members_across_pages():
             },
         ),
     )
-    assert p.list_members("groups/abc") == {"ada@x": "m/1", "bob@x": "m/3"}
+    assert p.list_members("groups/abc") == GroupRoster(
+        {"ada@x": "m/1", "bob@x": "m/3"}, {"owner@x"}
+    )
     assert s.calls[1][2]["params"]["pageToken"] == "t"
 
 
@@ -1184,6 +1192,45 @@ def test_rejected_campus_alias_uses_confirmed_primary_membership(storage, groups
     assert synced_groups_containing(storage, groups, outsider) == []
 
 
+@pytest.mark.parametrize("role", ["OWNER", "MANAGER"])
+def test_rejected_campus_alias_uses_elevated_primary_on_readback(storage, groups, role):
+    team = _team(storage)
+    person = _member(storage, team, "primary@gmail.com")
+    sync_team(storage, groups, team.id, actor="initial")
+    campus = "campus@mail.utoronto.ca"
+    storage.add_person_email(person.id, campus, actor="verified")
+
+    def roster(*roles):
+        return FakeResponse(
+            200,
+            {
+                "memberships": [
+                    {
+                        "name": "m/primary",
+                        "preferredMemberKey": {"id": person.primary_email},
+                        "roles": [{"name": name} for name in roles],
+                    }
+                ]
+            },
+        )
+
+    rejected = FakeResponse(400, {"error": {"message": "Error(4002): precondition failed"}})
+    elevated = roster("MEMBER", role)
+    provider, session = _provider(
+        roster("MEMBER"), rejected, elevated, elevated, rejected, elevated
+    )
+    # Google promotes the primary before confirmation. The next sync sees it elevated throughout.
+    for _ in range(2):
+        state = sync_team(storage, provider, team.id, actor="retry")
+        assert state.status == "synced" and "primary account" in state.last_error
+        assert synced_team_for_group(storage, state.group_email).id == team.id
+
+    assert [method for method, _, _ in session.calls] == ["GET", "POST", "GET"] * 2
+    for method, _, kwargs in session.calls:
+        if method == "POST":
+            assert kwargs["json"]["preferredMemberKey"]["id"] == campus
+
+
 @pytest.mark.parametrize(
     "scenario",
     [
@@ -1219,6 +1266,8 @@ def test_rejected_address_cannot_clear_unconfirmed_access(storage, groups, scena
     groups.add_member(state, other.primary_email)
     if scenario == "different_person":
         groups.members[state].pop("primary@gmail.com")
+        groups.members[state].pop(other.primary_email)
+        groups.owners[state].add(other.primary_email)
     if scenario == "stale_member":
         groups.add_member(state, "former@gmail.com")
         groups.remove_member = lambda _name: None  # ACK before the removal is visible on readback.

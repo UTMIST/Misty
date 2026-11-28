@@ -11,6 +11,7 @@ from contracts.groups import (
     ExternalMembersDisabled,
     GroupOperationPending,
     GroupProviderError,
+    GroupRoster,
     MembershipIdentityRejected,
 )
 
@@ -215,8 +216,8 @@ class GoogleGroupsProvider:
                 return name
         raise GroupProviderError(f"create group: {email} is already in use by another group")
 
-    def list_members(self, group_name: str) -> dict[str, str]:
-        members: dict[str, str] = {}
+    def list_members(self, group_name: str) -> GroupRoster:
+        roster = GroupRoster(managed={}, elevated=set())
         params = {"view": "BASIC", "pageSize": 1000}
         while True:
             status, body = self._call("GET", f"{group_name}/memberships", params=params)
@@ -225,10 +226,12 @@ class GoogleGroupsProvider:
             for m in body.get("memberships", []):
                 roles = {r.get("name") for r in m.get("roles", [])}
                 if roles == {"MEMBER"}:
-                    members[m["preferredMemberKey"]["id"].lower()] = m["name"]
+                    roster.managed[m["preferredMemberKey"]["id"].lower()] = m["name"]
+                elif roles & {"OWNER", "MANAGER"}:
+                    roster.elevated.add(m["preferredMemberKey"]["id"].lower())
             token = body.get("nextPageToken")
             if not token:
-                return members
+                return roster
             params = {**params, "pageToken": token}
 
     def add_member(self, group_name: str, email: str) -> None:
