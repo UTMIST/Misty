@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from argparse import Namespace
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,10 +15,12 @@ from urllib.request import Request, build_opener
 from pathlib import Path
 
 from alerts import discord_send, evaluate, notify
+from collect import pull
 from dashboard import load_access, make_handler, report_page
 from pilot import fixture, seed
 from project import build, iso, prune_snapshot, readonly
 from recording_view import percentiles
+from store import connect
 
 
 class PilotAcceptance(unittest.TestCase):
@@ -82,49 +85,13 @@ class DashboardTests(unittest.TestCase):
         self.now = datetime(2026, 1, 15, 12, 0, tzinfo=timezone.utc)
         self.raw = self.root / "collector.sqlite"
         self.snapshot = self.root / "snapshot.sqlite"
-        # The acceptance fixture below tests the reader and UI independently of
-        # collection credentials. The pilot command runs these same lines through the real importer.
-        with closing(sqlite3.connect(self.raw)) as db:
-            db.executescript("""
-                create table meta(key text primary key,value text);
-                insert into meta values('environment','local');
-                create table events(event_id text primary key,trace_id text,span_id text,parent_span_id text,
-                   link_trace_id text,link_span_id text,ts text,received_at text,service text,operation text,
-                   event_name text,result text,elapsed_ms int,traffic text,deployment text,payload text);
-                create table sources(service text primary key,last_success text,last_error text,gaps int,drops int,rejected int);
-            """)
-            self.rows = fixture(self.now)
-            for service, msg in self.rows[::-1] + self.rows:
-                r = json.loads(msg["message"])
-                db.execute(
-                    "insert or ignore into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        r.get(
-                            "event_id",
-                            hashlib.sha256(msg["message"].encode()).hexdigest()[:32],
-                        ),
-                        r["trace_id"],
-                        r["span_id"],
-                        r.get("parent_span_id"),
-                        r.get("link_trace_id"),
-                        r.get("link_span_id"),
-                        r["ts"],
-                        iso(self.now),
-                        service,
-                        r.get("operation", "recording"),
-                        r["event_name"],
-                        r.get("result", "unknown"),
-                        r["elapsed_ms"],
-                        "synthetic",
-                        "unknown",
-                        msg["message"],
-                    ),
-                )
-                db.execute(
-                    "insert or ignore into sources values(?,?,null,0,0,0)",
-                    (service, iso(self.now)),
-                )
-            db.commit()
+        rows = fixture(self.now)
+        for service in sorted({service for service, _ in rows}):
+            batch = [row for origin, row in rows if origin == service]
+            stats = self.import_wire(service, list(reversed(batch)) + batch)
+            self.assertEqual(
+                (stats["added"], stats["duplicate"]), (len(batch), len(batch))
+            )
         build(self.raw, self.snapshot, "local", self.now)
         access_file = self.root / "access.json"
         self.ids = {
@@ -165,6 +132,21 @@ class DashboardTests(unittest.TestCase):
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.trace = f"{2:032x}"
+
+    def import_wire(self, service, rows):
+        wire = self.root / "receipts.jsonl"
+        wire.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        args = Namespace(
+            command="import",
+            service=service,
+            environment="local",
+            traffic="synthetic",
+            until=iso(self.now),
+            available_since=None,
+            input=wire,
+        )
+        with closing(connect(self.raw, "local")) as db:
+            return pull(db, args, self.now)
 
     def request(self, path, user=None):
         headers = {}
@@ -222,33 +204,34 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("2 timed samples", component)
 
     def test_disputed_component_counts_once_without_a_latency_sample(self):
-        with closing(sqlite3.connect(self.raw)) as db:
-            db.row_factory = sqlite3.Row
-            receipt = dict(
+        with closing(readonly(self.raw, "local")) as db:
+            receipt = json.loads(
                 db.execute(
-                    """select * from events where service='connectors' and event_name='end'
+                    """select payload from events where service='connectors' and event_name='end'
                    order by ts limit 1"""
-                ).fetchone()
+                ).fetchone()[0]
             )
-            first_end = datetime.fromisoformat(receipt["ts"].replace("Z", "+00:00"))
-            disputed_time = iso(first_end + timedelta(seconds=3))
-            disputed_result = iso(first_end + timedelta(seconds=5))
-            for event_id, ts, result in (
-                ("f" * 32, disputed_result, "failed"),
-                ("e" * 32, disputed_time, "success"),
-            ):
-                conflict = dict(
-                    event_id=event_id, ts=ts, result=result, elapsed_ms=9000
-                )
-                row = dict(receipt, **conflict)
-                row["payload"] = json.dumps(
-                    dict(json.loads(receipt["payload"]), **conflict)
-                )
-                db.execute(
-                    "insert into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    tuple(row.values()),
-                )
-            db.commit()
+        first_end = datetime.fromisoformat(receipt["ts"].replace("Z", "+00:00"))
+        disputed_time = iso(first_end + timedelta(seconds=3))
+        disputed_result = iso(first_end + timedelta(seconds=5))
+        wire = []
+        for event_id, ts, result, elapsed in (
+            ("f" * 32, disputed_result, "failed", 9000),
+            ("e" * 32, disputed_time, "success", 9000),
+            ("d" * 32, disputed_time, "success", 8000),
+        ):
+            event = dict(
+                receipt, event_id=event_id, ts=ts, result=result, elapsed_ms=elapsed
+            )
+            wire.append({"timestamp": ts, "message": json.dumps(event)})
+        stats = self.import_wire("connectors", wire + list(reversed(wire)))
+        self.assertEqual((stats["added"], stats["duplicate"]), (3, 3))
+        with closing(readonly(self.raw, "local")) as db:
+            counts = db.execute("""select result,count,latency_count from summaries
+                where operation='connectors.google_create' order by result""").fetchall()
+            self.assertEqual(
+                [tuple(row) for row in counts], [("success", 1, 1), ("unknown", 1, 0)]
+            )
         build(self.raw, self.snapshot, "local", self.now)
         with closing(readonly(self.snapshot, "local")) as snapshot:
             disputed = snapshot.execute(

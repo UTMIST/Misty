@@ -5,12 +5,13 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import re
 import sqlite3
+import stat
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from store import RETENTION
@@ -37,7 +38,7 @@ a{color:#0e675c;text-underline-offset:.18em}header a{color:#c7e4db}
 form{display:flex;gap:.9rem;align-items:end;flex-wrap:wrap}label{display:grid;gap:.15rem;font-size:.85rem}
 button,select,input{border:1px solid #92a7a5;border-radius:4px;padding:.4rem;font:inherit}
 button{background:#2d605c;color:white;padding-inline:1rem}table{border-collapse:collapse;width:100%;background:white}
-th,td{text-align:left;padding:.55rem .75rem;border-bottom:1px solid #d4ddda;overflow-wrap:anywhere}
+th,td{text-align:left;padding:.55rem .75rem;border-bottom:1px solid #d4ddda;overflow-wrap:break-word}
 th{background:#e1ebe6}p{max-width:95ch}.note{border-left:4px solid #ba7622;padding:.4rem .8rem;background:#fff4df}
 .scroll{overflow-x:auto}code{font-size:.92em}button:focus,a:focus{outline:3px solid #c76b18}
 """
@@ -153,7 +154,21 @@ def page(body):
 
 
 def load_access(path):
-    rows = json.loads(Path(path).read_text())
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise ValueError(
+                "access file must be owned by the dashboard user and have mode 0600"
+            )
+        with open(fd, encoding="utf-8", closefd=False) as stream:
+            rows = json.load(stream)
+    finally:
+        os.close(fd)
     if not isinstance(rows, list) or not rows:
         raise ValueError("access file must contain users")
     access = {}
