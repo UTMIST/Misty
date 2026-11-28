@@ -23,6 +23,8 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, m
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.exceptions import SettingsError
 
+from platform_auth.telemetry import span, trace_headers
+
 
 class DiscoveryError(Exception):
     """Sanitized error safe to print. Never carries an upstream response body."""
@@ -275,7 +277,7 @@ class DiscoveryClient:
                 base + path,
                 json=body,
                 timeout=timeout,
-                headers={"X-API-Key": key.get_secret_value()},
+                headers={"X-API-Key": key.get_secret_value(), **trace_headers()},
                 follow_redirects=False,
             )
         except httpx.HTTPError:
@@ -498,7 +500,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     run_id = str(uuid4())
     started = time.monotonic()
-    state = monitor = completion_monitor = None
+    state = monitor = completion_monitor = call = None
     code = 2
     outcome = None
     monitor_failed = False
@@ -514,6 +516,9 @@ def main(argv=None) -> int:
                 with checkpoint(settings) as (state, _):
                     print(json.dumps({"enabled": settings.discovery_enabled, **state.summary()}))
                 return 0
+            call = stack.enter_context(
+                span("catalog.discovery", service="documentation-system", traffic="background")
+            )
             monitor_http = stack.enter_context(httpx.Client())
             if settings.discovery_monitor_url.get_secret_value():
                 monitor = DiscoveryMonitor(
@@ -553,6 +558,15 @@ def main(argv=None) -> int:
             monitor_failed = not monitor.ping(event) or monitor_failed
         if monitor_failed:
             code = 2
+        if call:
+            if code:
+                call.outcome("failed")
+            elif outcome == ScanOutcome.COMPLETED:
+                call.outcome("clean")
+            elif outcome == ScanOutcome.COMPLETED_WITH_GAPS:
+                call.outcome("gaps")
+            else:
+                call.outcome("continued")
         level = "error" if code else "info"
         if not code and (outcome != ScanOutcome.COMPLETED or state.counts.get("warnings", 0)):
             level = "warning"

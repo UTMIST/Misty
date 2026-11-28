@@ -122,3 +122,18 @@ proves identity and current eligibility, not compute roles or general directory
 access. Additional data access still requires explicit operations and permissions,
 following the [contribution guide](CONTRIBUTING.md). Never expose database access
 or allow a claimed user identity to bypass a private service's authorization.
+
+### Email login telemetry
+
+The gateway starts a fresh trace for public traffic. The generic start response
+and the background delivery have separate observations. Delivery keeps the
+start span as its parent and records directory eligibility, safe pre-send
+cooldown, and the verification request. Confirmation records the code check,
+identity recheck and single-use redemption. A follow-up HTTP request has its own
+trace. Login challenges, code values, addresses, account IDs, network addresses
+and API key values are absent from the typed events. The local three-service
+check uses synthetic input and fake email delivery.
+
+Gateway login sends the address in the body of an authenticated
+`POST /people/by-email`. Both services' HTTP access logs and ordinary
+request audits can record the path without exposing the address.

@@ -16,6 +16,8 @@ from uuid import uuid4
 import httpx
 from pydantic import AnyHttpUrl, BaseModel, Field, SecretStr, TypeAdapter, ValidationError
 
+from platform_auth.telemetry import span, trace_headers
+
 from contracts.meeting import MeetingRetryResult
 
 DEFAULT_BASE_URL = "http://localhost:8001"
@@ -87,7 +89,7 @@ class DocsApiClient:
             response = self._client.request(
                 method,
                 f"{self._base_url}{path}",
-                headers={"X-API-Key": self._api_key.get_secret_value()},
+                headers={"X-API-Key": self._api_key.get_secret_value(), **trace_headers()},
                 params=params,
                 timeout=timeout,
                 follow_redirects=False,
@@ -270,6 +272,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    with span("catalog.refresh", service="documentation-system", traffic="background") as call:
+        return _run(args, call)
+
+
+def _run(args, call):
     started = time.monotonic()
     report = Report()
     monitor_failed = False
@@ -363,6 +370,13 @@ def main(argv: list[str] | None = None) -> int:
     if monitor_failed:
         report.error = report.error or "monitor delivery failed"
     code = report.exit_code
+    if code:
+        call.outcome("incomplete" if report.budget_exhausted else "failed")
+    else:
+        call.outcome("gaps" if report.has_warnings else "drained")
+    call.measure("attempted", report.attempted)
+    call.measure("item_failed", report.failed)
+    call.measure("index_failed", report.index_failed)
     outcome = (
         "failed" if code else "completed_with_warnings" if report.has_warnings else "completed"
     )

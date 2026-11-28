@@ -1,13 +1,15 @@
-import json
+import asyncio
 import logging
 import re
 import time
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
-from starlette.responses import Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import ClientDisconnect
+from starlette.responses import JSONResponse
 
 from contracts.directory import DirectoryClient, DirectoryUnavailable
 from contracts.retrieval import (
@@ -20,9 +22,42 @@ from contracts.retrieval import (
 from contracts.storage import StorageAdapter
 from contracts.visibility import Actor, Channel
 from platform_auth import AuthedKey
+from platform_auth.telemetry import span
 from src.api.auth import get_on_behalf_actor, require_api_key
 from src.api.deps import get_directory, get_embeddings, get_storage
 from src.config import get_settings
+
+
+def _observe(request: Request, outcome: str) -> None:
+    request.state.search_outcome = outcome
+    if call := getattr(request.state, "search_call", None):
+        call.outcome(outcome)
+    if get_settings().search_outcome_audit_enabled:
+        request.state.audit_extra = {
+            **getattr(request.state, "audit_extra", {}),
+            "search_outcome": outcome,
+        }
+
+
+def _early_outcome(request, outcome):
+    if outcome not in {"internal_error", "cancelled"} and getattr(
+        request.state, "search_outcome", None
+    ):
+        return
+    if getattr(request.state, "search_call", None) is not None:
+        _observe(request, outcome)
+    else:
+        with span("catalog.search", service="documentation-system") as call:
+            call.outcome(outcome)
+            _observe(request, outcome)
+
+
+async def _trace_search(request: Request, _: AuthedKey = Depends(require_api_key)):
+    # The caller has been authenticated. Keep the span active through response
+    # validation and serialization, including any framework exception.
+    with span("catalog.search", service="documentation-system") as call:
+        request.state.search_call = call
+        yield
 
 
 class _SearchRoute(APIRoute):
@@ -30,15 +65,51 @@ class _SearchRoute(APIRoute):
         handler = super().get_route_handler()
 
         async def validated(request):
+            if get_settings().search_outcome_audit_enabled:
+                request.state.audit_cancel_extra = {"search_outcome": "cancelled"}
             try:
-                return await handler(request)
-            except RequestValidationError as exc:
-                # FastAPI's default error response echoes invalid Unicode input
-                # and fails to encode it. Keep the detail shape without input.
-                errors = [{k: error[k] for k in ("type", "loc", "msg")} for error in exc.errors()]
-                return Response(
-                    json.dumps({"detail": errors}), status_code=422, media_type="application/json"
+                response = await handler(request)
+                # Only count a completed search after FastAPI has validated
+                # and serialized its response, before the ASGI transport sends it.
+                _observe(request, request.state.search_result)
+                return response
+            except asyncio.CancelledError:
+                _early_outcome(request, "cancelled")
+                raise
+            except StarletteHTTPException as exc:
+                # FastAPI wraps a disconnected request body in a generic 400.
+                if isinstance(exc.__cause__, ClientDisconnect):
+                    _early_outcome(request, "cancelled")
+                    raise HTTPException(499, "client disconnected") from None
+                # FastAPI also uses Starlette's base exception for unreadable bodies.
+                fallback = {400: "invalid_request", 401: "denied", 403: "denied"}.get(
+                    exc.status_code
                 )
+                if fallback:
+                    _early_outcome(request, fallback)
+                raise
+            except RequestValidationError:
+                _early_outcome(request, "invalid_request")
+                # Extra-field names, error messages and invalid values may all
+                # contain caller data, including text that cannot encode as UTF-8.
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "detail": [
+                            {
+                                "type": "value_error",
+                                "loc": ["body"],
+                                "msg": "Invalid search request",
+                            }
+                        ]
+                    },
+                )
+            except Exception as exc:
+                _early_outcome(request, "internal_error")
+                # Save the call sites. Raise outside the handler so framework
+                # traceback formatting cannot include the original values.
+                failure = RuntimeError("catalog search failed").with_traceback(exc.__traceback__)
+            raise failure
 
         return validated
 
@@ -78,6 +149,7 @@ def _warn_on_excluded_docs(storage: StorageAdapter, model: str) -> None:
 @router.post("/search", response_model=SearchResponse)
 def search(
     payload: SearchRequest,
+    request: Request,
     person_id: UUID | None = Depends(get_on_behalf_actor),
     guild_id: str | None = Header(default=None, alias="X-Guild-ID"),
     channel_id: str | None = Header(default=None, alias="X-Channel-ID"),
@@ -85,6 +157,7 @@ def search(
     storage: StorageAdapter = Depends(get_storage),
     directory: DirectoryClient = Depends(get_directory),
     embeddings: EmbeddingClient = Depends(get_embeddings),
+    _: None = Depends(_trace_search, scope="function"),
 ) -> SearchResponse:
     if not (key.has_scope("docs:read") or key.has_scope("docs:read:all")):
         raise HTTPException(403, "missing scope: docs:read")
@@ -110,12 +183,15 @@ def search(
                 directory.get_source_access_team_ids(person_id),
             )
     except DirectoryUnavailable:
+        _observe(request, "directory_unavailable")
         raise HTTPException(503, "retrieval scope unavailable") from None
     if isinstance(visibility, Channel) and not visibility.source_team_ids:
+        request.state.search_result = "no_channel_teams"
         return SearchResponse(results=[])
     try:
         embedding = embeddings.embed_query(payload.query)
     except EmbeddingError as exc:
+        _observe(request, "embedding_error")
         raise HTTPException(exc.status_code, "query embedding unavailable") from None
     try:
         results = storage.search_chunks(
@@ -126,6 +202,9 @@ def search(
             min_cosine=get_settings().search_min_cosine,
         )
     except RetrievalUnavailable:
+        _observe(request, "storage_unavailable")
         raise HTTPException(503, "retrieval storage unavailable") from None
     _warn_on_excluded_docs(storage, embedding.model)
-    return SearchResponse(results=results)
+    response = SearchResponse(results=results)
+    request.state.search_result = "results" if results else "no_hits"
+    return response

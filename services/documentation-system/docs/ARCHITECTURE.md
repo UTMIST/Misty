@@ -813,6 +813,34 @@ paths exclude stored chunks from other models. HTTP clients are pooled; calls
 are synchronous worker-thread operations, with timeouts and no retries.
 Dependency errors never trigger broader or keyword-only fallback.
 
+### Search and catalog health
+
+Authorized search emits one platform outcome per request when shared telemetry
+is enabled, independently of the optional search audit field. A completed query
+with no hits contributes to the empty-search rate. Missing channel configuration,
+denials and upstream failures have their own results. Search spans start after
+authentication, with separate observations for early framework rejections and
+cancellations. Completed results are recorded after FastAPI response validation
+and serialization. Cancellation before that boundary produces one cancelled
+search, even if the embedding worker finishes later.
+
+Discovery and source refresh create background spans. Discovery distinguishes a
+clean traversal, gaps, a continuation, and failure. Refresh records attempted
+documents, item failures and indexing failures. Only authenticated catalog and
+connector requests receive trace context. External heartbeat endpoints do not.
+
+After a refresh guard is successfully released, an enabled catalog emits one
+read-only aggregate over active Google documents from fetch-enabled sources.
+Content freshness uses the stored text's fetch time. Access freshness uses its
+last successful reconciliation, including revocation. Each compares against
+the configured refresh interval. Missing or future timestamps are unknown.
+For searchable text, index currency requires matching content and title hashes
+for the serving model. A missing serving set is stale, and a legacy set with an
+unknown title hash has unknown currency. Missing content also has unknown currency.
+Empty or whitespace-only text is current once the serving model has no chunks;
+leftover serving chunks are stale until the indexer clears them.
+The aggregate query never reads document text into the telemetry stream.
+
 ## SSRF protection in the web fetcher
 
 Ingest fetches caller-supplied URLs, a textbook SSRF sink: unguarded, `POST /docs` would

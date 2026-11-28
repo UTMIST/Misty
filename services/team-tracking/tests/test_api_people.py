@@ -148,6 +148,48 @@ def test_get_person_by_email(client):
     assert resp.json()["display_name"] == "Alex"
 
 
+def test_body_lookup_uses_primary_email_and_requires_auth(client):
+    client.post(
+        "/people", json={"display_name": "Alex", "primary_email": "alex@example.org"}, headers=AUTH
+    )
+    lookup = "/people/by-email"
+    body = {"email": "Alex@EXAMPLE.ORG"}
+    expected = client.get("/people/by-email/alex@example.org", headers=AUTH).json()
+    assert client.post(lookup, json=body, headers=AUTH).json() == expected
+    assert (
+        client.post(lookup, json={"email": "absent@example.org"}, headers=AUTH).status_code == 404
+    )
+    assert client.post(lookup, json=body).status_code == 401
+    assert client.post(lookup, json=body | {"extra": True}, headers=AUTH).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"email":"' + "x" * 320 + '@private.example"}',
+        '{"email":{"private@example.org":"wrong-type"}}',
+        '{"email":"valid@example.org","private@example.org":{"private-value":"invalid"}}',
+        '{"email":"private@example.org\\u0000"}',
+        '{"private@example.org":',
+    ],
+)
+def test_invalid_body_lookup_never_echoes_input(client, raw, caplog):
+    response = client.post(
+        "/people/by-email", content=raw, headers={**AUTH, "Content-Type": "application/json"}
+    )
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": [{"loc": ["body"], "msg": "Invalid email lookup", "type": "value_error"}]
+    }
+    assert "private" not in caplog.text
+
+
+def test_other_people_routes_keep_field_level_validation(client):
+    response = client.get("/people/not-a-uuid", headers=AUTH)
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["path", "person_id"]
+
+
 def test_get_person_by_email_not_found(client):
     resp = client.get("/people/by-email/nobody@utmist.ca", headers=AUTH)
     assert resp.status_code == 404

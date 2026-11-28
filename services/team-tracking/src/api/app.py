@@ -1,4 +1,7 @@
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from platform_auth import AuditLogMiddleware
 
@@ -27,6 +30,21 @@ def create_app() -> FastAPI:
         description="Source of truth for people, teams, and memberships.",
     )
     app.add_middleware(AuditLogMiddleware, logger_name="team_tracking.audit")
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        if request.scope.get("endpoint") is people.lookup_primary_email:
+            # Pydantic's errors can contain the address in input, extra-field
+            # locations and error context. Only fixed fields leave this route.
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": [
+                        {"loc": ["body"], "msg": "Invalid email lookup", "type": "value_error"}
+                    ]
+                },
+            )
+        return await request_validation_exception_handler(request, exc)
 
     @app.get("/health")
     def health() -> dict[str, str]:

@@ -4,6 +4,7 @@ The logger name is per-service (passed via add_middleware(..., logger_name=...))
 Reads request.state.auth_key (set by require_api_key) for key_name/is_bootstrap.
 """
 
+import asyncio
 import json
 import logging
 import sys
@@ -60,8 +61,9 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
 
     Consumer contract: a route may set ``request.state.audit_extra`` to a
     dict of additional fields to merge into the log entry. Keys that collide
-    with reserved core fields (see ``_RESERVED_AUDIT_KEYS``) are ignored, and
-    values that are not JSON-native are stringified (via ``default=str``)
+    with reserved core fields (see ``_RESERVED_AUDIT_KEYS``) are ignored.
+    On cancellation, a route can override its extra fields with
+    ``request.state.audit_cancel_extra``. Values that are not JSON-native are stringified (via ``default=str``)
     rather than causing the whole line to be dropped.
     """
 
@@ -74,28 +76,32 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         request_id = str(uuid4())
         request.state.request_id = request_id
         start = time.monotonic()
-        response = None
+        status = 500
         try:
             with request_span(request, self._logger.name) as trace:
                 try:
                     response = await call_next(request)
+                    status = response.status_code
                     return response
+                except asyncio.CancelledError:
+                    status = 499
+                    raise
                 finally:
                     if trace is not None:
-                        observed = trace.get()
-                        code = response.status_code if response is not None else 500
                         result = (
-                            "failed"
-                            if code >= 500
+                            "cancelled"
+                            if status == 499
+                            else "failed"
+                            if status >= 500
                             else "rate_limited"
-                            if code == 429
+                            if status == 429
                             else "denied"
-                            if code in (401, 403)
+                            if status in (401, 403)
                             else "invalid_request"
-                            if code >= 400
+                            if status >= 400
                             else "success"
                         )
-                        observed._emit("end", result)
+                        trace.get()._emit("end", result)
         finally:
             duration_ms = int((time.monotonic() - start) * 1000)
             try:
@@ -110,15 +116,20 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
                     "request_id": request_id,
                     "method": request.method,
                     "path": request.url.path,
-                    "status": response.status_code if response is not None else 500,
+                    "status": status,
                     "duration_ms": duration_ms,
                     "key_name": auth_key.name if auth_key else None,
                     "is_bootstrap": auth_key.is_bootstrap if auth_key else False,
                     "remote": remote,
                 }
                 extra = getattr(request.state, "audit_extra", None)
-                if isinstance(extra, dict):
-                    for k, v in extra.items():
+                cancelled = (
+                    getattr(request.state, "audit_cancel_extra", None) if status == 499 else None
+                )
+                for fields in (extra, cancelled):
+                    if not isinstance(fields, dict):
+                        continue
+                    for k, v in fields.items():
                         key = str(k)  # keys must be JSON strings; default= only covers values
                         if key not in _RESERVED_AUDIT_KEYS:
                             entry[key] = v

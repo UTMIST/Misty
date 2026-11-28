@@ -106,21 +106,31 @@ def test_sink_stall_and_failure_leave_caller_unblocked():
     assert rows[0]["process_started_at"] == rows[1]["process_started_at"]
 
 
-def test_authenticated_client_parent_and_external_redirect_isolation(events):
+@pytest.mark.parametrize("enabled", [True, False])
+def test_authenticated_client_parent_and_external_redirect_isolation(events, monkeypatch, enabled):
     import httpx
 
+    monkeypatch.setenv("TELEMETRY_ENABLED", str(enabled).lower())
     seen = []
 
     def receive(request):
         seen.append((request.url.host, request.headers.get("traceparent")))
+        assert request.headers["X-API-Key"] == "canary"
         return httpx.Response(302, headers={"Location": "https://external.invalid/"})
 
     with httpx.Client(transport=httpx.MockTransport(receive), follow_redirects=True) as http:
         with t.span("catalog.search", service="documentation-system") as parent:
             response = t.internal_request(
-                http.get, "https://internal.invalid/private-canary", headers={"X-API-Key": "canary"}
+                http.get,
+                "https://internal.invalid/private-canary",
+                headers={"X-API-Key": "canary"},
+                follow_redirects=True,
             )
         assert response.status_code == 302
+    if not enabled:
+        assert seen == [("internal.invalid", None)]
+        assert events == []
+        return
     client = next(
         row for row in events if row["operation"] == "http.client" and row["event_name"] == "end"
     )

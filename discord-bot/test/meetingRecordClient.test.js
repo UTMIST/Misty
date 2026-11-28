@@ -101,7 +101,7 @@ for (const [operation, request] of [
     t.mock.timers.tick(3_999);
     assert.equal(signals[0].aborted, false);
     t.mock.timers.tick(1);
-    assert.equal(signals[0].aborted, true);
+    assert.equal(signals[0].reason.name, 'TimeoutError');
     await assert.rejects(pending, DocUnavailable);
 
     assert.deepEqual(await request(client), result);

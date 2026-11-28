@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     search_embed_model: Literal["openai-embed-3-small", "openai-embed-3-large"] = (
         "openai-embed-3-small"
     )
+    search_outcome_audit_enabled: bool = False
     search_min_cosine: float = Field(default=0.3, gt=0, le=1, allow_inf_nan=False)
     # A re-embed target (#209). Indexing always maintains the SEARCH_EMBED_MODEL
     # set; while this names another model, it also builds that model's set

@@ -136,6 +136,7 @@ Set these per environment (staging vs production) per service.
 | `CONNECTORS_API_KEY` | — | a `connectors` consumer key with the `fetch` scope — see step 4b | — |
 | `LLM_BASE_URL` | — | `http://${{llm.RAILWAY_PRIVATE_DOMAIN}}:${{llm.PORT}}` | — |
 | `LLM_API_KEY` | — | an `llm` consumer key with the `embed` scope — see step 4b | — |
+| Search diagnostics | — | `SEARCH_OUTCOME_AUDIT_ENABLED=false` by default. Enable for the selected catalog deployment. | — |
 | retrieval model | — | `SEARCH_EMBED_MODEL=openai-embed-3-small`, `SEARCH_MIN_COSINE=0.3`; indexing defaults to the search model — see [retrieval rollout](../services/documentation-system/docs/DEPLOYMENT.md#authorized-retrieval) | — |
 | source ACL cadence | — | `SOURCE_ACCESS_REFRESH_AFTER_HOURS=24`, `SOURCE_ACCESS_MAX_AGE_HOURS=48` | — |
 | `CODE_HMAC_SECRET` | — | — | a strong random secret |

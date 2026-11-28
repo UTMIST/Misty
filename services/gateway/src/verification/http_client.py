@@ -1,5 +1,7 @@
 import httpx
 
+from platform_auth.telemetry import trace_headers
+
 from contracts.login import VerificationRateLimited, VerificationUnavailable
 
 
@@ -14,7 +16,12 @@ class HttpVerificationClient:
 
     def _post(self, path: str, payload: dict) -> httpx.Response:
         try:
-            return self._client.post(f"{self._base_url}/verification/{path}", json=payload)
+            return self._client.post(
+                f"{self._base_url}/verification/{path}",
+                json=payload,
+                headers=trace_headers(),
+                follow_redirects=False,
+            )
         except httpx.HTTPError:
             raise VerificationUnavailable("verification unreachable") from None
 

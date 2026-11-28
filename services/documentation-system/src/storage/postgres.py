@@ -1234,6 +1234,62 @@ class PostgresStorageAdapter:
         with self._engine.connect() as conn:
             return list(conn.execute(stmt).scalars())
 
+    def source_freshness(
+        self, source_ids: Sequence[str], model: str, since: datetime, now: datetime
+    ) -> dict[str, int]:
+        # A model set is replaced atomically and all its chunks share hashes.
+        # Join ordinal zero so a multi-part document contributes exactly once.
+        served = doc_chunks.alias("served")
+        joined = (
+            docs.join(sources, docs.c.source_id == sources.c.id)
+            .outerjoin(doc_content, doc_content.c.doc_id == docs.c.id)
+            .outerjoin(
+                served,
+                and_(
+                    served.c.doc_id == docs.c.id,
+                    served.c.embedding_model == model,
+                    served.c.ordinal == 0,
+                ),
+            )
+        )
+        fetched = doc_content.c.fetched_at
+        synced = docs.c.source_access_synced_at
+        title_hash = func.encode(
+            func.sha256(func.convert_to(func.coalesce(docs.c.title, ""), "UTF8")), "hex"
+        )
+        has_text = doc_content.c.content_text.regexp_match(_HAS_NON_WHITESPACE)
+        conditions = {
+            "content_current": and_(fetched > since, fetched <= now),
+            "content_unknown": or_(fetched.is_(None), fetched > now),
+            "access_current": and_(synced > since, synced <= now),
+            "access_unknown": or_(synced.is_(None), synced > now),
+            "index_current": or_(
+                and_(~has_text, served.c.doc_id.is_(None)),
+                and_(
+                    has_text,
+                    served.c.source_title_hash == title_hash,
+                    served.c.source_content_hash == doc_content.c.content_hash,
+                ),
+            ),
+            "index_unknown": or_(
+                doc_content.c.doc_id.is_(None),
+                and_(has_text, served.c.doc_id.is_not(None), served.c.source_title_hash.is_(None)),
+            ),
+        }
+        stmt = (
+            select(
+                func.count().label("eligible"),
+                *(
+                    func.count().filter(condition).label(name)
+                    for name, condition in conditions.items()
+                ),
+            )
+            .select_from(joined)
+            .where(docs.c.active, sources.c.content_fetch_enabled, docs.c.source_id.in_(source_ids))
+        )
+        with self._engine.connect() as conn:
+            return dict(conn.execute(stmt).mappings().one())
+
     def get_index_coverage(self, models: Sequence[str]) -> IndexCoverage:
         indexable = and_(docs.c.active.is_(True), exists().where(doc_content.c.doc_id == docs.c.id))
         totals = select(

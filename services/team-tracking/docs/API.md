@@ -240,6 +240,14 @@ request URL audit logs.
 
 ---
 
+### POST /people/by-email
+
+With `people:read`, send `{"email":"alex@example.org"}` to look up the
+exact primary email. The response and 404 match the GET lookup below.
+The gateway uses this body-based form to keep email addresses out of URLs
+and access logs. Invalid bodies, including additional fields, return a fixed
+422 validation error that omits submitted values and field names.
+
 ### GET /people/by-email/{email}
 
 Resolve a person by their `primary_email` (case-insensitive). Declared before

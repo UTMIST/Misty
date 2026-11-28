@@ -679,6 +679,55 @@ class InMemoryStorageAdapter:
                 out.append(doc_id)
         return out[:limit]
 
+    def source_freshness(
+        self, source_ids: Sequence[str], model: str, since: datetime, now: datetime
+    ) -> dict[str, int]:
+        counts = dict.fromkeys(
+            (
+                "eligible",
+                "content_current",
+                "content_unknown",
+                "index_current",
+                "index_unknown",
+                "access_current",
+                "access_unknown",
+            ),
+            0,
+        )
+        for doc in self._docs.values():
+            source = self._sources.get(doc.source_id)
+            if (
+                not doc.active
+                or doc.source_id not in source_ids
+                or not source
+                or not source.content_fetch_enabled
+            ):
+                continue
+            counts["eligible"] += 1
+            content = self._content.get(doc.id)
+            fetched = content[2] if content else None
+            for dimension, stamp in (("content", fetched), ("access", doc.source_access_synced_at)):
+                if stamp is None or stamp > now:
+                    counts[f"{dimension}_unknown"] += 1
+                elif stamp > since:
+                    counts[f"{dimension}_current"] += 1
+            chunks = self._chunks.get(doc.id, {}).get(model, [])
+            if not content:
+                counts["index_unknown"] += 1
+            elif not content[0].strip():
+                # The indexer's finished state for blank text is no serving chunks.
+                if not chunks:
+                    counts["index_current"] += 1
+            elif chunks and chunks[0].source_title_hash is None:
+                counts["index_unknown"] += 1
+            elif (
+                chunks
+                and chunks[0].source_content_hash == content[1]
+                and chunks[0].source_title_hash == content_hash(doc.title or "")
+            ):
+                counts["index_current"] += 1
+        return counts
+
     def get_index_coverage(self, models: Sequence[str]) -> IndexCoverage:
         indexable = [
             doc_id for doc_id, doc in self._docs.items() if doc.active and doc_id in self._content

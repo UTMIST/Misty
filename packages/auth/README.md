@@ -23,6 +23,12 @@ Shared API-key auth (keys, scopes, audit) for UTMIST platform services. A pure l
 | `InMemoryKeyStore` | `memory_store.py` | DB-free `ApiKeyStore` implementation. Used by services with no `api_keys` table (`llm`, `meeting`, `connectors`, `verification`) — keys are seeded from config at boot rather than persisted. |
 | `key_store_from_config` | `memory_store.py` | Parses a `CONSUMER_KEYS` JSON array (`[{"name","prefix","key_hash","scopes"}]`) into a populated `InMemoryKeyStore`. Raises `RuntimeError` on a malformed value so a bad env var fails a service's boot, not its first request. |
 
+`internal_request` disables redirects on every authenticated send, including when
+telemetry is off. Its injected HTTPX-compatible method must accept the
+`follow_redirects` keyword. If a request task is cancelled before it has a
+response, the audit log records status 499 and its HTTP span ends as
+`cancelled`. The cancellation continues to the caller.
+
 ## Credential config convention
 
 **Every credential field in a service's `Settings` is `pydantic.SecretStr`, never `str`.** This is not a style preference — a plain `str` credential prints in full from anything that stringifies the settings object: a failing test's assertion diff, a debug `print`, an exception repr, a log line. That is not hypothetical; a routine assertion in `services/connectors` once dumped a real Google service-account private key into a terminal and a session transcript, and the key had to be rotated. `SecretStr` renders as `**********` everywhere, so no future test or traceback can print it regardless of who writes it.
