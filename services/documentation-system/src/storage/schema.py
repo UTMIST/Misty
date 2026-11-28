@@ -6,6 +6,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     Computed,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -28,6 +29,19 @@ source_refresh_run = Table(
     Column("started_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("created_by", Text, nullable=False),
     CheckConstraint("singleton", name="ck_source_refresh_run_singleton"),
+)
+
+vocabulary_runs = Table(
+    "vocabulary_runs",
+    metadata,
+    Column("week", Date, primary_key=True),
+    Column("completed_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("embedding_model", Text, nullable=False),
+    Column("snapshot_id", Text, nullable=False),
+    Column("rule_versions", JSONB, nullable=False),
+    Column("candidates", JSONB, nullable=False),
+    Column("additions", JSONB, nullable=False),
+    Column("removals", JSONB, nullable=False),
 )
 
 sources = Table(

@@ -1,6 +1,6 @@
 import sys
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from hashlib import sha256
 from uuid import UUID
 
@@ -40,6 +40,12 @@ from contracts.types import (
     Source,
     SourceGrant,
 )
+from contracts.vocabulary import (
+    BuildVocabularySnapshot,
+    VocabularyChunk,
+    VocabularyRunBusy,
+    VocabularySnapshot,
+)
 from contracts.visibility import Actor, ActorContext, Channel, DENY, SEE_ALL
 from src.content import content_hash
 from src.google_identity import GOOGLE_ID_PATTERNS, google_file_id
@@ -55,6 +61,7 @@ from src.storage.schema import (
     source_refresh_run,
     sources,
     meeting_records,
+    vocabulary_runs,
 )
 from contracts.meeting import MeetingRecord
 from src.storage.meeting import changed, catalog_values
@@ -110,6 +117,45 @@ class PostgresStorageAdapter:
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+
+    def record_vocabulary_week(
+        self, week: date, model: str, build: BuildVocabularySnapshot
+    ) -> VocabularySnapshot | None:
+        with self._engine.begin() as conn:
+            # Two-key namespace is separate from the single-key catalog locks.
+            if not conn.scalar(select(func.pg_try_advisory_xact_lock(0x4D495354, 447))):
+                raise VocabularyRunBusy
+            previous = conn.execute(
+                select(vocabulary_runs.c.week, vocabulary_runs.c.candidates)
+                .order_by(vocabulary_runs.c.week.desc())
+                .limit(1)
+            ).one_or_none()
+            if previous and previous.week >= week:
+                return None
+            previous_keys = {row["key"] for row in previous.candidates} if previous else set()
+            chunks = (
+                select(
+                    doc_chunks.c.doc_id,
+                    doc_chunks.c.ordinal,
+                    doc_chunks.c.start_offset,
+                    doc_chunks.c.end_offset,
+                    doc_chunks.c.chunk_text,
+                )
+                .where(doc_chunks.c.embedding_model == model)
+                .order_by(doc_chunks.c.doc_id, doc_chunks.c.start_offset, doc_chunks.c.ordinal)
+            )
+            # One SELECT gives a consistent snapshot, even across cursor fetches.
+            with conn.execute(chunks.execution_options(yield_per=500)) as rows:
+                snapshot = build((VocabularyChunk(*row) for row in rows), previous_keys)
+            conn.execute(
+                vocabulary_runs.insert().values(
+                    week=week,
+                    embedding_model=model,
+                    completed_at=func.clock_timestamp(),
+                    **snapshot.model_dump(mode="json"),
+                )
+            )
+        return snapshot
 
     def put_meeting(self, record):
         with self._engine.begin() as conn:

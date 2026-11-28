@@ -600,6 +600,12 @@ copies. Follow the [service runbook](../services/documentation-system/docs/DISCO
 for all settings, schedule, monitoring, recovery, member instructions and the separate
 production activation gate. Keep #292's existing-document refresh scheduled as well.
 
+## Weekly transcription vocabulary
+
+The documentation-system image also supports the optional staging
+[weekly vocabulary candidate job](../services/documentation-system/docs/DEPLOYMENT.md#weekly-transcription-vocabulary-candidates).
+Configure it as a dedicated scheduled service after verifying the first run.
+
 ## Meeting record persistence
 
 Deploy order for the durable Google Doc path:
