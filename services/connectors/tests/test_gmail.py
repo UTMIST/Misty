@@ -3,7 +3,6 @@ from email.message import EmailMessage
 import email
 import email.policy
 import json
-import logging
 from uuid import uuid4
 
 import httplib2
@@ -518,7 +517,7 @@ def test_gmail_errors_normalize_with_no_retries_and_no_upstream_body(status, cod
     assert "secret upstream email snippet" not in str(exc_info.value)
 
 
-def test_routes_enforce_scopes_hide_sensitive_422_inputs_and_omit_pii_from_audit_logs(caplog):
+def test_routes_enforce_scopes_hide_sensitive_422_inputs_and_omit_pii_from_audit_logs(capsys):
     gmail = FakeGmail()
     gmail.metadata["msg_1"], gmail.raw["msg_1"] = make_raw_email()
 
@@ -547,7 +546,7 @@ def test_routes_enforce_scopes_hide_sensitive_422_inputs_and_omit_pii_from_audit
     app.dependency_overrides[get_gmail_mailbox] = lambda: build_mailbox(gmail)
     app.dependency_overrides[get_key_store] = lambda: store
 
-    caplog.set_level(logging.INFO, logger="connectors.audit")
+    capsys.readouterr()
     with TestClient(app) as client:
         # Unauthenticated -> 401 before mailbox touch
         assert client.post("/google/gmail/messages/list", json={}).status_code == 401
@@ -604,7 +603,7 @@ def test_routes_enforce_scopes_hide_sensitive_422_inputs_and_omit_pii_from_audit
         assert ok_resp.status_code == 200
         assert ok_resp.json()["classification"] == "accepted_candidate"
 
-    audit_blob = "\n".join(r.getMessage() for r in caplog.records)
+    audit_blob = capsys.readouterr().out
     assert "accepted_candidate" in audit_blob
     assert "alex.chen@mail.utoronto.ca" not in audit_blob
     assert "Sponsor Commitment" not in audit_blob
