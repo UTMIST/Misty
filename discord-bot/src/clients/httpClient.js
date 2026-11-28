@@ -1,3 +1,4 @@
+import { withSpan, traceHeaders } from '../telemetry.js';
 // Shared HTTP wrapper for the internal service clients (directory/doc/
 // verification). Each client injects its own base URL, auth headers, and
 // error factories so its specific "unavailable" error type and message survive
@@ -24,10 +25,22 @@ export function createHttpClient({
       timer = setTimeout(() => controller.abort(), timeoutMs);
     }
     try {
-      return await fetchImpl(`${baseUrl}${path}`, {
-        ...rest,
-        headers: mergedHeaders,
-        ...(controller ? { signal: controller.signal } : {}),
+      return await withSpan('http.client', async (span) => {
+        const response = await fetchImpl(`${baseUrl}${path}`, {
+          ...rest,
+          headers: span.traceparent ? { ...mergedHeaders, ...traceHeaders() } : mergedHeaders,
+          ...(span.traceparent && { redirect: 'error' }),
+          ...(controller ? { signal: controller.signal } : {}),
+        });
+        if (response.status >= 400)
+          span.outcome(
+            response.status === 429
+              ? 'rate_limited'
+              : [401, 403].includes(response.status)
+                ? 'denied'
+                : 'failed',
+          );
+        return response;
       });
     } catch {
       throw networkError();

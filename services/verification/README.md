@@ -228,3 +228,6 @@ One table (`verification_codes`), two endpoints plus `/health`, two storage adap
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — contributor orientation: why the service is shaped this way, boundaries, trade-offs
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — task walkthroughs and the pre-push checklist
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — deploy shape, variables, key provisioning, troubleshooting
+
+The shared telemetry pilot is opt-in through process environment variables.
+[Producer settings and collection runbook](../../docs/OBSERVABILITY-COLLECTION.md)
