@@ -14,6 +14,8 @@ from uuid import uuid4
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
+from platform_auth.telemetry import request_span
+
 _RESERVED_AUDIT_KEYS = frozenset(
     {
         "ts",
@@ -74,8 +76,26 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
         start = time.monotonic()
         response = None
         try:
-            response = await call_next(request)
-            return response
+            with request_span(request, self._logger.name) as trace:
+                try:
+                    response = await call_next(request)
+                    return response
+                finally:
+                    if trace is not None:
+                        observed = trace.get()
+                        code = response.status_code if response is not None else 500
+                        result = (
+                            "failed"
+                            if code >= 500
+                            else "rate_limited"
+                            if code == 429
+                            else "denied"
+                            if code in (401, 403)
+                            else "invalid_request"
+                            if code >= 400
+                            else "success"
+                        )
+                        observed._emit("end", result)
         finally:
             duration_ms = int((time.monotonic() - start) * 1000)
             try:

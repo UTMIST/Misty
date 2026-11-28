@@ -322,3 +322,6 @@ private verification service. Enabling and connecting compute requires the
 **Known constraint:** GitHub logins resolve case-sensitively, because that is how
 team-tracking matches identifiers. See "Two things to know about this endpoint"
 above — the fix belongs upstream, not here.
+
+The shared telemetry pilot is opt-in through process environment variables.
+[Producer settings and collection runbook](../../docs/OBSERVABILITY-COLLECTION.md)

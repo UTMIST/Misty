@@ -1,3 +1,4 @@
+import { withSpan } from './telemetry.js';
 import { resolvePrincipal } from './auth/principal.js';
 import { authorize } from './auth/policy.js';
 import { DirectoryUnavailable } from './clients/directoryClient.js';
@@ -82,14 +83,22 @@ export async function authorizeCommand(intent, { commands, appContext, checks = 
 }
 
 /** Dispatch through the shared policy check; unknown commands return null. */
-export async function dispatch(intent, { commands, appContext, checks = new Map() }) {
-  if (!commands.has(intent.commandName)) return null;
+export function dispatch(intent, deps) {
+  return withSpan('command', (span) => execute(intent, deps, span));
+}
+
+async function execute(intent, { commands, appContext, checks = new Map() }, span) {
+  if (!commands.has(intent.commandName)) {
+    span.outcome('denied');
+    return null;
+  }
   const { command, principal, error } = await authorizeCommand(intent, {
     commands,
     appContext,
     checks,
   });
   if (error) {
+    span.outcome('denied');
     if (intent.requireLinked) throw new Error('Helper command is no longer authorized');
     return error;
   }
@@ -109,6 +118,7 @@ export async function dispatch(intent, { commands, appContext, checks = new Map(
       channelUsedParent: Boolean(intent.channelUsedParent),
     });
   } catch (err) {
+    span.outcome('failed');
     if (intent.requireLinked) {
       console.error(`Helper command ${intent.commandName} failed`);
       // Let the pending action stop the batch; do not turn an unexpected

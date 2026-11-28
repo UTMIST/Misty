@@ -2,6 +2,7 @@ from uuid import UUID
 from urllib.parse import quote
 
 import httpx
+from platform_auth.telemetry import internal_request
 from pydantic import BaseModel, Field, TypeAdapter
 from typing import Literal
 
@@ -39,7 +40,9 @@ class HttpDirectoryClient:
 
     def _get_label(self, path: str, label_field: str) -> str | None:
         try:
-            resp = self._client.get(f"{self._base_url}{path}", headers={"X-API-Key": self._api_key})
+            resp = internal_request(
+                self._client.get, f"{self._base_url}{path}", headers={"X-API-Key": self._api_key}
+            )
         except httpx.HTTPError as e:
             raise DirectoryUnavailable(f"directory unreachable: {e}") from e
         if resp.status_code == 404:
@@ -56,7 +59,8 @@ class HttpDirectoryClient:
 
     def get_meeting_audience(self, guild_id: str, channel_id: str) -> dict[UUID, str]:
         try:
-            response = self._client.get(
+            response = internal_request(
+                self._client.get,
                 f"{self._base_url}/channels/{guild_id}/{channel_id}/teams",
                 headers={"X-API-Key": self._api_key},
             )
@@ -67,8 +71,10 @@ class HttpDirectoryClient:
                 raise ValueError("wrong channel")
             if not channel.team_ids:
                 return {}
-            response = self._client.get(
-                f"{self._base_url}/teams/google-groups", headers={"X-API-Key": self._api_key}
+            response = internal_request(
+                self._client.get,
+                f"{self._base_url}/teams/google-groups",
+                headers={"X-API-Key": self._api_key},
             )
             if response.status_code != 200:
                 raise ValueError("groups unavailable")
@@ -89,7 +95,8 @@ class HttpDirectoryClient:
 
     def get_active_team_ids(self, person_id: UUID) -> frozenset[UUID]:
         try:
-            resp = self._client.get(
+            resp = internal_request(
+                self._client.get,
                 f"{self._base_url}/memberships",
                 params={"person_id": str(person_id), "active_only": "true"},
                 headers={"X-API-Key": self._api_key},
@@ -105,7 +112,9 @@ class HttpDirectoryClient:
 
     def _get_id(self, path: str) -> UUID | None:
         try:
-            resp = self._client.get(f"{self._base_url}{path}", headers={"X-API-Key": self._api_key})
+            resp = internal_request(
+                self._client.get, f"{self._base_url}{path}", headers={"X-API-Key": self._api_key}
+            )
         except httpx.HTTPError as e:
             raise DirectoryUnavailable(f"directory unreachable: {e}") from e
         if resp.status_code == 404:
@@ -134,7 +143,8 @@ class HttpDirectoryClient:
         if not normalized or "\x00" in normalized:
             return None
         try:
-            resp = self._client.post(
+            resp = internal_request(
+                self._client.post,
                 f"{self._base_url}/people/search",
                 json={"email": normalized, "active_only": True, "limit": 2},
                 headers={"X-API-Key": self._api_key},
@@ -186,7 +196,8 @@ class HttpDirectoryClient:
 
     def get_source_access_team_ids(self, person_id: UUID) -> frozenset[UUID]:
         try:
-            resp = self._client.get(
+            resp = internal_request(
+                self._client.get,
                 f"{self._base_url}/people/{person_id}/synced-google-teams",
                 headers={"X-API-Key": self._api_key},
             )
@@ -203,7 +214,8 @@ class HttpDirectoryClient:
 
     def get_channel_source_team_ids(self, guild_id: str, channel_id: str) -> frozenset[UUID]:
         try:
-            response = self._client.get(
+            response = internal_request(
+                self._client.get,
                 f"{self._base_url}/channels/{guild_id}/{channel_id}/teams",
                 headers={"X-API-Key": self._api_key},
             )
@@ -215,7 +227,8 @@ class HttpDirectoryClient:
                 raise ValueError("wrong channel scope")
             if not channel.team_ids:
                 return frozenset()
-            response = self._client.get(
+            response = internal_request(
+                self._client.get,
                 f"{self._base_url}/teams/google-groups",
                 headers={"X-API-Key": self._api_key},
             )
