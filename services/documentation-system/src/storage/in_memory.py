@@ -78,6 +78,7 @@ class InMemoryStorageAdapter:
                 if previous_week is not None
                 else set()
             )
+            # Writers replace each document's mapping; a shallow copy fixes the snapshot.
             chunks = sorted(
                 (
                     VocabularyChunk(
@@ -87,7 +88,7 @@ class InMemoryStorageAdapter:
                         chunk.end_offset,
                         chunk.chunk_text,
                     )
-                    for doc_id, models in self._chunks.items()
+                    for doc_id, models in self._chunks.copy().items()
                     for chunk in models.get(model, ())
                 ),
                 key=lambda row: (row.doc_id, row.start, row.ordinal),
