@@ -69,6 +69,10 @@ All settings load from the environment (`src/config.py`, `.env` in dev):
 | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` | `""` | Optional Workspace user OAuth writer credentials (`drive.file`), separate from the read account. |
 | `GOOGLE_MEETING_ROOT_FOLDER_ID` | `""` | Admin-only root folder accessible to the writer OAuth app. |
 | `GOOGLE_MEETING_ADMIN_EMAILS` | `[]` | JSON array of explicitly trusted infra user/group emails, including inherited Drive admins. |
+| `GOOGLE_GMAIL_ADDRESS` | `""` | Optional dedicated Workspace forwarding mailbox (`misty@utmist.ca` in prod, `misty-staging@utmist.ca` in staging). |
+| `GOOGLE_GMAIL_OAUTH_CLIENT_ID`, `GOOGLE_GMAIL_OAUTH_CLIENT_SECRET`, `GOOGLE_GMAIL_OAUTH_REFRESH_TOKEN` | `""` | Optional Workspace user OAuth credentials (`gmail.readonly`, `gmail.send`) for the forwarding mailbox, separate from the Drive writer. |
+| `MAX_EMAIL_BYTES` | `5242880` | Metadata precheck and decoded raw MIME cap (5 MiB) for forwarded emails. |
+| `MAX_EMAIL_TEXT_CHARS` | `500000` | Extracted forwarded-email plain-text cap before transport (at most 1,200,000). |
 
 ## Auth model
 
@@ -99,6 +103,7 @@ Business endpoints require `X-API-Key`. `/health` and the API documentation/sche
 | POST | `/fetch` | `fetch` | Fetch a document's text content from a source. |
 | POST | `/discover/google` | `discover` | List a bounded metadata page; see the [discovery contract](docs/API.md#post-discovergoogle). |
 | POST / PUT / GET / DELETE | `/google/docs` route group | `meeting-write` / `meeting-fetch` | Create, find, share, read, check, or delete meeting Docs; see [per-route scopes](docs/API.md#meeting-writer-googledocs). |
+| POST | `/google/gmail` route group | `email-read` / `email-send` | List/inspect inbound forwarded emails and send threaded receipts; see [Gmail forwarding mailbox](docs/API.md#gmail-forwarding-mailbox-googlegmail). |
 | GET | `/health` | none | Liveness probe → `{"status": "ok"}`. |
 
 `POST /fetch` requires the `fetch` scope (`require_scope("fetch")`); the `admin` wildcard satisfies it, so the bootstrap key and any admin key also work.

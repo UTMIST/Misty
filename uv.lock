@@ -423,6 +423,7 @@ dependencies = [
     { name = "google-auth-httplib2" },
     { name = "httpx" },
     { name = "platform-auth" },
+    { name = "publicsuffixlist" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pypdf" },
@@ -445,6 +446,7 @@ requires-dist = [
     { name = "google-auth-httplib2", specifier = ">=0.2" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "platform-auth", editable = "packages/auth" },
+    { name = "publicsuffixlist", specifier = ">=1.0" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.5" },
     { name = "pypdf", specifier = ">=6.21.4" },
@@ -1749,6 +1751,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4e/2c/c1547871be3790676e8868b38655496422f94f0978dfb66b74bdba2f1676/psycopg_binary-3.3.4-cp314-cp314-musllinux_1_2_riscv64.whl", hash = "sha256:6b9016b1714da4dd5ecaaa75b82098aa5a0b87854ce9b092e21c27c4ae23e014", size = 3946204, upload-time = "2026-05-01T23:31:39.626Z" },
     { url = "https://files.pythonhosted.org/packages/c4/b1/f6670f00fa7ea601584623f6c11602ab92117d83eaff885e0210f6de7418/psycopg_binary-3.3.4-cp314-cp314-musllinux_1_2_x86_64.whl", hash = "sha256:47c656a8a7ba6eb0cff1801a4caaa9c8bdc12d03080e273aff1c8ac39971a77e", size = 4255811, upload-time = "2026-05-01T23:31:44.986Z" },
     { url = "https://files.pythonhosted.org/packages/eb/e6/5fff07a70d1f945ed90ae131c3bd76cab32beff7c58c6db15ad5820b6d1f/psycopg_binary-3.3.4-cp314-cp314-win_amd64.whl", hash = "sha256:c37e024c07308cd06cf3ec51bfd0e7f6157585a4d84d1bce4a7f5f7913719bf8", size = 3666849, upload-time = "2026-05-01T23:31:51.165Z" },
+]
+
+[[package]]
+name = "publicsuffixlist"
+version = "1.1.2.20261127"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c3/77/93b8d9ac773b52e9c160f1c026317ef058648ceea117c45eaa9e1580e94c/publicsuffixlist-1.1.2.20261127.tar.gz", hash = "sha256:cb4ac2b1da6ee8c0e4c8b060dc5950a05ba4b88506de06fd74007491e4a608b1", size = 108831, upload-time = "2026-11-27T12:01:03.377Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/39/42/9136be6742df17e7671cc76960f307a24c5b6be64bb369ab557ae0094d88/publicsuffixlist-1.1.2.20261127-py3-none-any.whl", hash = "sha256:83ff9948bd1c82b1385a4026b5ffec5723f146adbbf91c076e761cac06029c15", size = 111577, upload-time = "2026-11-27T12:01:02.052Z" },
 ]
 
 [[package]]

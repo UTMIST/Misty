@@ -175,6 +175,7 @@ Set these per environment (staging vs production) per service.
 | `GOOGLE_CREDENTIALS_JSON` | — | — | base64 Google service-account key; empty is a valid running state (Google fetches 503, rest of the service works) |
 | `GITHUB_TOKEN` | — | — | optional fine-grained read-only PAT; empty fetches public repositories only (private ones 404) |
 | `MAX_FILE_BYTES` | — | — | optional; defaults to 25 MiB. Pre-download limit for uploaded PDF, `.docx`, `text/*`, and GitHub files |
+| `GOOGLE_GMAIL_ADDRESS`, `GOOGLE_GMAIL_OAUTH_CLIENT_ID`, `GOOGLE_GMAIL_OAUTH_CLIENT_SECRET`, `GOOGLE_GMAIL_OAUTH_REFRESH_TOKEN`, `MAX_EMAIL_BYTES`, `MAX_EMAIL_TEXT_CHARS` | — | — | optional, all-or-nothing OAuth mailbox for forwarded emails (`email-read,email-send` scopes on `documentation-system`'s key); see [Gmail forwarding mailbox setup](../services/connectors/docs/DEPLOYMENT.md#gmail-forwarding-mailbox-setup) |
 
 > **Before merging or deploying llm**, configure a real `OPENAI_API_KEY` in the target
 > Railway environment, even for chat-only consumers. The boot check verifies presence,

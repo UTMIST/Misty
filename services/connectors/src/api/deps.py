@@ -6,8 +6,24 @@ from src.config import get_settings
 from src.sources.base import DiscoverySource, SourceFetcher
 from src.sources.google import GoogleSource
 from src.sources.registry import build_registry
+from contracts.gmail import GmailMailbox
 from contracts.meeting import MeetingWriter
+from src.sources.gmail_google import GoogleGmailMailbox
 from src.sources.meeting_google import GoogleMeetingWriter
+
+
+@lru_cache(maxsize=1)
+def get_gmail_mailbox() -> GmailMailbox:
+    s = get_settings()
+    return GoogleGmailMailbox(
+        address=s.google_gmail_address,
+        client_id=s.google_gmail_oauth_client_id.get_secret_value(),
+        client_secret=s.google_gmail_oauth_client_secret.get_secret_value(),
+        refresh_token=s.google_gmail_oauth_refresh_token.get_secret_value(),
+        max_email_bytes=s.max_email_bytes,
+        max_email_text_chars=s.max_email_text_chars,
+        timeout=s.request_timeout_s,
+    )
 
 
 @lru_cache(maxsize=1)

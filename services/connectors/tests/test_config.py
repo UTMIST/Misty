@@ -122,3 +122,28 @@ def test_partial_writer_config_fails_at_boot_but_disabled_writer_is_supported():
     assert "private-client" not in repr(settings)
     assert "private-secret" not in repr(settings)
     assert "private-refresh" not in repr(settings)
+
+
+def test_partial_gmail_config_fails_at_boot_and_secrets_never_leak():
+    verify_production_secrets(Settings(connectors_env="production", api_key="real-key"))
+    with pytest.raises(RuntimeError, match="GOOGLE_GMAIL_OAUTH_CLIENT_SECRET"):
+        verify_production_secrets(
+            Settings(
+                connectors_env="production",
+                api_key="real-key",
+                google_gmail_address="misty@utmist.ca",
+                google_gmail_oauth_client_id="gmail-client",
+            )
+        )
+    settings = Settings(
+        google_gmail_address="misty@utmist.ca",
+        google_gmail_oauth_client_id="gmail-private-client",
+        google_gmail_oauth_client_secret="gmail-private-secret",
+        google_gmail_oauth_refresh_token="gmail-private-refresh",
+    )
+    verify_production_secrets(
+        settings.model_copy(update={"connectors_env": "production", "api_key": SecretStr("real")})
+    )
+    assert "gmail-private-client" not in repr(settings)
+    assert "gmail-private-secret" not in repr(settings)
+    assert "gmail-private-refresh" not in repr(settings)
