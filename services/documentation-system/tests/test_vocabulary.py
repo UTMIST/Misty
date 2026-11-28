@@ -42,6 +42,18 @@ def test_numeric_only_unicode_and_ordinals_are_filtered():
     assert [(c.key, c.count) for c in snapshot.candidates] == [("scene3", 1)]
 
 
+def test_long_unbroken_source_is_not_saved_as_a_candidate():
+    blob = "X" * 260
+    text = f"{blob} {blob} Scene3"
+    doc = UUID(int=1)
+    rows = [
+        VocabularyChunk(doc, 0, 0, 130, text[:130]),
+        VocabularyChunk(doc, 1, 130, len(text), text[130:]),
+    ]
+    snapshot = _rank(rows)
+    assert [(c.key, c.count) for c in snapshot.candidates] == [("scene3", 1)]
+
+
 def test_offsets_join_adjacent_chunks_but_not_across_gaps_or_documents():
     one, two = UUID(int=1), UUID(int=2)
     rows = [

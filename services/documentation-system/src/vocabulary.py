@@ -38,6 +38,8 @@ _TOKEN = regex.compile(
     r"[\p{L}\p{N}][\p{L}\p{N}\p{M}]*(?:(?:[-'’]|(?<=\d)[.,](?=\d))[\p{L}\p{N}][\p{L}\p{N}\p{M}]*)*"
 )
 _NUMBER = regex.compile(r"\p{N}+(?:[.,-]\p{N}+)*(?:st|nd|rd|th)?")
+# Prevent an unbroken ID or encoded blob spanning chunks from becoming a term.
+_MAX_TERM_CHARS = 256
 _RULE_VERSION = "1"
 
 
@@ -95,10 +97,13 @@ def rank_snapshot(
         for text in _covered_text(document):
             for match in _TOKEN.finditer(text):
                 spelling = match[0]
+                if len(spelling) > _MAX_TERM_CHARS:
+                    continue
                 key = _key(spelling)
                 # NFKC can turn numeric characters such as Ⅷ into letters.
                 if (
-                    key in excluded
+                    len(key) > _MAX_TERM_CHARS
+                    or key in excluded
                     or _NUMBER.fullmatch(key)
                     or _NUMBER.fullmatch(spelling.casefold())
                 ):

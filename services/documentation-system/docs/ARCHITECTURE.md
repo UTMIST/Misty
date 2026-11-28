@@ -959,8 +959,9 @@ scans all stored chunk text for the served embedding model in one database
 snapshot. If reindexing has yet to replace a set, the job ranks the stored set.
 Source offsets join adjacent chunks and remove overlap before tokenization.
 The job matches whole tokens case-insensitively against the pinned dictionaries,
-drops numbers and ordinals, then selects the top fifth of distinct remaining
-terms rounded up, sorted by descending count and ascending normalized key. An
+drops numbers, ordinals and tokens longer than 256 characters, then selects the top
+fifth of distinct remaining terms rounded up, sorted by descending count and ascending
+normalized key. An
 observed spelling is chosen by descending spelling count and then lexical order.
 
 A database transaction holds the job lock and commits the fingerprint, rules,
