@@ -8,6 +8,7 @@ from sqlalchemy.engine import Engine
 from starlette.concurrency import run_in_threadpool
 
 from contracts.directory import DirectoryClient
+from contracts.documents import DocumentsClient
 from contracts.storage import StorageAdapter
 from contracts.login import VerificationClient
 from src.config import get_settings
@@ -41,6 +42,8 @@ async def lifespan(app: FastAPI):
     app.state.directory_lock = Lock()
     app.state.verification = None
     app.state.verification_lock = Lock()
+    app.state.documents = None
+    app.state.documents_lock = Lock()
     try:
         yield
     finally:
@@ -50,6 +53,9 @@ async def lifespan(app: FastAPI):
         if app.state.verification is not None:
             await run_in_threadpool(app.state.verification.close)
             app.state.verification = None
+        if app.state.documents is not None:
+            await run_in_threadpool(app.state.documents.close)
+            app.state.documents = None
 
 
 def get_directory(request: Request) -> DirectoryClient:
@@ -72,3 +78,17 @@ def get_verification(request: Request) -> VerificationClient:
                 settings.verification_api_key.get_secret_value(),
             )
         return request.app.state.verification
+
+
+def get_documents(request: Request) -> DocumentsClient:
+    # Same lazy, once-per-lifespan pool as get_directory. The doc_ key is
+    # unwrapped only here, where it becomes the outbound header.
+    from src.documents.http_client import HttpDocumentsClient
+
+    with request.app.state.documents_lock:
+        if request.app.state.documents is None:
+            settings = get_settings()
+            request.app.state.documents = HttpDocumentsClient(
+                settings.doc_base_url, settings.doc_api_key.get_secret_value()
+            )
+        return request.app.state.documents

@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     verification_base_url: str = "http://localhost:8003"
     verification_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
 
+    # MCP endpoint (/mcp). Off by default so the code can merge before rollout;
+    # while off, /mcp is not mounted at all and answers 404. The doc_ key is
+    # outbound to documentation-system and must carry only docs:read and
+    # act-as-user, never docs:read:all.
+    mcp_enabled: bool = False
+    doc_base_url: str = "http://localhost:8001"
+    doc_api_key: SecretStr = SecretStr(DEFAULT_DEV_API_KEY)
+
     gateway_env: Literal["local", "staging", "production"] = "local"
 
     # Trust only an ingress that overwrites X-Real-IP, such as Railway's public
@@ -79,6 +87,12 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
             insecure.append("VERIFICATION_API_KEY")
         if not settings.verification_base_url.strip():
             insecure.append("VERIFICATION_BASE_URL")
+    if settings.mcp_enabled:
+        doc_secret = settings.doc_api_key.get_secret_value().strip()
+        if not doc_secret or doc_secret == DEFAULT_DEV_API_KEY:
+            insecure.append("DOC_API_KEY")
+        if not settings.doc_base_url.strip():
+            insecure.append("DOC_BASE_URL")
     if insecure:
         raise RuntimeError(
             f"Refusing to start in gateway_env={settings.gateway_env!r}: "

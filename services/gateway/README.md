@@ -75,6 +75,9 @@ schema is at `http://localhost:8006/openapi.json`.
 | `EMAIL_LOGIN_ENABLED` | `false` by default. Enable after provisioning private verification and directory access. |
 | `VERIFICATION_BASE_URL` | Private verification URL; local default `http://localhost:8003`. |
 | `VERIFICATION_API_KEY` | A distinct scoped `vf_` key; blank/dev values are refused outside local mode when login is enabled. |
+| `MCP_ENABLED` | `false` by default; while off, `/mcp` is not mounted and answers `404`. See [the MCP endpoint](docs/ARCHITECTURE.md#mcp-endpoint). |
+| `DOC_BASE_URL` | documentation-system's private URL, used by the MCP document client; local default `http://localhost:8001`. |
+| `DOC_API_KEY` | A distinct `doc_` key scoped only `docs:read` and `act-as-user`, never `docs:read:all`; blank/dev values are refused outside local mode when MCP is enabled. |
 | `GATEWAY_ENV` | `local` / `staging` / `production`; determines the attested login issuer. In non-`local` envs, startup refuses to boot if `DIRECTORY_API_KEY` is blank or still the built-in dev default. |
 | `TRUST_PROXY_HEADERS` | Trust a single valid `X-Real-IP` supplied by an ingress that overwrites that header. **Set this to `true` behind Railway's public edge.** `X-Forwarded-For` is ignored. Missing/invalid/duplicate `X-Real-IP` falls back to the socket peer. Leave `false` for direct/private-network callers. |
 
@@ -230,7 +233,8 @@ gateway/
 ├── contracts/               The domain boundary — no framework imports
 │   ├── types.py              Pydantic ApiKey type
 │   ├── storage.py            StorageAdapter Protocol
-│   └── directory.py           DirectoryClient Protocol + DirectoryUnavailable
+│   ├── directory.py           DirectoryClient Protocol + DirectoryUnavailable
+│   └── documents.py           DocumentsClient Protocol + DocumentsUnavailable
 │
 ├── src/
 │   ├── api/
@@ -244,6 +248,8 @@ gateway/
 │   │   └── routers/resolve.py `GET /v1/resolve/discord/{github_login}`
 │   │
 │   ├── directory/http_client.py  HTTP DirectoryClient — calls team-tracking with DIRECTORY_API_KEY
+│   ├── documents/http_client.py  HTTP DocumentsClient — searches/reads documentation-system as one member
+│   ├── mcp_server/endpoint.py    `/mcp`, mounted only when MCP_ENABLED (no tools or sign-in yet)
 │   ├── storage/               StorageAdapter implementations (in-memory + Postgres) for keys, login challenges, and abuse counters
 │   ├── cli.py                 gateway-keys CLI (issue / list / revoke external keys)
 │   └── config.py               Settings (DATABASE_URL, DIRECTORY_*, GATEWAY_ENV, TRUST_PROXY_HEADERS)
