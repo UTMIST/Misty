@@ -16,6 +16,7 @@ from contracts.groups import (
     GroupOperationPending,
     GroupProvider,
     GroupProviderError,
+    MembershipIdentityRejected,
 )
 from contracts.storage import StorageAdapter
 from contracts.types import GoogleGroupStatus, PendingGroupChange, Person, Team, TeamGoogleGroup
@@ -31,17 +32,18 @@ EXTERNAL_MEMBERS_HINT = (
 )
 
 
-def desired_emails(storage: StorageAdapter, team_id: UUID) -> set[str]:
-    """Every email of every active person with a membership current today."""
+def desired_members(storage: StorageAdapter, team_id: UUID) -> dict[str, set[str]]:
+    """Map each desired group address to the primary addresses of its active owners."""
     team = storage.get_team(team_id)
     if team is None or not team.active:
-        return set()
-    emails: set[str] = set()
+        return {}
+    owners: dict[str, set[str]] = {}
     for m in storage.list_memberships(team_id=team_id, as_of=date.today()):
         person = storage.get_person(m.person_id)
         if person is not None and person.active:
-            emails |= person_emails(storage, person)
-    return emails
+            for email in person_emails(storage, person):
+                owners.setdefault(email, set()).add(person.primary_email)
+    return owners
 
 
 def person_emails(storage: StorageAdapter, person: Person) -> set[str]:
@@ -77,7 +79,7 @@ def synced_groups_containing(
         if (
             g.status == "synced"
             and g.group_name
-            and emails & groups.list_members(g.group_name).keys()
+            and emails & groups.list_members(g.group_name).managed.keys()
         ):
             found.append(g)
     return found
@@ -126,7 +128,8 @@ def sync_team(
                 group_name = groups.create_group(
                     email, team.label, f"Managed by Misty team-tracking (team {team.id})"
                 )
-            current = groups.list_members(group_name)
+            roster = groups.list_members(group_name)
+            current = roster.managed
             # Cloud Identity has no operations.get method. A missing addition
             # or still-present removal is unresolved, even if today's desired
             # membership has reversed. An addition cannot be replayed safely:
@@ -140,7 +143,9 @@ def sync_team(
                 if (p.action == "add" and p.email not in current)
                 or (p.action == "remove" and current.get(p.email) == p.membership_name)
             ]
-            want = desired_emails(storage, team_id)
+            owners = desired_members(storage, team_id)
+            want = owners.keys()
+            rejected_aliases: dict[str, str] = {}
             blocked = {p.email for p in pending if p.action == "add" or p.email in want}
             # Each change is independent: one bad address must never block
             # revoking someone else, so removals go first and errors accumulate.
@@ -161,7 +166,7 @@ def sync_team(
                 for addr in sorted(current.keys() - want - blocked)
             ] + [
                 PendingGroupChange(action="add", email=addr)
-                for addr in sorted(want - current.keys() - blocked)
+                for addr in sorted(want - roster.addresses - blocked)
             ]
             for change in changes:
                 if change.action == "add" and not settings_ready:
@@ -186,6 +191,18 @@ def sync_team(
                     if existing is None:
                         pending.remove(change)
                     external_blocked = True
+                except MembershipIdentityRejected as e:
+                    if existing is None:
+                        pending.remove(change)
+                    addr = change.email
+                    if (
+                        change.action == "add"
+                        and addr.endswith("@mail.utoronto.ca")
+                        and addr not in owners[addr]
+                    ):
+                        rejected_aliases[addr] = str(e)
+                    else:
+                        errors.append(str(e))
                 except GroupProviderError as e:
                     if existing is None:
                         pending.remove(change)
@@ -193,13 +210,32 @@ def sync_team(
                 else:
                     pending.remove(change)
             errors.extend(f"awaiting Google {p.action} completion for {p.email}" for p in pending)
+            note = None
+            if rejected_aliases:
+                if errors or external_blocked:
+                    errors.extend(rejected_aliases.values())
+                else:
+                    # Only the same person's observed primary membership can cover a rejected alias.
+                    # Verify the entire roster again, including removals, before publishing this mapping.
+                    readback = groups.list_members(group_name)
+                    confirmed = readback.addresses
+                    missing = want - confirmed
+                    covered = {addr for addr in rejected_aliases if owners[addr] <= confirmed}
+                    if readback.managed.keys() - want or missing - covered:
+                        errors.extend(rejected_aliases.values())
+                        errors.append("expected Google membership not confirmed on readback")
+                    elif missing:
+                        note = (
+                            f"Google declined {len(missing)} secondary university address(es). "
+                            "Use the member's confirmed primary account for Drive access."
+                        )
             if errors:
                 hint = [EXTERNAL_MEMBERS_HINT] if external_blocked else []
                 status, error = "failed", "; ".join(errors + hint)
             elif external_blocked:
                 status, error = "needs_external_members", EXTERNAL_MEMBERS_HINT
             else:
-                status, error = "synced", None
+                status, error = "synced", note
         except GroupProviderError as e:
             status, error = "failed", str(e)
         return record(status, error)

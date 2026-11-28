@@ -1,9 +1,14 @@
+from dataclasses import dataclass
 from typing import Protocol
 
 
 class GroupProviderError(Exception):
     """A group-provider call failed. The message is stored as `last_error`, so it
     must never carry a credential or token."""
+
+
+class MembershipIdentityRejected(GroupProviderError):
+    """Google definitively refused this membership add with a known identity error."""
 
 
 class ExternalMembersDisabled(GroupProviderError):
@@ -22,6 +27,18 @@ class GroupOperationPending(GroupProviderError):
         self.operation_name = operation_name
 
 
+@dataclass
+class GroupRoster:
+    """One Google read. Only plain MEMBER addresses have a managed resource name."""
+
+    managed: dict[str, str]
+    elevated: set[str]  # OWNER or MANAGER addresses
+
+    @property
+    def addresses(self) -> set[str]:
+        return self.managed.keys() | self.elevated
+
+
 class GroupProvider(Protocol):
     """Managed mailing groups (Google Groups in production, a fake in tests)."""
 
@@ -37,9 +54,8 @@ class GroupProvider(Protocol):
         """
         ...
 
-    def list_members(self, group_name: str) -> dict[str, str]:
-        """Lowercased member email -> membership resource name, for plain MEMBER
-        memberships only. Owners and managers are omitted and never touched."""
+    def list_members(self, group_name: str) -> GroupRoster:
+        """List all pages, with lowercased addresses and separate managed and elevated roles."""
         ...
 
     def ensure_external_members(self, group_email: str) -> None:

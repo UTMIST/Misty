@@ -417,6 +417,16 @@ test('Google Group offline cases: in-progress, disabled, setup, empty synced, fa
     state: { group_email: 'ml@utmist.skule.ca', status: 'synced' },
   }).content;
   assert.match(emptySynced, /synced/i);
+  const covered = renderGoogleGroupStatusResult({
+    outcome: 'STATUS',
+    team,
+    state: {
+      group_email: 'ml@utmist.skule.ca',
+      status: 'synced',
+      last_error: 'Use the confirmed primary account for Drive access.',
+    },
+  }).content;
+  assert.match(covered, /confirmed primary account/);
   assert.doesNotMatch(emptySynced, /groups\.google\.com|not proof|manual/i);
 
   // Failed sync (generic + external-members flavored).
