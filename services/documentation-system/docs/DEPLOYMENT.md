@@ -916,12 +916,18 @@ and may contain blank lines and full-line `#` comments. The job records hashes
 of the effective lists and the ranking rule version.
 
 After migration 019 is deployed and the first restricted report is verified,
-create one dedicated staging service in the Railway dashboard. Use repository
-`UTMIST/Misty`, branch `staging`, the repository root as build context, and
-`services/documentation-system/Dockerfile`. Set one replica, no HTTP healthcheck,
-no pre-deploy command, and no automatic restart. Use the same database and served
-model as the staging catalog. The catalog service owns migrations. No provider
-keys, public domain, or extra volume is required.
+create one dedicated staging service in the Railway dashboard. Connect repository
+`UTMIST/Misty`, branch `staging`, and keep the root directory `/`. Set
+`RAILWAY_DOCKERFILE_PATH=/services/documentation-system/Dockerfile` and leave the
+Railway config file setting blank. Set one replica, no HTTP healthcheck, no
+pre-deploy command, and no automatic restart. The catalog service owns migrations.
+
+Use the staging catalog database and served model. Set the worker's
+`DATABASE_URL` as a [sealed Railway variable](https://docs.railway.com/variables#sealed-variables)
+so Railway omits it from PR environment copies. Use a worker credential with
+`SELECT` on `doc_chunks` and `SELECT` and `INSERT` on `vocabulary_runs`.
+Keep the service out of PR deployments where possible. No provider keys, public
+domain, or extra volume is required.
 
 Use this start command. It checks Railway's environment name before touching
 the database, even if the worker is copied into a PR preview.
