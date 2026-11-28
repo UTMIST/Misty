@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import date, datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -18,6 +18,7 @@ from contracts.types import (
 from contracts.visibility import ActorContext, RetrievalContext, SEE_ALL
 from contracts.meeting import MeetingRecord
 from contracts.fetcher import FetchResult
+from contracts.vocabulary import BuildVocabularySnapshot, VocabularySnapshot
 
 
 class DuplicateActiveUrl(Exception):
@@ -58,6 +59,18 @@ class ExistingGoogleDoc(Exception):
 class StorageAdapter(Protocol):
     """Stable contract between the service and persistence. Concrete adapters
     (Postgres, in-memory) implement these with identical semantics."""
+
+    def record_vocabulary_week(
+        self, week: date, model: str, build: BuildVocabularySnapshot
+    ) -> VocabularySnapshot | None:
+        """Commit from one consistent stream of chunks plus the previous selection.
+
+        The stream includes stored chunks for the model, ordered by document, offset
+        and ordinal. The callback consumes it synchronously without external I/O.
+        None means the week or a later one is already recorded. VocabularyRunBusy
+        signals overlap. A failure leaves the previous successful checkpoint intact.
+        """
+        ...
 
     def put_meeting(self, record: MeetingRecord) -> tuple[MeetingRecord, bool]:
         """Insert atomically; identical payload_hash returns existing + False.

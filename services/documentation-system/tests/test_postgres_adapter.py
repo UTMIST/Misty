@@ -367,7 +367,11 @@ def adapter(request):
     engine = create_engine(get_settings().database_url, future=True)
     request.addfinalizer(engine.dispose)
     with engine.begin() as conn:
-        conn.execute(text("TRUNCATE doc_grants, doc_tags, docs, api_keys RESTART IDENTITY CASCADE"))
+        conn.execute(
+            text(
+                "TRUNCATE doc_grants, doc_tags, docs, api_keys, vocabulary_runs RESTART IDENTITY CASCADE"
+            )
+        )
     return PostgresStorageAdapter(engine)
 
 

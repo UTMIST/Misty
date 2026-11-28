@@ -43,6 +43,7 @@ doc-keys = "src.cli:main"
 doc-backfill = "src.backfill:main"
 doc-source-refresh = "src.source_refresh:main"
 doc-discover = "src.discovery:main"
+doc-vocabulary = "src.vocabulary:main"
 
 [dependency-groups]
 dev = [

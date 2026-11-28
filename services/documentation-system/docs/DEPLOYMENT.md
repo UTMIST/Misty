@@ -897,3 +897,52 @@ remain the admin's responsibility; automatic Discord cleanup is outside #223.
 The bot's [link delivery runbook](../../../discord-bot/docs/meeting-delivery.md)
 describes saved-message receipts and recovery. Never log record
 payloads or credentials. See the [platform rollout](../../../docs/RAILWAY-DEPLOYMENT.md#meeting-record-persistence).
+
+## Weekly transcription vocabulary candidates
+
+After migration 019, run `doc-vocabulary` inside the documentation-system image
+for a manual staging check. From a workspace checkout use
+`uv --directory services/documentation-system --project . run python -m src.vocabulary`.
+The job uses that environment's docs `DATABASE_URL` and `SEARCH_EMBED_MODEL`.
+Run it only as an operator already authorized to read the full catalog.
+The image includes pinned SCOWL American, British and Canadian English lists
+(Debian `2020.12.07-2`, notices under `/usr/share/doc/scowl/`) and the
+[CSpell software and computing lists](https://github.com/streetsidesoftware/cspell-dicts/tree/498d2b4fe97816860beae66463131fd59be9d133/dictionaries/software-terms)
+(MIT, notice under `/usr/share/misty-vocabulary/`). For a local run outside the
+image supply UTF-8 files with `--english PATH` and `--technical PATH` (repeat
+each flag for multiple files). The optional `--exceptions PATH` list keeps
+whole terms that the dictionaries would remove. Files have one term per line
+and may contain blank lines and full-line `#` comments. The job records hashes
+of the effective lists and the ranking rule version.
+
+After verifying the first restricted report, configure one dedicated staging
+Railway service using the repo root and
+`/services/documentation-system/railway.vocabulary.json`. It runs Mondays at
+07:00 UTC. Use the same database and served model as the staging catalog, and
+let the catalog service own migrations. No provider keys, public domain, or
+extra volume is required. The config leaves scheduling disabled outside staging.
+
+Monitor the command's exit status and aggregate completion counts, and check for a
+successful row each week. A duplicate trigger in the same UTC week exits
+successfully without replacing its result. An overlap or failure returns nonzero.
+Retry an interrupted run by running the same command again during that week. If
+the week has passed, the next successful run compares against the last recorded
+success. Failed attempts leave no candidate checkpoint or partial review data.
+
+The restricted `vocabulary_runs` table stores the week, completion time, model,
+chunk snapshot fingerprint, rule versions, selected candidates (key, observed
+spelling, count and rank), added keys and removed keys. Grant access only to the
+authorized review workflow, never to catalog consumers. For operational checks,
+query only status and counts, for example:
+
+```sql
+SELECT week, completed_at, jsonb_array_length(candidates) AS candidates,
+       jsonb_array_length(additions) AS additions, jsonb_array_length(removals) AS removals
+FROM vocabulary_runs ORDER BY week DESC LIMIT 1;
+```
+
+The job has no HTTP endpoint and publishes neither candidate text nor source text.
+It makes no model, AWS, or Drive calls. After human review, the planned Drive
+destination for the approved Transcribe table is
+`Infrastructure/Misty/Vocabulary/vocabulary.txt`. File export and AWS publishing
+are separate work.

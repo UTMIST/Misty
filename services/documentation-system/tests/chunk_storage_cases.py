@@ -1,6 +1,7 @@
 """The same chunk persistence assertions run in both adapter suites."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from functools import partial
 from uuid import uuid4
 
 import pytest
@@ -8,6 +9,8 @@ import pytest
 from contracts.types import MAX_CHUNK_CHARS, DocChunk, SourceGrant
 from contracts.visibility import Actor, DENY, SEE_ALL
 from src.content import content_hash
+from contracts.vocabulary import VocabularyRunBusy
+from src.vocabulary import rank_snapshot
 from tests.fake_embedder import FAKE_MODEL
 
 LARGE_MODEL = "text-embedding-3-large"
@@ -50,6 +53,53 @@ def make_doc(adapter):
 
 
 class ChunkStorageCases:
+    def test_weekly_vocabulary_records_one_model_and_retries_failed_week(self, adapter):
+        doc = make_doc(adapter)
+        source = "UTMIST UTMIST"
+        model = "text-embedding-3-small"
+        adapter.replace_doc_chunks(
+            doc.id, [make_chunk(text="IgnoreOtherModel", embedding_model=LARGE_MODEL)]
+        )
+        adapter.upsert_doc_content(
+            doc.id, content_text=source, content_hash=content_hash(source), fetched_at=None
+        )
+        assert adapter.replace_doc_chunks_if_current(
+            doc.id,
+            content_hash(source),
+            [make_chunk(text=source)],
+            expected_title_hash=content_hash(doc.title),
+        )
+        # A newly fetched body can differ from the stored index. Rank stored chunks.
+        adapter.upsert_doc_content(
+            doc.id, content_text="new body", content_hash=content_hash("new body"), fetched_at=None
+        )
+        week = date(2026, 11, 23)
+        rank = partial(rank_snapshot, excluded=set(), rule_versions={"ranking": "test"})
+
+        def interrupted(chunks, previous):
+            assert next(iter(chunks)).text == source
+            # A second invocation cannot change the checkpoint mid-run.
+            with pytest.raises(VocabularyRunBusy):
+                adapter.record_vocabulary_week(week, model, rank)
+            raise RuntimeError("interrupted")
+
+        with pytest.raises(RuntimeError, match="interrupted"):
+            adapter.record_vocabulary_week(week, model, interrupted)
+        first = adapter.record_vocabulary_week(week, model, rank)
+        assert [(c.key, c.count) for c in first.candidates] == [("utmist", 2)]
+        assert first.additions == ["utmist"] and first.removals == []
+        assert adapter.record_vocabulary_week(week, model, interrupted) is None
+
+        adapter.replace_doc_chunks(doc.id, [make_chunk(text="UTMIST UTMIST UTMIST")])
+        second = adapter.record_vocabulary_week(week + timedelta(days=7), model, rank)
+        assert [(c.key, c.count) for c in second.candidates] == [("utmist", 3)]
+        assert second.snapshot_id != first.snapshot_id
+        assert second.additions == second.removals == []
+
+        adapter.replace_doc_chunks(doc.id, [make_chunk(text="EigenAI")])
+        third = adapter.record_vocabulary_week(week + timedelta(days=14), model, rank)
+        assert third.additions == ["eigenai"] and third.removals == ["utmist"]
+
     def test_chunk_round_trip_with_unicode_offsets_and_order(self, adapter):
         doc = make_doc(adapter)
         source = "α😀\r\nUTMIST CPSIF"

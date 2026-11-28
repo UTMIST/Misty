@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from math import sqrt
 from threading import Lock
 from uuid import UUID, uuid4
@@ -17,6 +17,12 @@ from contracts.types import (
     IndexModelCoverage,
     Source,
     SourceGrant,
+)
+from contracts.vocabulary import (
+    BuildVocabularySnapshot,
+    VocabularyChunk,
+    VocabularyRunBusy,
+    VocabularySnapshot,
 )
 from contracts.visibility import ActorContext, SEE_ALL, doc_visible
 from src.content import content_hash
@@ -54,6 +60,43 @@ class InMemoryStorageAdapter:
         self._source_refresh_run: UUID | None = None
         self._meeting_lock = Lock()
         self._meetings: dict[UUID, MeetingRecord] = {}
+
+        self._vocabulary_lock = Lock()
+        self._vocabulary_runs: dict[date, VocabularySnapshot] = {}
+
+    def record_vocabulary_week(
+        self, week: date, model: str, build: BuildVocabularySnapshot
+    ) -> VocabularySnapshot | None:
+        if not self._vocabulary_lock.acquire(blocking=False):
+            raise VocabularyRunBusy
+        try:
+            previous_week = max(self._vocabulary_runs, default=None)
+            if previous_week is not None and previous_week >= week:
+                return None
+            previous_keys = (
+                {row.key for row in self._vocabulary_runs[previous_week].candidates}
+                if previous_week is not None
+                else set()
+            )
+            chunks = sorted(
+                (
+                    VocabularyChunk(
+                        doc_id,
+                        chunk.ordinal,
+                        chunk.start_offset,
+                        chunk.end_offset,
+                        chunk.chunk_text,
+                    )
+                    for doc_id, models in self._chunks.items()
+                    for chunk in models.get(model, ())
+                ),
+                key=lambda row: (row.doc_id, row.start, row.ordinal),
+            )
+            snapshot = build(chunks, previous_keys)
+            self._vocabulary_runs[week] = snapshot.model_copy(deep=True)
+            return snapshot
+        finally:
+            self._vocabulary_lock.release()
 
     def put_meeting(self, record):
         with self._meeting_lock:

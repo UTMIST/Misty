@@ -951,3 +951,20 @@ Generation-time decisions/action items/participants remain separate fields;
 readable content follows current Google edits. Google creation is a single HTML
 conversion and later retries never write that body. Audio stays entirely outside
 this persistence boundary. No durable PDF copy is retained by the platform.
+
+## Weekly transcription vocabulary ranking
+
+The private [vocabulary job](DEPLOYMENT.md#weekly-transcription-vocabulary-candidates)
+scans all stored chunk text for the served embedding model in one database
+snapshot. If reindexing has yet to replace a set, the job ranks the stored set.
+Source offsets join adjacent chunks and remove overlap before tokenization.
+The job matches whole tokens case-insensitively against the pinned dictionaries,
+drops numbers and ordinals, then selects the top fifth of distinct remaining
+terms rounded up, sorted by descending count and ascending normalized key. An
+observed spelling is chosen by descending spelling count and then lexical order.
+
+A database transaction holds the job lock and commits the fingerprint, rules,
+ranking and membership differences together. A count or rank change alone
+leaves the membership diff empty. Only selected terms are saved, with no copied
+chunks or source excerpts. The catalog's retrieval path and the meeting service
+do not consume this internal table.
