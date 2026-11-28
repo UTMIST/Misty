@@ -254,24 +254,29 @@ def render_recording(db, raw, view, params, role, base, period, flags, aged):
         )
         if not current:
             body += '<p class="note">Component source unavailable or stale. Current activity is unknown.</p>'
+        fields = {r[1] for r in db.execute("pragma table_info(spans)")}
+        evidence = (
+            "first_result,first_elapsed_ms,result_conflict_at,latency_conflict_at"
+        )
+        if "first_result" not in fields:
+            # Older snapshots retained one end. Its timestamp still bounds the result.
+            evidence = "result as first_result,elapsed_ms as first_elapsed_ms,null as result_conflict_at,null as latency_conflict_at"
         for name, left, right in [
             ("Selected", start, end),
             ("Previous", previous, start),
         ]:
-            args = (service, op, traffic, iso(left), iso(right))
+            until = iso(right)
             rows = db.execute(
-                "select result,elapsed_ms from spans where service=? and operation=? and traffic=? and start>=? and start<?",
-                args,
+                f"select finish,result,{evidence} from spans where service=? and operation=? and traffic=? and start>=? and start<?",
+                (service, op, traffic, iso(left), until),
             )
             outcomes = {}
             times = []
-            for r in rows:
-                result = (
-                    "unknown" if r["result"] == "open" and not current else r["result"]
-                )
+            for row in rows:
+                result, elapsed = component_at(row, until, current)
                 outcomes[result] = outcomes.get(result, 0) + 1
-                if r["elapsed_ms"] is not None:
-                    times.append(r["elapsed_ms"])
+                if elapsed is not None:
+                    times.append(elapsed)
             n, p50, p95 = percentiles(times)
             body += (
                 f"<h3>{name} period</h3><p>{sum(outcomes.values())} observed calls · Median {ms(p50)} · p95 {ms(p95)} · {n} timed samples.</p>"
@@ -293,12 +298,32 @@ def render_recording(db, raw, view, params, role, base, period, flags, aged):
     return body + '<p><a href="' + RUNBOOK + '">Recording operator runbook</a></p>'
 
 
+def component_at(row, until, current):
+    if row["finish"] is None:
+        return ("open" if current and row["result"] == "open" else "unknown"), None
+    if row["finish"] >= until:
+        return "unknown", None
+    if row["result_conflict_at"] and row["result_conflict_at"] < until:
+        return "unknown", None
+    if row["latency_conflict_at"] and row["latency_conflict_at"] < until:
+        return row["first_result"], None
+    return row["first_result"], row["first_elapsed_ms"]
+
+
 def span_tree(rows, base, q):
     spans = {}
+    disputed = set()
     children = {}
     for r in rows:
         key = (r["trace_id"], r["span_id"])
-        if key not in spans or r["event_name"] == "end":
+        previous = spans.get(key)
+        if r["event_name"] == "end" and previous and previous["event_name"] == "end":
+            if (r["result"], r["elapsed_ms"]) != (
+                previous["result"],
+                previous["elapsed_ms"],
+            ):
+                disputed.add(key)
+        if previous is None or r["event_name"] == "end":
             spans[key] = r
     roots = []
     for key, r in spans.items():
@@ -339,7 +364,7 @@ def span_tree(rows, base, q):
                     esc(r["service"]),
                     esc(r["span_id"]),
                     esc(note),
-                    ms(r["elapsed_ms"]),
+                    ms(None if key in disputed else r["elapsed_ms"]),
                 ]
             )
             for child in reversed(children.get(key, [])):

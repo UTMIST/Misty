@@ -17,6 +17,7 @@ def materialize(raw, snap, cutoff):
         create index cohort on attempts(traffic,cohort);
         create table spans(trace_id text,span_id text,parent text,link_trace text,link_span text,
           service text, operation text,traffic text,start text,finish text,result text,elapsed_ms integer,
+          first_result text,first_elapsed_ms integer,result_conflict_at text,latency_conflict_at text,
           primary key(service,traffic,operation,trace_id,span_id));
         create index component on spans(traffic,service,operation,start);
     """)
@@ -39,22 +40,45 @@ def materialize(raw, snap, cutoff):
     # Timed spans have one stable operation. Starts and ends may arrive in any order.
     # Missing ends keep their start and unknown outcome. Count retries as separate spans.
     rows = raw.execute(
-        """select trace_id,span_id,min(parent_span_id),min(link_trace_id),min(link_span_id),
-          min(service),min(operation),min(traffic),
+        """with observations as (
+            select trace_id,span_id,parent_span_id,link_trace_id,link_span_id,service,operation,traffic,
+                   ts,event_name,result,elapsed_ms,json_extract(payload,'$.process_started_at') boot,
+                   first_value(result) over first_end initial_result,
+                   first_value(elapsed_ms) over first_end initial_ms
+            from events where ts>=? and json_extract(payload,'$.schema')='misty.telemetry.v1'
+            window first_end as (partition by service,traffic,operation,trace_id,span_id
+                order by case when event_name='end' then 0 else 1 end,ts,event_id)
+        )
+        select trace_id,span_id,min(parent_span_id),min(link_trace_id),min(link_span_id),
+          service,operation,traffic,
           coalesce(min(case when event_name='start' then ts end),min(ts)),
-          max(case when event_name='end' then ts end),
-          coalesce(min(case when event_name='end' then result end),'unknown'),
-          max(case when event_name='end' then elapsed_ms end),
-          max(case when event_name='start' then json_extract(payload,'$.process_started_at') end)
-          from events where ts>=? and json_extract(payload,'$.schema')='misty.telemetry.v1'
-          group by service,traffic,operation,trace_id,span_id""",
+          min(case when event_name='end' then ts end),
+          min(case when event_name='end' then initial_result end),
+          min(case when event_name='end' then initial_ms end),
+          min(case when event_name='end' and result!=initial_result then ts end),
+          min(case when event_name='end' and (result!=initial_result or elapsed_ms!=initial_ms) then ts end),
+          max(case when event_name='start' then boot end)
+        from observations group by service,traffic,operation,trace_id,span_id""",
         (cutoff,),
     )
     for row in rows:
-        span = list(row[:-1])
-        if span[9] is None and row[-1] and boots.get(span[5]) == row[-1]:
-            span[10] = "open"
-        snap.execute("insert into spans values(?,?,?,?,?,?,?,?,?,?,?,?)", span)
+        first_result, first_elapsed, result_conflict, latency_conflict, boot = row[10:]
+        result = first_result if first_result and not result_conflict else "unknown"
+        if not first_result and boot and boots.get(row[5]) == boot:
+            result = "open"
+        elapsed = None if latency_conflict else first_elapsed
+        snap.execute(
+            "insert into spans values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                *row[:10],
+                result,
+                elapsed,
+                first_result,
+                first_elapsed,
+                result_conflict,
+                latency_conflict,
+            ),
+        )
 
 
 def project_recordings(raw, snap, traffic, cutoff, bot_boot):

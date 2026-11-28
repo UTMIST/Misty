@@ -14,7 +14,7 @@ from urllib.request import Request, build_opener
 from pathlib import Path
 
 from alerts import discord_send, evaluate, notify
-from dashboard import load_access, make_handler
+from dashboard import load_access, make_handler, report_page
 from pilot import fixture, seed
 from project import build, iso, prune_snapshot, readonly
 from recording_view import percentiles
@@ -25,7 +25,8 @@ class PilotAcceptance(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             raw = Path(temp) / "raw.sqlite"
             snapshot = Path(temp) / "snapshot.sqlite"
-            seed(raw, snapshot, datetime.now(timezone.utc))
+            now = datetime.now(timezone.utc)
+            seed(raw, snapshot, now)
             with closing(readonly(raw, "local")) as db:
                 self.assertEqual(
                     db.execute(
@@ -41,6 +42,29 @@ class PilotAcceptance(unittest.TestCase):
                 self.assertEqual(
                     db.execute("select count(*) from spans").fetchone()[0], 7
                 )
+                finish = db.execute(
+                    "select min(finish) from spans where service='connectors'"
+                ).fetchone()[0]
+                with closing(readonly(raw, "local")) as source:
+                    page = report_page(
+                        db,
+                        source,
+                        "local",
+                        "component",
+                        {
+                            "service": "connectors",
+                            "operation": "connectors.google_create",
+                            "traffic": "synthetic",
+                            "end": finish,
+                        },
+                        "lead",
+                        now,
+                        300,
+                    )
+                self.assertIn(
+                    "1 observed calls · Median — · p95 — · 0 timed samples", page
+                )
+                self.assertIn("<td>unknown</td><td>1</td>", page)
             with self.assertRaises(ValueError):
                 seed(raw, snapshot, datetime.now(timezone.utc))
 
@@ -109,6 +133,7 @@ class DashboardTests(unittest.TestCase):
             "admin": "admin-demo-key",
             "prod": "prod-demo-key",
         }
+        access_file.touch(mode=0o600, exist_ok=False)
         access_file.write_text(
             json.dumps(
                 [
@@ -195,6 +220,85 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("connectors operator runbook", component)
         self.assertIn("320 ms", component)
         self.assertIn("2 timed samples", component)
+
+    def test_disputed_component_counts_once_without_a_latency_sample(self):
+        with closing(sqlite3.connect(self.raw)) as db:
+            db.row_factory = sqlite3.Row
+            receipt = dict(
+                db.execute(
+                    """select * from events where service='connectors' and event_name='end'
+                   order by ts limit 1"""
+                ).fetchone()
+            )
+            first_end = datetime.fromisoformat(receipt["ts"].replace("Z", "+00:00"))
+            disputed_time = iso(first_end + timedelta(seconds=3))
+            disputed_result = iso(first_end + timedelta(seconds=5))
+            for event_id, ts, result in (
+                ("f" * 32, disputed_result, "failed"),
+                ("e" * 32, disputed_time, "success"),
+            ):
+                conflict = dict(
+                    event_id=event_id, ts=ts, result=result, elapsed_ms=9000
+                )
+                row = dict(receipt, **conflict)
+                row["payload"] = json.dumps(
+                    dict(json.loads(receipt["payload"]), **conflict)
+                )
+                db.execute(
+                    "insert into events values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    tuple(row.values()),
+                )
+            db.commit()
+        build(self.raw, self.snapshot, "local", self.now)
+        with closing(readonly(self.snapshot, "local")) as snapshot:
+            disputed = snapshot.execute(
+                "select result,elapsed_ms from spans where trace_id=? and span_id=?",
+                (receipt["trace_id"], receipt["span_id"]),
+            ).fetchall()
+            self.assertEqual([tuple(row) for row in disputed], [("unknown", None)])
+        url = "/local/component?traffic=synthetic&service=connectors&operation=connectors.google_create"
+        for end, outcome, samples in (
+            (iso(first_end), "unknown", 0),
+            (disputed_time, "success", 1),
+            (disputed_result, "success", 0),
+            (iso(first_end + timedelta(seconds=6)), "unknown", 0),
+        ):
+            with self.subTest(end=end):
+                status, component = self.request(url + "&end=" + end, "lead")
+                self.assertEqual(status, 200)
+                self.assertIn(f"<td>{outcome}</td><td>1</td>", component)
+                self.assertIn(
+                    f"{samples} timed samples", component.split("Previous period")[0]
+                )
+        status, component = self.request(url, "dev")
+        self.assertEqual(status, 200)
+        self.assertIn(
+            "2 observed calls · Median 320 ms · p95 — · 1 timed samples", component
+        )
+        self.assertIn("<td>unknown</td><td>1</td>", component)
+        self.assertIn("<td>success</td><td>1</td>", component)
+        _, detail = self.request("/local/attempt/" + receipt["trace_id"], "dev")
+        timeline, tree = detail.split("<h2>Call tree</h2>")
+        self.assertIn("9000 ms", timeline)
+        self.assertNotIn("9000 ms", tree)
+
+    def test_existing_snapshot_hides_end_at_period_boundary(self):
+        with closing(sqlite3.connect(self.snapshot)) as db:
+            db.execute("alter table spans rename to new_spans")
+            db.execute("""create table spans as select trace_id,span_id,parent,link_trace,link_span,
+                service,operation,traffic,start,finish,result,elapsed_ms from new_spans""")
+            finish = db.execute(
+                "select min(finish) from spans where service='connectors'"
+            ).fetchone()[0]
+            db.commit()
+        status, page = self.request(
+            "/local/component?traffic=synthetic&service=connectors&operation=connectors.google_create&end="
+            + finish,
+            "lead",
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("<td>unknown</td><td>1</td>", page)
+        self.assertIn("1 observed calls · Median — · p95 — · 0 timed samples", page)
 
     def test_open_then_restart_or_collection_loss(self):
         trace = f"{3:032x}"
