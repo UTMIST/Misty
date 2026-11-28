@@ -1,5 +1,27 @@
+// Both immediate delivery and recovery observe the same catalog states.
+export function traceMeetingDelivery(trace, delivery, reportedStatus) {
+  if (!trace) return;
+  const status = delivery?.persistenceStatus ?? reportedStatus;
+  if (delivery?.status === 'posted' || status === 'saved') trace.mark('save.confirmed');
+  else if (status === 'failed') trace.mark('save.failed');
+  else if (status === 'create_uncertain') trace.mark('save.uncertain');
+  else if (['handoff_pending', 'pending', 'creating', 'doc_created', 'shared'].includes(status)) {
+    trace.mark('save.pending');
+  } else if (['removed', 'removing', 'inaccessible'].includes(status)) {
+    trace.mark('save.unavailable');
+  }
+  if (
+    delivery?.status === 'pending' &&
+    ['failed', 'inaccessible', 'removed', 'removing', 'create_uncertain'].includes(status)
+  ) {
+    trace.mark('link.not_attempted');
+  } else if (['posted', 'pending', 'failed', 'disabled'].includes(delivery?.status)) {
+    trace.mark(`link.${delivery.status}`);
+  }
+}
+
 /** Deliver only saved references. This service never writes Google or meeting content. */
-export function createMeetingDelivery({ records, post }) {
+export function createMeetingDelivery({ records, post, beginTrace }) {
   const inFlight = new Map();
   // Remember a successful Discord send if its acknowledgement fails. The
   // adapter also recovers recent messages after a process restart.
@@ -7,7 +29,7 @@ export function createMeetingDelivery({ records, post }) {
   const awaitingRecovery = new Set();
   let polling;
 
-  async function attempt(meetingId) {
+  async function attempt(meetingId, trace) {
     let record;
     let messageId = unacknowledged.get(meetingId);
     try {
@@ -29,6 +51,7 @@ export function createMeetingDelivery({ records, post }) {
       messageId ??= record.discord_message_id;
       messageId = await post({ ...record, discord_message_id: messageId });
       if (!messageId) throw new Error('missing Discord receipt');
+      trace?.mark('link.acknowledged');
       unacknowledged.set(meetingId, messageId);
       const updated = await records.update(meetingId, 'posted', messageId);
       if (!updated) throw new Error('missing delivery acknowledgement');
@@ -45,9 +68,9 @@ export function createMeetingDelivery({ records, post }) {
     }
   }
 
-  function deliver(meetingId) {
+  function deliver(meetingId, trace) {
     if (inFlight.has(meetingId)) return inFlight.get(meetingId);
-    const task = attempt(meetingId)
+    const task = attempt(meetingId, trace)
       .then((result) => {
         const unfinishedSave =
           result.status === 'pending' &&
@@ -79,7 +102,11 @@ export function createMeetingDelivery({ records, post }) {
           console.warn('meeting delivery poll failed');
         }
       }
-      for (const meetingId of pending) await deliver(meetingId);
+      for (const meetingId of pending) {
+        const trace = beginTrace?.(meetingId);
+        const result = await deliver(meetingId, trace);
+        traceMeetingDelivery(trace, result);
+      }
       return { empty: listed && pending.size === 0 && awaitingRecovery.size === 0 };
     })().finally(() => (polling = null));
     return polling;

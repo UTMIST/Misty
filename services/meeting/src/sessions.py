@@ -450,6 +450,14 @@ class MeetingSession:
         return await asyncio.shield(self._stop_task)
 
     async def _finalize(self, title, record) -> StopResponse:
+        with span("meeting.finalize", service="meeting") as attempt:
+            try:
+                return await self._build_response(title, record)
+            finally:
+                for reason, count in self.drop_summary().items():
+                    attempt.measure("drop_" + reason, count)
+
+    async def _build_response(self, title, record) -> StopResponse:
         self._stop_requested = True
         # Wait for the tail BEFORE quiescing: the last frames may still be in
         # flight on the WS, and refusing them is exactly how the transcript lost
@@ -472,10 +480,13 @@ class MeetingSession:
             # and the work is independent per speaker -- serializing it would
             # make worst-case /stop latency N x that bound, which for a large
             # meeting exceeds the bot's HTTP timeout and loses the minutes.
-            per_speaker = await asyncio.gather(
-                *(buf.finalize(anchors) for buf, _, anchors in snapshot),
-                return_exceptions=True,
-            )
+            with span("meeting.speech_flush", service="meeting") as flush:
+                per_speaker = await asyncio.gather(
+                    *(buf.finalize(anchors) for buf, _, anchors in snapshot),
+                    return_exceptions=True,
+                )
+                if any(isinstance(words, BaseException) for words in per_speaker):
+                    flush.outcome("failed")
             for (buf, display_name, _anchors), words in zip(snapshot, per_speaker):
                 if isinstance(words, BaseException):
                     # One speaker's stream failing must not lose everyone else's
@@ -497,9 +508,10 @@ class MeetingSession:
             # The sync internals (llm_client/minutes/pdf) are intentionally left
             # as-is -- thread-offloading at this async boundary is the chosen
             # fix, not an async rewrite of those modules.
-            minutes, pdf_bytes = await asyncio.to_thread(
-                self._deps["report_builder"], segments, self._meta(title)
-            )
+            with span("meeting.report", service="meeting"):
+                minutes, pdf_bytes = await asyncio.to_thread(
+                    self._deps["report_builder"], segments, self._meta(title)
+                )
             pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
 
             # Meeting audio is deliberately NOT returned: consumers get the

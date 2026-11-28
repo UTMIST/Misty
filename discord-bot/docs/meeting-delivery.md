@@ -80,3 +80,53 @@ state separately. They make no audio, Discord, Google, directory or catalog
 calls and require no acting identity selection. Ordinary commands still require
 an identity, and the preview cannot be submitted while a request is running.
 Voice capture still requires the real Discord adapter.
+
+## Investigate one recording
+
+The [recording operator dashboard](../../docs/RECORDING-TELEMETRY.md) shows
+recording cohorts, component timing, restricted traces and alert recovery.
+
+Enable `RECORDING_TRACE_ENABLED=true` on the bot in the selected environment
+and restart it. Filter the restricted bot logs by `schema=misty.recording.v1`.
+Use the time of the incident to find a recording trace, then filter both the
+bot and meeting logs by that trace ID. The meeting request audit contains its
+HTTP status and duration. Bot elapsed times use the local clock for each span.
+
+From `discord-bot/`, run the following with raw bot log messages, one JSON
+object per line, from **one environment**. Use a window from recording start
+through the most recent delivery retry.
+
+```sh
+node scripts/recording-report.js "$TRACE_ID" < recording.jsonl
+```
+
+The report reconstructs milestones from duplicate or reordered lines. It links
+the recording span to one stop request and its response using the actual span
+and parent IDs. Missing or conflicting links leave finalization unconfirmed.
+A normal capture needs a linked successful stop, service confirmation that
+the end-of-audio marker arrived, and confirmed PDF delivery. A saved recording
+also needs save and link confirmation. A drain timeout produces an observed
+error. A disconnect or lost voice connection marks the attempt interrupted,
+including after later delivery. Older stop responses without drain evidence
+leave the outcome unconfirmed.
+
+Recovery uses the catalog meeting UUID to correlate later attempts after a
+restart. A delayed pending snapshot cannot reopen a terminal state. A
+subsequent confirmed retry can supersede a failed attempt. For competing save
+states the report uses the producer UTC timestamp and prefers explicit
+failure on a tie. Clock skew between workers limits that ordering. A failed
+or uncertain save can prevent a link attempt entirely.
+
+The `link.acknowledged` milestone records Discord acceptance as soon as the
+send returns a message ID. A later catalog receipt failure remains visible
+as a failed delivery attempt. The acknowledgment still counts toward
+member-visible delivery. A successful catalog receipt appears as `link.posted`.
+
+
+The reader accepts allowlisted v1 events. It skips malformed records and
+lines over 2,048 characters, and reads an unterminated last line. It retains a
+fixed number of event labels and span IDs. `dropped_before` counts records
+lost by the bot process since its previous successful write. It cannot identify
+which recording lost evidence. The report describes observed delivery and
+the audio barrier. Missing speech, transcript accuracy, and provider-level
+timing need separate evidence. Keep raw logs restricted.

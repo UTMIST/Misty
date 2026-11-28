@@ -204,3 +204,11 @@ in-memory HTML upload converted in the same Drive create operation; no empty Doc
 is published and retries never replace a human-edited body. See the
 [durable record architecture](../../../docs/MEETING-RECORDING.md#durable-records)
 and [writer API](API.md#meeting-writer-googledocs).
+
+### Recording writer timings
+
+With shared telemetry enabled, the Google meeting writer times a create,
+search or share operation locally. The internal request context ends at
+connectors. A transport failure with an uncertain result is marked ambiguous
+so recording recovery can search for the existing document. Event fields
+contain no Google resource IDs, audience, document content or credentials.

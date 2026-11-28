@@ -5,6 +5,7 @@ import logging
 import time
 
 import httpx
+from platform_auth.telemetry import span, trace_headers
 
 from src.contracts import RecordResult
 
@@ -32,6 +33,12 @@ class HttpRecordHandoff:
         self.tasks = set()
 
     async def _put(self, meeting_id, payload):
+        with span("meeting.handoff", service="meeting") as attempt:
+            result = await self._send(meeting_id, payload)
+            attempt.outcome("confirmed" if result is not None else "pending")
+            return result
+
+    async def _send(self, meeting_id, payload):
         if not self.base_url or not self.api_key:
             return None
 
@@ -39,7 +46,8 @@ class HttpRecordHandoff:
             try:
                 response = await client.put(
                     f"{self.base_url}/meeting-records/{meeting_id}",
-                    headers={"X-API-Key": self.api_key},
+                    headers={"X-API-Key": self.api_key, **trace_headers()},
+                    follow_redirects=False,
                     json=payload,
                 )
                 if response.status_code not in {200, 202}:
@@ -80,6 +88,10 @@ class HttpRecordHandoff:
         return RecordResult(status="handoff_pending")
 
     async def _retry(self, meeting_id, payload):
+        with span("meeting.handoff_recovery", service="meeting") as recovery:
+            await self._retry_until_expiry(meeting_id, payload, recovery)
+
+    async def _retry_until_expiry(self, meeting_id, payload, recovery):
         until = self.monotonic() + self.hold_s
         delay = 5
         try:
@@ -88,9 +100,11 @@ class HttpRecordHandoff:
                 if self.monotonic() >= until:
                     break
                 if await self._put(meeting_id, payload) is not None:
+                    recovery.outcome("confirmed")
                     logger.info("meeting.record_handoff_saved meeting_id=%s", meeting_id)
                     return
                 delay = min(300, delay * 2)
+            recovery.outcome("failed")
             logger.error("meeting.record_handoff_failed meeting_id=%s", meeting_id)
         finally:
             self.pending.pop(meeting_id, None)

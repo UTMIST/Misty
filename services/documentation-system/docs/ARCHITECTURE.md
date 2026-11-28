@@ -951,3 +951,14 @@ Generation-time decisions/action items/participants remain separate fields;
 readable content follows current Google edits. Google creation is a single HTML
 conversion and later retries never write that body. Audio stays entirely outside
 this persistence boundary. No durable PDF copy is retained by the platform.
+
+### Recording recovery traces
+
+An accepted meeting may carry an internal trace reference. A retry links
+its own span to that exact acceptance, including after a process restart.
+It carries the accepted traffic class through the writer calls. Older rows
+without a trusted class count as background work during recovery.
+The meeting API omits this reference from responses. Older rows, disabled
+collection and references at least 30 days old produce unlinked work. A
+confirmed catalog save follows the storage commit. Indexing has its own
+result, and an ambiguous Google create remains visible after a later retry.

@@ -6,7 +6,9 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, delete, insert, inspect, select, update
+from sqlalchemy import create_engine, delete, insert, inspect, select, text, update
+
+from contracts.meeting import MeetingRecord
 
 from src.content import content_hash
 from tests.chunk_storage_cases import make_chunk
@@ -47,11 +49,23 @@ def test_migration_018_round_trip_preserves_identity_and_unrelated_data():
         expected[doc_id] = replacement or url
         return doc_id
 
+    def stored_meeting():
+        # Read the columns actually present in the historical revision.
+        with engine.connect() as conn:
+            row = (
+                conn.execute(
+                    text("SELECT * FROM meeting_records WHERE meeting_id = :id"), {"id": meeting_id}
+                )
+                .mappings()
+                .one()
+            )
+        return MeetingRecord.model_validate(dict(row))
+
     try:
-        command.downgrade(cfg, "017")
         pending, _ = MeetingRecords(adapter, Writer(), Directory(), get_settings()).accept(
             meeting_id, payload(), actor="meeting-key"
         )
+        command.downgrade(cfg, "017")
         for source, path in (
             ("gdocs", "document"),
             ("gsheets", "spreadsheets"),
@@ -129,7 +143,7 @@ def test_migration_018_round_trip_preserves_identity_and_unrelated_data():
 
         for _ in range(2):
             command.upgrade(cfg, "head")
-            assert adapter.get_meeting(meeting_id) == pending
+            assert stored_meeting() == pending
             assert adapter.list_doc_chunks(rows[0]["id"]) == chunks
             with engine.connect() as conn:
                 upgraded = {r.id: dict(r._mapping) for r in conn.execute(select(docs))}
@@ -139,7 +153,7 @@ def test_migration_018_round_trip_preserves_identity_and_unrelated_data():
                 }
                 assert conn.execute(select(doc_tags)).all() == tags
             command.downgrade(cfg, "017")
-            assert adapter.get_meeting(meeting_id) == pending
+            assert stored_meeting() == pending
             assert adapter.list_doc_chunks(rows[0]["id"]) == chunks
             assert "doc_source_url_backfill" not in inspect(engine).get_table_names()
             with engine.connect() as conn:

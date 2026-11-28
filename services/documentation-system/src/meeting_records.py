@@ -8,6 +8,8 @@ import logging
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from platform_auth.telemetry import parse_parent, span, trace_headers
+
 from contracts.directory import DirectoryUnavailable
 from contracts.meeting import MeetingRecord, MeetingRetryResult, WriterError
 from src.indexing import index_doc
@@ -71,6 +73,10 @@ class MeetingRecords:
         self.now = now or (lambda: datetime.now(timezone.utc))
 
     def accept(self, meeting_id, payload, *, actor):
+        with span("catalog.accept", service="documentation-system"):
+            return self._accept(meeting_id, payload, actor=actor)
+
+    def _accept(self, meeting_id, payload, *, actor):
         existing = self.storage.get_meeting(meeting_id)
         digest = payload_digest(payload)
         if existing:
@@ -96,9 +102,12 @@ class MeetingRecords:
             requester = None
         now = self.now()
         fields = payload.model_dump(exclude={"transcript", "participants"})
+        context = trace_headers()
         record = MeetingRecord(
             meeting_id=meeting_id,
             payload_hash=digest,
+            accept_traceparent=context.get("traceparent"),
+            accept_traffic=context.get("x-misty-traffic"),
             **fields,
             participants=participants,
             requester_person_id=requester,
@@ -176,13 +185,39 @@ class MeetingRecords:
             exc.code,
         )
 
+    def _worker_span(self, operation, record):
+        # Recovery may run in a different process. Only an observed acceptance
+        # establishes the link. Legacy records start independent work.
+        link = record.accept_traceparent
+        if self.now() >= record.created_at + timedelta(days=30):
+            link = None
+        parent = parse_parent(link)
+        return span(
+            operation,
+            service="documentation-system",
+            trace_id=parent[0] if parent else uuid4().hex,
+            link=link,
+            traffic=(record.accept_traffic if parent else None) or "background",
+        )
+
+    def _writer_call(self, operation, method, *args, **kwargs):
+        with span(operation, service="documentation-system") as call:
+            try:
+                return method(*args, **kwargs)
+            except WriterError as exc:
+                call.outcome("ambiguous" if exc.uncertain else "failed")
+                raise
+
     def _index(self, record):
         if self.embedder is None or not record or record.removed_at or not record.index_pending:
             return
-        outcome = index_doc(
-            record.doc_id, storage=self.storage, embedder=self.embedder, target=self.target
-        )
-        pending = outcome.status in {"failed", "skipped"}
+        with span("catalog.index", service="documentation-system") as call:
+            outcome = index_doc(
+                record.doc_id, storage=self.storage, embedder=self.embedder, target=self.target
+            )
+            pending = outcome.status in {"failed", "skipped"}
+            if pending:
+                call.outcome("pending")
         self._change(
             record,
             index_pending=pending,
@@ -204,12 +239,16 @@ class MeetingRecords:
         if not explicit and r.next_attempt_at and r.next_attempt_at > now:
             return
         if r.persistence_status == "saved":
-            self._index(r)
+            if r.index_pending and self.embedder is not None:
+                with self._worker_span("catalog.advance", r):
+                    self._index(r)
             return
         if r.attempts >= self.settings.meeting_record_max_attempts and not explicit:
-            self._change(
-                r, persistence_status="failed", last_error="attempt_limit", failed_at=self.now()
-            )
+            with self._worker_span("catalog.advance", r) as call:
+                updated = self._change(
+                    r, persistence_status="failed", last_error="attempt_limit", failed_at=self.now()
+                )
+                call.outcome("failed" if updated else "unknown")
             return
         r = self._change(
             r,
@@ -221,10 +260,19 @@ class MeetingRecords:
         )
         if r is None:
             return
+        with self._worker_span("catalog.advance", r) as call:
+            self._advance_claimed(r, call)
+
+    def _advance_claimed(self, r, call):
+        meeting_id = r.meeting_id
+        call.outcome("unknown")  # A competing lease can fence this worker.
         creating = not r.google_document_id
+        cataloged = False
         try:
             if creating:
-                matches = self.writer.search(r.meeting_id)
+                matches = self._writer_call(
+                    "catalog.writer_search", self.writer.search, r.meeting_id
+                )
                 if not self._owns(r):
                     return
                 matches = [f for f in matches if f.document_id not in r.google_deletions]
@@ -240,7 +288,9 @@ class MeetingRecords:
                     raise WriterError("payload_unavailable")
                 else:
                     # Every attempt is tagged before Google can see its body.
-                    document_id = self.writer.create(
+                    document_id = self._writer_call(
+                        "catalog.writer_create",
+                        self.writer.create,
                         meeting_id=r.meeting_id,
                         attempt_id=r.create_attempt_id,
                         voice_channel_id=r.voice_channel_id,
@@ -253,7 +303,12 @@ class MeetingRecords:
                 creating = False
             if not self._owns(r):
                 return
-            self.writer.share(r.google_document_id, r.audience_group_emails)
+            self._writer_call(
+                "catalog.writer_share",
+                self.writer.share,
+                r.google_document_id,
+                r.audience_group_emails,
+            )
             if not self._owns(r):
                 return
             r = self._change(r, persistence_status="shared")
@@ -277,13 +332,17 @@ class MeetingRecords:
                 actor="meeting-records",
             )
             if cataloged:
+                call.outcome("confirmed")
                 self._index(self.storage.get_meeting(meeting_id))
         except WriterError as exc:
+            call.outcome("ambiguous" if exc.uncertain else "failed")
             if exc.code == "unexpected_acl" and r.google_document_id:
                 self.remove(r.meeting_id, actor="security:unexpected_acl")
             else:
                 self._failure(r, exc, creating=creating)
         except Exception:
+            if not cataloged:
+                call.outcome("failed")
             # Includes catalog/directory failures. The ID and pending state are
             # already durable. Never include exceptions containing private data.
             self._failure(r, WriterError("persistence_unavailable"), creating=creating)
@@ -313,11 +372,16 @@ class MeetingRecords:
         )
         if r is None:
             return
+        with self._worker_span("catalog.reconcile", r) as call:
+            self._reconcile_claimed(r, call)
+
+    def _reconcile_claimed(self, r, call):
+        meeting_id = r.meeting_id
         error = None
         try:
             if r.removed_at:
                 r = self.storage.purge_meeting_catalog(meeting_id, [], actor="meeting-reconcile")
-            matches = self.writer.search(r.meeting_id)
+            matches = self._writer_call("catalog.writer_search", self.writer.search, r.meeting_id)
             ids = {match.document_id for match in matches}
             ids.update(
                 document_id
@@ -345,6 +409,7 @@ class MeetingRecords:
                         )
                     self._delete(meeting_id, document_id, cleanup_attempt=r.create_attempt_id)
         except Exception:
+            call.outcome("failed")
             error = "reconcile_failed"
             logger.warning("meeting.reconcile_failed meeting_id=%s", meeting_id)
         finally:
@@ -409,6 +474,8 @@ class MeetingRecords:
                     "delivery_status": "disabled",
                     "index_pending": False,
                     "pending_payload": None,
+                    "accept_traceparent": None,
+                    "accept_traffic": None,
                     "next_reconcile_at": self.now(),
                     "title": None,
                     "summary": None,
@@ -484,6 +551,12 @@ class MeetingRecords:
         now = self.now()
         due = []
         for r in self.storage.list_meetings():
+            if (
+                r.accept_traceparent
+                and now >= r.created_at + timedelta(days=30)
+                and not (r.create_lease_until and r.create_lease_until > now)
+            ):
+                self._change(r, accept_traceparent=None, accept_traffic=None)
             times = [
                 t
                 for t in (
