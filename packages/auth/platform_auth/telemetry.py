@@ -310,11 +310,12 @@ def request_span(request, logger_name):
 def internal_request(send, *args, headers, **kwargs):
     """Wrap one configured, authenticated internal HTTP call, including its response."""
     with span("http.client") as call:
+        kwargs["follow_redirects"] = False
+        if call.traceparent:
+            headers = {**headers, **trace_headers()}
+        response = send(*args, headers=headers, **kwargs)
         if not call.traceparent:
-            return send(*args, headers=headers, **kwargs)
-        response = send(
-            *args, headers={**headers, **trace_headers()}, **{**kwargs, "follow_redirects": False}
-        )
+            return response
         code = response.status_code
         if code in (401, 403):
             call.outcome("denied")

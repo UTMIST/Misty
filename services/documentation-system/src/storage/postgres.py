@@ -1257,18 +1257,23 @@ class PostgresStorageAdapter:
         title_hash = func.encode(
             func.sha256(func.convert_to(func.coalesce(docs.c.title, ""), "UTF8")), "hex"
         )
+        has_text = doc_content.c.content_text.regexp_match(_HAS_NON_WHITESPACE)
         conditions = {
             "content_current": and_(fetched > since, fetched <= now),
             "content_unknown": or_(fetched.is_(None), fetched > now),
             "access_current": and_(synced > since, synced <= now),
             "access_unknown": or_(synced.is_(None), synced > now),
-            "index_current": and_(
-                served.c.source_title_hash == title_hash,
-                served.c.source_content_hash == doc_content.c.content_hash,
+            "index_current": or_(
+                and_(~has_text, served.c.doc_id.is_(None)),
+                and_(
+                    has_text,
+                    served.c.source_title_hash == title_hash,
+                    served.c.source_content_hash == doc_content.c.content_hash,
+                ),
             ),
             "index_unknown": or_(
                 doc_content.c.doc_id.is_(None),
-                and_(served.c.doc_id.is_not(None), served.c.source_title_hash.is_(None)),
+                and_(has_text, served.c.doc_id.is_not(None), served.c.source_title_hash.is_(None)),
             ),
         }
         stmt = (

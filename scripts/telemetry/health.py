@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from html import escape
 import json
 
+from dashboard_ui import sources
+
 
 def _table(headings, rows):
     def cells(values, tag):
@@ -95,22 +97,34 @@ def _outcomes(rows, operation):
 
 def _catalog(db, traffic, end):
     parts = ["<h2>Catalog evidence</h2>"]
+    # Snapshots built before collection could retain a conflicting end have
+    # no conflict_at column. Keep serving them until the next atomic rebuild.
+    has_conflict = any(
+        row[1] == "conflict_at" for row in db.execute("pragma table_info(health_jobs)")
+    )
+    conflict = "conflict_at" if has_conflict else "null"
+    jobs = f"""with jobs as (
+      select operation,started,case when {conflict}<:end then {conflict} else ts end as ts,
+        case when {conflict}<:end then 'unknown' else result end as result,
+        case when {conflict}<:end then '{{}}' else measures end as measures
+      from health_jobs where traffic=:traffic and ts<:end and operation=:operation
+    ) """
+    bounds = {"end": end, "traffic": traffic}
     for operation, label, good in (
         ("catalog.discovery", "Discovery", "clean"),
         ("catalog.refresh", "Refresh", "drained"),
     ):
+        params = dict(bounds, operation=operation, good=good)
         latest = db.execute(
-            "select ts,result,measures from health_jobs where traffic=? and operation=? and ts<? order by ts desc limit 1",
-            (traffic, operation, end),
+            jobs + "select ts,result,measures from jobs order by ts desc limit 1",
+            params,
         ).fetchone()
-        success = db.execute(
-            "select max(ts) from health_jobs where traffic=? and operation=? and result=? and ts<?",
-            (traffic, operation, good, end),
-        ).fetchone()[0]
-        finished = db.execute(
-            "select max(ts) from health_jobs where traffic=? and operation=? and result in (?, 'gaps') and ts<?",
-            (traffic, operation, good, end),
-        ).fetchone()[0]
+        success, finished = db.execute(
+            jobs
+            + """select max(case when result=:good then ts end),
+                     max(case when result in (:good, 'gaps') then ts end) from jobs""",
+            params,
+        ).fetchone()
         row = (
             label,
             latest["ts"] if latest else "Unknown",
@@ -144,8 +158,8 @@ def _catalog(db, traffic, end):
                 )
             )
     last = db.execute(
-        "select ts,result,measures from health_jobs where traffic=? and operation='catalog.freshness' and ts<? order by ts desc limit 1",
-        (traffic, end),
+        jobs + "select ts,result,measures from jobs order by ts desc limit 1",
+        dict(bounds, operation="catalog.freshness"),
     ).fetchone()
     if not last:
         return (
@@ -267,6 +281,14 @@ def render_health(
 ):
     parts = ["<h2>Workflow health</h2>"]
     source_status = []
+    receipts = {
+        row["service"]: (row, status)
+        for row, status in sources(
+            source_db or db,
+            datetime.fromisoformat(now.replace("Z", "+00:00")),
+            stale_seconds,
+        )
+    }
     for service in (
         "discord-bot",
         "documentation-system",
@@ -274,39 +296,17 @@ def render_health(
         "team-tracking",
         "verification",
     ):
-        state = (
-            (source_db or db)
-            .execute(
-                "select last_success,last_error,gaps,drops,rejected from sources where service=?",
-                (service,),
-            )
-            .fetchone()
-        )
-        stamp = state[0] if state else None
-        status = (
-            "No receipt"
-            if not stamp
-            else (
-                "Read failed"
-                if state[1]
-                else (
-                    "Stale"
-                    if not -60
-                    <= (
-                        datetime.fromisoformat(now.replace("Z", "+00:00"))
-                        - datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-                    ).total_seconds()
-                    <= stale_seconds
-                    else "Current"
-                )
-            )
-        )
+        row, status = receipts.get(service, (None, "No receipt"))
         source_status.append(
             (
                 service,
-                stamp or "Unknown",
+                (row["last_success"] if row else None) or "Unknown",
                 status,
-                *(state[2:] if state else ("—", "—", "—")),
+                *(
+                    (row["gaps"], row["drops"], row["rejected"])
+                    if row
+                    else ("—", "—", "—")
+                ),
             )
         )
     parts.append(
@@ -383,20 +383,38 @@ def render_health(
         )
         search = _outcomes(rows, "catalog.search")
         complete = search["results"] + search["no_hits"]
+        failures = sum(
+            search[key]
+            for key in (
+                "directory_unavailable",
+                "embedding_error",
+                "storage_unavailable",
+                "internal_error",
+                "failed",
+            )
+        )
+        total = sum(search.values())
+        unknown = total - (
+            complete
+            + search["no_channel_teams"]
+            + search["denied"]
+            + search["invalid_request"]
+            + failures
+            + search["cancelled"]
+        )
         searches.append(
             (
                 period,
+                total,
                 search["results"],
                 search["no_hits"],
                 f"{search['no_hits']}/{complete}" if complete else "—",
                 search["no_channel_teams"],
                 search["denied"],
                 search["invalid_request"],
-                search["directory_unavailable"]
-                + search["embedding_error"]
-                + search["storage_unavailable"]
-                + search["internal_error"],
-                search["unknown"],
+                failures,
+                search["cancelled"],
+                unknown,
             )
         )
         route_counts = {}
@@ -432,6 +450,7 @@ def render_health(
                     values["rate_limited"],
                     values["invalid_request"],
                     values["failed"],
+                    values["cancelled"],
                     values["unknown"],
                     round(elapsed / finished) if finished else "—",
                 )
@@ -462,6 +481,7 @@ def render_health(
         + _table(
             (
                 "Period",
+                "Searches",
                 "Results",
                 "No hits",
                 "Empty / complete",
@@ -469,6 +489,7 @@ def render_health(
                 "Denied",
                 "Invalid",
                 "Failure",
+                "Cancelled",
                 "Unknown",
             ),
             searches,
@@ -511,6 +532,7 @@ def render_health(
                     "Rate limited",
                     "Invalid",
                     "Server error",
+                    "Cancelled",
                     "Unknown",
                     "Mean finished ms",
                 ),

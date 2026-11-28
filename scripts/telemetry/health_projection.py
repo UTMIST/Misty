@@ -13,7 +13,7 @@ def materialize(raw, snap, cutoff):
           service text,operation text,route text,admitted_at text,ended text,result text,latency integer,conflict_at text);
         create index health_bounds on health_runs(traffic,started);
         create index health_crossings on health_runs(traffic,sealed,started);
-        create table health_jobs(traffic text,operation text,ts text,started text,result text,measures text);
+        create table health_jobs(traffic text,operation text,ts text,started text,result text,measures text,conflict_at text);
         create index job_end on health_jobs(traffic,operation,ts);
         create table health_marks(traffic text,ts text,name text,n integer, primary key(traffic,ts,name)) without rowid;
         create table health_resources(service text,observed_at text,cpu_cores real,memory_bytes integer,deployed_at text,
@@ -36,6 +36,7 @@ def materialize(raw, snap, cutoff):
         route = ""
         latency = 0
         last = None
+        job_measures = None
         for row in group:
             name, ts, value, elapsed, payload = row[5:]
             last = ts
@@ -45,16 +46,17 @@ def materialize(raw, snap, cutoff):
             elif name == "admitted" and admitted is None:
                 admitted = ts
             elif name == "end":
-                if op in ("catalog.discovery", "catalog.refresh", "catalog.freshness"):
-                    measures = json.dumps(
-                        json.loads(payload).get("measures", {}), separators=(",", ":")
-                    )
-                    snap.execute(
-                        "insert into health_jobs values(?,?,?,?,?,?)",
-                        (traffic, op, ts, start, value, measures),
-                    )
                 if ended is None:
                     ended, result, latency = ts, value, elapsed
+                    if op in (
+                        "catalog.discovery",
+                        "catalog.refresh",
+                        "catalog.freshness",
+                    ):
+                        job_measures = json.dumps(
+                            json.loads(payload).get("measures", {}),
+                            separators=(",", ":"),
+                        )
                 elif value != result and conflict is None:
                     conflict = ts
             elif (op, name) in (
@@ -66,6 +68,11 @@ def materialize(raw, snap, cutoff):
                   on conflict(traffic,ts,name) do update set n=n+1""",
                     (traffic, ts, name),
                 )
+        if job_measures is not None:
+            snap.execute(
+                "insert into health_jobs values(?,?,?,?,?,?,?)",
+                (traffic, op, ended, start, result, job_measures, conflict),
+            )
         if not start:
             continue
         minute = start[:16] + ":00.000Z"

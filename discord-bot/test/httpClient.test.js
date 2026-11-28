@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { createHttpClient } from '../src/clients/httpClient.js';
 
 class TypeA extends Error {}
@@ -128,4 +129,54 @@ test('timeoutMs arms an AbortController and the abort surfaces as networkError',
     (e) => e instanceof TypeA,
   );
   assert.equal(gotSignal, true);
+});
+
+test('authenticated requests refuse cross-origin redirects with telemetry on and off', async (t) => {
+  async function listen(handler) {
+    const server = createServer(handler);
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    t.after(() => new Promise((resolve) => server.close(resolve)));
+    return `http://127.0.0.1:${server.address().port}`;
+  }
+
+  let forwarded = 0;
+  const target = await listen((_req, res) => {
+    forwarded++;
+    res.end();
+  });
+  const seen = [];
+  const origin = await listen((req, res) => {
+    seen.push(req.headers);
+    res.writeHead(307, { Location: target });
+    res.end();
+  });
+  const { send } = createHttpClient({
+    baseUrl: origin,
+    headers: { 'X-API-Key': 'fixture' },
+    networkError: () => new TypeA('redirect refused'),
+  });
+
+  for (const name of ['TELEMETRY_ENABLED', 'TELEMETRY_ENV', 'TELEMETRY_TRAFFIC']) {
+    const prior = process.env[name];
+    t.after(() => {
+      if (prior === undefined) delete process.env[name];
+      else process.env[name] = prior;
+    });
+  }
+  process.env.TELEMETRY_ENV = 'local';
+  process.env.TELEMETRY_TRAFFIC = 'synthetic';
+  for (const enabled of ['false', 'true']) {
+    process.env.TELEMETRY_ENABLED = enabled;
+    await assert.rejects(send('/private', { method: 'POST', redirect: 'follow' }), TypeA);
+  }
+  assert.equal(forwarded, 0);
+  assert.deepEqual(
+    seen.map((h) => h['x-api-key']),
+    ['fixture', 'fixture'],
+  );
+  assert.equal(seen[0].traceparent, undefined);
+  assert.match(seen[1].traceparent, /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
 });

@@ -90,7 +90,8 @@ class FakeHttp:
         repaired = self._repaired_ids()
         return [d for d in self._docs if d.get("id") not in repaired]
 
-    def get(self, url, headers=None, params=None):
+    def get(self, url, headers=None, params=None, *, follow_redirects=False):
+        assert follow_redirects is False
         if self._get_raises is not None:
             raise self._get_raises
         self.gets.append((url, dict(params or {})))
@@ -102,7 +103,8 @@ class FakeHttp:
             return _as_resp(self._contentless())
         raise AssertionError(f"unexpected GET {url}")
 
-    def post(self, url, headers=None):
+    def post(self, url, headers=None, *, follow_redirects=False):
+        assert follow_redirects is False
         doc_id = url.rsplit("/docs/", 1)[1].removesuffix("/refetch")
         self.refetched.append(doc_id)
         outcome = self._refetch.get(doc_id, FakeResp(200, {"id": doc_id}))
@@ -344,7 +346,7 @@ def test_api_key_is_sent_as_a_header_not_a_query_param():
     http = FakeHttp(sources=[_source("web", fetch=True)], docs=[])
     captured = {}
 
-    def get(url, headers=None, params=None):
+    def get(url, headers=None, params=None, *, follow_redirects=False):
         captured["headers"] = headers
         captured["url"] = url
         return FakeResp(200, [])
@@ -414,7 +416,7 @@ def test_a_scope_listing_without_scopes_is_fatal():
     empty-listing trap reappears one layer up."""
     http = FakeHttp(sources=[_source("web", fetch=True)], docs=[_doc("d1")])
 
-    def get(url, headers=None, params=None):
+    def get(url, headers=None, params=None, *, follow_redirects=False):
         if url.endswith("/api-keys/self"):
             return FakeResp(200, {"name": "content-backfill"})
         raise AssertionError(f"unexpected GET {url}")
@@ -426,7 +428,9 @@ def test_a_scope_listing_without_scopes_is_fatal():
 
 def test_unauthorized_scope_check_is_fatal():
     http = FakeHttp(sources=[_source("web", fetch=True)], docs=[_doc("d1")])
-    http.get = lambda url, headers=None, params=None: FakeResp(401, {"detail": "bad key"})
+    http.get = lambda url, headers=None, params=None, *, follow_redirects=False: FakeResp(
+        401, {"detail": "bad key"}
+    )
     with pytest.raises(BackfillError, match="401"):
         run_backfill(_client(http))
 

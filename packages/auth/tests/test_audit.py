@@ -1,10 +1,14 @@
+import asyncio
 import json
+
+import httpx
+import pytest
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from platform_auth import AuditLogMiddleware
+from platform_auth import AuditLogMiddleware, telemetry
 
 
 def test_emits_one_json_line_per_request(capsys):
@@ -93,3 +97,48 @@ def test_audit_extra_non_string_key_does_not_drop_line(capsys):
     assert entry["status"] == 200
     assert entry["path"] == "/k"
     assert entry[str(("a", "b"))] == "v"  # key stringified, value preserved
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize(
+    "error_type,status,result",
+    [(asyncio.CancelledError, 499, "cancelled"), (RuntimeError, 500, "failed")],
+)
+def test_interrupted_request_preserves_exception_and_closes_span_once(
+    monkeypatch, capsys, enabled, error_type, status, result
+):
+    monkeypatch.setenv("TELEMETRY_ENABLED", str(enabled).lower())
+    monkeypatch.setenv("TELEMETRY_ENV", "local")
+    rows = []
+    monkeypatch.setattr(telemetry._emitter, "offer", rows.append)
+    app = FastAPI()
+    app.add_middleware(AuditLogMiddleware, logger_name="gateway.audit")
+
+    async def exercise():
+        started = asyncio.Event()
+
+        @app.get("/health")
+        async def handler():
+            started.set()
+            if error_type is asyncio.CancelledError:
+                await asyncio.Future()
+            raise error_type("private-cause")
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://fixture"
+        ) as client:
+            task = asyncio.create_task(client.get("/health"))
+            await started.wait()
+            if error_type is asyncio.CancelledError:
+                task.cancel()
+            with pytest.raises(error_type):
+                await task
+
+    asyncio.run(exercise())
+    entry = json.loads(capsys.readouterr().out)
+    assert entry["status"] == status
+    assert [(r["event_name"], r["result"]) for r in rows] == (
+        [("start", "started"), ("end", result)] if enabled else []
+    )
+    assert all(r["operation"] == "http.request" for r in rows)
+    assert "private-cause" not in json.dumps([entry, rows])

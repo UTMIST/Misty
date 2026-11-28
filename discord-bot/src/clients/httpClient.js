@@ -29,7 +29,7 @@ export function createHttpClient({
         const response = await fetchImpl(`${baseUrl}${path}`, {
           ...rest,
           headers: span.traceparent ? { ...mergedHeaders, ...traceHeaders() } : mergedHeaders,
-          ...(span.traceparent && { redirect: 'error' }),
+          redirect: 'error',
           ...(controller ? { signal: controller.signal } : {}),
         });
         if (response.status >= 400)

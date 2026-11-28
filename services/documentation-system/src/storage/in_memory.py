@@ -712,7 +712,13 @@ class InMemoryStorageAdapter:
                 elif stamp > since:
                     counts[f"{dimension}_current"] += 1
             chunks = self._chunks.get(doc.id, {}).get(model, [])
-            if not content or (chunks and chunks[0].source_title_hash is None):
+            if not content:
+                counts["index_unknown"] += 1
+            elif not content[0].strip():
+                # The indexer's finished state for blank text is no serving chunks.
+                if not chunks:
+                    counts["index_current"] += 1
+            elif chunks and chunks[0].source_title_hash is None:
                 counts["index_unknown"] += 1
             elif (
                 chunks

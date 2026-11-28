@@ -8,7 +8,8 @@ import pytest
 from contracts.types import MAX_CHUNK_CHARS, DocChunk, SourceGrant
 from contracts.visibility import Actor, DENY, SEE_ALL
 from src.content import content_hash
-from tests.fake_embedder import FAKE_MODEL
+from src.indexing import index_doc
+from tests.fake_embedder import FAKE_MODEL, FakeEmbedder
 
 LARGE_MODEL = "text-embedding-3-large"
 
@@ -91,6 +92,30 @@ class ChunkStorageCases:
         }
         assert adapter.source_freshness(["web"], FAKE_MODEL, since, now) == expected
         assert adapter.source_freshness([], FAKE_MODEL, since, now) == dict.fromkeys(expected, 0)
+
+    @pytest.mark.parametrize("blank", ["", " \t\r\n", "\u3000\u2028\x1c\x85"])
+    def test_blank_text_freshness_matches_empty_index(self, adapter, blank):
+        now = datetime.now(timezone.utc)
+        doc = self._with_content(adapter, blank)
+
+        def index_counts():
+            counts = adapter.source_freshness(["web"], FAKE_MODEL, now - timedelta(days=1), now)
+            return counts["eligible"], counts["index_current"], counts["index_unknown"]
+
+        assert index_counts() == (1, 1, 0)
+        # A set left behind when a refresh replaced searchable text with blanks
+        # stays stale until the normal indexer removes it without a paid call.
+        adapter.replace_doc_chunks(doc.id, [make_chunk(source_text="previous text")])
+        assert index_counts() == (1, 0, 0)
+        embedder = FakeEmbedder()
+        assert index_doc(doc.id, storage=adapter, embedder=embedder).status == "cleared"
+        assert not embedder.calls
+        assert index_counts() == (1, 1, 0)
+        visible = blank + "x"
+        adapter.upsert_doc_content(
+            doc.id, content_text=visible, content_hash=content_hash(visible), fetched_at=now
+        )
+        assert index_counts() == (1, 0, 0)
 
     def test_chunk_round_trip_with_unicode_offsets_and_order(self, adapter):
         doc = make_doc(adapter)

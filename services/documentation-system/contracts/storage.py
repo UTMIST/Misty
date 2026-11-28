@@ -419,7 +419,10 @@ class StorageAdapter(Protocol):
     def source_freshness(
         self, source_ids: Sequence[str], model: str, since: datetime, now: datetime
     ) -> dict[str, int]:
-        """Count active, fetch-enabled source docs at one observation time."""
+        """Count active, fetch-enabled source docs at one observation time.
+
+        Blank stored text is index-current exactly when the serving model has no chunks.
+        """
         ...
 
     def get_index_coverage(self, models: Sequence[str]) -> IndexCoverage:

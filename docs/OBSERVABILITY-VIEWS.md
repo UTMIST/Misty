@@ -163,7 +163,8 @@ attempt unknown. Admission is a separate positive observation. Full answers
 require Discord to accept all intended parts. The median covers fully delivered
 answers. Tool rounds count model calls that requested tools. Part counts exclude
 notices. Empty search rate divides complete zero-hit searches by successful
-searches with hits plus successful zero-hit searches.
+searches with hits plus successful zero-hit searches. Failures, cancellations, and
+unknown outcomes each count toward total searches and are excluded from this rate.
 
 Select background traffic for scheduled catalog runs. The catalog measures content,
 index and access from the same owner-side database snapshot at guard release.
@@ -205,8 +206,9 @@ python3 scripts/telemetry/project.py --environment local --db "$pilot_dir/events
   --snapshot "$pilot_dir/workflows.sqlite"
 ```
 
-Build the snapshot once per minute. Prepare a mode-0600 access file containing
-a JSON array of records. Each record contains `user`, `environment`, `role`
+Build the snapshot once per minute. The access file must be a regular file owned
+by the dashboard user with mode 0600. The dashboard rejects symbolic links.
+Use a JSON array of records. Each record contains `user`, `environment`, `role`
 and `sha256`. Set `role` to `lead`, `developer` or `admin`. Store the SHA-256
 hex digest of a unique random secret in `sha256` and deliver the original
 secret to its user privately. The server reads this file at startup.
@@ -229,6 +231,10 @@ python3 scripts/telemetry/project.py --prune --environment local --snapshot "$pi
 The collector and snapshot use a 29-day event window. Daily pruning keeps
 stored observations within the 30-day limit while jobs are running. When
 resuming an offline pilot, prune expired rows before opening the dashboard.
+After updating the collector, reopen the raw database with the collector and
+rebuild the snapshot before restarting the dashboard. Older collectors discarded
+conflicting end events. Recover them by reimporting the original logs while the
+events are within retention.
 
 ### Importing local Railway resource samples
 
@@ -252,7 +258,7 @@ or calls to Railway are required by the importer.
 python3 scripts/telemetry/resource_metrics.py /private/path/collector.sqlite local samples.csv
 ```
 
-The importer accepts at most 10,000 rows and 2 MB, within the last 30 days.
+The importer accepts at most 10,000 rows and 2 MB, within the collector’s 29-day window.
 Conflicting duplicates, invalid counts, future observations, cross-environment
 rows and extra columns reject the import. Exact duplicates can be replayed.
 The resource table shows sample count, arithmetic mean CPU, peak memory in

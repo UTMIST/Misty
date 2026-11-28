@@ -831,9 +831,11 @@ read-only aggregate over active Google documents from fetch-enabled sources.
 Content freshness uses the stored text's fetch time. Access freshness uses its
 last successful reconciliation, including revocation. Each compares against
 the configured refresh interval. Missing or future timestamps are unknown.
-Index currency requires matching content and title hashes for the serving model.
-Missing content or a legacy set with an unknown title hash leaves index state
-unknown. A document with stored content and no serving set has a missing index.
+For searchable text, index currency requires matching content and title hashes
+for the serving model. A missing serving set is stale, and a legacy set with an
+unknown title hash has unknown currency. Missing content also has unknown currency.
+Empty or whitespace-only text is current once the serving model has no chunks;
+leftover serving chunks are stale until the indexer clears them.
 The aggregate query never reads document text into the telemetry stream.
 
 ## SSRF protection in the web fetcher

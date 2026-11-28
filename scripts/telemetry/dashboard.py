@@ -5,12 +5,13 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import re
 import sqlite3
+import stat
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from store import RETENTION
@@ -153,7 +154,21 @@ def page(body):
 
 
 def load_access(path):
-    rows = json.loads(Path(path).read_text())
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise ValueError(
+                "access file must be owned by the dashboard user and have mode 0600"
+            )
+        with open(fd, encoding="utf-8", closefd=False) as stream:
+            rows = json.load(stream)
+    finally:
+        os.close(fd)
     if not isinstance(rows, list) or not rows:
         raise ValueError("access file must contain users")
     access = {}

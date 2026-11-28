@@ -17,6 +17,7 @@ import tempfile
 import unittest
 from urllib.parse import urlsplit
 
+from dashboard import load_access
 from project import FEATURES
 from store import connect, insert, iso
 
@@ -110,6 +111,36 @@ def get(url, path, auth=True):
 
 
 class DashboardHostTests(unittest.TestCase):
+    def test_access_rejects_public_file_link_and_fifo(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            access = root / "access.json"
+            access.write_text(
+                json.dumps(
+                    [
+                        dict(
+                            user="ops",
+                            environment="local",
+                            role="lead",
+                            sha256="f" * 64,
+                        )
+                    ]
+                )
+            )
+            access.chmod(0o640)
+            with self.assertRaises(ValueError):
+                load_access(access)
+            access.chmod(0o600)
+            self.assertIn(("local", "ops"), load_access(access))
+            link = root / "link"
+            link.symlink_to(access)
+            with self.assertRaises(OSError):
+                load_access(link)
+            fifo = root / "fifo"
+            os.mkfifo(fifo, 0o600)
+            with self.assertRaises(ValueError):
+                load_access(fifo)
+
     def exercise(self, feature):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
@@ -143,6 +174,7 @@ class DashboardHostTests(unittest.TestCase):
                     db.execute(f"select count(*) from {table}").fetchone()[0], 1
                 )
             access = root / "grants.json"
+            access.touch(mode=0o600)
             access.write_text(
                 json.dumps(
                     [

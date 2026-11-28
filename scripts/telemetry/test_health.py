@@ -13,7 +13,7 @@ from contextlib import closing
 from dashboard import report_page
 from health_projection import materialize
 from resource_metrics import FIELDS, import_samples
-from store import connect, insert, iso, validate
+from store import RETENTION, connect, insert, iso, prune, validate
 
 END = datetime(2026, 11, 20, 14, tzinfo=timezone.utc)
 
@@ -151,9 +151,19 @@ class HealthTest(unittest.TestCase):
             "no_channel_teams",
             "denied",
             "embedding_error",
+            "failed",
+            "cancelled",
+            None,
         ):
             self.attempt("catalog.search", outcome, service="documentation-system")
-        for result in ("success", "denied", "rate_limited", "failed", None):
+        for result in (
+            "success",
+            "denied",
+            "rate_limited",
+            "failed",
+            "cancelled",
+            None,
+        ):
             self.attempt(
                 "http.request", result, service="gateway", route="/v1/auth/email/start"
             )
@@ -163,9 +173,15 @@ class HealthTest(unittest.TestCase):
             "<td>Current</td><td>0</td><td>0</td><td>22</td><td>4600</td>", page
         )
         self.assertIn("<td>Previous</td><td>1</td><td>1</td><td>1</td>", page)
-        self.assertIn("<td>1/3</td>", page)
         self.assertIn(
-            "<td>/v1/auth/email/start</td><td>5</td><td>1</td><td>1</td><td>0</td><td>1</td><td>1</td><td>4600</td>",
+            "<td>Current</td><td>9</td><td>2</td><td>1</td><td>1/3</td>"
+            "<td>1</td><td>1</td><td>0</td><td>2</td><td>1</td><td>1</td>",
+            page,
+        )
+        for result in ("failed", "cancelled", "unknown"):
+            self.assertIn(f"<td>catalog.search</td><td>{result}</td><td>1</td>", page)
+        self.assertIn(
+            "<td>/v1/auth/email/start</td><td>6</td><td>1</td><td>1</td><td>0</td><td>1</td><td>1</td><td>1</td><td>4600</td>",
             page,
         )
         self.assertNotIn(lost, page)
@@ -237,6 +253,26 @@ class HealthTest(unittest.TestCase):
         self.assertNotIn("<td>content</td><td>1</td><td>1</td><td>1</td>", page)
         self.assertIn("<td>Current</td><td>2</td><td>3</td><td>4</td>", page)
 
+    def test_initial_read_failure_and_recovery(self):
+        self.assertIn(
+            "<td>gateway</td><td>Unknown</td><td>No receipt</td>", self.page()
+        )
+        with self.db:
+            self.db.execute(
+                "insert into sources(service,last_error) values('gateway','read_failed')"
+            )
+        self.assertIn(
+            "<td>gateway</td><td>Unknown</td><td>Read failed</td>", self.page()
+        )
+        with self.db:
+            self.db.execute(
+                "update sources set last_success=?,last_error=NULL where service='gateway'",
+                (iso(END),),
+            )
+        self.assertIn(
+            f"<td>gateway</td><td>{iso(END)}</td><td>Current</td>", self.page()
+        )
+
     def test_resource_import_is_atomic_replay_safe_and_bound_to_environment(self):
         def data(rows):
             stream = StringIO()
@@ -280,6 +316,26 @@ class HealthTest(unittest.TestCase):
             import_samples(self.db, "local", data([conflict]), END)
         self.assertEqual(
             self.db.execute("select count(*) from railway_samples").fetchone()[0], 1
+        )
+        boundary = row.copy()
+        boundary[2] = iso(END - RETENTION)
+        boundary[5] = ""
+        expired = boundary.copy()
+        expired[2] = iso(END - RETENTION - timedelta(milliseconds=1))
+        with self.assertRaises(ValueError):
+            import_samples(self.db, "local", data([boundary, expired]), END)
+        self.assertEqual(
+            self.db.execute("select count(*) from railway_samples").fetchone()[0], 1
+        )
+        import_samples(self.db, "local", data([boundary]), END)
+        prune(self.db, END)
+        self.assertEqual(
+            self.db.execute("select count(*) from railway_samples").fetchone()[0], 2
+        )
+        prune(self.db, END + timedelta(milliseconds=1))
+        self.assertEqual(
+            self.db.execute("select observed_at from railway_samples").fetchone()[0],
+            row[2],
         )
 
 

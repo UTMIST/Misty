@@ -2,12 +2,12 @@
 
 import argparse
 import csv
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import math
 from pathlib import Path
 import re
 
-from store import ENVIRONMENTS, SERVICES, connect, iso, utc
+from store import ENVIRONMENTS, RETENTION, SERVICES, connect, iso, utc
 
 FIELDS = [
     "environment",
@@ -29,7 +29,7 @@ def import_samples(db, env, stream, now):
     rows = csv.DictReader(stream)
     if rows.fieldnames != FIELDS:
         raise ValueError("invalid CSV header")
-    oldest = now - timedelta(days=30)
+    oldest = now - RETENTION
     with db:
         db.execute(SCHEMA)
         db.execute("delete from railway_samples where observed_at < ?", (iso(oldest),))
