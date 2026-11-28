@@ -916,7 +916,8 @@ and may contain blank lines and full-line `#` comments. The job records hashes
 of the effective lists and the ranking rule version.
 
 After migration 019 is deployed and the first restricted report is verified,
-create one dedicated staging service in the Railway dashboard. Connect repository
+create one dedicated staging service named `doc-vocabulary` in the Railway dashboard.
+Connect repository
 `UTMIST/Misty`, branch `staging`, and keep the root directory `/`. Set
 `RAILWAY_DOCKERFILE_PATH=/services/documentation-system/Dockerfile` and leave the
 Railway config file setting blank. Set one replica, no HTTP healthcheck, no
@@ -924,9 +925,11 @@ pre-deploy command, and no automatic restart. The catalog service owns migration
 
 Use the staging catalog database and served model. Set the worker's
 `DATABASE_URL` as a [sealed Railway variable](https://docs.railway.com/variables#sealed-variables)
-so Railway omits it from PR environment copies. Use a worker credential with
-`SELECT` on `doc_chunks` and `SELECT` and `INSERT` on `vocabulary_runs`.
-Keep the service out of PR deployments where possible. No provider keys, public
+so Railway omits it from PR environment copies. Create the worker login with
+[SQL on the staging Neon branch](https://neon.com/docs/manage/roles#manage-roles-with-sql)
+without `neon_superuser`. Grant database `CONNECT`, schema `USAGE`, `SELECT` on
+`doc_chunks`, and `SELECT` and `INSERT` on `vocabulary_runs`. Exclude this
+staging-only worker when cloning services into the persistent `dev` environment. No provider keys, public
 domain, or extra volume is required.
 
 Use this start command. It checks Railway's environment name before touching
@@ -944,9 +947,11 @@ and [provided variables](https://docs.railway.com/variables/reference).
 Monitor the command's exit status and aggregate completion counts, and check for a
 successful row each week. A duplicate trigger in the same UTC week exits
 successfully without replacing its result. An overlap or failure returns nonzero.
-Retry an interrupted run by running the same command again during that week. If
-the week has passed, the next successful run compares against the last recorded
-success. Failed attempts leave no candidate checkpoint or partial review data.
+Retry an interrupted staging run during the same week with
+[`railway cron run --service doc-vocabulary --environment staging`](https://docs.railway.com/cli/cron#railway-cron-run)
+or the dashboard's Cron Runs tab. If the week has passed, the next successful run
+compares against the last recorded success. Failed attempts leave no candidate
+checkpoint or partial review data.
 
 The restricted `vocabulary_runs` table stores the week, completion time, model,
 chunk snapshot fingerprint, rule versions, selected candidates (key, observed
