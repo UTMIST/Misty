@@ -273,6 +273,10 @@ Drive 404 cannot prove deletion, even for the writer: status returns
 file is positively identified; cleanup permanently deletes it. An unconfirmed
 404 during deletion returns `delete_unconfirmed`, keeping cleanup pending.
 
+## Verified GitHub accounts (#406)
+
+See [the identity/OAuth contract and operations guide](GITHUB-LINKING.md).
+
 ## Managed GitHub team mappings (#405)
 
 See [the HTTP contract, adoption policy and recovery guide](../../team-tracking/docs/GITHUB-TEAMS.md).

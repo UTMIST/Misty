@@ -52,6 +52,16 @@ class Settings(BaseSettings):
     # MAX_CONTENT_CHARS (1,000,000) so this guard never trips first — the
     # catalog's clamp must remain the authoritative one, or its "content
     # truncated" warning can never fire.
+    github_oauth_enabled: bool = False
+    github_oauth_client_id: SecretStr = SecretStr("")
+    github_oauth_client_secret: SecretStr = SecretStr("")
+    github_oauth_callback_url: str = ""
+    github_oauth_webhook_secret: SecretStr = SecretStr("")
+    github_oauth_vault_path: str = ""
+    github_oauth_vault_key: SecretStr = SecretStr("")
+    github_directory_url: str = ""
+    github_directory_api_key: SecretStr = SecretStr("")
+
     github_admin_token: SecretStr = SecretStr("")
     github_organization_id: int = Field(default=0, ge=0)
     github_organization: str = "UTMIST"
@@ -79,6 +89,40 @@ def verify_production_secrets(settings: Settings | None = None) -> None:
     # The optional OAuth writer may be disabled, but an enabled writer must
     # have complete configuration outside local (checked below).
     settings = settings or get_settings()
+    if settings.github_oauth_enabled:
+        from urllib.parse import urlsplit
+        from cryptography.fernet import Fernet
+
+        fields = [
+            settings.github_oauth_client_id.get_secret_value(),
+            settings.github_oauth_client_secret.get_secret_value(),
+            settings.github_oauth_callback_url,
+            settings.github_oauth_webhook_secret.get_secret_value(),
+            settings.github_oauth_vault_path,
+            settings.github_oauth_vault_key.get_secret_value(),
+            settings.github_directory_url,
+            settings.github_directory_api_key.get_secret_value(),
+        ]
+        if not all(fields):
+            raise RuntimeError("Enabled GitHub OAuth requires complete configuration")
+        url = urlsplit(settings.github_oauth_callback_url)
+        if (
+            url.scheme != "https"
+            or not url.hostname
+            or url.username
+            or url.password
+            or url.query
+            or url.fragment
+            or url.path != "/github/oauth/callback"
+        ):
+            raise RuntimeError("GitHub callback must be a fixed HTTPS /github/oauth/callback URL")
+        try:
+            Fernet(settings.github_oauth_vault_key.get_secret_value().encode())
+        except (ValueError, TypeError):
+            raise RuntimeError("Invalid GitHub vault encryption key") from None
+        if not settings.github_oauth_vault_path.startswith("/"):
+            raise RuntimeError("GitHub vault path must be absolute on a persistent volume")
+
     fields = [settings.github_admin_token.get_secret_value(), settings.github_organization_id]
     if any(fields) and not all(fields):
         raise RuntimeError(

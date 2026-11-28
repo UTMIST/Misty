@@ -2,6 +2,7 @@
 (no real ffmpeg/AWS/network) injected via app.dependency_overrides."""
 
 import asyncio
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -26,6 +27,7 @@ class FakeSession:
         self._segments = [Segment(speaker="alice", start_ms=0, text="hello")]
         self.raise_on_feed_for: set[str] = set()
         self.audio_complete = False
+        self.audio_complete_event = threading.Event()
         self.drops = {}
 
     def feed(self, speaker_id, display_name, opus_payload, ts_ms):
@@ -47,6 +49,7 @@ class FakeSession:
 
     def mark_audio_complete(self):
         self.audio_complete = True
+        self.audio_complete_event.set()
 
     def note_drop(self, reason, count=1):
         self.drops[reason] = self.drops.get(reason, 0) + count
@@ -304,9 +307,14 @@ def test_ws_stream_decode_error_drops_frame_but_keeps_session_alive(client, regi
 
         ws.send_bytes(_frame("bad-speaker", 0, b"undecodable"))
         ws.send_bytes(_frame("good-speaker", 100, b"opus-frame-ok"))
+        # Closing the TestClient socket cancels its handler. Wait for the
+        # ordered end-of-audio barrier so both threaded feeds finish first.
+        ws.send_json({"end_of_audio": True})
+        assert session.audio_complete_event.wait(3)
 
     session = registry.sessions["decode-err-session"]
     assert session.feed_calls == [("good-speaker", "good-speaker", b"opus-frame-ok", 100)]
+    assert session.drops == {"feed_raised": 1}
     # The connection stayed alive through the bad frame and tore down normally
     # via the disconnect path (not an unhandled-exception 1011).
     assert session.discard_called is True

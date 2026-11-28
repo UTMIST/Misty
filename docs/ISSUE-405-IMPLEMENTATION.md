@@ -12,10 +12,9 @@ runbook. This working branch keeps the pieces together for end-to-end review;
 local commits group the implementation by responsibility. It has not been pushed,
 deployed, or used to modify GitHub accounts.
 
-Both independent worktrees start at staging `52246a4` and allocate directory
-revision 012 from head 011. Whichever merges second must rebase, renumber its
-migration, and point `down_revision` at the new head before integration. Do not
-merge two different revisions named 012.
+The worktrees originally started independently at `52246a4`. The local
+account-linking branch now includes the managed-team branch: mapping migration
+012 follows 011, and verified-identity migration 013 follows 012.
 
 ## Verification
 

@@ -36,7 +36,7 @@ services and the public external gateway, plus the Discord bot as a consumer:
 | [`services/llm`](../services/llm) | Stateless LLM proxy | `POST /chat` via OpenAI (default) or Bedrock; `POST /embed` for retrieval; no database |
 | [`services/verification`](../services/verification) | Email ownership verification | request/confirm an email code; `verification:write` scope |
 | [`services/meeting`](../services/meeting) | **Stateful** live meeting transcription + minutes | WS audio stream in → rolling transcript → minutes/PDF on stop; `meetings` scope. Owns live sessions in one process — see [MEETING-RECORDING.md](MEETING-RECORDING.md) |
-| [`services/connectors`](../services/connectors) | Outbound content/discovery/writer adapter | Google/GitHub fetch, Google discovery and meeting-Doc operations; per-route scopes, no local DB. See its [API](../services/connectors/docs/API.md). |
+| [`services/connectors`](../services/connectors) | Outbound content/discovery/writer adapter | Google/GitHub fetch, Google discovery and meeting-Doc operations; per-route scopes, optional encrypted GitHub OAuth vault. See its [API](../services/connectors/docs/API.md). |
 | [`services/gateway`](../services/gateway) | Public external API | Curated `/v1` operations; per-consumer scoped keys in its own database; private HTTP calls to the owning services. |
 
 > **Meeting recording** spans two components (the `meeting` service + a Discord *voice surface* in the bot) with live session state and a dedicated bot voice path. Its cross-cutting design is documented separately in **[MEETING-RECORDING.md](MEETING-RECORDING.md)**.
@@ -59,7 +59,7 @@ their required directory context cannot be resolved. See the
 
 The other services are independent and share the conventions below:
 `verification` owns its own database and migrations; `llm` and `connectors` are
-stateless with no database at all; `meeting` has no database either but *is*
+stateless for LLM and source fetches; connectors optionally persists GitHub OAuth state in its own vault; `meeting` has no database either but *is*
 stateful in memory.
 
 Other service-to-service dependencies include:
@@ -231,7 +231,7 @@ describes how it applies them concretely.
   verification and gateway); inspect their migration directories for the
   current heads rather than pinning a deployment to an old revision. For
   cleanup/rollback exceptions, follow the service deployment guide. `llm`,
-  `meeting`, and `connectors` have no schema.
+  `meeting` have no schema. Connectors optionally owns a SQLite GitHub credential vault without Alembic; it never shares another service's tables.
 - **Two auth storage models.** The convention is scoped, argon2-hashed keys
   behind `platform_auth`'s `ApiKeyStore` protocol — but where they *live* varies
   with how many consumers a service has:
@@ -331,3 +331,10 @@ and filters candidates before ranking limits. See the
 and [deployment setup](../services/documentation-system/docs/DEPLOYMENT.md).
 Implementation does not establish that any particular live environment has its
 embedding provider, keys, corpus and scheduled refresh configured.
+
+## Optional GitHub credential persistence (#406)
+
+When GitHub account linking is enabled, connectors owns an encrypted SQLite vault
+on a dedicated volume. Its other source-fetch paths remain stateless. No service
+shares that file or its tokens; team-tracking owns verified identity only. See
+[the ownership and recovery contract](../services/connectors/docs/GITHUB-LINKING.md).

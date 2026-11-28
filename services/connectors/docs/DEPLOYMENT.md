@@ -51,7 +51,7 @@ uv --project services/connectors run connectors-keys \
 - **stdout** — the plaintext key, shown **once**. Set it as documentation-system's `CONNECTORS_API_KEY`.
 - **stderr** — the JSON object. Append it to connectors' `CONSUMER_KEYS` array.
 
-Then redeploy connectors. **Revoking is the same operation in reverse**: drop the entry from `CONSUMER_KEYS` and redeploy. There is no revoke command, because there is no database.
+Then redeploy connectors. **Revoking is the same operation in reverse**: drop the entry from `CONSUMER_KEYS` and redeploy. There is no API-key revoke command, because API keys are config-seeded.
 
 > Always pass `--project`. Every service declares a top-level `src` package, so in the shared workspace venv a bare invocation can resolve the wrong service's CLI and mint a key with the wrong envelope prefix. (The entry points differ — `src.mint_key:main` here, `src.cli:main` in team-tracking and documentation-system — but the `src` collision is what bites.) Verify the token starts with `connectors_`.
 
@@ -138,6 +138,10 @@ See the [platform rollout](../../../docs/RAILWAY-DEPLOYMENT.md#meeting-record-pe
 Google's [upload/conversion guide](https://developers.google.com/workspace/drive/api/guides/manage-uploads)
 and [permission inheritance guide](https://developers.google.com/workspace/drive/api/guides/manage-sharing)
 explain the two boundaries enforced here.
+
+## Verified GitHub accounts (#406)
+
+See [the identity/OAuth contract and operations guide](GITHUB-LINKING.md).
 
 ## Managed GitHub team mappings (#405)
 

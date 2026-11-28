@@ -1,3 +1,4 @@
+import github from './github.js';
 import link from './link.js';
 import verifyCode from './verify-code.js';
 import addEmail from './add-email.js';
@@ -20,6 +21,7 @@ import bug from './bug.js';
 // + one entry here.
 export const commands = new Map([
   [link.name, link],
+  [github.name, github],
   [verifyCode.name, verifyCode],
   [addEmail.name, addEmail],
   [verifyEmail.name, verifyEmail],

@@ -640,6 +640,14 @@ for failed, inaccessible or unsafe-ACL records. Meeting removal uses an internal
 atomic catalog purge with restoration guards; no public generic catalog-purge
 endpoint is exposed.
 
+## Verified GitHub linking (#406)
+
+Apply the directory identity migration, attach a connector-owned persistent
+volume, provision its encryption key and GitHub App OAuth credentials, then enable
+linking and register `/github`. Expose only the fixed callback and signed webhook
+paths through an HTTPS ingress with query logging disabled. Keep one worker.
+See [the complete setup and recovery guide](../services/connectors/docs/GITHUB-LINKING.md).
+
 ## Managed GitHub team mapping (#405)
 
 Apply directory migration 012, then configure the separate connector/admin keys

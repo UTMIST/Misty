@@ -6,6 +6,9 @@ from src.config import verify_production_secrets
 
 def create_app() -> FastAPI:
     verify_production_secrets()
+    from src.api.github_logging import protect_callback_logs
+
+    protect_callback_logs()
 
     from src.api.deps import get_key_store
 
@@ -23,6 +26,10 @@ def create_app() -> FastAPI:
     app.include_router(fetch_router.router)
     app.include_router(discovery.router)
     app.include_router(meeting.router)
+    from src.api.routers import github_oauth
+
+    app.include_router(github_oauth.router)
+
     from src.api.routers import github_teams
 
     app.include_router(github_teams.router)

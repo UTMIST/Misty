@@ -417,6 +417,7 @@ version = "0.1.0"
 source = { editable = "services/connectors" }
 dependencies = [
     { name = "argon2-cffi" },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "google-api-python-client" },
     { name = "google-auth" },
@@ -439,6 +440,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "argon2-cffi", specifier = ">=23.1" },
+    { name = "cryptography", specifier = ">=50.0.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "google-api-python-client", specifier = ">=2.100" },
     { name = "google-auth", specifier = ">=2.30" },

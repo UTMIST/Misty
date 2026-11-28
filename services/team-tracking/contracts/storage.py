@@ -1,3 +1,4 @@
+from contracts.github_identity import VerifiedGitHubIdentity
 from contextlib import AbstractContextManager
 from datetime import date, datetime
 from typing import Protocol
@@ -297,4 +298,20 @@ class StorageAdapter(Protocol):
 
     def deactivate_github_mapping(self, team_id: UUID, *, actor: str) -> GitHubTeamMapping | None:
         """Soft-disable and increment version; never delete a GitHub team."""
+        ...
+
+    def get_verified_github(self, person_id: UUID) -> VerifiedGitHubIdentity | None:
+        """Verified links only, never legacy username identifiers; inactive people return None."""
+        ...
+
+    def set_verified_github(
+        self, person_id: UUID, discord_id: str, github_id: int, login: str, *, actor: str
+    ) -> VerifiedGitHubIdentity:
+        """Active person and current Discord link must match. Duplicate accounts conflict.
+        Reconnect may update login for same numeric ID; switching requires unlink first.
+        """
+        ...
+
+    def unlink_verified_github(self, person_id: UUID, *, actor: str) -> None:
+        """Clear verified identity but retain its audited row; credentials are connector-owned."""
         ...

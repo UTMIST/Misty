@@ -525,3 +525,10 @@ as #362.
 Remaining limitation: the final read and the PATCH are separate requests. Closing
 that window needs a conditional write in team-tracking, which is a separate
 service change.
+
+### GitHub linking (#406)
+
+`/github` reuses linked-member command authentication and private replies in
+Discord and the web playground. Do not register it in helper tools: OAuth links,
+identity changes and tokens must stay outside model context. Follow the
+[connector runbook](../../services/connectors/docs/GITHUB-LINKING.md) for setup.

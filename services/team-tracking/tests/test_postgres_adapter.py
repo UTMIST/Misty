@@ -799,3 +799,9 @@ def test_github_mapping_contract(adapter):
     from github_mapping_contract import check_github_mapping_contract
 
     check_github_mapping_contract(adapter)
+
+
+def test_verified_github_identity_contract(adapter):
+    from github_identity_contract import check_github_identity_contract
+
+    check_github_identity_contract(adapter)

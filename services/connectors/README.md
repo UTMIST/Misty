@@ -1,6 +1,6 @@
 # connectors
 
-HTTP adapter for UTMIST's internal consumers: document fetching, Google metadata discovery, and an optional Google meeting-Doc writer, with scoped API-key auth and no local database.
+HTTP adapter for UTMIST's internal consumers: document fetching, Google metadata discovery, and an optional Google meeting-Doc writer, with scoped API-key auth and an optional encrypted GitHub OAuth credential vault.
 
 ## What this service does
 
@@ -11,7 +11,7 @@ Two things this service deliberately is **not**:
 - **Not a gateway.** It does not sit in front of other UTMIST services or route traffic to them.
 - **Not the final authorization boundary.** It authenticates the *calling service*, not an end user. For Google sources it returns the complete effective Drive ACL with the text; documentation-system resolves that evidence to verified people and membership-synced team groups before storing or disclosing content. The ACL is read before export/download, and an ACL-read failure blocks the content fetch.
 
-There is no local database, migration, or persisted key store. API keys are seeded from a config env var at boot. The meeting writer changes durable Google state; interrupted writes need [catalog reconciliation](docs/DEPLOYMENT.md#rollback).
+API keys have no local database, migration, or persisted key store; optional GitHub OAuth credentials use the separate encrypted vault below. API keys are seeded from a config env var at boot. The meeting writer changes durable Google state; interrupted writes need [catalog reconciliation](docs/DEPLOYMENT.md#rollback).
 
 ## Quick start
 
@@ -88,7 +88,7 @@ uv run connectors-keys --name documentation-system --scopes fetch
 # stderr: {"name": "documentation-system", "prefix": "...", "key_hash": "$argon2id$...", "scopes": ["fetch"]}
 ```
 
-Append the printed JSON object to the service's `CONSUMER_KEYS` array and redeploy. To **revoke** a key, drop its entry from `CONSUMER_KEYS` and redeploy — there is no revoke command because there is no database.
+Append the printed JSON object to the service's `CONSUMER_KEYS` array and redeploy. To **revoke** a key, drop its entry from `CONSUMER_KEYS` and redeploy — there is no API-key revoke command because that key store is config-seeded.
 
 ## API at a glance
 
@@ -246,12 +246,12 @@ connectors/
 │                          Build context is the repo root; installs via `uv sync --frozen --no-dev --package connectors`.
 ├── docker-compose.yml     Builds/runs the image locally on port 8005 (no DB service).
 └── railway.json           Railway deploy config: Dockerfile builder, /health check, NO preDeployCommand
-                            (stateless — nothing to migrate).
+                            (no Alembic migration; enabled OAuth initializes its vault).
 ```
 
 ## Testing
 
-The suite is single-mode — no Docker, no database, no network:
+The suite is single-mode — no Docker, no external database, no network (OAuth tests use temporary SQLite vaults):
 
 ```bash
 uv run pytest
@@ -274,7 +274,7 @@ The service fetches Google and GitHub text, enumerates Google metadata, and opti
 
 **Not implemented (by design):**
 
-- **Local persistence** — no database. Consumers own fetched-content caches and reconciliation of external Google writes.
+- **Source-content persistence** — consumers own fetched-content caches and reconciliation of external Google writes. Only optional GitHub OAuth credentials/state are persisted locally.
 - **Per-end-user authorization** — connectors authenticates the calling service, not the end user on whose behalf a fetch happens; that check belongs in the consumer.
 - **GitHub harvesting** — `github` fetches one explicitly supplied README or file; it does not enumerate repositories, sync, or read issues/PRs/wikis.
 - **OCR** — a scanned PDF with no embedded text layer captures nothing; see "Known limitations" above.
@@ -289,6 +289,27 @@ The service fetches Google and GitHub text, enumerates Google metadata, and opti
 
 Automatic sharing discovery also exposes [`POST /discover/google`](docs/API.md#post-discovergoogle)
 with a separate `discover` scope. See the [operator/member runbook](../documentation-system/docs/DISCOVERY.md).
+
+### Optional GitHub OAuth vault (#406)
+
+When enabled, connectors now owns a small encrypted SQLite credential vault on a
+persistent volume; the disabled service still needs no database. This is separate
+from content retrieval and does not expose tokens over HTTP.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `GITHUB_OAUTH_ENABLED` | `false` | Enable browser linking only after setup |
+| `GITHUB_OAUTH_CLIENT_ID` | empty | GitHub App client ID |
+| `GITHUB_OAUTH_CLIENT_SECRET` | empty | Secret App client credential |
+| `GITHUB_OAUTH_CALLBACK_URL` | empty | Fixed HTTPS URL ending `/github/oauth/callback`, without query/fragment |
+| `GITHUB_OAUTH_WEBHOOK_SECRET` | empty | Secret used to authenticate revocation events |
+| `GITHUB_OAUTH_VAULT_PATH` | empty | Absolute SQLite path on a persistent connector volume |
+| `GITHUB_OAUTH_VAULT_KEY` | empty | Secret Fernet key for encrypted records |
+| `GITHUB_DIRECTORY_URL` | empty | Internal team-tracking URL |
+| `GITHUB_DIRECTORY_API_KEY` | empty | Secret directory key for identity verification and binding reads |
+
+Enabled linking fails at boot for incomplete configuration. See
+[GitHub OAuth operations](docs/GITHUB-LINKING.md).
 
 ### Managed GitHub teams (#405)
 

@@ -311,6 +311,10 @@ Explicitly out of scope:
 - No content storage — the directory is identity and structure only.
 - No pagination — list endpoints return all matching rows; add limit/offset if the roster grows past a few hundred.
 
+## Verified GitHub accounts (#406)
+
+See [the identity/OAuth contract and operations guide](../../connectors/docs/GITHUB-LINKING.md).
+
 ## Managed GitHub team mappings (#405)
 
 See [the HTTP contract, adoption policy and recovery guide](GITHUB-TEAMS.md).

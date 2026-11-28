@@ -1216,6 +1216,10 @@ The service generates an OpenAPI 3.x schema automatically from the FastAPI route
 
 The schema reflects the live code and is always up to date. For integration code generation (e.g., a typed client library), use `/openapi.json` as the source.
 
+## Verified GitHub accounts (#406)
+
+See [the identity/OAuth contract and operations guide](../../connectors/docs/GITHUB-LINKING.md).
+
 ## Managed GitHub team mappings (#405)
 
 See [the HTTP contract, adoption policy and recovery guide](GITHUB-TEAMS.md).

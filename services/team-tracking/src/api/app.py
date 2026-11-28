@@ -39,6 +39,9 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(people.router)
+    from src.api.routers import github_identity
+
+    app.include_router(github_identity.router)
     app.include_router(teams.router)
     from src.api.routers import github_teams
 
