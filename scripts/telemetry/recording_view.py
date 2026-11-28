@@ -364,7 +364,11 @@ def span_tree(rows, base, q):
                     esc(r["service"]),
                     esc(r["span_id"]),
                     esc(note),
-                    ms(None if key in disputed else r["elapsed_ms"]),
+                    ms(
+                        r["elapsed_ms"]
+                        if r["event_name"] == "end" and key not in disputed
+                        else None
+                    ),
                 ]
             )
             for child in reversed(children.get(key, [])):

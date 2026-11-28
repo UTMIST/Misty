@@ -282,6 +282,23 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("9000 ms", timeline)
         self.assertNotIn("9000 ms", tree)
 
+    def test_call_tree_with_missing_end_has_no_elapsed_time(self):
+        with closing(sqlite3.connect(self.raw)) as db:
+            span = db.execute(
+                """select span_id from events where trace_id=? and service='connectors' and event_name='start'""",
+                (self.trace,),
+            ).fetchone()[0]
+            db.execute(
+                "delete from events where trace_id=? and span_id=? and event_name='end'",
+                (self.trace, span),
+            )
+            db.commit()
+        build(self.raw, self.snapshot, "local", self.now)
+        status, detail = self.request("/local/attempt/" + self.trace, "dev")
+        self.assertEqual(status, 200)
+        tree = detail.split("<h2>Call tree</h2>")[1]
+        self.assertIn(f"<td>{span}</td><td>Child</td><td>—</td>", tree)
+
     def test_existing_snapshot_hides_end_at_period_boundary(self):
         with closing(sqlite3.connect(self.snapshot)) as db:
             db.execute("alter table spans rename to new_spans")
