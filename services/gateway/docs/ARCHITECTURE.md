@@ -115,6 +115,24 @@ response and durably pins issuer plus gateway origin to its database. Explicit
 operator mappings are required before existing compute accounts can be claimed;
 email equality alone does not establish continuity of account ownership.
 
+## MCP endpoint
+
+`/mcp` uses the official Python SDK, [`mcp`](https://github.com/modelcontextprotocol/python-sdk)
+2.x, not `fastmcp` or a hand-written transport: it is the reference
+implementation and ships the OAuth server pieces #440 builds on.
+
+`src/mcp_server/endpoint.py` mounts it only when `MCP_ENABLED` is true (`404`
+otherwise), as a plain route so the audit log and edge limit apply. The
+transport is stateless with JSON responses, and `GET` answers `405` because
+there is never a server-initiated stream. The SDK's localhost Host check is off
+because auth is by bearer token. Until #440, every request gets `401`.
+
+`src/documents/http_client.py` calls documentation-system's `POST /search` and
+`GET /docs/{id}` as the member (`X-On-Behalf-Of`), with a `doc_` key scoped only
+`docs:read` and `act-as-user`. Only documentation-system's own `doc not found`
+404 means "not visible"; other failures, including any other 404, raise
+`DocumentsUnavailable`. Bad search input raises `ValueError` before any call.
+
 ## Future compute-platform access
 
 Compute receives only the scopes it uses (`auth:email`, `auth:status`). Login

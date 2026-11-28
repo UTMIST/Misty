@@ -14,6 +14,7 @@ from src.api.ratelimit import ClientRateLimitMiddleware
 from src.api.readiness import ReadinessProbe
 from src.api.routers import resolve, email_login
 from src.config import get_settings, verify_production_secrets
+from src.mcp_server.endpoint import mount_mcp
 
 logger = logging.getLogger("gateway")
 
@@ -55,6 +56,9 @@ def create_app() -> FastAPI:
 
     app.include_router(resolve.router)
     app.include_router(email_login.router)
+    if get_settings().mcp_enabled:
+        # Off by default: without this, /mcp is simply not a route (404).
+        mount_mcp(app)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request: Request, exc: RequestValidationError):

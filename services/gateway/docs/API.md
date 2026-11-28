@@ -14,6 +14,15 @@ consumer to a particular person or team.
 There are no general person, membership, document, or database-query routes.
 External identity headers do not grant delegated user access to private services.
 
+## MCP
+
+`/mcp` is the [Model Context Protocol](https://modelcontextprotocol.io)
+endpoint, using Streamable HTTP. It exists only when `MCP_ENABLED=true`;
+otherwise every method answers `404`. It has no tools and no sign-in yet, so
+every request answers `401` with a `WWW-Authenticate: Bearer` header. Design and
+rollout: [`docs/MISTY-MCP.md`](../../../docs/MISTY-MCP.md) and
+[architecture](ARCHITECTURE.md#mcp-endpoint).
+
 ## Health
 
 | Route | Authentication | Behavior |
